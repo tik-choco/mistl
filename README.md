@@ -10,6 +10,11 @@ It integrates the [tc-storage](https://github.com/tik-choco/tc-storage) CLI and 
 - **stream** — screen-share RTSP server (playable by VRChat's AVPro video player; Rust port of mistlink)
 - **mailbox** — p2p store-and-forward messaging ("p2p mail server"): when the recipient
   is offline, a bot node holds the deposit and forwards it once they come online
+- **ai** — p2p AI network, wire-compatible with
+  [mistai](https://github.com/tik-choco-lab/mistai) protocol v1 (tc-mistllm /
+  tc-translate peers can share the room): *provide* LLM inference to peers from any
+  OpenAI-compatible upstream, and/or *serve* a local OpenAI-compatible API endpoint
+  whose requests are answered by the network
 
 The release build is a single, fully standalone `mistl.exe`: screen capture uses
 Windows.Graphics.Capture, H264 encoding uses OpenH264 compiled into the binary, and
@@ -60,6 +65,23 @@ $ mistl mailbox send <did|node-id> --message "hello"
 $ mistl mailbox send <did|node-id> --file .\data.bin
 $ mistl mailbox fetch         # receive messages pending for me
 $ mistl mailbox ls            # deposits this node is holding as a bot
+
+# AI network
+$ mistl ai provide start      # serve LLM inference to peers from [ai] upstream_url
+$ mistl ai serve start        # local OpenAI-compatible API -> http://127.0.0.1:6478/v1
+$ mistl ai chat "hello" --model mock-echo-1
+$ mistl ai models
+$ mistl ai status
+```
+
+With `ai serve` running, any OpenAI client works against this node — requests go to
+the local provider when one is running, otherwise to the first provider discovered
+on the p2p network:
+
+```console
+$ curl http://127.0.0.1:6478/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{"messages":[{"role":"user","content":"hi"}],"stream":true}'
 ```
 
 `mailbox send` returns one of three `status` values:
@@ -92,7 +114,21 @@ max_width = 1920                             # native backend: downscale wider s
 [mailbox]
 # room_id = "my-private-room"               # default: "mistl-mailbox-v1"
 serve_as_bot = true                          # hold deposits for other peers
+
+[ai]
+# room_id = "my-llm-room"                   # default: the mailbox room (see note)
+# upstream_url = "http://127.0.0.1:11434/v1" # OpenAI-compatible upstream (provide)
+# upstream_api_key = "sk-..."
+# default_model = "llama3"                  # default: first model from upstream
+# advertised_models = ["llama3"]            # default: fetched from upstream /models
+# temperature = 0.7
+api_listen = "127.0.0.1:6478"                # local OpenAI-compatible API (serve)
+request_timeout_secs = 120                   # p2p inactivity timeout (resets per chunk)
 ```
+
+Note: mistlib supports **one room per process**, so mailbox and ai share it.
+`[ai] room_id` defaults to the mailbox room; to join an existing mistai app room,
+set both to the same value.
 
 Data lives in `%APPDATA%\tik-choco\mistl\data\` (keys, blocks, spools, logs).
 
@@ -103,7 +139,9 @@ mistl <subcommand>  --(JSON over loopback TCP)-->  mistl daemon run
                                                      ├─ identity  (did:key ed25519, profile)
                                                      ├─ storage   (mistlib StorageEngine + NativeBlockStore)
                                                      ├─ stream    (Windows.Graphics.Capture → OpenH264 → RTP → RTSP server)
-                                                     └─ mailbox   (mistlib WebRTC/Nostr + signed envelope spools)
+                                                     ├─ mailbox   (signed envelope spools over net)
+                                                     ├─ ai        (mistai protocol v1 over net + local OpenAI-compatible HTTP)
+                                                     └─ net       (shared mistlib WebRTC/Nostr transport: one engine, one room)
 ```
 
 - IPC discovery info is written to `data\daemon.json` (port + random token); only the
@@ -113,6 +151,11 @@ mistl <subcommand>  --(JSON over loopback TCP)-->  mistl daemon run
 - mistlink interop: AVPro-friendly dummy SPS/PPS RTSP keepalive, PT 96 / SSRC 0x12345678
 - `stream` backends: `native` captures via Windows.Graphics.Capture and encodes with
   OpenH264 in-process; `ffmpeg` spawns ffmpeg (gdigrab → MPEG-TS → demux) as a fallback
+- `ai` speaks mistai protocol v1 on the wire (`provider_hello` / `llm_request` /
+  `llm_response_chunk` with seq reordering / `llm_response_done`), so browser-based
+  mistai consumers and providers in the same room interoperate; the `net` module
+  multiplexes mailbox and ai traffic over mistlib's single raw-message handler by
+  message shape
 
 ## Known limitations (v0.1)
 
@@ -120,6 +163,10 @@ mistl <subcommand>  --(JSON over loopback TCP)-->  mistl daemon run
   the file bytes is not implemented yet
 - `stream` is video-only (audio_capture is ignored); no RTCP (NACK/PLI)
 - No bot capability advertisement (every connected peer is treated as a bot candidate)
+- `ai` implements the LLM part of the mistai protocol; voice (tts/stt) messages are
+  decoded but not served, and `raft_message` scheduling is passed through untouched
+- The local API server (`ai serve`) has no auth; keep `api_listen` on loopback unless
+  the network is trusted
 
 ## License
 

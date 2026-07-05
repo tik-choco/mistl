@@ -43,6 +43,11 @@ pub enum Command {
         #[command(subcommand)]
         action: MailboxAction,
     },
+    /// P2P AI network: consume or provide LLM inference (mistai compatible)
+    Ai {
+        #[command(subcommand)]
+        action: AiAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -124,6 +129,40 @@ pub enum MailboxAction {
     Fetch,
 }
 
+#[derive(Subcommand)]
+pub enum AiAction {
+    /// One-shot chat completion (local provider or first p2p provider)
+    Chat {
+        /// The user prompt
+        prompt: String,
+        /// Model to request (default: provider's choice)
+        #[arg(short, long)]
+        model: Option<String>,
+    },
+    /// Show AI network status (room, provider, API server)
+    Status,
+    /// List models advertised by the reachable provider
+    Models,
+    /// Provide inference to the network from the configured upstream
+    Provide {
+        #[command(subcommand)]
+        action: AiToggleAction,
+    },
+    /// Local OpenAI-compatible API server backed by the network
+    Serve {
+        #[command(subcommand)]
+        action: AiToggleAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AiToggleAction {
+    /// Start the service
+    Start,
+    /// Stop the service
+    Stop,
+}
+
 /// Dispatch a parsed CLI invocation: either run the daemon, or act as a
 /// client sending one request to the running daemon over local IPC.
 pub fn dispatch(cli: Cli) -> Result<()> {
@@ -173,6 +212,21 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             }
             MailboxAction::Ls => client_call("mailbox.ls", json!({})),
             MailboxAction::Fetch => client_call("mailbox.fetch", json!({})),
+        },
+        Command::Ai { action } => match action {
+            AiAction::Chat { prompt, model } => {
+                client_call("ai.chat", json!({ "prompt": prompt, "model": model }))
+            }
+            AiAction::Status => client_call("ai.status", json!({})),
+            AiAction::Models => client_call("ai.models", json!({})),
+            AiAction::Provide { action } => match action {
+                AiToggleAction::Start => client_call("ai.provide.start", json!({})),
+                AiToggleAction::Stop => client_call("ai.provide.stop", json!({})),
+            },
+            AiAction::Serve { action } => match action {
+                AiToggleAction::Start => client_call("ai.serve.start", json!({})),
+                AiToggleAction::Stop => client_call("ai.serve.stop", json!({})),
+            },
         },
     }
 }
