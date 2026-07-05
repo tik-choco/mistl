@@ -1,0 +1,44 @@
+[package]
+name = "mistl"
+version = "0.1.0"
+edition = "2024"
+description = "Unified P2P daemon CLI: identity (DID), storage, RTSP screen share for VRChat, and offline mailbox bot"
+license = "MPL-2.0"
+
+[dependencies]
+# mistlib workspace (path deps; mistlib-native's lib name is `mistlib`)
+mistlib-core = { path = "../mistlib-dev/mistlib-core" }
+mistlib-native = { path = "../mistlib-dev/mistlib-native" }
+
+# CLI / runtime / config
+anyhow = "1"
+thiserror = "2"
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_cbor = "0.11"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+directories = "5"
+rand = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+bytes = "1"
+
+# identity / crypto (tc-storage interop: did:key ed25519, AES-256-GCM + PBKDF2)
+ed25519-dalek = { version = "2", features = ["pkcs8", "rand_core"] }
+bs58 = "0.5"
+aes-gcm = "0.10"
+pbkdf2 = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+
+# stream (RTSP server + MPEG-TS ingest, VRChat/AVPro compatible)
+rtsp-types = "0.1"
+mpeg2ts = "0.3"
+rtp = "0.13"
+
+[profile.release]
+lto = "thin"
+strip = true
