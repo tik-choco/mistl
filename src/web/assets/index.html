@@ -56,17 +56,19 @@
   }
   code, .mono { font-family: var(--mono); }
 
-  header {
+  .topbar {
     position: sticky;
     top: 0;
     z-index: 10;
+    background: var(--bg-alt);
+    border-bottom: 1px solid var(--panel-border);
+  }
+  header {
     display: flex;
     align-items: center;
     gap: 16px;
     flex-wrap: wrap;
     padding: 12px 20px;
-    background: var(--bg-alt);
-    border-bottom: 1px solid var(--panel-border);
   }
   header h1 {
     font-size: 16px;
@@ -118,6 +120,23 @@
   }
   .copyable:hover { background: var(--panel-border); color: var(--text); }
 
+  .quicknav {
+    display: flex;
+    gap: 4px;
+    overflow-x: auto;
+    padding: 0 20px 8px;
+  }
+  .quicknav a {
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-dim);
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .quicknav a:hover { color: var(--accent); background: var(--panel-border); }
+
   main {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
@@ -150,6 +169,28 @@
   .panel-span2 { grid-column: span 2; }
   @media (max-width: 760px) {
     .panel-span2 { grid-column: span 1; }
+  }
+
+  .hint-banner {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 10px 14px;
+    border-radius: 8px;
+    background: var(--accent-dim);
+    color: var(--text);
+    font-size: 13px;
+  }
+  .hint-banner .dismiss {
+    margin-left: auto;
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    font-weight: 700;
+    cursor: pointer;
+    padding: 0 4px;
   }
 
   .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -188,7 +229,7 @@
   }
   @keyframes spin { to { transform: rotate(360deg); } }
 
-  input[type=text], input[type=password], select, textarea {
+  input[type=text], input[type=password], input[type=number], select, textarea {
     font-family: var(--sans);
     font-size: 13px;
     padding: 6px 9px;
@@ -198,7 +239,7 @@
     color: var(--text);
     min-width: 0;
   }
-  input[type=text]:focus, textarea:focus, select:focus {
+  input[type=text]:focus, input[type=password]:focus, input[type=number]:focus, textarea:focus, select:focus {
     outline: none;
     border-color: var(--accent);
   }
@@ -293,6 +334,7 @@
   .badge.delivered, .badge.ok-badge { background: var(--ok-dim); color: var(--ok); }
   .badge.deposited { background: var(--warn-dim); color: var(--warn); }
   .badge.queued { background: var(--panel-border); color: var(--text-dim); }
+  .badge.restart { background: var(--warn-dim); color: var(--warn); margin-left: auto; }
 
   .toast-stack {
     position: fixed;
@@ -328,17 +370,105 @@
   .muted { color: var(--text-faint); }
   .section-actions { display: flex; gap: 8px; margin-left: auto; }
   hr.sep { border: none; border-top: 1px solid var(--panel-border); margin: 4px 0; }
+
+  .flow-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+  @media (max-width: 600px) {
+    .flow-grid { grid-template-columns: 1fr; }
+  }
+  .flow-card {
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .flow-card h3 { margin: 0; font-size: 13px; }
+  .flow-card p { margin: 0; color: var(--text-dim); font-size: 12.5px; }
+
+  .info-hint {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: var(--warn-dim);
+    color: var(--warn);
+    font-size: 12.5px;
+  }
+  .info-hint.neutral { background: var(--bg-alt); color: var(--text-dim); }
+  .info-hint a { color: inherit; font-weight: 600; }
+
+  .settings-section { display: flex; flex-direction: column; gap: 6px; margin-bottom: 4px; }
+  .settings-section h3 {
+    margin: 0;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-faint);
+    border-bottom: 1px solid var(--panel-border);
+    padding-bottom: 4px;
+  }
+  .settings-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--panel-border);
+  }
+  .settings-field:last-child { border-bottom: none; }
+  .settings-field .settings-label { font-size: 12.5px; font-weight: 600; }
+  .settings-field .desc { font-size: 11.5px; color: var(--text-faint); }
+  .settings-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .settings-row input[type=text], .settings-row input[type=password], .settings-row input[type=number], .settings-row select {
+    flex: 1;
+    min-width: 160px;
+  }
+  .toggle-switch { position: relative; display: inline-block; width: 36px; height: 20px; flex: none; }
+  .toggle-switch input { opacity: 0; width: 0; height: 0; position: absolute; }
+  .toggle-switch .slider {
+    position: absolute; inset: 0; cursor: pointer;
+    background: var(--panel-border); border-radius: 999px; transition: background 0.15s;
+  }
+  .toggle-switch .slider::before {
+    content: ""; position: absolute; width: 14px; height: 14px; left: 3px; top: 3px;
+    background: #fff; border-radius: 50%; transition: transform 0.15s;
+  }
+  .toggle-switch input:checked + .slider { background: var(--accent); }
+  .toggle-switch input:checked + .slider::before { transform: translateX(16px); }
 </style>
 </head>
 <body>
 
-<header>
-  <h1>mistl</h1>
-  <span id="daemon-pill" class="pill"><span class="dot"></span><span>connecting&hellip;</span></span>
-  <div class="identity" id="identity-summary"></div>
-</header>
+<div class="topbar" id="topbar">
+  <header>
+    <h1>mistl</h1>
+    <span id="daemon-pill" class="pill"><span class="dot"></span><span>connecting&hellip;</span></span>
+    <div class="identity" id="identity-summary"></div>
+  </header>
+  <nav class="quicknav">
+    <a href="#panel-overview">Overview</a>
+    <a href="#panel-stream">Stream</a>
+    <a href="#panel-ai">AI</a>
+    <a href="#panel-mailbox">Mailbox</a>
+    <a href="#panel-store">Store</a>
+    <a href="#panel-profile">Profile</a>
+    <a href="#panel-settings">Settings</a>
+  </nav>
+</div>
 
 <main id="main">
+  <div class="hint-banner" id="profile-hint-banner" hidden>
+    <span>Set a display name so others can recognize you.</span>
+    <button type="button" id="btn-profile-hint-focus">Set display name</button>
+    <button type="button" class="dismiss" id="btn-profile-hint-dismiss" aria-label="Dismiss">&times;</button>
+  </div>
+
   <section class="panel" id="panel-overview">
     <h2>Overview <span class="spacer"></span>
       <button id="btn-refresh-overview" data-role="refresh">Refresh</button>
@@ -353,28 +483,44 @@
     <h2>Stream <span class="spacer"></span>
       <button data-role="refresh" data-target="stream">Refresh</button>
     </h2>
+    <div class="flow-grid">
+      <div class="flow-card">
+        <h3>Share this PC&#39;s screen</h3>
+        <p>Streams this computer&#39;s desktop directly to an RTSP URL you paste into the VRChat video player.</p>
+        <div class="row">
+          <button id="btn-stream-start" class="primary">Start (this screen)</button>
+        </div>
+      </div>
+      <div class="flow-card">
+        <h3>Relay a tc-chat share</h3>
+        <p>Relays a screen already being shared in a tc-chat room, so VRChat viewers can watch it.</p>
+        <form class="inline" id="relay-form">
+          <div class="field" style="flex: 2;">
+            <label for="relay-room">tc-chat room id</label>
+            <input type="text" id="relay-room" placeholder="room id (or set a default in Settings)" autocomplete="off">
+          </div>
+          <button type="submit" class="primary">Relay to VRChat</button>
+        </form>
+        <div class="info-hint neutral" id="relay-room-hint" hidden>
+          <span>Type a room id above, or set a default relay room in <a href="#panel-settings" id="relay-room-hint-link">Settings</a>.</span>
+        </div>
+      </div>
+    </div>
     <div class="url-callout" id="stream-url-callout" hidden title="Click to copy">
       <span class="url-callout-label">Paste into the VRChat video player</span>
       <span class="url-callout-url mono" id="stream-url-text"></span>
     </div>
     <dl class="kv" id="stream-kv"></dl>
     <div class="row">
-      <button id="btn-stream-start" class="primary">Start (this screen)</button>
       <button id="btn-stream-stop" class="danger">Stop</button>
     </div>
-    <form class="inline" id="relay-form">
-      <div class="field" style="flex: 2;">
-        <label for="relay-room">tc-chat room id</label>
-        <input type="text" id="relay-room" placeholder="default: stream.relay_room" autocomplete="off">
-      </div>
-      <button type="submit" class="primary">Relay share to VRChat</button>
-    </form>
   </section>
 
   <section class="panel panel-span2" id="panel-ai">
     <h2>AI <span class="spacer"></span>
       <button data-role="refresh" data-target="ai">Refresh</button>
     </h2>
+    <div id="ai-hints"></div>
     <dl class="kv" id="ai-kv"></dl>
     <div class="row">
       <button id="btn-ai-provide-start" class="primary">Start providing</button>
@@ -410,20 +556,20 @@
         <thead><tr><th>ID</th><th>From</th><th>To</th><th>Size</th><th>Held since</th></tr></thead>
         <tbody></tbody>
       </table>
-      <div class="empty-note" id="mailbox-held-empty">No held deposits.</div>
+      <div class="empty-note" id="mailbox-held-empty">No held deposits &mdash; deposits are messages other nodes left here for their recipients to fetch later.</div>
     </div>
     <div class="table-wrap">
       <table id="mailbox-fetch-table">
         <thead><tr><th>ID</th><th>From</th><th>Content</th></tr></thead>
         <tbody></tbody>
       </table>
-      <div class="empty-note" id="mailbox-fetch-empty">Nothing fetched yet.</div>
+      <div class="empty-note" id="mailbox-fetch-empty">Nothing fetched yet. Click &quot;Fetch my messages&quot; to check for new mail.</div>
     </div>
     <hr class="sep">
     <form class="inline" id="mailbox-send-form">
       <div class="field" style="flex: 1; min-width: 160px;">
         <label for="mailbox-to">To (DID or node id)</label>
-        <input type="text" id="mailbox-to" autocomplete="off">
+        <input type="text" id="mailbox-to" placeholder="did:key:z6Mk&hellip; or a 16-hex node id" autocomplete="off">
       </div>
       <div class="field" style="flex: 2;">
         <label for="mailbox-message">Message</label>
@@ -447,7 +593,7 @@
     <hr class="sep">
     <form class="inline" id="store-put-form">
       <div class="field" style="flex: 1;">
-        <label for="store-path">Add file &mdash; local filesystem path (read server-side by the daemon)</label>
+        <label for="store-path">Add file &mdash; path on this machine (read server-side by the daemon)</label>
         <input type="text" id="store-path" placeholder="C:\path\to\file or /path/to/file" autocomplete="off">
       </div>
       <button type="submit" class="primary" id="btn-store-put">Add</button>
@@ -466,6 +612,13 @@
       </div>
       <button type="submit" class="primary" id="btn-profile-save">Save</button>
     </form>
+  </section>
+
+  <section class="panel panel-span2" id="panel-settings">
+    <h2>Settings <span class="spacer"></span>
+      <button data-role="refresh" data-target="settings">Refresh</button>
+    </h2>
+    <div id="settings-body"></div>
   </section>
 </main>
 
@@ -623,6 +776,7 @@
     identity: null,
     stream: null,
     ai: null,
+    config: null,
     chatHistory: []
   };
 
@@ -724,10 +878,15 @@
   var streamKv = document.getElementById("stream-kv");
   var streamUrlCallout = document.getElementById("stream-url-callout");
   var streamUrlText = document.getElementById("stream-url-text");
+  var relayRoomHint = document.getElementById("relay-room-hint");
 
   streamUrlCallout.addEventListener("click", function () {
     if (streamUrlText.textContent) copyToClipboard(streamUrlText.textContent);
   });
+
+  function showRelayRoomHint(show) {
+    relayRoomHint.hidden = !show;
+  }
 
   function renderStream() {
     streamKv.innerHTML = "";
@@ -745,7 +904,7 @@
       addKv(streamKv, "backend", s.backend);
       if (s.room) addKv(streamKv, "relay room", s.room);
       if (s.backend === "relay") {
-        addKv(streamKv, "publisher", s.publisher ? s.publisher : "waiting for a share…");
+        addKv(streamKv, "publisher", s.publisher ? s.publisher : "waiting for a publisher…");
       }
       addKv(streamKv, "uptime", fmtUptime(s.uptime_secs));
     } else {
@@ -788,7 +947,15 @@
 
   document.getElementById("relay-form").addEventListener("submit", function (e) {
     e.preventDefault();
-    var room = document.getElementById("relay-room").value.trim();
+    var roomInput = document.getElementById("relay-room");
+    var room = roomInput.value.trim();
+    var configuredDefault = state.config && state.config.stream && state.config.stream.relay_room;
+    if (!room && !configuredDefault) {
+      showRelayRoomHint(true);
+      roomInput.focus();
+      return;
+    }
+    showRelayRoomHint(false);
     var btn = e.target.querySelector("button[type=submit]");
     runAction(btn, "stream.relay.start", room ? { room: room } : {}, function (data) {
       showToast("Relay started" + (data.room ? " in room " + data.room : "") + ".");
@@ -796,11 +963,48 @@
     });
   });
 
+  document.getElementById("relay-room-hint-link").addEventListener("click", function () {
+    showRelayRoomHint(false);
+  });
+
   /* ---------- ai panel ---------- */
 
   var aiKv = document.getElementById("ai-kv");
   var aiModelsBox = document.getElementById("ai-models");
+  var aiHintsBox = document.getElementById("ai-hints");
   var chatModelSelect = document.getElementById("chat-model");
+
+  function refreshAiHints() {
+    if (!aiHintsBox) return;
+    aiHintsBox.innerHTML = "";
+    var cfg = state.config;
+    var a = state.ai;
+    if (!cfg) return;
+    var aiCfg = cfg.ai || {};
+    if (!aiCfg.upstream_url) {
+      var hint = el("div", { class: "info-hint" });
+      hint.appendChild(el("span", { text: "Set an OpenAI-compatible upstream in Settings to provide inference." }));
+      var openBtn = el("button", { type: "button", text: "Open Settings" });
+      openBtn.addEventListener("click", function () { focusSettingsField("settings-ai-upstream_url"); });
+      hint.appendChild(openBtn);
+      aiHintsBox.appendChild(hint);
+    } else if (a && !a.providing) {
+      var hint2 = el("div", { class: "info-hint neutral" });
+      hint2.appendChild(el("span", { text: "Upstream is configured. Start providing to answer AI requests from the network." }));
+      aiHintsBox.appendChild(hint2);
+    }
+    if (a && a.serving) {
+      var listen = aiCfg.api_listen || (typeof a.serving === "string" ? a.serving : "");
+      if (listen) {
+        var url = "http://" + listen + "/v1";
+        var callout = el("div", { class: "url-callout", title: "Click to copy" });
+        callout.appendChild(el("span", { class: "url-callout-label", text: "OpenAI-compatible endpoint" }));
+        callout.appendChild(el("span", { class: "url-callout-url mono", text: url }));
+        callout.addEventListener("click", function () { copyToClipboard(url); });
+        aiHintsBox.appendChild(callout);
+      }
+    }
+  }
 
   function renderAi() {
     aiKv.innerHTML = "";
@@ -808,6 +1012,7 @@
     if (!a) {
       addKv(aiKv, "status", "unknown");
       aiModelsBox.innerHTML = "";
+      refreshAiHints();
       return;
     }
     addKv(aiKv, "room", a.room);
@@ -836,6 +1041,8 @@
       chatModelSelect.appendChild(opt);
     });
     if (models.indexOf(prevSelected) !== -1) chatModelSelect.value = prevSelected;
+
+    refreshAiHints();
   }
 
   function pollAiStatus() {
@@ -907,6 +1114,13 @@
     chatLog.scrollTop = chatLog.scrollHeight;
   }
 
+  function friendlyChatError(msg) {
+    if (/no provider/i.test(msg)) {
+      return "No provider reachable — start providing locally or wait for a p2p provider.";
+    }
+    return msg;
+  }
+
   chatForm.addEventListener("submit", function (e) {
     e.preventDefault();
     var prompt = chatPromptInput.value.trim();
@@ -923,7 +1137,7 @@
         renderChat();
       },
       function (err) {
-        var msg = err.message || String(err);
+        var msg = friendlyChatError(err.message || String(err));
         state.chatHistory.push({ role: "error", text: msg });
         renderChat();
         showToast("ai.chat: " + msg);
@@ -1085,6 +1299,18 @@
 
   var profileKv = document.getElementById("profile-kv");
   var profileDisplayNameInput = document.getElementById("profile-display-name");
+  var profileHintBanner = document.getElementById("profile-hint-banner");
+  var profileHintDismissed = false;
+
+  document.getElementById("btn-profile-hint-dismiss").addEventListener("click", function () {
+    profileHintDismissed = true;
+    profileHintBanner.hidden = true;
+  });
+
+  document.getElementById("btn-profile-hint-focus").addEventListener("click", function () {
+    document.getElementById("panel-profile").scrollIntoView({ behavior: "smooth", block: "start" });
+    setTimeout(function () { profileDisplayNameInput.focus(); }, 300);
+  });
 
   function renderProfile(data) {
     profileKv.innerHTML = "";
@@ -1101,6 +1327,9 @@
     state.identity = data;
     renderIdentitySummary();
     profileDisplayNameInput.value = data.display_name || "";
+    if (!profileHintDismissed) {
+      profileHintBanner.hidden = !!data.display_name;
+    }
   }
 
   function pollProfile() {
@@ -1121,6 +1350,183 @@
       showToast("Profile updated.");
       renderProfile(data);
     });
+  });
+
+  /* ---------- settings ---------- */
+
+  var GIB = 1073741824;
+
+  var SETTINGS_SCHEMA = [
+    { section: "identity", title: "Identity", fields: [
+      { key: "display_name", label: "Display name", desc: "Default display name written to config (applies at next start; use the Profile panel above to change it live).", type: "text" }
+    ] },
+    { section: "storage", title: "Storage", fields: [
+      { key: "capacity_bytes", label: "Storage capacity", desc: "Maximum size of the local block store.", type: "gib" }
+    ] },
+    { section: "stream", title: "Stream", fields: [
+      { key: "rtsp_url", label: "RTSP URL", desc: "RTSP endpoint used when streaming. Leave blank to use the default.", type: "text" },
+      { key: "frame_rate", label: "Frame rate", desc: "Capture frame rate, in frames per second.", type: "number" },
+      { key: "capture_backend", label: "Capture backend", desc: "Screen capture backend to use.", type: "select", options: [["", "(default)"], ["native", "native"], ["ffmpeg", "ffmpeg"]] },
+      { key: "max_width", label: "Max width", desc: "Maximum capture width in pixels; wider input is scaled down.", type: "number" },
+      { key: "relay_room", label: "Default relay room", desc: "tc-chat room id used by “Relay a tc-chat share” when none is typed.", type: "text" },
+      { key: "audio_codec", label: "Audio codec", desc: "Audio codec used for the stream.", type: "select", options: [["", "(default)"], ["aac", "aac"], ["opus", "opus"]] }
+    ] },
+    { section: "mailbox", title: "Mailbox", fields: [
+      { key: "room_id", label: "Room id", desc: "tc-chat room used for mailbox delivery.", type: "text" },
+      { key: "serve_as_bot", label: "Serve as bot", desc: "Answer mailbox room presence as an automated bot.", type: "toggle" }
+    ] },
+    { section: "ai", title: "AI", fields: [
+      { key: "room_id", label: "Room id", desc: "tc-chat room used to discover AI providers and consumers.", type: "text" },
+      { key: "upstream_url", label: "Upstream URL", desc: "OpenAI-compatible endpoint this daemon forwards inference to when providing.", type: "text" },
+      { key: "upstream_api_key", label: "Upstream API key", desc: "API key sent to the upstream endpoint. Stored on this machine only.", type: "password" },
+      { key: "default_model", label: "Default model", desc: "Model name used when a request does not specify one.", type: "text" },
+      { key: "temperature", label: "Temperature", desc: "Default sampling temperature.", type: "number" },
+      { key: "request_timeout_secs", label: "Request timeout (seconds)", desc: "How long to wait for an upstream response before giving up.", type: "number" },
+      { key: "api_listen", label: "API listen address", desc: "Address:port the local OpenAI-compatible API server binds to.", type: "text" }
+    ] },
+    { section: "ui", title: "Web dashboard", fields: [
+      { key: "listen", label: "Listen address", desc: "Address:port this dashboard binds to.", type: "text" },
+      { key: "enabled", label: "Enabled", desc: "Whether the web dashboard starts with the daemon.", type: "toggle" }
+    ] }
+  ];
+
+  function settingsFieldId(section, key) {
+    return "settings-" + section + "-" + key;
+  }
+
+  function focusSettingsField(id) {
+    var input = document.getElementById(id);
+    var panel = document.getElementById("panel-settings");
+    if (panel) panel.scrollIntoView({ behavior: "smooth", block: "start" });
+    if (input) setTimeout(function () { input.focus(); }, 300);
+  }
+
+  function saveSetting(path, value, sectionCfg, key, badge) {
+    return api("config.set", { path: path, value: value }).then(function (data) {
+      if (sectionCfg) sectionCfg[key] = value;
+      var applies = data && data.applies === "daemon restart";
+      badge.style.display = applies ? "inline-block" : "none";
+      showToast(applies ? "Saved. Restart the daemon to apply." : "Saved. Applies next time this service starts.");
+      refreshAiHints();
+    }, function (err) {
+      showToast("config.set " + path + ": " + (err.message || err));
+    });
+  }
+
+  function buildSettingsField(section, f, sectionCfg) {
+    var wrap = el("div", { class: "settings-field" });
+    var id = settingsFieldId(section, f.key);
+    wrap.appendChild(el("label", { class: "settings-label", for: id, text: f.label }));
+    wrap.appendChild(el("div", { class: "desc", text: f.desc }));
+    var row = el("div", { class: "settings-row" });
+    var current = sectionCfg ? sectionCfg[f.key] : null;
+    var path = section + "." + f.key;
+    var badge = el("span", { class: "badge restart", text: "restart the daemon to apply" });
+    badge.style.display = "none";
+    var input;
+
+    if (f.type === "toggle") {
+      var toggleLabel = el("label", { class: "toggle-switch" });
+      input = el("input", { type: "checkbox", id: id });
+      input.checked = !!current;
+      toggleLabel.appendChild(input);
+      toggleLabel.appendChild(el("span", { class: "slider" }));
+      input.addEventListener("change", function () {
+        saveSetting(path, input.checked, sectionCfg, f.key, badge);
+      });
+      row.appendChild(toggleLabel);
+    } else if (f.type === "select") {
+      input = el("select", { id: id });
+      f.options.forEach(function (opt) {
+        input.appendChild(el("option", { value: opt[0], text: opt[1] }));
+      });
+      input.value = current === null || current === undefined ? "" : String(current);
+      input.addEventListener("change", function () {
+        saveSetting(path, input.value === "" ? null : input.value, sectionCfg, f.key, badge);
+      });
+      row.appendChild(input);
+    } else if (f.type === "gib") {
+      input = el("input", { type: "text", id: id, inputmode: "decimal" });
+      input.value = typeof current === "number" ? String(current / GIB) : "";
+      input.addEventListener("blur", function () {
+        var v = input.value.trim();
+        if (v === "") { saveSetting(path, null, sectionCfg, f.key, badge); return; }
+        var num = Number(v);
+        if (!isFinite(num)) { showToast("Enter a number of GiB for " + f.label + "."); return; }
+        saveSetting(path, Math.round(num * GIB), sectionCfg, f.key, badge);
+      });
+      row.appendChild(input);
+      row.appendChild(el("span", { class: "muted", text: "GiB" }));
+    } else if (f.type === "number") {
+      input = el("input", { type: "text", id: id, inputmode: "decimal" });
+      input.value = current === null || current === undefined ? "" : String(current);
+      input.addEventListener("blur", function () {
+        var v = input.value.trim();
+        if (v === "") { saveSetting(path, null, sectionCfg, f.key, badge); return; }
+        var num = Number(v);
+        if (!isFinite(num)) { showToast("Enter a number for " + f.label + "."); return; }
+        saveSetting(path, num, sectionCfg, f.key, badge);
+      });
+      row.appendChild(input);
+    } else if (f.type === "password") {
+      input = el("input", { type: "password", id: id, autocomplete: "off" });
+      input.placeholder = current === "***" ? "(set) leave blank to keep" : "not set";
+      row.appendChild(input);
+      var clearBtn = el("button", { type: "button", text: "Clear" });
+      clearBtn.addEventListener("click", function () {
+        input.value = "";
+        saveSetting(path, null, sectionCfg, f.key, badge).then(function () {
+          input.placeholder = "not set";
+        });
+      });
+      row.appendChild(clearBtn);
+      input.addEventListener("blur", function () {
+        if (input.value !== "") {
+          saveSetting(path, input.value, sectionCfg, f.key, badge).then(function () {
+            input.value = "";
+            input.placeholder = "(set) leave blank to keep";
+          });
+        }
+      });
+    } else {
+      input = el("input", { type: "text", id: id, autocomplete: "off" });
+      input.value = current === null || current === undefined ? "" : String(current);
+      input.addEventListener("blur", function () {
+        var v = input.value;
+        saveSetting(path, v.trim() === "" ? null : v, sectionCfg, f.key, badge);
+      });
+      row.appendChild(input);
+    }
+
+    row.appendChild(badge);
+    wrap.appendChild(row);
+    return wrap;
+  }
+
+  function renderSettings(cfg) {
+    state.config = cfg;
+    var body = document.getElementById("settings-body");
+    body.innerHTML = "";
+    SETTINGS_SCHEMA.forEach(function (grp) {
+      var sec = el("div", { class: "settings-section" });
+      sec.appendChild(el("h3", { text: grp.title }));
+      var sectionCfg = cfg ? cfg[grp.section] : null;
+      grp.fields.forEach(function (f) {
+        sec.appendChild(buildSettingsField(grp.section, f, sectionCfg));
+      });
+      body.appendChild(sec);
+    });
+    refreshAiHints();
+  }
+
+  function pollConfig() {
+    return api("config.show", {}).then(renderSettings, function (err) {
+      showToast("config.show: " + err.message);
+    });
+  }
+
+  document.querySelector('[data-target="settings"]').addEventListener("click", function (e) {
+    runAction(e.currentTarget, "config.show", {}, renderSettings);
   });
 
   /* ---------- polling scheduler ---------- */
@@ -1175,6 +1581,7 @@
   pollProfile();
   pollMailboxLs();
   pollStoreLs();
+  pollConfig();
 })();
 </script>
 </body>

@@ -82,12 +82,12 @@ async fn ensure_started(state: &Arc<AppState>) -> Result<Arc<AiService>> {
 }
 
 async fn init_service(state: &Arc<AppState>) -> Result<Arc<AiService>> {
-    let room = state
-        .config
+    let config = state.config();
+    let room = config
         .ai
         .room_id
         .clone()
-        .or_else(|| state.config.mailbox.room_id.clone())
+        .or_else(|| config.mailbox.room_id.clone())
         .unwrap_or_else(|| crate::net::DEFAULT_ROOM.to_string());
     let transport = crate::net::ensure_started(state, room)
         .await
@@ -114,7 +114,7 @@ async fn init_service(state: &Arc<AppState>) -> Result<Arc<AiService>> {
         consumer: Consumer::new(send),
         provider: RwLock::new(None),
         api_server: Mutex::new(None),
-        request_timeout: Duration::from_secs(state.config.ai.request_timeout_secs.max(1)),
+        request_timeout: Duration::from_secs(config.ai.request_timeout_secs.max(1)),
     });
 
     {
@@ -307,9 +307,10 @@ async fn provide_start(service: &Arc<AiService>, state: &Arc<AppState>) -> Resul
         }));
     }
 
-    let cfg = &state.config.ai;
+    let cfg = state.config().ai;
     let base_url = cfg.upstream_url.clone().context(
-        "ai: [ai] upstream_url is not configured; set it in config.toml \
+        "ai: [ai] upstream_url is not configured; set it in the dashboard's \
+         Settings panel or with `mistl config set ai.upstream_url <url>` \
          (e.g. \"http://127.0.0.1:11434/v1\" for Ollama)",
     )?;
     let mut upstream = UpstreamConfig {
@@ -394,9 +395,10 @@ async fn serve_start(service: &Arc<AiService>, state: &Arc<AppState>) -> Result<
         })
     };
 
-    let server = ApiServer::start(&state.config.ai.api_listen, call, models_fn)
+    let api_listen = state.config().ai.api_listen;
+    let server = ApiServer::start(&api_listen, call, models_fn)
         .await
-        .with_context(|| format!("ai: binding API server on {}", state.config.ai.api_listen))?;
+        .with_context(|| format!("ai: binding API server on {api_listen}"))?;
     let addr = server.addr();
     *guard = Some(server);
 

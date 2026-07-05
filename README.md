@@ -45,12 +45,19 @@ $ cargo build --release
 ## Usage
 
 The CLI acts as a client to a resident daemon (IPC: loopback TCP with token auth).
+Client commands start the daemon automatically if it isn't running.
 
 ```console
 # Daemon management
-$ mistl daemon start          # start in the background
+$ mistl status                # combined overview (daemon, stream, ai)
+$ mistl daemon start          # start in the background (also happens automatically)
 $ mistl daemon status
 $ mistl daemon stop
+
+# Configuration (no config.toml editing needed)
+$ mistl config show           # secrets masked
+$ mistl config set ai.upstream_url http://127.0.0.1:11434/v1
+$ mistl config set stream.relay_room my-room
 
 # Profile / DID keys
 $ mistl key did               # generates a key on first call
@@ -127,7 +134,11 @@ or leave the others unset).
 
 ## Configuration
 
-`%APPDATA%\tik-choco\mistl\config\config.toml` (created with defaults on first run):
+Configuration lives in `%APPDATA%\tik-choco\mistl\config\config.toml` (created with
+defaults on first run) and can be changed with `mistl config set` or in the
+dashboard's Settings panel — changes hot-reload into the running daemon and apply
+the next time the affected service starts (room ids and `[ui]` need a daemon
+restart):
 
 ```toml
 [identity]

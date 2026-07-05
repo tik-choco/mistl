@@ -75,13 +75,12 @@ async fn init_service(state: &Arc<AppState>) -> Result<Arc<MailboxService>> {
     let node_id = identity.node_id();
     let did = identity.did().to_string();
 
-    let room = state
-        .config
-        .mailbox
+    let mailbox_config = state.config().mailbox;
+    let room = mailbox_config
         .room_id
         .clone()
         .unwrap_or_else(|| crate::net::DEFAULT_ROOM.to_string());
-    let serve_as_bot = state.config.mailbox.serve_as_bot;
+    let serve_as_bot = mailbox_config.serve_as_bot;
 
     let data_dir = crate::config::data_dir()
         .context("mailbox: resolving data dir")?

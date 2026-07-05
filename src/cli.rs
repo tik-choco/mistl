@@ -50,6 +50,26 @@ pub enum Command {
     },
     /// Open the web dashboard in the default browser (starts the daemon if needed)
     Ui,
+    /// Show a combined status overview (daemon, stream, AI)
+    Status,
+    /// Show or change configuration (applies without editing config.toml)
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ConfigAction {
+    /// Show the current configuration (secrets masked)
+    Show,
+    /// Set one field, e.g. `mistl config set ai.upstream_url http://127.0.0.1:11434/v1`
+    Set {
+        /// Field path as section.field (see `mistl config show`)
+        path: String,
+        /// New value; JSON accepted (numbers, true/false, ["a","b"]), empty string clears
+        value: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -206,7 +226,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         Command::Stream { action } => match action {
             StreamAction::Start => client_call("stream.start", json!({})),
             StreamAction::Relay { room } => {
-                let response = daemon::ipc::client_request("stream.relay.start", json!({ "room": room }))?;
+                let response = request("stream.relay.start", json!({ "room": room }))?;
                 println!("{}", serde_json::to_string_pretty(&response)?);
                 if let Some(url) = response.get("rtsp_url").and_then(Value::as_str) {
                     println!();
@@ -249,7 +269,45 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             },
         },
         Command::Ui => open_dashboard(),
+        Command::Status => status_overview(),
+        Command::Config { action } => match action {
+            ConfigAction::Show => client_call("config.show", json!({})),
+            ConfigAction::Set { path, value } => {
+                // Accept JSON for typed values; fall back to a plain string
+                // ("30" stays a number, "native" a string). An empty value
+                // (also the JSON form `""`, since some shells can't pass a
+                // truly empty argument) clears optional fields.
+                let value = match serde_json::from_str(&value) {
+                    _ if value.is_empty() => Value::Null,
+                    Ok(Value::String(s)) if s.is_empty() => Value::Null,
+                    Ok(parsed) => parsed,
+                    Err(_) => Value::String(value),
+                };
+                let response = request("config.set", json!({ "path": path, "value": value }))?;
+                println!("{}", serde_json::to_string_pretty(&response)?);
+                if let Some(applies) = response.get("applies").and_then(Value::as_str) {
+                    if applies != "next service start" {
+                        println!("note: this change takes effect after a {applies}");
+                    }
+                }
+                Ok(())
+            }
+        },
     }
+}
+
+/// One combined, human-scannable status snapshot.
+fn status_overview() -> Result<()> {
+    // The stream call goes first so its auto-start covers daemon.status
+    // (which is exempt from auto-start by design).
+    let stream = request("stream.status", json!({}))?;
+    let overview = json!({
+        "daemon": daemon::ipc::client_request("daemon.status", json!({}))?,
+        "stream": stream,
+        "ai": request("ai.status", json!({}))?,
+    });
+    println!("{}", serde_json::to_string_pretty(&overview)?);
+    Ok(())
 }
 
 /// Ensure the daemon is up, then open the dashboard URL in the default
@@ -291,9 +349,26 @@ fn open_dashboard() -> Result<()> {
     Ok(())
 }
 
+/// Send one request to the daemon, transparently starting it first if it
+/// isn't running (`daemon.*` commands are exempt so `daemon stop`/`status`
+/// never boot a daemon just to talk to it).
+fn request(cmd: &str, args: Value) -> Result<Value> {
+    match daemon::ipc::client_request(cmd, args.clone()) {
+        Err(error)
+            if !cmd.starts_with("daemon.")
+                && error.to_string().contains("daemon is not running") =>
+        {
+            eprintln!("mistl: starting daemon...");
+            daemon::start_background_quiet()?;
+            daemon::ipc::client_request(cmd, args)
+        }
+        other => other,
+    }
+}
+
 /// Send one request to the daemon and pretty-print the JSON response.
 fn client_call(cmd: &str, args: Value) -> Result<()> {
-    let response = daemon::ipc::client_request(cmd, args)?;
+    let response = request(cmd, args)?;
     println!("{}", serde_json::to_string_pretty(&response)?);
     Ok(())
 }

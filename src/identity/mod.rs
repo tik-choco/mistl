@@ -215,7 +215,7 @@ fn generate_identity(state: &AppState) -> Result<Identity> {
 
     if !profile_path()?.exists() {
         let mut profile = Profile::default();
-        if let Some(name) = &state.config.identity.display_name {
+        if let Some(name) = &state.config().identity.display_name {
             profile.display_name = Some(name.clone());
         }
         save_profile(&profile)?;
