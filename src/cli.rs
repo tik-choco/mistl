@@ -48,6 +48,8 @@ pub enum Command {
         #[command(subcommand)]
         action: AiAction,
     },
+    /// Open the web dashboard in the default browser (starts the daemon if needed)
+    Ui,
 }
 
 #[derive(Subcommand)]
@@ -228,7 +230,47 @@ pub fn dispatch(cli: Cli) -> Result<()> {
                 AiToggleAction::Stop => client_call("ai.serve.stop", json!({})),
             },
         },
+        Command::Ui => open_dashboard(),
     }
+}
+
+/// Ensure the daemon is up, then open the dashboard URL in the default
+/// browser.
+fn open_dashboard() -> Result<()> {
+    let config = crate::config::Config::load()?;
+    if !config.ui.enabled {
+        bail!("the web dashboard is disabled ([ui] enabled = false in config.toml)");
+    }
+    if daemon::ipc::client_request("daemon.status", json!({})).is_err() {
+        daemon::start_background()?;
+    }
+    let url = format!("http://{}/", config.ui.listen);
+
+    #[cfg(windows)]
+    let opened = std::process::Command::new("cmd")
+        .args(["/c", "start", "", &url])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    #[cfg(target_os = "macos")]
+    let opened = std::process::Command::new("open")
+        .arg(&url)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let opened = std::process::Command::new("xdg-open")
+        .arg(&url)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if opened {
+        println!("dashboard: {url}");
+    } else {
+        println!("open {url} in your browser");
+    }
+    Ok(())
 }
 
 /// Send one request to the daemon and pretty-print the JSON response.

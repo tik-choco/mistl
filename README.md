@@ -10,6 +10,8 @@ It integrates the [tc-storage](https://github.com/tik-choco/tc-storage) CLI and 
 - **stream** — screen-share RTSP server (playable by VRChat's AVPro video player; Rust port of mistlink)
 - **mailbox** — p2p store-and-forward messaging ("p2p mail server"): when the recipient
   is offline, a bot node holds the deposit and forwards it once they come online
+- **ui** — embedded web dashboard (`mistl ui`): operate all of the above from a
+  browser at `http://127.0.0.1:6480/`
 - **ai** — p2p AI network, wire-compatible with
   [mistai](https://github.com/tik-choco-lab/mistai) protocol v1 (tc-mistllm /
   tc-translate peers can share the room): *provide* LLM inference to peers from any
@@ -65,6 +67,9 @@ $ mistl mailbox send <did|node-id> --message "hello"
 $ mistl mailbox send <did|node-id> --file .\data.bin
 $ mistl mailbox fetch         # receive messages pending for me
 $ mistl mailbox ls            # deposits this node is holding as a bot
+
+# Web dashboard
+$ mistl ui                    # starts the daemon if needed, opens the browser
 
 # AI network
 $ mistl ai provide start      # serve LLM inference to peers from [ai] upstream_url
@@ -124,6 +129,10 @@ serve_as_bot = true                          # hold deposits for other peers
 # temperature = 0.7
 api_listen = "127.0.0.1:6478"                # local OpenAI-compatible API (serve)
 request_timeout_secs = 120                   # p2p inactivity timeout (resets per chunk)
+
+[ui]
+enabled = true                               # serve the dashboard from the daemon
+listen = "127.0.0.1:6480"                    # keep on loopback (no auth)
 ```
 
 Note: mistlib supports **one room per process**, so mailbox and ai share it.
@@ -141,6 +150,7 @@ mistl <subcommand>  --(JSON over loopback TCP)-->  mistl daemon run
                                                      ├─ stream    (Windows.Graphics.Capture → OpenH264 → RTP → RTSP server)
                                                      ├─ mailbox   (signed envelope spools over net)
                                                      ├─ ai        (mistai protocol v1 over net + local OpenAI-compatible HTTP)
+                                                     ├─ web       (embedded dashboard + /api/call bridge into the same router)
                                                      └─ net       (shared mistlib WebRTC/Nostr transport: one engine, one room)
 ```
 
@@ -167,6 +177,8 @@ mistl <subcommand>  --(JSON over loopback TCP)-->  mistl daemon run
   decoded but not served, and `raft_message` scheduling is passed through untouched
 - The local API server (`ai serve`) has no auth; keep `api_listen` on loopback unless
   the network is trusted
+- The web dashboard has no login; it rejects cross-origin and non-localhost requests,
+  but anyone with local access can use it — keep `[ui] listen` on loopback
 
 ## License
 
