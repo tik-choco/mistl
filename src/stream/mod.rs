@@ -22,6 +22,7 @@ mod capture;
 mod ingest;
 #[cfg(windows)]
 mod native;
+mod relay;
 mod rtp_out;
 mod rtsp;
 
@@ -44,6 +45,9 @@ use crate::daemon::AppState;
 enum CaptureBackend {
     Native,
     Ffmpeg,
+    /// p2p relay of a tc-chat screen share (selected by `stream.relay.start`,
+    /// not by `stream.capture_backend`).
+    Relay,
 }
 
 impl CaptureBackend {
@@ -61,6 +65,7 @@ impl CaptureBackend {
         match self {
             Self::Native => "native",
             Self::Ffmpeg => "ffmpeg",
+            Self::Relay => "relay",
         }
     }
 }
@@ -74,6 +79,7 @@ enum Backend {
     },
     #[cfg(windows)]
     Native(native::NativeCapture),
+    Relay(relay::RelayCapture),
 }
 
 impl Backend {
@@ -88,6 +94,7 @@ impl Backend {
             }
             #[cfg(windows)]
             Backend::Native(native) => native.stop().await,
+            Backend::Relay(relay) => relay.stop().await,
         }
     }
 }
@@ -99,6 +106,7 @@ struct Pipeline {
     rtsp: Arc<rtsp::RtspServer>,
     rtsp_url: String,
     started_at: Instant,
+    relay_room: Option<String>,
 }
 
 /// Module-internal state: at most one pipeline runs at a time.
@@ -110,25 +118,57 @@ fn pipeline() -> &'static Mutex<Option<Pipeline>> {
 
 /// Handle `stream.*` IPC commands:
 /// - `stream.start` `{}` -> `{rtsp_url}` (idempotent: returns existing URL)
+/// - `stream.relay.start` `{room?}` -> `{rtsp_url, room}` (tc-chat share relay)
 /// - `stream.stop` `{}` -> `{stopped: bool}`
 /// - `stream.status` `{}` -> `{running, rtsp_url?, clients?, backend?}`
-pub async fn handle(cmd: &str, _args: Value, state: &Arc<AppState>) -> Result<Value> {
+pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Value> {
     match cmd {
-        "stream.start" => start(state).await,
+        "stream.start" => {
+            let backend = CaptureBackend::parse(&state.config.stream.capture_backend)?;
+            start(state, backend, None).await
+        }
+        "stream.relay.start" => {
+            let room = args
+                .get("room")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| state.config.stream.relay_room.clone());
+            let Some(room) = room else {
+                bail!(
+                    "no relay room: pass --room or set stream.relay_room to the \
+                     tc-chat room id of the screen share"
+                );
+            };
+            start(state, CaptureBackend::Relay, Some(room)).await
+        }
         "stream.stop" => stop().await,
         "stream.status" => status().await,
         _ => bail!("`{cmd}` is not implemented yet"),
     }
 }
 
-async fn start(state: &Arc<AppState>) -> Result<Value> {
+async fn start(
+    state: &Arc<AppState>,
+    backend_kind: CaptureBackend,
+    relay_room: Option<String>,
+) -> Result<Value> {
     let mut guard = pipeline().lock().await;
     if let Some(existing) = guard.as_ref() {
+        if existing.backend_kind != backend_kind {
+            bail!(
+                "stream already running with backend {:?}; run `stream stop` first",
+                existing.backend_kind.as_str()
+            );
+        }
         return Ok(json!({ "rtsp_url": existing.rtsp_url }));
     }
 
     let cfg = &state.config.stream;
-    let backend_kind = CaptureBackend::parse(&cfg.capture_backend)?;
+    // Relayed shares carry audio; local capture stays video-only for now.
+    let audio = match backend_kind {
+        CaptureBackend::Relay => Some(rtp_out::AudioCodec::parse(&cfg.audio_codec)?),
+        _ => None,
+    };
 
     let parsed = rtsp_types::Url::parse(&cfg.rtsp_url).context("invalid stream.rtsp_url")?;
     let host = parsed.host_str().unwrap_or("127.0.0.1").to_string();
@@ -142,13 +182,20 @@ async fn start(state: &Arc<AppState>) -> Result<Value> {
     let bind_ip: IpAddr = host.parse().unwrap_or_else(|_| "127.0.0.1".parse().expect("valid IP"));
     let bind_addr = SocketAddr::new(bind_ip, port);
 
-    let rtsp = rtsp::RtspServer::start(bind_addr, cfg.frame_rate)
+    let rtsp = rtsp::RtspServer::start(bind_addr, cfg.frame_rate, audio)
         .await
         .context("starting RTSP server")?;
 
     let backend = match backend_kind {
         CaptureBackend::Ffmpeg => start_ffmpeg_backend(cfg, &rtsp).await,
         CaptureBackend::Native => start_native_backend(cfg, &rtsp).await,
+        CaptureBackend::Relay => {
+            let room = relay_room.clone().expect("relay backend requires a room");
+            let codec = audio.expect("relay backend always has an audio codec");
+            relay::RelayCapture::spawn(state, room, codec, rtsp.clone())
+                .await
+                .map(Backend::Relay)
+        }
     };
 
     let backend = match backend {
@@ -166,15 +213,21 @@ async fn start(state: &Arc<AppState>) -> Result<Value> {
     };
     let rtsp_url = format!("rtsp://{advertise_host}:{port}{path}");
 
+    let response = match &relay_room {
+        Some(room) => json!({ "rtsp_url": rtsp_url, "room": room }),
+        None => json!({ "rtsp_url": rtsp_url }),
+    };
+
     *guard = Some(Pipeline {
         backend,
         backend_kind,
         rtsp,
         rtsp_url: rtsp_url.clone(),
         started_at: Instant::now(),
+        relay_room,
     });
 
-    Ok(json!({ "rtsp_url": rtsp_url }))
+    Ok(response)
 }
 
 /// Binds the ffmpeg ingest UDP socket *before* spawning ffmpeg, so we own
@@ -229,13 +282,22 @@ async fn stop() -> Result<Value> {
 async fn status() -> Result<Value> {
     let guard = pipeline().lock().await;
     match guard.as_ref() {
-        Some(pipeline) => Ok(json!({
-            "running": true,
-            "rtsp_url": pipeline.rtsp_url,
-            "clients": pipeline.rtsp.client_count().await,
-            "uptime_secs": pipeline.started_at.elapsed().as_secs(),
-            "backend": pipeline.backend_kind.as_str(),
-        })),
+        Some(pipeline) => {
+            let mut value = json!({
+                "running": true,
+                "rtsp_url": pipeline.rtsp_url,
+                "clients": pipeline.rtsp.client_count().await,
+                "uptime_secs": pipeline.started_at.elapsed().as_secs(),
+                "backend": pipeline.backend_kind.as_str(),
+            });
+            if let Some(room) = &pipeline.relay_room {
+                value["room"] = json!(room);
+                if let Backend::Relay(relay) = &pipeline.backend {
+                    value["publisher"] = json!(relay.publisher());
+                }
+            }
+            Ok(value)
+        }
         None => Ok(json!({ "running": false })),
     }
 }

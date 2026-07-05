@@ -43,6 +43,12 @@ mpeg2ts = "0.3"
 rtp = "0.13"
 openh264 = "0.9.3"
 
+# stream::relay (tc-chat WebRTC share -> RTSP): Opus decode (audiopus_sys
+# builds libopus from source via cmake, matching the openh264 precedent) and
+# AAC-LC encode (fdk-aac-sys builds libfdk-aac from source via cc).
+opus = "0.3"
+fdk-aac = "0.8"
+
 [profile.release]
 lto = "thin"
 strip = true

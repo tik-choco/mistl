@@ -104,8 +104,14 @@ pub enum StoreAction {
 
 #[derive(Subcommand)]
 pub enum StreamAction {
-    /// Start the RTSP screen-share server
+    /// Start the RTSP screen-share server (local screen capture)
     Start,
+    /// Relay a tc-chat screen share to VRChat (p2p -> RTSP, video + audio)
+    Relay {
+        /// tc-chat room id of the share (default: stream.relay_room)
+        #[arg(short, long)]
+        room: Option<String>,
+    },
     /// Stop the RTSP server
     Stop,
     /// Show stream status and URL
@@ -199,6 +205,18 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         },
         Command::Stream { action } => match action {
             StreamAction::Start => client_call("stream.start", json!({})),
+            StreamAction::Relay { room } => {
+                let response = daemon::ipc::client_request("stream.relay.start", json!({ "room": room }))?;
+                println!("{}", serde_json::to_string_pretty(&response)?);
+                if let Some(url) = response.get("rtsp_url").and_then(Value::as_str) {
+                    println!();
+                    println!("  Paste this URL into the VRChat video player:");
+                    println!();
+                    println!("      {url}");
+                    println!();
+                }
+                Ok(())
+            }
             StreamAction::Stop => client_call("stream.stop", json!({})),
             StreamAction::Status => client_call("stream.status", json!({})),
         },

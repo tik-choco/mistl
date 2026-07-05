@@ -7,7 +7,10 @@ It integrates the [tc-storage](https://github.com/tik-choco/tc-storage) CLI and 
 
 - **identity** — user profile and `did:key` Ed25519 key management (tc-storage compatible)
 - **store** — content-addressed storage (CIDv1 / sha2-256 / 1 MiB chunks, mistlib StorageEngine)
-- **stream** — screen-share RTSP server (playable by VRChat's AVPro video player; Rust port of mistlink)
+- **stream** — screen-share RTSP server (playable by VRChat's AVPro video player; Rust
+  port of mistlink), from local screen capture or relayed from a
+  [tc-chat](https://github.com/tik-choco/tc-chat) screen share (video + audio) over the
+  p2p network
 - **mailbox** — p2p store-and-forward messaging ("p2p mail server"): when the recipient
   is offline, a bot node holds the deposit and forwards it once they come online
 - **ui** — embedded web dashboard (`mistl ui`): operate all of the above from a
@@ -26,6 +29,9 @@ the MSVC runtime is statically linked — no external tools, DLLs, or installers
 
 - Rust (edition 2024) with [mistlib](https://github.com/tik-choco-lab/mistlib) checked
   out as `../mistlib-dev` (path dependencies)
+- [cmake](https://cmake.org/) on PATH at build time (libopus is compiled from source
+  for the relay's audio pipeline). With cmake ≥ 4.0, also set
+  `CMAKE_POLICY_VERSION_MINIMUM=3.5` in the build environment.
 - Optional: [ffmpeg](https://ffmpeg.org/) on PATH, only if you switch
   `stream.capture_backend` to `"ffmpeg"` (the default `"native"` backend has no
   external dependencies)
@@ -58,7 +64,8 @@ $ mistl store ls
 $ mistl store get <cid> --output .\file.bin
 
 # Screen share (VRChat)
-$ mistl stream start          # -> rtsp://<LAN IP>:8554/stream
+$ mistl stream start          # local screen -> rtsp://<LAN IP>:8554/stream
+$ mistl stream relay --room my-room   # tc-chat share (video+audio) -> same URL
 $ mistl stream status
 $ mistl stream stop
 
@@ -89,6 +96,27 @@ $ curl http://127.0.0.1:6478/v1/chat/completions \
     -d '{"messages":[{"role":"user","content":"hi"}],"stream":true}'
 ```
 
+### Sharing a tc-chat screen into VRChat
+
+Someone shares their screen in a [tc-chat](https://github.com/tik-choco/tc-chat) room
+(browser screen share, optionally with tab/system audio). On the machine that should
+feed VRChat, run:
+
+```console
+$ mistl stream relay --room <the tc-chat room id>
+
+  Paste this URL into the VRChat video player:
+
+      rtsp://192.168.x.x:8554/stream
+```
+
+mistl joins the room as a WebRTC peer, receives the share (H264 video + Opus audio),
+transcodes the audio to AAC (what AVPro plays over RTSP), and serves both tracks on
+the RTSP URL. Paste the printed URL into any AVPro-based VRChat video player.
+Note: mistlib supports one room per process, so the relay room is shared with
+mailbox/ai (set `stream.relay_room`, `mailbox.room_id`, `ai.room_id` consistently,
+or leave the others unset).
+
 `mailbox send` returns one of three `status` values:
 
 | status | meaning |
@@ -112,9 +140,11 @@ capacity_bytes = 10737418240
 [stream]
 rtsp_url = "rtsp://127.0.0.1:8554/stream"   # use 0.0.0.0 to expose on the LAN
 frame_rate = 30
-audio_capture = false                        # not implemented yet
+audio_capture = false                        # local capture audio: not implemented yet
 capture_backend = "native"                   # "native" (built-in) or "ffmpeg"
 max_width = 1920                             # native backend: downscale wider screens
+# relay_room = "my-room"                     # tc-chat room for `stream relay`
+audio_codec = "aac"                          # relay audio track: "aac" (AVPro) or "opus"
 
 [mailbox]
 # room_id = "my-private-room"               # default: "mistl-mailbox-v1"
@@ -147,7 +177,7 @@ Data lives in `%APPDATA%\tik-choco\mistl\data\` (keys, blocks, spools, logs).
 mistl <subcommand>  --(JSON over loopback TCP)-->  mistl daemon run
                                                      ├─ identity  (did:key ed25519, profile)
                                                      ├─ storage   (mistlib StorageEngine + NativeBlockStore)
-                                                     ├─ stream    (Windows.Graphics.Capture → OpenH264 → RTP → RTSP server)
+                                                     ├─ stream    (screen capture or p2p WebRTC relay → RTP → RTSP server)
                                                      ├─ mailbox   (signed envelope spools over net)
                                                      ├─ ai        (mistai protocol v1 over net + local OpenAI-compatible HTTP)
                                                      ├─ web       (embedded dashboard + /api/call bridge into the same router)
@@ -160,7 +190,9 @@ mistl <subcommand>  --(JSON over loopback TCP)-->  mistl daemon run
   (`identity::crypto`), CID semantics
 - mistlink interop: AVPro-friendly dummy SPS/PPS RTSP keepalive, PT 96 / SSRC 0x12345678
 - `stream` backends: `native` captures via Windows.Graphics.Capture and encodes with
-  OpenH264 in-process; `ffmpeg` spawns ffmpeg (gdigrab → MPEG-TS → demux) as a fallback
+  OpenH264 in-process; `ffmpeg` spawns ffmpeg (gdigrab → MPEG-TS → demux) as a fallback;
+  `relay` (via `stream relay`) receives a tc-chat WebRTC screen share over mistlib and
+  re-serves it (H264 passthrough, Opus→AAC transcode, RTCP sender reports for lipsync)
 - `ai` speaks mistai protocol v1 on the wire (`provider_hello` / `llm_request` /
   `llm_response_chunk` with seq reordering / `llm_response_done`), so browser-based
   mistai consumers and providers in the same room interoperate; the `net` module
@@ -171,7 +203,9 @@ mistl <subcommand>  --(JSON over loopback TCP)-->  mistl daemon run
 
 - `mailbox` file sends forward only the envelope (cid/name/size); p2p block transfer of
   the file bytes is not implemented yet
-- `stream` is video-only (audio_capture is ignored); no RTCP (NACK/PLI)
+- `stream` local capture is video-only (audio_capture is ignored); relayed shares carry
+  audio. Inbound NACK is not implemented (loss shows until the next keyframe; the relay
+  requests one every 5s)
 - No bot capability advertisement (every connected peer is treated as a bot candidate)
 - `ai` implements the LLM part of the mistai protocol; voice (tts/stt) messages are
   decoded but not served, and `raft_message` scheduling is passed through untouched
@@ -183,3 +217,9 @@ mistl <subcommand>  --(JSON over loopback TCP)-->  mistl daemon run
 ## License
 
 [MPL-2.0](LICENSE)
+
+Binary builds statically link the
+[Fraunhofer FDK AAC Codec Library for Android](https://github.com/mstorsjo/fdk-aac)
+(via the `fdk-aac` crate) for the relay's Opus→AAC transcoding, which is licensed
+under its own terms (© Fraunhofer-Gesellschaft; see the fdk-aac NOTICE), and
+[libopus](https://opus-codec.org/) (BSD-3-Clause).

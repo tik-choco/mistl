@@ -55,6 +55,19 @@ pub struct Transport {
 static TRANSPORT: OnceCell<Arc<Transport>> = OnceCell::const_new();
 static HANDLERS: RwLock<Vec<EventHandler>> = RwLock::new(Vec::new());
 
+/// Optional consumer of remote WebRTC media tracks (the stream relay).
+/// mistlib delivers track events from engine start; while no consumer is
+/// registered they are dropped here, so a relay started later only sees
+/// tracks from peers that (re)negotiate after it subscribed -- which is the
+/// normal case, since tc-chat renegotiates whenever a share starts.
+static MEDIA_CONSUMER: RwLock<Option<tokio::sync::mpsc::UnboundedSender<mistlib::MediaTrackEvent>>> =
+    RwLock::new(None);
+
+/// Route media track events to `tx` (or drop them again when `None`).
+pub fn set_media_consumer(tx: Option<tokio::sync::mpsc::UnboundedSender<mistlib::MediaTrackEvent>>) {
+    *MEDIA_CONSUMER.write().expect("media consumer lock poisoned") = tx;
+}
+
 /// Start the shared transport (identity load, engine init, raw-handler
 /// registration, room join) on first call. Subsequent calls return the
 /// running transport -- and fail if they ask for a *different* room, since
@@ -109,6 +122,27 @@ async fn start(state: &Arc<AppState>, room: String) -> Result<Arc<Transport>> {
         .await
         .context("net: initializing mistlib engine")?;
     }
+
+    // Wire up media-track delivery before joining the room so every peer
+    // gets the handler (mistlib only wires peers created after this call).
+    // register_media_track_handler block_ons the engine runtime, so it needs
+    // a blocking thread like the init call above.
+    let (media_tx, mut media_rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::task::spawn_blocking(move || {
+        if let Err(error) = mistlib::app::register_media_track_handler(media_tx) {
+            warn!(%error, "net: media track handler registration failed; stream relay unavailable");
+        }
+    })
+    .await
+    .context("net: registering media track handler")?;
+    tokio::spawn(async move {
+        while let Some(event) = media_rx.recv().await {
+            let consumer = MEDIA_CONSUMER.read().expect("media consumer lock poisoned");
+            if let Some(tx) = consumer.as_ref() {
+                let _ = tx.send(event);
+            }
+        }
+    });
 
     // The one process-wide raw handler: fan out to module handlers.
     mistlib::app::register_raw_handler(move |event_type, from_id, data| {

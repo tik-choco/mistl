@@ -76,6 +76,13 @@ pub struct StreamConfig {
     pub capture_backend: String,
     /// Native backend only: downscale captured frames wider than this.
     pub max_width: u32,
+    /// Room joined by `stream relay` to receive a tc-chat screen share.
+    /// mistlib supports one room per process, so this must match (or be the
+    /// only configured) room across mailbox/ai/stream.
+    pub relay_room: Option<String>,
+    /// Audio codec served over RTSP for relayed shares: "aac" (transcoded
+    /// from Opus; what AVPro reliably plays) or "opus" (passthrough).
+    pub audio_codec: String,
 }
 
 impl Default for StreamConfig {
@@ -86,6 +93,8 @@ impl Default for StreamConfig {
             audio_capture: false,
             capture_backend: "native".into(),
             max_width: 1920,
+            relay_room: None,
+            audio_codec: "aac".into(),
         }
     }
 }
