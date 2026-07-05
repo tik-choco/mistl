@@ -15,6 +15,27 @@ pub struct Config {
     pub mailbox: MailboxConfig,
     #[serde(default)]
     pub ai: AiConfig,
+    #[serde(default)]
+    pub ui: UiConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiConfig {
+    /// Serve the embedded web dashboard from the daemon.
+    pub enabled: bool,
+    /// Dashboard listen address. The dashboard has no auth beyond a
+    /// same-origin check, so keep it on loopback.
+    pub listen: String,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            listen: "127.0.0.1:6480".into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

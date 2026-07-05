@@ -42,11 +42,29 @@ async fn daemon_main() -> Result<()> {
     let server = ipc::serve(state.clone()).await?;
     info!(port = server.port(), "mistl daemon ready");
 
+    let web = if state.config.ui.enabled {
+        match crate::web::serve(state.clone(), &state.config.ui.listen.clone()).await {
+            Ok(web) => {
+                info!(url = %web.url(), "web dashboard ready");
+                Some(web)
+            }
+            Err(error) => {
+                tracing::warn!(%error, "web dashboard failed to start; continuing without it");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     tokio::select! {
         _ = tokio::signal::ctrl_c() => info!("interrupted, shutting down"),
         _ = shutdown_rx.wait_for(|&stop| stop) => info!("stop requested, shutting down"),
     }
 
+    if let Some(web) = web {
+        web.close().await;
+    }
     server.close().await;
     Ok(())
 }
