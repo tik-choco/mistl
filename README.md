@@ -11,11 +11,17 @@ It integrates the [tc-storage](https://github.com/tik-choco/tc-storage) CLI and 
 - **mailbox** — p2p store-and-forward messaging ("p2p mail server"): when the recipient
   is offline, a bot node holds the deposit and forwards it once they come online
 
+The release build is a single, fully standalone `mistl.exe`: screen capture uses
+Windows.Graphics.Capture, H264 encoding uses OpenH264 compiled into the binary, and
+the MSVC runtime is statically linked — no external tools, DLLs, or installers.
+
 ## Requirements
 
 - Rust (edition 2024) with [mistlib](https://github.com/tik-choco-lab/mistlib) checked
   out as `../mistlib-dev` (path dependencies)
-- [ffmpeg](https://ffmpeg.org/) on PATH for the `stream` feature
+- Optional: [ffmpeg](https://ffmpeg.org/) on PATH, only if you switch
+  `stream.capture_backend` to `"ffmpeg"` (the default `"native"` backend has no
+  external dependencies)
 
 ## Build
 
@@ -80,6 +86,8 @@ capacity_bytes = 10737418240
 rtsp_url = "rtsp://127.0.0.1:8554/stream"   # use 0.0.0.0 to expose on the LAN
 frame_rate = 30
 audio_capture = false                        # not implemented yet
+capture_backend = "native"                   # "native" (built-in) or "ffmpeg"
+max_width = 1920                             # native backend: downscale wider screens
 
 [mailbox]
 # room_id = "my-private-room"               # default: "mistl-mailbox-v1"
@@ -94,7 +102,7 @@ Data lives in `%APPDATA%\tik-choco\mistl\data\` (keys, blocks, spools, logs).
 mistl <subcommand>  --(JSON over loopback TCP)-->  mistl daemon run
                                                      ├─ identity  (did:key ed25519, profile)
                                                      ├─ storage   (mistlib StorageEngine + NativeBlockStore)
-                                                     ├─ stream    (ffmpeg gdigrab → MPEG-TS → RTP → RTSP server)
+                                                     ├─ stream    (Windows.Graphics.Capture → OpenH264 → RTP → RTSP server)
                                                      └─ mailbox   (mistlib WebRTC/Nostr + signed envelope spools)
 ```
 
@@ -103,6 +111,8 @@ mistl <subcommand>  --(JSON over loopback TCP)-->  mistl daemon run
 - tc-storage interop: DID format, AES-256-GCM + PBKDF2-SHA256 (210k) envelopes
   (`identity::crypto`), CID semantics
 - mistlink interop: AVPro-friendly dummy SPS/PPS RTSP keepalive, PT 96 / SSRC 0x12345678
+- `stream` backends: `native` captures via Windows.Graphics.Capture and encodes with
+  OpenH264 in-process; `ffmpeg` spawns ffmpeg (gdigrab → MPEG-TS → demux) as a fallback
 
 ## Known limitations (v0.1)
 

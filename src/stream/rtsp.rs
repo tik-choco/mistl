@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use rtsp_types::headers::{self, RtpLowerTransport, RtpProfile, RtpTransport, RtpTransportParameters, Transport, Transports};
@@ -21,6 +21,9 @@ use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
 use super::rtp_out::{self, DUMMY_NALU, RtpHeaderFields};
+
+/// How long after the last real access unit the dummy keepalive resumes.
+const REAL_DATA_IDLE: Duration = Duration::from_millis(1000);
 
 /// Per-client RTSP session: how to reach it (UDP endpoint or TCP
 /// interleaved channel) and whether `PLAY` has been issued.
@@ -43,7 +46,11 @@ struct Inner {
     sessions: HashMap<String, Session>,
     sps: Option<Vec<u8>>,
     pps: Option<Vec<u8>>,
-    has_real_data: bool,
+    /// When the last real access unit was fanned out. The dummy keepalive
+    /// stands down only while real data flowed recently: damage-driven
+    /// capture backends (Windows.Graphics.Capture) emit nothing at all on a
+    /// static screen, and AVPro drops the stream if RTP goes silent.
+    last_real_au: Option<Instant>,
     real_seq: u16,
     real_ts: u32,
     dummy_seq: u16,
@@ -69,7 +76,7 @@ impl RtspServer {
                 sessions: HashMap::new(),
                 sps: None,
                 pps: None,
-                has_real_data: false,
+                last_real_au: None,
                 real_seq: rand::random(),
                 real_ts: rand::random(),
                 dummy_seq: 0,
@@ -159,10 +166,10 @@ impl RtspServer {
 
     /// Packetize one Annex-B access unit and fan it out as RTP to every
     /// playing session; also marks real data as flowing so the dummy
-    /// keepalive loop stands down.
+    /// keepalive loop stands down while frames keep arriving.
     pub async fn send_video_access_unit(&self, annex_b: &[u8]) {
         let mut inner = self.inner.lock().await;
-        inner.has_real_data = true;
+        inner.last_real_au = Some(Instant::now());
 
         let payloads = inner.payloader.payload(annex_b);
         if payloads.is_empty() {
@@ -269,7 +276,10 @@ async fn dummy_keepalive_loop(server: Arc<RtspServer>) {
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         }
 
-        if inner.has_real_data {
+        if inner
+            .last_real_au
+            .is_some_and(|at| at.elapsed() < REAL_DATA_IDLE)
+        {
             continue;
         }
 

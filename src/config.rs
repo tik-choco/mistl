@@ -22,6 +22,7 @@ pub struct IdentityConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct StorageConfig {
     /// Directory for content-addressed blocks. Defaults to `<data_dir>/blocks`.
     pub blocks_dir: Option<PathBuf>,
@@ -39,6 +40,7 @@ impl Default for StorageConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct StreamConfig {
     /// RTSP listen URL served to VRChat video players.
     pub rtsp_url: String,
@@ -46,6 +48,11 @@ pub struct StreamConfig {
     pub frame_rate: u32,
     /// Capture audio alongside video.
     pub audio_capture: bool,
+    /// Capture backend: "native" (built-in screen capture + OpenH264, no
+    /// external tools) or "ffmpeg" (spawns ffmpeg, the pre-v0.2 pipeline).
+    pub capture_backend: String,
+    /// Native backend only: downscale captured frames wider than this.
+    pub max_width: u32,
 }
 
 impl Default for StreamConfig {
@@ -54,11 +61,14 @@ impl Default for StreamConfig {
             rtsp_url: "rtsp://127.0.0.1:8554/stream".into(),
             frame_rate: 30,
             audio_capture: false,
+            capture_backend: "native".into(),
+            max_width: 1920,
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct MailboxConfig {
     /// Room id used for mailbox rendezvous with peers.
     pub room_id: Option<String>,
