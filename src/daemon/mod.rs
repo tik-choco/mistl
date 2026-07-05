@@ -121,6 +121,7 @@ pub async fn dispatch(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<V
             Some("store") => crate::storage::handle(cmd, args, state).await,
             Some("stream") => crate::stream::handle(cmd, args, state).await,
             Some("mailbox") => crate::mailbox::handle(cmd, args, state).await,
+            Some("ai") => crate::ai::handle(cmd, args, state).await,
             _ => bail!("unknown command: {cmd}"),
         },
     }

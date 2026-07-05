@@ -13,6 +13,8 @@ pub struct Config {
     pub stream: StreamConfig,
     #[serde(default)]
     pub mailbox: MailboxConfig,
+    #[serde(default)]
+    pub ai: AiConfig,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -81,6 +83,46 @@ impl Default for MailboxConfig {
         Self {
             room_id: None,
             serve_as_bot: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AiConfig {
+    /// Room id for the AI network. mistlib supports one room per process,
+    /// so this defaults to the mailbox room; set both to the same value to
+    /// join an existing mistai (tc-mistllm etc.) room.
+    pub room_id: Option<String>,
+    /// Upstream OpenAI-compatible endpoint base URL used when providing,
+    /// e.g. "http://127.0.0.1:11434/v1" (Ollama) or "https://api.openai.com/v1".
+    pub upstream_url: Option<String>,
+    /// API key sent to the upstream endpoint (Bearer).
+    pub upstream_api_key: Option<String>,
+    /// Model requested when a client doesn't specify one.
+    pub default_model: Option<String>,
+    /// Models advertised in provider_hello. Empty = fetch from upstream
+    /// `GET /models` at provide start.
+    pub advertised_models: Vec<String>,
+    /// Sampling temperature forwarded to the upstream (unset = upstream default).
+    pub temperature: Option<f64>,
+    /// Listen address of the local OpenAI-compatible API server (`ai serve`).
+    pub api_listen: String,
+    /// Inactivity timeout for a p2p LLM request (resets on every streamed chunk).
+    pub request_timeout_secs: u64,
+}
+
+impl Default for AiConfig {
+    fn default() -> Self {
+        Self {
+            room_id: None,
+            upstream_url: None,
+            upstream_api_key: None,
+            default_model: None,
+            advertised_models: Vec::new(),
+            temperature: None,
+            api_listen: "127.0.0.1:6478".into(), // 6478 = "MIST" on a phone keypad
+            request_timeout_secs: 120,
         }
     }
 }
