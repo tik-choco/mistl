@@ -1,8 +1,9 @@
 # mistl
 
 A Rust daemon CLI that unifies tik-choco ecosystem features in a single binary.
-It integrates the [tc-storage](../tc-storage) CLI and the [mistlink](../mistlink)
-CLI, built on top of [mistlib](../mistlib-dev) (path dependencies).
+It integrates the [tc-storage](https://github.com/tik-choco/tc-storage) CLI and the
+[mistlink](https://github.com/tik-choco-lab/mistlink) CLI, built on top of
+[mistlib](https://github.com/tik-choco-lab/mistlib) (path dependencies).
 
 - **identity** — user profile and `did:key` Ed25519 key management (tc-storage compatible)
 - **store** — content-addressed storage (CIDv1 / sha2-256 / 1 MiB chunks, mistlib StorageEngine)
@@ -12,7 +13,8 @@ CLI, built on top of [mistlib](../mistlib-dev) (path dependencies).
 
 ## Requirements
 
-- Rust (edition 2024) with `../mistlib-dev` checked out (path dependencies)
+- Rust (edition 2024) with [mistlib](https://github.com/tik-choco-lab/mistlib) checked
+  out as `../mistlib-dev` (path dependencies)
 - [ffmpeg](https://ffmpeg.org/) on PATH for the `stream` feature
 
 ## Build
