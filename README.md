@@ -1,70 +1,70 @@
 # mistl
 
-tik-choco エコシステムの機能を1バイナリに統合した Rust 製デーモン型 CLI。
-[tc-storage](../tc-storage) の CLI と [mistlink](../mistlink) の CLI を統合し、
-[mistlib](../mistlib-dev)(path 依存)の上に構築されています。
+A Rust daemon CLI that unifies tik-choco ecosystem features in a single binary.
+It integrates the [tc-storage](../tc-storage) CLI and the [mistlink](../mistlink)
+CLI, built on top of [mistlib](../mistlib-dev) (path dependencies).
 
-- **identity** — ユーザープロファイルと `did:key` Ed25519 鍵管理(tc-storage 互換)
-- **store** — コンテンツアドレス型ストレージ(CIDv1 / sha2-256 / 1 MiB チャンク、mistlib StorageEngine)
-- **stream** — 画面共有 RTSP サーバー(VRChat の AVPro ビデオプレイヤーで再生可能、mistlink の Rust 移植)
-- **mailbox** — P2P store-and-forward メッセージング(P2P 版メールサーバー)。相手がオフラインなら
-  bot ノードがデータを預かり、オンライン復帰時に転送
+- **identity** — user profile and `did:key` Ed25519 key management (tc-storage compatible)
+- **store** — content-addressed storage (CIDv1 / sha2-256 / 1 MiB chunks, mistlib StorageEngine)
+- **stream** — screen-share RTSP server (playable by VRChat's AVPro video player; Rust port of mistlink)
+- **mailbox** — p2p store-and-forward messaging ("p2p mail server"): when the recipient
+  is offline, a bot node holds the deposit and forwards it once they come online
 
-## 必要環境
+## Requirements
 
-- Rust(edition 2024)。`../mistlib-dev` がチェックアウトされていること(path 依存)
-- `stream` 機能には PATH 上に [ffmpeg](https://ffmpeg.org/)
+- Rust (edition 2024) with `../mistlib-dev` checked out (path dependencies)
+- [ffmpeg](https://ffmpeg.org/) on PATH for the `stream` feature
 
-## ビルド
+## Build
 
 ```console
 $ cargo build --release
 ```
 
-## 使い方
+## Usage
 
-CLI は常駐デーモンへのクライアントとして動作します(IPC: loopback TCP + トークン認証)。
+The CLI acts as a client to a resident daemon (IPC: loopback TCP with token auth).
 
 ```console
-# デーモン管理
-$ mistl daemon start          # バックグラウンド起動
+# Daemon management
+$ mistl daemon start          # start in the background
 $ mistl daemon status
 $ mistl daemon stop
 
-# プロファイル / DID 鍵
-$ mistl key did               # 初回呼び出しで鍵を自動生成
+# Profile / DID keys
+$ mistl key did               # generates a key on first call
 $ mistl key list
 $ mistl profile set display_name "yourname"
 $ mistl profile show
 
-# ストレージ
-$ mistl store put .\file.bin  # -> CID を返す
+# Storage
+$ mistl store put .\file.bin  # -> returns a CID
 $ mistl store ls
 $ mistl store get <cid> --output .\file.bin
 
-# 画面共有 (VRChat)
+# Screen share (VRChat)
 $ mistl stream start          # -> rtsp://<LAN IP>:8554/stream
 $ mistl stream status
 $ mistl stream stop
 
-# メールボックス
+# Mailbox
 $ mistl mailbox send <did|node-id> --message "hello"
 $ mistl mailbox send <did|node-id> --file .\data.bin
-$ mistl mailbox fetch         # 自分宛の保留メッセージを受信
-$ mistl mailbox ls            # このノードが bot として預かり中の預託一覧
+$ mistl mailbox fetch         # receive messages pending for me
+$ mistl mailbox ls            # deposits this node is holding as a bot
 ```
 
-`mailbox send` の結果 `status` は 3 値:
+`mailbox send` returns one of three `status` values:
 
-| status | 意味 |
+| status | meaning |
 | --- | --- |
-| `delivered` | 相手がオンラインで直接配送済み |
-| `deposited` | 接続中の bot ノードに預託済み |
-| `queued` | 到達可能なピアなし。ローカル outbox に保存し、後で再送 |
+| `delivered` | recipient was online; delivered directly |
+| `deposited` | deposited with a connected bot node |
+| `queued` | no reachable peers; saved to the local outbox for retry |
 
-## 設定
+## Configuration
 
-`%APPDATA%\tik-choco\mistl\config\config.toml`(初回起動時に既定値で生成):
+`%APPDATA%\tik-choco\mistl\config\config.toml` (created with defaults on first run):
 
 ```toml
 [identity]
@@ -75,37 +75,39 @@ $ mistl mailbox ls            # このノードが bot として預かり中の�
 capacity_bytes = 10737418240
 
 [stream]
-rtsp_url = "rtsp://127.0.0.1:8554/stream"   # 0.0.0.0 にすると LAN 公開
+rtsp_url = "rtsp://127.0.0.1:8554/stream"   # use 0.0.0.0 to expose on the LAN
 frame_rate = 30
-audio_capture = false                        # 未実装(将来対応)
+audio_capture = false                        # not implemented yet
 
 [mailbox]
-# room_id = "my-private-room"               # 既定: "mistl-mailbox-v1"
-serve_as_bot = true                          # 他人の預託を預かる bot になる
+# room_id = "my-private-room"               # default: "mistl-mailbox-v1"
+serve_as_bot = true                          # hold deposits for other peers
 ```
 
-データは `%APPDATA%\tik-choco\mistl\data\`(鍵・ブロック・spool・ログ)。
+Data lives in `%APPDATA%\tik-choco\mistl\data\` (keys, blocks, spools, logs).
 
-## アーキテクチャ
+## Architecture
 
 ```
 mistl <subcommand>  --(JSON over loopback TCP)-->  mistl daemon run
                                                      ├─ identity  (did:key ed25519, profile)
                                                      ├─ storage   (mistlib StorageEngine + NativeBlockStore)
                                                      ├─ stream    (ffmpeg gdigrab → MPEG-TS → RTP → RTSP server)
-                                                     └─ mailbox   (mistlib WebRTC/Nostr + 署名付き envelope spool)
+                                                     └─ mailbox   (mistlib WebRTC/Nostr + signed envelope spools)
 ```
 
-- IPC 発見情報は `data\daemon.json`(port + ランダムトークン)。ローカルユーザーのみ接続可能
-- tc-storage 互換: DID フォーマット、AES-256-GCM + PBKDF2-SHA256(210k)エンベロープ
-  (`identity::crypto`)、CID セマンティクス
-- mistlink 互換: RTSP の AVPro 向けダミー SPS/PPS keepalive、PT 96 / SSRC 0x12345678
+- IPC discovery info is written to `data\daemon.json` (port + random token); only the
+  local user can connect
+- tc-storage interop: DID format, AES-256-GCM + PBKDF2-SHA256 (210k) envelopes
+  (`identity::crypto`), CID semantics
+- mistlink interop: AVPro-friendly dummy SPS/PPS RTSP keepalive, PT 96 / SSRC 0x12345678
 
-## 既知の制限(v0.1)
+## Known limitations (v0.1)
 
-- `mailbox` のファイル送信はエンベロープ(cid/名前/サイズ)のみ転送。ブロック本体の p2p 転送は未実装
-- `stream` は映像のみ(audio_capture は無視される)。RTCP(NACK/PLI)未実装
-- bot の能力広告プロトコルはなし(接続中ピアはすべて bot 候補として扱う)
+- `mailbox` file sends forward only the envelope (cid/name/size); p2p block transfer of
+  the file bytes is not implemented yet
+- `stream` is video-only (audio_capture is ignored); no RTCP (NACK/PLI)
+- No bot capability advertisement (every connected peer is treated as a bot candidate)
 
 ## License
 
