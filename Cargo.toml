@@ -38,7 +38,11 @@ base64 = "0.22"
 rtsp-types = "0.1"
 mpeg2ts = "0.3"
 rtp = "0.13"
+openh264 = "0.9.3"
 
 [profile.release]
 lto = "thin"
 strip = true
+
+[target."cfg(windows)".dependencies]
+windows-capture = "2.0.0"
