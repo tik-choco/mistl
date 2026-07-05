@@ -182,6 +182,50 @@ pub fn config_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("config.toml"))
 }
 
+/// Set one config field addressed as `section.field` (e.g.
+/// "ai.upstream_url"), returning the updated config. Values round-trip
+/// through serde so types are validated against the real Config shape;
+/// `null` clears optional fields.
+pub fn set_by_path(config: &Config, path: &str, value: serde_json::Value) -> Result<Config> {
+    if value == serde_json::Value::String("***".into()) {
+        anyhow::bail!("refusing to store the masked placeholder \"***\" (re-enter the real value)");
+    }
+    let (section, field) = path
+        .split_once('.')
+        .with_context(|| format!("invalid config path {path:?}; expected \"section.field\""))?;
+    if field.is_empty() || field.contains('.') {
+        anyhow::bail!("invalid config path {path:?}; expected \"section.field\"");
+    }
+
+    let mut tree = serde_json::to_value(config).context("serializing config")?;
+    let section_value = tree
+        .get_mut(section)
+        .with_context(|| format!("unknown config section {section:?}"))?;
+    let slot = section_value
+        .get_mut(field)
+        .with_context(|| format!("unknown config field {section}.{field}"))?;
+    *slot = value;
+
+    serde_json::from_value(tree).with_context(|| format!("invalid value for {section}.{field}"))
+}
+
+/// When a change to `path` actually takes effect, shown to users by the CLI
+/// and dashboard. Services read config as they start, so most fields apply
+/// on the next `*.start`; the p2p room is joined once per daemon lifetime
+/// and the dashboard listener binds at daemon startup.
+pub fn applies_when(path: &str) -> &'static str {
+    match path {
+        "ui.enabled" | "ui.listen" => "daemon restart",
+        "mailbox.room_id" | "ai.room_id" | "stream.relay_room" => {
+            // The room only pins once the p2p engine has joined; before any
+            // p2p service ran it applies on next start. "daemon restart" is
+            // the safe universal answer.
+            "daemon restart"
+        }
+        _ => "next service start",
+    }
+}
+
 impl Config {
     /// Load config from disk, writing defaults on first run.
     pub fn load() -> Result<Self> {
@@ -201,5 +245,49 @@ impl Config {
         std::fs::write(&path, toml::to_string_pretty(self)?)
             .with_context(|| format!("writing {}", path.display()))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn set_by_path_updates_a_string_option() {
+        let config = Config::default();
+        let updated = set_by_path(&config, "ai.upstream_url", json!("http://x/v1")).unwrap();
+        assert_eq!(updated.ai.upstream_url.as_deref(), Some("http://x/v1"));
+        // Untouched fields survive.
+        assert_eq!(updated.stream.frame_rate, config.stream.frame_rate);
+    }
+
+    #[test]
+    fn set_by_path_clears_option_with_null() {
+        let mut config = Config::default();
+        config.stream.relay_room = Some("room".into());
+        let updated = set_by_path(&config, "stream.relay_room", serde_json::Value::Null).unwrap();
+        assert_eq!(updated.stream.relay_room, None);
+    }
+
+    #[test]
+    fn set_by_path_updates_numbers_bools_and_arrays() {
+        let config = Config::default();
+        let updated = set_by_path(&config, "stream.frame_rate", json!(60)).unwrap();
+        assert_eq!(updated.stream.frame_rate, 60);
+        let updated = set_by_path(&config, "mailbox.serve_as_bot", json!(false)).unwrap();
+        assert!(!updated.mailbox.serve_as_bot);
+        let updated = set_by_path(&config, "ai.advertised_models", json!(["a", "b"])).unwrap();
+        assert_eq!(updated.ai.advertised_models, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn set_by_path_rejects_wrong_type_and_unknown_fields() {
+        let config = Config::default();
+        assert!(set_by_path(&config, "stream.frame_rate", json!("fast")).is_err());
+        assert!(set_by_path(&config, "stream.nope", json!(1)).is_err());
+        assert!(set_by_path(&config, "nope.field", json!(1)).is_err());
+        assert!(set_by_path(&config, "noseparator", json!(1)).is_err());
+        assert!(set_by_path(&config, "ai.upstream_api_key", json!("***")).is_err());
     }
 }

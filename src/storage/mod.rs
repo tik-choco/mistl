@@ -115,7 +115,7 @@ pub async fn store(state: &AppState) -> Result<Arc<Store>> {
     let store = STORE
         .get_or_try_init(|| async {
             let data_dir = crate::config::data_dir()?;
-            Store::open(&state.config.storage, data_dir)
+            Store::open(&state.config().storage, data_dir)
                 .await
                 .map(Arc::new)
         })

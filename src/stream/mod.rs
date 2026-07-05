@@ -124,7 +124,7 @@ fn pipeline() -> &'static Mutex<Option<Pipeline>> {
 pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Value> {
     match cmd {
         "stream.start" => {
-            let backend = CaptureBackend::parse(&state.config.stream.capture_backend)?;
+            let backend = CaptureBackend::parse(&state.config().stream.capture_backend)?;
             start(state, backend, None).await
         }
         "stream.relay.start" => {
@@ -132,7 +132,7 @@ pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Val
                 .get("room")
                 .and_then(Value::as_str)
                 .map(str::to_string)
-                .or_else(|| state.config.stream.relay_room.clone());
+                .or_else(|| state.config().stream.relay_room.clone());
             let Some(room) = room else {
                 bail!(
                     "no relay room: pass --room or set stream.relay_room to the \
@@ -163,7 +163,7 @@ async fn start(
         return Ok(json!({ "rtsp_url": existing.rtsp_url }));
     }
 
-    let cfg = &state.config.stream;
+    let cfg = &state.config().stream;
     // Relayed shares carry audio; local capture stays video-only for now.
     let audio = match backend_kind {
         CaptureBackend::Relay => Some(rtp_out::AudioCodec::parse(&cfg.audio_codec)?),
