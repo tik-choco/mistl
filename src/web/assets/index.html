@@ -258,6 +258,29 @@
   .chat-msg.error .bubble { background: var(--err-dim); color: var(--err); }
   .chat-empty { color: var(--text-faint); font-size: 12.5px; padding: 4px; }
 
+  .url-callout {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 12px 14px;
+    border: 1px solid var(--accent);
+    border-radius: 8px;
+    background: var(--accent-dim);
+    cursor: pointer;
+  }
+  .url-callout-label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--accent);
+  }
+  .url-callout-url {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text);
+    word-break: break-all;
+  }
   .badge {
     display: inline-block;
     font-size: 11px;
@@ -330,11 +353,22 @@
     <h2>Stream <span class="spacer"></span>
       <button data-role="refresh" data-target="stream">Refresh</button>
     </h2>
+    <div class="url-callout" id="stream-url-callout" hidden title="Click to copy">
+      <span class="url-callout-label">Paste into the VRChat video player</span>
+      <span class="url-callout-url mono" id="stream-url-text"></span>
+    </div>
     <dl class="kv" id="stream-kv"></dl>
     <div class="row">
-      <button id="btn-stream-start" class="primary">Start</button>
+      <button id="btn-stream-start" class="primary">Start (this screen)</button>
       <button id="btn-stream-stop" class="danger">Stop</button>
     </div>
+    <form class="inline" id="relay-form">
+      <div class="field" style="flex: 2;">
+        <label for="relay-room">tc-chat room id</label>
+        <input type="text" id="relay-room" placeholder="default: stream.relay_room" autocomplete="off">
+      </div>
+      <button type="submit" class="primary">Relay share to VRChat</button>
+    </form>
   </section>
 
   <section class="panel panel-span2" id="panel-ai">
@@ -688,24 +722,34 @@
   /* ---------- stream panel ---------- */
 
   var streamKv = document.getElementById("stream-kv");
+  var streamUrlCallout = document.getElementById("stream-url-callout");
+  var streamUrlText = document.getElementById("stream-url-text");
+
+  streamUrlCallout.addEventListener("click", function () {
+    if (streamUrlText.textContent) copyToClipboard(streamUrlText.textContent);
+  });
 
   function renderStream() {
     streamKv.innerHTML = "";
     var s = state.stream;
     if (!s) {
       addKv(streamKv, "status", "unknown");
+      streamUrlCallout.hidden = true;
       return;
     }
     if (s.running) {
+      streamUrlText.textContent = s.rtsp_url;
+      streamUrlCallout.hidden = false;
       addKv(streamKv, "status", "running");
-      streamKv.appendChild(el("dt", { text: "rtsp url" }));
-      var dd = el("dd", {});
-      dd.appendChild(copyButton(s.rtsp_url, s.rtsp_url));
-      streamKv.appendChild(dd);
       addKv(streamKv, "clients", s.clients);
       addKv(streamKv, "backend", s.backend);
+      if (s.room) addKv(streamKv, "relay room", s.room);
+      if (s.backend === "relay") {
+        addKv(streamKv, "publisher", s.publisher ? s.publisher : "waiting for a share…");
+      }
       addKv(streamKv, "uptime", fmtUptime(s.uptime_secs));
     } else {
+      streamUrlCallout.hidden = true;
       addKv(streamKv, "status", "stopped");
     }
   }
@@ -738,6 +782,16 @@
     if (!confirm("Stop the stream?")) return;
     runAction(e.currentTarget, "stream.stop", {}, function () {
       showToast("Stream stopped.");
+      pollStreamStatus();
+    });
+  });
+
+  document.getElementById("relay-form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var room = document.getElementById("relay-room").value.trim();
+    var btn = e.target.querySelector("button[type=submit]");
+    runAction(btn, "stream.relay.start", room ? { room: room } : {}, function (data) {
+      showToast("Relay started" + (data.room ? " in room " + data.room : "") + ".");
       pollStreamStatus();
     });
   });
