@@ -88,7 +88,13 @@ impl RelayCapture {
         audio_codec: AudioCodec,
         rtsp: Arc<RtspServer>,
     ) -> Result<Self> {
-        crate::net::ensure_started(state, room).await?;
+        // tc-chat joins its rooms under a derived channel id (not the raw room
+        // name — see net::channel_id_for / tc-chat's channelIdFor), so the raw
+        // name is never the on-wire topic. Derive the same channel here so the
+        // relay lands in the same swarm and can see the shared screen. Callers
+        // pass the friendly room id (e.g. `--room global`); the derivation is
+        // owned here so users never handle the opaque `tcch-…` form.
+        crate::net::ensure_started(state, crate::net::channel_id_for(&room)).await?;
 
         let (tx, rx) = mpsc::unbounded_channel();
         crate::net::set_media_consumer(Some(tx));
