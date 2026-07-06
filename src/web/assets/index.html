@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>mistl dashboard</title>
+<title data-i18n="pageTitle">mistl dashboard</title>
 <style>
   :root {
     color-scheme: dark light;
@@ -119,6 +119,19 @@
     border-radius: 4px;
   }
   .copyable:hover { background: var(--panel-border); color: var(--text); }
+
+  .lang-toggle { display: flex; gap: 4px; }
+  .lang-toggle button {
+    padding: 3px 10px;
+    font-size: 11px;
+    font-weight: 700;
+    border-radius: 999px;
+    border: 1px solid transparent;
+    background: var(--panel-border);
+    color: var(--text-dim);
+  }
+  .lang-toggle button.active { background: var(--accent-dim); color: var(--accent); }
+  .lang-toggle button:hover:not(.active) { color: var(--text); border-color: var(--accent); }
 
   .quicknav {
     display: flex;
@@ -441,6 +454,52 @@
   }
   .toggle-switch input:checked + .slider { background: var(--accent); }
   .toggle-switch input:checked + .slider::before { transform: translateX(16px); }
+
+  .store-dropzone {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    border: 2px dashed var(--panel-border);
+    border-radius: 10px;
+    padding: 22px 14px;
+    text-align: center;
+    color: var(--text-dim);
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s, color 0.15s;
+  }
+  .store-dropzone:hover, .store-dropzone:focus {
+    border-color: var(--accent);
+    color: var(--accent);
+    outline: none;
+  }
+  .store-dropzone.dragover {
+    border-color: var(--accent);
+    background: var(--accent-dim);
+    color: var(--accent);
+  }
+  #store-upload-status { display: flex; flex-direction: column; gap: 2px; }
+  .upload-row { font-size: 12.5px; color: var(--text-dim); }
+  #store-path-details summary {
+    cursor: pointer;
+    font-size: 12.5px;
+    color: var(--text-dim);
+    padding: 4px 0;
+  }
+  #store-path-details summary:hover { color: var(--accent); }
+  #store-path-details form.inline { margin-top: 8px; }
+  .download-link {
+    display: inline-block;
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--accent);
+    text-decoration: none;
+    margin-right: 10px;
+  }
+  .download-link:hover { text-decoration: underline; }
+  .store-save-form { margin: 6px 0 0; }
+  .store-save-form input { width: 140px; }
 </style>
 </head>
 <body>
@@ -448,175 +507,205 @@
 <div class="topbar" id="topbar">
   <header>
     <h1>mistl</h1>
-    <span id="daemon-pill" class="pill"><span class="dot"></span><span>connecting&hellip;</span></span>
+    <span id="daemon-pill" class="pill"><span class="dot"></span><span data-i18n="daemon.connecting">connecting&hellip;</span></span>
     <div class="identity" id="identity-summary"></div>
+    <div class="lang-toggle" id="lang-toggle">
+      <button type="button" id="lang-en-btn" data-lang="en">EN</button>
+      <button type="button" id="lang-ja-btn" data-lang="ja">日本語</button>
+    </div>
   </header>
   <nav class="quicknav">
-    <a href="#panel-overview">Overview</a>
-    <a href="#panel-stream">Stream</a>
-    <a href="#panel-ai">AI</a>
-    <a href="#panel-mailbox">Mailbox</a>
-    <a href="#panel-store">Store</a>
-    <a href="#panel-profile">Profile</a>
-    <a href="#panel-settings">Settings</a>
+    <a href="#panel-overview" data-i18n="nav.overview">Overview</a>
+    <a href="#panel-stream" data-i18n="nav.stream">Stream</a>
+    <a href="#panel-ai" data-i18n="nav.ai">AI</a>
+    <a href="#panel-mailbox" data-i18n="nav.mailbox">Mailbox</a>
+    <a href="#panel-store" data-i18n="nav.store">Store</a>
+    <a href="#panel-profile" data-i18n="nav.profile">Profile</a>
+    <a href="#panel-settings" data-i18n="nav.settings">Settings</a>
   </nav>
 </div>
 
 <main id="main">
   <div class="hint-banner" id="profile-hint-banner" hidden>
-    <span>Set a display name so others can recognize you.</span>
-    <button type="button" id="btn-profile-hint-focus">Set display name</button>
-    <button type="button" class="dismiss" id="btn-profile-hint-dismiss" aria-label="Dismiss">&times;</button>
+    <span data-i18n="profileHint.text">Set a display name so others can recognize you.</span>
+    <button type="button" id="btn-profile-hint-focus" data-i18n="profileHint.button">Set display name</button>
+    <button type="button" class="dismiss" id="btn-profile-hint-dismiss" data-i18n-aria-label="common.dismiss" aria-label="Dismiss">&times;</button>
   </div>
 
   <section class="panel" id="panel-overview">
-    <h2>Overview <span class="spacer"></span>
-      <button id="btn-refresh-overview" data-role="refresh">Refresh</button>
+    <h2><span data-i18n="overview.title">Overview</span> <span class="spacer"></span>
+      <button id="btn-refresh-overview" data-role="refresh" data-i18n="common.refresh">Refresh</button>
     </h2>
     <dl class="kv" id="overview-kv"></dl>
     <div class="row">
-      <button id="btn-stop-daemon" class="danger">Stop daemon</button>
+      <button id="btn-stop-daemon" class="danger" data-i18n="overview.stopDaemon">Stop daemon</button>
     </div>
   </section>
 
   <section class="panel" id="panel-stream">
-    <h2>Stream <span class="spacer"></span>
-      <button data-role="refresh" data-target="stream">Refresh</button>
+    <h2><span data-i18n="stream.title">Stream</span> <span class="spacer"></span>
+      <button data-role="refresh" data-target="stream" data-i18n="common.refresh">Refresh</button>
     </h2>
     <div class="flow-grid">
       <div class="flow-card">
-        <h3>Share this PC&#39;s screen</h3>
-        <p>Streams this computer&#39;s desktop directly to an RTSP URL you paste into the VRChat video player.</p>
+        <h3 data-i18n="stream.shareTitle">Share this PC&#39;s screen</h3>
+        <p data-i18n="stream.shareDesc">Streams this computer&#39;s desktop directly to an RTSP URL you paste into the VRChat video player.</p>
         <div class="row">
-          <button id="btn-stream-start" class="primary">Start (this screen)</button>
+          <button id="btn-stream-start" class="primary" data-i18n="stream.startBtn">Start (this screen)</button>
         </div>
       </div>
       <div class="flow-card">
-        <h3>Relay a tc-chat share</h3>
-        <p>Relays a screen already being shared in a tc-chat room, so VRChat viewers can watch it.</p>
+        <h3 data-i18n="stream.relayTitle">Relay a tc-chat share</h3>
+        <p data-i18n="stream.relayDesc">Relays a screen already being shared in a tc-chat room, so VRChat viewers can watch it.</p>
         <form class="inline" id="relay-form">
           <div class="field" style="flex: 2;">
-            <label for="relay-room">tc-chat room id</label>
-            <input type="text" id="relay-room" placeholder="room id (or set a default in Settings)" autocomplete="off">
+            <label for="relay-room" data-i18n="stream.roomLabel">tc-chat room id</label>
+            <input type="text" id="relay-room" data-i18n-placeholder="stream.roomPlaceholder" placeholder="room id (or set a default in Settings)" autocomplete="off">
           </div>
-          <button type="submit" class="primary">Relay to VRChat</button>
+          <button type="submit" class="primary" data-i18n="stream.relayBtn">Relay to VRChat</button>
         </form>
         <div class="info-hint neutral" id="relay-room-hint" hidden>
-          <span>Type a room id above, or set a default relay room in <a href="#panel-settings" id="relay-room-hint-link">Settings</a>.</span>
+          <span data-i18n="stream.roomHint.prefix">Type a room id above, or set a default relay room in </span><a href="#panel-settings" id="relay-room-hint-link" data-i18n="stream.roomHint.link">Settings</a><span data-i18n="stream.roomHint.suffix">.</span>
         </div>
       </div>
     </div>
-    <div class="url-callout" id="stream-url-callout" hidden title="Click to copy">
-      <span class="url-callout-label">Paste into the VRChat video player</span>
+    <div class="url-callout" id="stream-url-callout" hidden data-i18n-title="common.clickToCopy" title="Click to copy">
+      <span class="url-callout-label" data-i18n="stream.urlLabel">Paste into the VRChat video player</span>
       <span class="url-callout-url mono" id="stream-url-text"></span>
     </div>
+    <div class="info-hint" id="stream-vrchat-hint" hidden></div>
     <dl class="kv" id="stream-kv"></dl>
     <div class="row">
-      <button id="btn-stream-stop" class="danger">Stop</button>
+      <button id="btn-stream-stop" class="danger" data-i18n="stream.stopBtn">Stop</button>
     </div>
   </section>
 
   <section class="panel panel-span2" id="panel-ai">
-    <h2>AI <span class="spacer"></span>
-      <button data-role="refresh" data-target="ai">Refresh</button>
+    <h2><span data-i18n="ai.title">AI</span> <span class="spacer"></span>
+      <button data-role="refresh" data-target="ai" data-i18n="common.refresh">Refresh</button>
     </h2>
     <div id="ai-hints"></div>
     <dl class="kv" id="ai-kv"></dl>
     <div class="row">
-      <button id="btn-ai-provide-start" class="primary">Start providing</button>
-      <button id="btn-ai-provide-stop" class="danger">Stop providing</button>
-      <button id="btn-ai-serve-start" class="primary">Start API server</button>
-      <button id="btn-ai-serve-stop" class="danger">Stop API server</button>
+      <button id="btn-ai-provide-start" class="primary" data-i18n="ai.startProviding">Start providing</button>
+      <button id="btn-ai-provide-stop" class="danger" data-i18n="ai.stopProviding">Stop providing</button>
+      <button id="btn-ai-serve-start" class="primary" data-i18n="ai.startServe">Start API server</button>
+      <button id="btn-ai-serve-stop" class="danger" data-i18n="ai.stopServe">Stop API server</button>
     </div>
     <div id="ai-models" class="row"></div>
     <hr class="sep">
     <div class="chat-log" id="chat-log">
-      <div class="chat-empty">No messages yet.</div>
+      <div class="chat-empty" data-i18n="chat.empty">No messages yet.</div>
     </div>
     <form class="inline" id="chat-form">
       <div class="field" style="flex: 3;">
-        <label for="chat-prompt">Prompt</label>
-        <input type="text" id="chat-prompt" placeholder="Ask something&hellip;" autocomplete="off">
+        <label for="chat-prompt" data-i18n="chat.promptLabel">Prompt</label>
+        <input type="text" id="chat-prompt" data-i18n-placeholder="chat.promptPlaceholder" placeholder="Ask something&hellip;" autocomplete="off">
       </div>
       <div class="field" style="flex: 1; min-width: 140px;">
-        <label for="chat-model">Model (optional)</label>
-        <select id="chat-model"><option value="">default</option></select>
+        <label for="chat-model" data-i18n="chat.modelLabel">Model (optional)</label>
+        <select id="chat-model"><option value="" data-i18n="common.default">default</option></select>
       </div>
-      <button type="submit" class="primary" id="btn-chat-send">Send</button>
+      <button type="submit" class="primary" id="btn-chat-send" data-i18n="chat.send">Send</button>
     </form>
   </section>
 
   <section class="panel panel-span2" id="panel-mailbox">
-    <h2>Mailbox <span class="spacer"></span>
-      <button id="btn-mailbox-fetch">Fetch my messages</button>
-      <button data-role="refresh" data-target="mailbox-ls">Refresh held</button>
+    <h2><span data-i18n="mailbox.title">Mailbox</span> <span class="spacer"></span>
+      <button id="btn-mailbox-fetch" data-i18n="mailbox.fetchBtn">Fetch my messages</button>
+      <button data-role="refresh" data-target="mailbox-ls" data-i18n="mailbox.refreshHeld">Refresh held</button>
     </h2>
     <div class="table-wrap">
       <table id="mailbox-held-table">
-        <thead><tr><th>ID</th><th>From</th><th>To</th><th>Size</th><th>Held since</th></tr></thead>
+        <thead><tr>
+          <th data-i18n="mailbox.heldCol.id">ID</th>
+          <th data-i18n="mailbox.heldCol.from">From</th>
+          <th data-i18n="mailbox.heldCol.to">To</th>
+          <th data-i18n="mailbox.heldCol.size">Size</th>
+          <th data-i18n="mailbox.heldCol.since">Held since</th>
+        </tr></thead>
         <tbody></tbody>
       </table>
-      <div class="empty-note" id="mailbox-held-empty">No held deposits &mdash; deposits are messages other nodes left here for their recipients to fetch later.</div>
+      <div class="empty-note" id="mailbox-held-empty" data-i18n="mailbox.heldEmpty">No held deposits &mdash; deposits are messages other nodes left here for their recipients to fetch later.</div>
     </div>
     <div class="table-wrap">
       <table id="mailbox-fetch-table">
-        <thead><tr><th>ID</th><th>From</th><th>Content</th></tr></thead>
+        <thead><tr>
+          <th data-i18n="mailbox.fetchCol.id">ID</th>
+          <th data-i18n="mailbox.fetchCol.from">From</th>
+          <th data-i18n="mailbox.fetchCol.content">Content</th>
+        </tr></thead>
         <tbody></tbody>
       </table>
-      <div class="empty-note" id="mailbox-fetch-empty">Nothing fetched yet. Click &quot;Fetch my messages&quot; to check for new mail.</div>
+      <div class="empty-note" id="mailbox-fetch-empty" data-i18n="mailbox.fetchEmpty">Nothing fetched yet. Click &quot;Fetch my messages&quot; to check for new mail.</div>
     </div>
     <hr class="sep">
     <form class="inline" id="mailbox-send-form">
       <div class="field" style="flex: 1; min-width: 160px;">
-        <label for="mailbox-to">To (DID or node id)</label>
-        <input type="text" id="mailbox-to" placeholder="did:key:z6Mk&hellip; or a 16-hex node id" autocomplete="off">
+        <label for="mailbox-to" data-i18n="mailbox.toLabel">To (DID or node id)</label>
+        <input type="text" id="mailbox-to" data-i18n-placeholder="mailbox.toPlaceholder" placeholder="did:key:z6Mk&hellip; or a 16-hex node id" autocomplete="off">
       </div>
       <div class="field" style="flex: 2;">
-        <label for="mailbox-message">Message</label>
+        <label for="mailbox-message" data-i18n="mailbox.messageLabel">Message</label>
         <input type="text" id="mailbox-message" autocomplete="off">
       </div>
-      <button type="submit" class="primary" id="btn-mailbox-send">Send</button>
+      <button type="submit" class="primary" id="btn-mailbox-send" data-i18n="mailbox.send">Send</button>
     </form>
   </section>
 
   <section class="panel panel-span2" id="panel-store">
-    <h2>Store <span class="spacer"></span>
-      <button data-role="refresh" data-target="store">Refresh</button>
+    <h2><span data-i18n="store.title">Store</span> <span class="spacer"></span>
+      <button data-role="refresh" data-target="store" data-i18n="common.refresh">Refresh</button>
     </h2>
     <div class="table-wrap">
       <table id="store-table">
-        <thead><tr><th>CID</th><th>Name</th><th>Size</th><th>Stored at</th><th>Save to path</th></tr></thead>
+        <thead><tr>
+          <th data-i18n="store.col.cid">CID</th>
+          <th data-i18n="store.col.name">Name</th>
+          <th data-i18n="store.col.size">Size</th>
+          <th data-i18n="store.col.storedAt">Stored at</th>
+          <th data-i18n="store.col.actions">Actions</th>
+        </tr></thead>
         <tbody></tbody>
       </table>
-      <div class="empty-note" id="store-empty">No stored items.</div>
+      <div class="empty-note" id="store-empty" data-i18n="store.empty">No stored items.</div>
     </div>
     <hr class="sep">
-    <form class="inline" id="store-put-form">
-      <div class="field" style="flex: 1;">
-        <label for="store-path">Add file &mdash; path on this machine (read server-side by the daemon)</label>
-        <input type="text" id="store-path" placeholder="C:\path\to\file or /path/to/file" autocomplete="off">
-      </div>
-      <button type="submit" class="primary" id="btn-store-put">Add</button>
-    </form>
+    <div class="store-dropzone" id="store-dropzone" tabindex="0" role="button">
+      <span data-i18n="store.dropzoneText">Drag files here, or click to browse</span>
+      <span class="muted" style="font-size: 11.5px;" data-i18n="store.dropzoneHint">Uploads directly to this node&#39;s store.</span>
+      <input type="file" id="store-file-input" multiple hidden>
+    </div>
+    <div id="store-upload-status"></div>
+    <details id="store-path-details">
+      <summary data-i18n="store.addByPathSummary">Add by file path on this machine (for very large local files)</summary>
+      <form class="inline" id="store-put-form">
+        <div class="field" style="flex: 1;">
+          <label for="store-path" data-i18n="store.pathLabel">Path on this machine (read server-side by the daemon)</label>
+          <input type="text" id="store-path" data-i18n-placeholder="store.pathPlaceholder" placeholder="C:\path\to\file or /path/to/file" autocomplete="off">
+        </div>
+        <button type="submit" class="primary" id="btn-store-put" data-i18n="store.addBtn">Add</button>
+      </form>
+    </details>
   </section>
 
   <section class="panel" id="panel-profile">
-    <h2>Profile <span class="spacer"></span>
-      <button data-role="refresh" data-target="profile">Refresh</button>
+    <h2><span data-i18n="profile.title">Profile</span> <span class="spacer"></span>
+      <button data-role="refresh" data-target="profile" data-i18n="common.refresh">Refresh</button>
     </h2>
     <dl class="kv" id="profile-kv"></dl>
     <form class="inline" id="profile-form">
       <div class="field" style="flex: 1;">
-        <label for="profile-display-name">Display name</label>
+        <label for="profile-display-name" data-i18n="profile.displayNameLabel">Display name</label>
         <input type="text" id="profile-display-name" autocomplete="off">
       </div>
-      <button type="submit" class="primary" id="btn-profile-save">Save</button>
+      <button type="submit" class="primary" id="btn-profile-save" data-i18n="profile.save">Save</button>
     </form>
   </section>
 
   <section class="panel panel-span2" id="panel-settings">
-    <h2>Settings <span class="spacer"></span>
-      <button data-role="refresh" data-target="settings">Refresh</button>
+    <h2><span data-i18n="settings.title">Settings</span> <span class="spacer"></span>
+      <button data-role="refresh" data-target="settings" data-i18n="common.refresh">Refresh</button>
     </h2>
     <div id="settings-body"></div>
   </section>
@@ -627,6 +716,475 @@
 <script>
 (function () {
   "use strict";
+
+  /* ---------- i18n ---------- */
+
+  var T = {
+    en: {
+      "pageTitle": "mistl dashboard",
+      "lang.en": "EN",
+      "lang.ja": "日本語",
+      "daemon.connecting": "connecting…",
+      "daemon.running": "running · pid {pid} · v{version} · {uptime}",
+      "daemon.unreachable": "daemon unreachable",
+      "nav.overview": "Overview",
+      "nav.stream": "Stream",
+      "nav.ai": "AI",
+      "nav.mailbox": "Mailbox",
+      "nav.store": "Store",
+      "nav.profile": "Profile",
+      "nav.settings": "Settings",
+      "profileHint.text": "Set a display name so others can recognize you.",
+      "profileHint.button": "Set display name",
+      "common.dismiss": "Dismiss",
+      "common.refresh": "Refresh",
+      "common.save": "Save",
+      "common.add": "Add",
+      "common.send": "Send",
+      "common.copied": "Copied to clipboard.",
+      "common.copyFailed": "Copy failed.",
+      "common.clipboardUnavailable": "Clipboard unavailable.",
+      "common.default": "default",
+      "common.clickToCopy": "Click to copy",
+      "overview.title": "Overview",
+      "overview.stopDaemon": "Stop daemon",
+      "overview.stopConfirm": "Stop the mistl daemon? This will end all active sessions.",
+      "overview.stopping": "Daemon is stopping.",
+      "overview.status": "status",
+      "overview.unreachable": "daemon unreachable",
+      "overview.pid": "pid",
+      "overview.version": "version",
+      "overview.uptime": "uptime",
+      "stream.title": "Stream",
+      "stream.shareTitle": "Share this PC's screen",
+      "stream.shareDesc": "Streams this computer's desktop directly to an RTSP URL you paste into the VRChat video player.",
+      "stream.startBtn": "Start (this screen)",
+      "stream.relayTitle": "Relay a tc-chat share",
+      "stream.relayDesc": "Relays a screen already being shared in a tc-chat room, so VRChat viewers can watch it.",
+      "stream.roomLabel": "tc-chat room id",
+      "stream.roomPlaceholder": "room id (or set a default in Settings)",
+      "stream.relayBtn": "Relay to VRChat",
+      "stream.roomHint.prefix": "Type a room id above, or set a default relay room in ",
+      "stream.roomHint.link": "Settings",
+      "stream.roomHint.suffix": ".",
+      "stream.urlLabel": "Paste into the VRChat video player",
+      "stream.status": "status",
+      "stream.statusUnknown": "unknown",
+      "stream.statusRunning": "running",
+      "stream.statusStopped": "stopped",
+      "stream.clients": "clients",
+      "stream.backend": "backend",
+      "stream.relayRoom": "relay room",
+      "stream.publisher": "publisher",
+      "stream.waitingPublisher": "waiting for a publisher…",
+      "stream.uptime": "uptime",
+      "stream.stopBtn": "Stop",
+      "stream.stopConfirm": "Stop the stream?",
+      "stream.started": "Stream started.",
+      "stream.stopped": "Stream stopped.",
+      "stream.relayStarted": "Relay started in room {room}.",
+      "stream.relayStartedNoRoom": "Relay started.",
+      "stream.vrchatHint.prefix": "This URL only works in VRChat on this same PC. Playing on another PC or Quest?",
+      "stream.vrchatHint.link": "Set the RTSP address to 0.0.0.0 in Settings",
+      "stream.vrchatHint.suffix": " and restart the stream.",
+      "ai.title": "AI",
+      "ai.upstreamHint": "Set an OpenAI-compatible upstream in Settings to provide inference.",
+      "ai.openSettings": "Open Settings",
+      "ai.readyHint": "Upstream is configured. Start providing to answer AI requests from the network.",
+      "ai.endpointLabel": "OpenAI-compatible endpoint",
+      "ai.statusLabel": "status",
+      "ai.room": "room",
+      "ai.nodeId": "node id",
+      "ai.connectedPeers": "connected peers",
+      "ai.providing": "providing",
+      "ai.servingLabel": "serving",
+      "ai.remoteProvider": "remote provider",
+      "ai.yes": "yes",
+      "ai.no": "no",
+      "ai.modelsLabel": "models:",
+      "ai.startProviding": "Start providing",
+      "ai.stopProviding": "Stop providing",
+      "ai.startServe": "Start API server",
+      "ai.stopServe": "Stop API server",
+      "ai.alreadyProviding": "Already providing.",
+      "ai.nowProviding": "Now providing AI models.",
+      "ai.stoppedProviding": "Stopped providing.",
+      "ai.wasNotProviding": "Was not providing.",
+      "ai.serveAlready": "API server already running at {listen}",
+      "ai.serveStarted": "API server listening at {listen}",
+      "ai.serveStopped": "API server stopped.",
+      "ai.serveWasNotRunning": "API server was not running.",
+      "chat.promptLabel": "Prompt",
+      "chat.promptPlaceholder": "Ask something…",
+      "chat.modelLabel": "Model (optional)",
+      "chat.send": "Send",
+      "chat.empty": "No messages yet.",
+      "chat.you": "you",
+      "chat.error": "error",
+      "chat.assistant": "assistant",
+      "chat.noProviderError": "No provider reachable — start providing locally or wait for a p2p provider.",
+      "mailbox.title": "Mailbox",
+      "mailbox.fetchBtn": "Fetch my messages",
+      "mailbox.refreshHeld": "Refresh held",
+      "mailbox.heldCol.id": "ID",
+      "mailbox.heldCol.from": "From",
+      "mailbox.heldCol.to": "To",
+      "mailbox.heldCol.size": "Size",
+      "mailbox.heldCol.since": "Held since",
+      "mailbox.heldEmpty": "No held deposits — deposits are messages other nodes left here for their recipients to fetch later.",
+      "mailbox.fetchCol.id": "ID",
+      "mailbox.fetchCol.from": "From",
+      "mailbox.fetchCol.content": "Content",
+      "mailbox.fetchEmpty": "Nothing fetched yet. Click “Fetch my messages” to check for new mail.",
+      "mailbox.fileContent": "file: {name} ({size}, cid {cid})",
+      "mailbox.toLabel": "To (DID or node id)",
+      "mailbox.toPlaceholder": "did:key:z6Mk… or a 16-hex node id",
+      "mailbox.messageLabel": "Message",
+      "mailbox.send": "Send",
+      "mailbox.needBoth": "Recipient and message are both required.",
+      "mailbox.sentStatus": "Message {status} (id {id}).",
+      "store.title": "Store",
+      "store.col.cid": "CID",
+      "store.col.name": "Name",
+      "store.col.size": "Size",
+      "store.col.storedAt": "Stored at",
+      "store.col.actions": "Actions",
+      "store.empty": "No stored items.",
+      "store.download": "Download",
+      "store.saveToPath": "Save to server path",
+      "store.savePathPlaceholder": "output path (optional)",
+      "store.saved": "Saved to {output}",
+      "store.dropzoneText": "Drag files here, or click to browse",
+      "store.dropzoneHint": "Uploads directly to this node's store.",
+      "store.uploading": "Uploading {name}… {pct}%",
+      "store.uploaded": "Uploaded {name} ({size}).",
+      "store.uploadFailed": "Upload failed for {name}: {error}",
+      "store.addByPathSummary": "Add by file path on this machine (for very large local files)",
+      "store.pathLabel": "Path on this machine (read server-side by the daemon)",
+      "store.pathPlaceholder": "C:\\path\\to\\file or /path/to/file",
+      "store.addBtn": "Add",
+      "store.stored": "Stored {name} ({size}).",
+      "profile.title": "Profile",
+      "profile.did": "did",
+      "profile.displayName": "display name",
+      "profile.bio": "bio",
+      "profile.avatar": "avatar",
+      "profile.displayNameLabel": "Display name",
+      "profile.save": "Save",
+      "profile.updated": "Profile updated.",
+      "settings.title": "Settings",
+      "settings.restartBadge": "restart the daemon to apply",
+      "settings.savedRestart": "Saved. Restart the daemon to apply.",
+      "settings.savedNextStart": "Saved. Applies next time this service starts.",
+      "settings.enterGib": "Enter a number of GiB for {label}.",
+      "settings.enterNumber": "Enter a number for {label}.",
+      "settings.gibUnit": "GiB",
+      "settings.clear": "Clear",
+      "settings.passwordSetPlaceholder": "(set) leave blank to keep",
+      "settings.passwordNotSet": "not set",
+      "settings.optionDefault": "(default)",
+      "settings.section.identity": "Identity",
+      "settings.section.storage": "Storage",
+      "settings.section.stream": "Stream",
+      "settings.section.mailbox": "Mailbox",
+      "settings.section.ai": "AI",
+      "settings.section.ui": "Web dashboard",
+      "settings.field.identity.display_name.label": "Display name",
+      "settings.field.identity.display_name.desc": "Default display name written to config (applies at next start; use the Profile panel above to change it live).",
+      "settings.field.storage.capacity_bytes.label": "Storage capacity",
+      "settings.field.storage.capacity_bytes.desc": "Maximum size of the local block store.",
+      "settings.field.stream.rtsp_url.label": "RTSP URL",
+      "settings.field.stream.rtsp_url.desc": "RTSP endpoint used when streaming. Leave blank to use the default.",
+      "settings.field.stream.frame_rate.label": "Frame rate",
+      "settings.field.stream.frame_rate.desc": "Capture frame rate, in frames per second.",
+      "settings.field.stream.capture_backend.label": "Capture backend",
+      "settings.field.stream.capture_backend.desc": "Screen capture backend to use.",
+      "settings.field.stream.max_width.label": "Max width",
+      "settings.field.stream.max_width.desc": "Maximum capture width in pixels; wider input is scaled down.",
+      "settings.field.stream.relay_room.label": "Default relay room",
+      "settings.field.stream.relay_room.desc": "tc-chat room id used by “Relay a tc-chat share” when none is typed.",
+      "settings.field.stream.audio_codec.label": "Audio codec",
+      "settings.field.stream.audio_codec.desc": "Audio codec used for the stream.",
+      "settings.field.mailbox.room_id.label": "Room id",
+      "settings.field.mailbox.room_id.desc": "tc-chat room used for mailbox delivery.",
+      "settings.field.mailbox.serve_as_bot.label": "Serve as bot",
+      "settings.field.mailbox.serve_as_bot.desc": "Answer mailbox room presence as an automated bot.",
+      "settings.field.ai.room_id.label": "Room id",
+      "settings.field.ai.room_id.desc": "tc-chat room used to discover AI providers and consumers.",
+      "settings.field.ai.upstream_url.label": "Upstream URL",
+      "settings.field.ai.upstream_url.desc": "OpenAI-compatible endpoint this daemon forwards inference to when providing.",
+      "settings.field.ai.upstream_api_key.label": "Upstream API key",
+      "settings.field.ai.upstream_api_key.desc": "API key sent to the upstream endpoint. Stored on this machine only.",
+      "settings.field.ai.default_model.label": "Default model",
+      "settings.field.ai.default_model.desc": "Model name used when a request does not specify one.",
+      "settings.field.ai.temperature.label": "Temperature",
+      "settings.field.ai.temperature.desc": "Default sampling temperature.",
+      "settings.field.ai.request_timeout_secs.label": "Request timeout (seconds)",
+      "settings.field.ai.request_timeout_secs.desc": "How long to wait for an upstream response before giving up.",
+      "settings.field.ai.api_listen.label": "API listen address",
+      "settings.field.ai.api_listen.desc": "Address:port the local OpenAI-compatible API server binds to.",
+      "settings.field.ui.listen.label": "Listen address",
+      "settings.field.ui.listen.desc": "Address:port this dashboard binds to.",
+      "settings.field.ui.enabled.label": "Enabled",
+      "settings.field.ui.enabled.desc": "Whether the web dashboard starts with the daemon."
+    },
+    ja: {
+      "pageTitle": "mistl ダッシュボード",
+      "lang.en": "EN",
+      "lang.ja": "日本語",
+      "daemon.connecting": "接続中…",
+      "daemon.running": "稼働中 · pid {pid} · v{version} · {uptime}",
+      "daemon.unreachable": "デーモンに接続できません",
+      "nav.overview": "概要",
+      "nav.stream": "ストリーム",
+      "nav.ai": "AI",
+      "nav.mailbox": "メールボックス",
+      "nav.store": "ストア",
+      "nav.profile": "プロフィール",
+      "nav.settings": "設定",
+      "profileHint.text": "表示名を設定すると、他の人があなたを識別しやすくなります。",
+      "profileHint.button": "表示名を設定",
+      "common.dismiss": "閉じる",
+      "common.refresh": "更新",
+      "common.save": "保存",
+      "common.add": "追加",
+      "common.send": "送信",
+      "common.copied": "クリップボードにコピーしました。",
+      "common.copyFailed": "コピーに失敗しました。",
+      "common.clipboardUnavailable": "クリップボードが利用できません。",
+      "common.default": "デフォルト",
+      "common.clickToCopy": "クリックしてコピー",
+      "overview.title": "概要",
+      "overview.stopDaemon": "デーモンを停止",
+      "overview.stopConfirm": "mistlデーモンを停止しますか?すべてのアクティブなセッションが終了します。",
+      "overview.stopping": "デーモンを停止しています。",
+      "overview.status": "状態",
+      "overview.unreachable": "デーモンに接続できません",
+      "overview.pid": "pid",
+      "overview.version": "バージョン",
+      "overview.uptime": "稼働時間",
+      "stream.title": "ストリーム",
+      "stream.shareTitle": "この画面を共有",
+      "stream.shareDesc": "このPCのデスクトップをRTSP URLとして直接配信します。VRChatの動画プレイヤーに貼り付けて再生できます。",
+      "stream.startBtn": "開始 (この画面)",
+      "stream.relayTitle": "tc-chatの画面共有を中継",
+      "stream.relayDesc": "tc-chatのルームで共有中の画面をVRChatへ中継し、視聴者が見られるようにします。",
+      "stream.roomLabel": "tc-chatルームID",
+      "stream.roomPlaceholder": "ルームID (設定でデフォルトを指定できます)",
+      "stream.relayBtn": "VRChatへ中継",
+      "stream.roomHint.prefix": "上にルームIDを入力するか、",
+      "stream.roomHint.link": "設定",
+      "stream.roomHint.suffix": "でデフォルトの中継ルームを指定してください。",
+      "stream.urlLabel": "貼り付け用URL (VRChatの動画プレイヤーへ)",
+      "stream.status": "状態",
+      "stream.statusUnknown": "不明",
+      "stream.statusRunning": "配信中",
+      "stream.statusStopped": "停止中",
+      "stream.clients": "クライアント数",
+      "stream.backend": "バックエンド",
+      "stream.relayRoom": "中継ルーム",
+      "stream.publisher": "配信元",
+      "stream.waitingPublisher": "配信元を待っています…",
+      "stream.uptime": "稼働時間",
+      "stream.stopBtn": "停止",
+      "stream.stopConfirm": "ストリームを停止しますか?",
+      "stream.started": "ストリームを開始しました。",
+      "stream.stopped": "ストリームを停止しました。",
+      "stream.relayStarted": "ルーム{room}で中継を開始しました。",
+      "stream.relayStartedNoRoom": "中継を開始しました。",
+      "stream.vrchatHint.prefix": "このURLは同じPC上のVRChatでのみ機能します。別のPCやQuestで再生する場合は、",
+      "stream.vrchatHint.link": "設定でRTSPアドレスを0.0.0.0に変更",
+      "stream.vrchatHint.suffix": "し、ストリームを再起動してください。",
+      "ai.title": "AI",
+      "ai.upstreamHint": "推論を提供するには、設定でOpenAI互換のアップストリームを指定してください。",
+      "ai.openSettings": "設定を開く",
+      "ai.readyHint": "アップストリームが設定されています。「提供を開始」すると、ネットワークからのAIリクエストに応答できます。",
+      "ai.endpointLabel": "OpenAI互換エンドポイント",
+      "ai.statusLabel": "状態",
+      "ai.room": "ルーム",
+      "ai.nodeId": "ノードID",
+      "ai.connectedPeers": "接続中のピア数",
+      "ai.providing": "提供中",
+      "ai.servingLabel": "APIサーバー",
+      "ai.remoteProvider": "リモートプロバイダー",
+      "ai.yes": "はい",
+      "ai.no": "いいえ",
+      "ai.modelsLabel": "モデル:",
+      "ai.startProviding": "提供を開始",
+      "ai.stopProviding": "提供を停止",
+      "ai.startServe": "APIサーバーを開始",
+      "ai.stopServe": "APIサーバーを停止",
+      "ai.alreadyProviding": "すでに提供中です。",
+      "ai.nowProviding": "AIモデルの提供を開始しました。",
+      "ai.stoppedProviding": "提供を停止しました。",
+      "ai.wasNotProviding": "提供していませんでした。",
+      "ai.serveAlready": "APIサーバーはすでに{listen}で稼働しています",
+      "ai.serveStarted": "APIサーバーが{listen}で待ち受けを開始しました",
+      "ai.serveStopped": "APIサーバーを停止しました。",
+      "ai.serveWasNotRunning": "APIサーバーは稼働していませんでした。",
+      "chat.promptLabel": "プロンプト",
+      "chat.promptPlaceholder": "質問を入力…",
+      "chat.modelLabel": "モデル (任意)",
+      "chat.send": "送信",
+      "chat.empty": "まだメッセージはありません。",
+      "chat.you": "あなた",
+      "chat.error": "エラー",
+      "chat.assistant": "アシスタント",
+      "chat.noProviderError": "利用可能なプロバイダーがありません。ローカルで提供を開始するか、p2pプロバイダーが見つかるまでお待ちください。",
+      "mailbox.title": "メールボックス",
+      "mailbox.fetchBtn": "メッセージを取得",
+      "mailbox.refreshHeld": "保留中を更新",
+      "mailbox.heldCol.id": "ID",
+      "mailbox.heldCol.from": "差出人",
+      "mailbox.heldCol.to": "宛先",
+      "mailbox.heldCol.size": "サイズ",
+      "mailbox.heldCol.since": "保留開始",
+      "mailbox.heldEmpty": "保留中のデポジットはありません。デポジットとは、他のノードが受信者のために一時的に預けたメッセージです。",
+      "mailbox.fetchCol.id": "ID",
+      "mailbox.fetchCol.from": "差出人",
+      "mailbox.fetchCol.content": "内容",
+      "mailbox.fetchEmpty": "まだ何も取得していません。「メッセージを取得」をクリックして新着を確認してください。",
+      "mailbox.fileContent": "ファイル: {name} ({size}、cid {cid})",
+      "mailbox.toLabel": "宛先 (DIDまたはノードID)",
+      "mailbox.toPlaceholder": "did:key:z6Mk… または16桁の16進ノードID",
+      "mailbox.messageLabel": "メッセージ",
+      "mailbox.send": "送信",
+      "mailbox.needBoth": "宛先とメッセージの両方を入力してください。",
+      "mailbox.sentStatus": "メッセージは{status} (id {id})。",
+      "store.title": "ストア",
+      "store.col.cid": "CID",
+      "store.col.name": "名前",
+      "store.col.size": "サイズ",
+      "store.col.storedAt": "保存日時",
+      "store.col.actions": "操作",
+      "store.empty": "保存されたアイテムはありません。",
+      "store.download": "ダウンロード",
+      "store.saveToPath": "サーバー側パスに保存",
+      "store.savePathPlaceholder": "出力パス (任意)",
+      "store.saved": "{output} に保存しました",
+      "store.dropzoneText": "ここにファイルをドラッグ、またはクリックして選択",
+      "store.dropzoneHint": "このノードのストアに直接アップロードされます。",
+      "store.uploading": "{name} をアップロード中… {pct}%",
+      "store.uploaded": "{name} ({size}) をアップロードしました。",
+      "store.uploadFailed": "{name} のアップロードに失敗しました: {error}",
+      "store.addByPathSummary": "このPC上のファイルパスで追加 (大きなローカルファイル向け)",
+      "store.pathLabel": "このPC上のパス (デーモンがサーバー側で読み込みます)",
+      "store.pathPlaceholder": "C:\\path\\to\\file or /path/to/file",
+      "store.addBtn": "追加",
+      "store.stored": "{name} ({size}) を保存しました。",
+      "profile.title": "プロフィール",
+      "profile.did": "did",
+      "profile.displayName": "表示名",
+      "profile.bio": "自己紹介",
+      "profile.avatar": "アバター",
+      "profile.displayNameLabel": "表示名",
+      "profile.save": "保存",
+      "profile.updated": "プロフィールを更新しました。",
+      "settings.title": "設定",
+      "settings.restartBadge": "適用にはデーモンの再起動が必要",
+      "settings.savedRestart": "保存しました。適用にはデーモンの再起動が必要です。",
+      "settings.savedNextStart": "保存しました。次回起動時に適用されます。",
+      "settings.enterGib": "{label} にはGiB単位の数値を入力してください。",
+      "settings.enterNumber": "{label} には数値を入力してください。",
+      "settings.gibUnit": "GiB",
+      "settings.clear": "クリア",
+      "settings.passwordSetPlaceholder": "(設定済み) 変更しない場合は空欄のまま",
+      "settings.passwordNotSet": "未設定",
+      "settings.optionDefault": "(デフォルト)",
+      "settings.section.identity": "本人情報",
+      "settings.section.storage": "ストレージ",
+      "settings.section.stream": "ストリーム",
+      "settings.section.mailbox": "メールボックス",
+      "settings.section.ai": "AI",
+      "settings.section.ui": "Webダッシュボード",
+      "settings.field.identity.display_name.label": "表示名",
+      "settings.field.identity.display_name.desc": "設定ファイルに書き込まれるデフォルトの表示名です (次回起動時に適用されます。今すぐ変更する場合は上のプロフィールパネルを使ってください)。",
+      "settings.field.storage.capacity_bytes.label": "ストレージ容量",
+      "settings.field.storage.capacity_bytes.desc": "ローカルブロックストアの最大サイズです。",
+      "settings.field.stream.rtsp_url.label": "RTSP URL",
+      "settings.field.stream.rtsp_url.desc": "配信に使用するRTSPエンドポイントです。空欄の場合はデフォルトを使用します。",
+      "settings.field.stream.frame_rate.label": "フレームレート",
+      "settings.field.stream.frame_rate.desc": "キャプチャのフレームレート (1秒あたりのフレーム数) です。",
+      "settings.field.stream.capture_backend.label": "キャプチャバックエンド",
+      "settings.field.stream.capture_backend.desc": "使用する画面キャプチャのバックエンドです。",
+      "settings.field.stream.max_width.label": "最大幅",
+      "settings.field.stream.max_width.desc": "キャプチャの最大幅 (ピクセル) です。これより広い入力は縮小されます。",
+      "settings.field.stream.relay_room.label": "デフォルトの中継ルーム",
+      "settings.field.stream.relay_room.desc": "「tc-chatの画面共有を中継」でルームIDが未入力のときに使われるtc-chatルームIDです。",
+      "settings.field.stream.audio_codec.label": "音声コーデック",
+      "settings.field.stream.audio_codec.desc": "配信に使用する音声コーデックです。",
+      "settings.field.mailbox.room_id.label": "ルームID",
+      "settings.field.mailbox.room_id.desc": "メールボックスの配送に使うtc-chatルームです。",
+      "settings.field.mailbox.serve_as_bot.label": "ボットとして応答",
+      "settings.field.mailbox.serve_as_bot.desc": "メールボックスのルームプレゼンスに自動応答ボットとして応答します。",
+      "settings.field.ai.room_id.label": "ルームID",
+      "settings.field.ai.room_id.desc": "AIプロバイダーと利用者を発見するために使うtc-chatルームです。",
+      "settings.field.ai.upstream_url.label": "アップストリームURL",
+      "settings.field.ai.upstream_url.desc": "提供時にこのデーモンが推論を転送するOpenAI互換エンドポイントです。",
+      "settings.field.ai.upstream_api_key.label": "アップストリームAPIキー",
+      "settings.field.ai.upstream_api_key.desc": "アップストリームエンドポイントに送信するAPIキーです。このPCにのみ保存されます。",
+      "settings.field.ai.default_model.label": "デフォルトモデル",
+      "settings.field.ai.default_model.desc": "リクエストでモデルが指定されなかった場合に使用されるモデル名です。",
+      "settings.field.ai.temperature.label": "Temperature",
+      "settings.field.ai.temperature.desc": "デフォルトのサンプリング温度 (temperature) です。",
+      "settings.field.ai.request_timeout_secs.label": "リクエストタイムアウト (秒)",
+      "settings.field.ai.request_timeout_secs.desc": "アップストリームからの応答を待つ最大時間です。",
+      "settings.field.ai.api_listen.label": "API待ち受けアドレス",
+      "settings.field.ai.api_listen.desc": "ローカルのOpenAI互換APIサーバーが待ち受けるアドレス:ポートです。",
+      "settings.field.ui.listen.label": "待ち受けアドレス",
+      "settings.field.ui.listen.desc": "このダッシュボードが待ち受けるアドレス:ポートです。",
+      "settings.field.ui.enabled.label": "有効化",
+      "settings.field.ui.enabled.desc": "デーモン起動時にWebダッシュボードを開始するかどうかです。"
+    }
+  };
+
+  var currentLang = localStorage.getItem("mistl-lang") || (navigator.language && navigator.language.indexOf("ja") === 0 ? "ja" : "en");
+  if (currentLang !== "en" && currentLang !== "ja") currentLang = "en";
+
+  function t(key, vars) {
+    var dict = T[currentLang] || T.en;
+    var str = dict[key];
+    if (str === undefined) str = T.en[key] !== undefined ? T.en[key] : key;
+    if (vars) {
+      Object.keys(vars).forEach(function (k) {
+        str = str.split("{" + k + "}").join(vars[k] === null || vars[k] === undefined ? "" : String(vars[k]));
+      });
+    }
+    return str;
+  }
+
+  function applyStaticI18n(root) {
+    var scope = root || document;
+    scope.querySelectorAll("[data-i18n]").forEach(function (node) {
+      node.textContent = t(node.getAttribute("data-i18n"));
+    });
+    scope.querySelectorAll("[data-i18n-placeholder]").forEach(function (node) {
+      node.setAttribute("placeholder", t(node.getAttribute("data-i18n-placeholder")));
+    });
+    scope.querySelectorAll("[data-i18n-title]").forEach(function (node) {
+      node.setAttribute("title", t(node.getAttribute("data-i18n-title")));
+    });
+    scope.querySelectorAll("[data-i18n-aria-label]").forEach(function (node) {
+      node.setAttribute("aria-label", t(node.getAttribute("data-i18n-aria-label")));
+    });
+  }
+
+  function updateLangButtons() {
+    var enBtn = document.getElementById("lang-en-btn");
+    var jaBtn = document.getElementById("lang-ja-btn");
+    if (enBtn) enBtn.classList.toggle("active", currentLang === "en");
+    if (jaBtn) jaBtn.classList.toggle("active", currentLang === "ja");
+  }
+
+  function setLang(lang) {
+    if (lang !== "en" && lang !== "ja") return;
+    currentLang = lang;
+    localStorage.setItem("mistl-lang", lang);
+    document.documentElement.lang = lang;
+    applyStaticI18n();
+    updateLangButtons();
+    rerenderAllDynamic();
+  }
 
   /* ---------- helpers ---------- */
 
@@ -689,11 +1247,11 @@
   function copyToClipboard(text) {
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(text).then(
-        function () { showToast("Copied to clipboard.", "info"); },
-        function () { showToast("Copy failed.", "error"); }
+        function () { showToast(t("common.copied"), "info"); },
+        function () { showToast(t("common.copyFailed"), "error"); }
       );
     } else {
-      showToast("Clipboard unavailable.", "error");
+      showToast(t("common.clipboardUnavailable"), "error");
     }
   }
 
@@ -713,7 +1271,7 @@
     var id = "toast-" + (++toastSeq);
     var toast = el("div", { class: "toast", id: id });
     toast.appendChild(el("span", { class: "msg", text: message }));
-    var closeBtn = el("button", { type: "button", "aria-label": "Dismiss" });
+    var closeBtn = el("button", { type: "button", "aria-label": t("common.dismiss") });
     closeBtn.textContent = "×";
     closeBtn.addEventListener("click", function () { dismissToast(id); });
     toast.appendChild(closeBtn);
@@ -777,13 +1335,33 @@
     stream: null,
     ai: null,
     config: null,
-    chatHistory: []
+    chatHistory: [],
+    mailboxHeldItems: [],
+    mailboxFetchItems: [],
+    storeItems: []
   };
+
+  function rerenderAllDynamic() {
+    renderDaemonPill();
+    renderOverview();
+    renderIdentitySummary();
+    renderStream();
+    renderAi();
+    renderChat();
+    renderMailboxHeld(state.mailboxHeldItems);
+    renderMailboxFetch(state.mailboxFetchItems);
+    renderStore(state.storeItems);
+    renderProfile(state.identity);
+    renderSettings(state.config);
+  }
 
   /* ---------- header ---------- */
 
   var daemonPill = document.getElementById("daemon-pill");
   var identitySummary = document.getElementById("identity-summary");
+
+  document.getElementById("lang-en-btn").addEventListener("click", function () { setLang("en"); });
+  document.getElementById("lang-ja-btn").addEventListener("click", function () { setLang("ja"); });
 
   function renderDaemonPill() {
     daemonPill.innerHTML = "";
@@ -794,10 +1372,10 @@
       var uptime = state.daemonUptimeBase !== null
         ? state.daemonUptimeBase + Math.floor((Date.now() - state.daemonUptimeAt) / 1000)
         : state.daemon.uptime_secs;
-      label = el("span", { text: "running · pid " + state.daemon.pid + " · v" + state.daemon.version + " · " + fmtUptime(uptime) });
+      label = el("span", { text: t("daemon.running", { pid: state.daemon.pid, version: state.daemon.version, uptime: fmtUptime(uptime) }) });
     } else {
       daemonPill.className = "pill err";
-      label = el("span", { text: "daemon unreachable" });
+      label = el("span", { text: t("daemon.unreachable") });
     }
     daemonPill.appendChild(dot);
     daemonPill.appendChild(label);
@@ -821,16 +1399,15 @@
   function renderOverview() {
     overviewKv.innerHTML = "";
     if (!state.daemon) {
-      overviewKv.appendChild(el("dt", { text: "status" }));
-      overviewKv.appendChild(el("dd", { text: "daemon unreachable" }));
+      addKv(overviewKv, t("overview.status"), t("overview.unreachable"));
       return;
     }
     var uptime = state.daemonUptimeBase !== null
       ? state.daemonUptimeBase + Math.floor((Date.now() - state.daemonUptimeAt) / 1000)
       : state.daemon.uptime_secs;
-    addKv(overviewKv, "pid", state.daemon.pid);
-    addKv(overviewKv, "version", state.daemon.version);
-    addKv(overviewKv, "uptime", fmtUptime(uptime));
+    addKv(overviewKv, t("overview.pid"), state.daemon.pid);
+    addKv(overviewKv, t("overview.version"), state.daemon.version);
+    addKv(overviewKv, t("overview.uptime"), fmtUptime(uptime));
   }
 
   function addKv(container, key, value, mono) {
@@ -867,9 +1444,9 @@
   });
 
   document.getElementById("btn-stop-daemon").addEventListener("click", function (e) {
-    if (!confirm("Stop the mistl daemon? This will end all active sessions.")) return;
+    if (!confirm(t("overview.stopConfirm"))) return;
     runAction(e.currentTarget, "daemon.stop", {}, function () {
-      showToast("Daemon is stopping.");
+      showToast(t("overview.stopping"));
     });
   });
 
@@ -879,6 +1456,7 @@
   var streamUrlCallout = document.getElementById("stream-url-callout");
   var streamUrlText = document.getElementById("stream-url-text");
   var relayRoomHint = document.getElementById("relay-room-hint");
+  var streamVrchatHint = document.getElementById("stream-vrchat-hint");
 
   streamUrlCallout.addEventListener("click", function () {
     if (streamUrlText.textContent) copyToClipboard(streamUrlText.textContent);
@@ -888,29 +1466,57 @@
     relayRoomHint.hidden = !show;
   }
 
+  function extractHost(url) {
+    if (!url) return "";
+    var m = /^[a-zA-Z][a-zA-Z0-9+.\-]*:\/\/([^\/\\?#:]+)/.exec(url);
+    return m ? m[1] : "";
+  }
+
+  function renderVrchatHint(s) {
+    streamVrchatHint.innerHTML = "";
+    if (!s || !s.running) { streamVrchatHint.hidden = true; return; }
+    var host = extractHost(s.rtsp_url);
+    if (host === "127.0.0.1" || host === "localhost") {
+      streamVrchatHint.hidden = false;
+      streamVrchatHint.appendChild(el("span", { text: t("stream.vrchatHint.prefix") + " " }));
+      var link = el("a", { href: "#panel-settings" });
+      link.textContent = t("stream.vrchatHint.link");
+      link.addEventListener("click", function (e) {
+        e.preventDefault();
+        focusSettingsField(settingsFieldId("stream", "rtsp_url"));
+      });
+      streamVrchatHint.appendChild(link);
+      streamVrchatHint.appendChild(el("span", { text: t("stream.vrchatHint.suffix") }));
+    } else {
+      streamVrchatHint.hidden = true;
+    }
+  }
+
   function renderStream() {
     streamKv.innerHTML = "";
     var s = state.stream;
     if (!s) {
-      addKv(streamKv, "status", "unknown");
+      addKv(streamKv, t("stream.status"), t("stream.statusUnknown"));
       streamUrlCallout.hidden = true;
+      renderVrchatHint(null);
       return;
     }
     if (s.running) {
       streamUrlText.textContent = s.rtsp_url;
       streamUrlCallout.hidden = false;
-      addKv(streamKv, "status", "running");
-      addKv(streamKv, "clients", s.clients);
-      addKv(streamKv, "backend", s.backend);
-      if (s.room) addKv(streamKv, "relay room", s.room);
+      addKv(streamKv, t("stream.status"), t("stream.statusRunning"));
+      addKv(streamKv, t("stream.clients"), s.clients);
+      addKv(streamKv, t("stream.backend"), s.backend);
+      if (s.room) addKv(streamKv, t("stream.relayRoom"), s.room);
       if (s.backend === "relay") {
-        addKv(streamKv, "publisher", s.publisher ? s.publisher : "waiting for a publisher…");
+        addKv(streamKv, t("stream.publisher"), s.publisher ? s.publisher : t("stream.waitingPublisher"));
       }
-      addKv(streamKv, "uptime", fmtUptime(s.uptime_secs));
+      addKv(streamKv, t("stream.uptime"), fmtUptime(s.uptime_secs));
     } else {
       streamUrlCallout.hidden = true;
-      addKv(streamKv, "status", "stopped");
+      addKv(streamKv, t("stream.status"), t("stream.statusStopped"));
     }
+    renderVrchatHint(s);
   }
 
   function pollStreamStatus() {
@@ -932,15 +1538,15 @@
 
   document.getElementById("btn-stream-start").addEventListener("click", function (e) {
     runAction(e.currentTarget, "stream.start", {}, function () {
-      showToast("Stream started.");
+      showToast(t("stream.started"));
       pollStreamStatus();
     });
   });
 
   document.getElementById("btn-stream-stop").addEventListener("click", function (e) {
-    if (!confirm("Stop the stream?")) return;
+    if (!confirm(t("stream.stopConfirm"))) return;
     runAction(e.currentTarget, "stream.stop", {}, function () {
-      showToast("Stream stopped.");
+      showToast(t("stream.stopped"));
       pollStreamStatus();
     });
   });
@@ -958,7 +1564,7 @@
     showRelayRoomHint(false);
     var btn = e.target.querySelector("button[type=submit]");
     runAction(btn, "stream.relay.start", room ? { room: room } : {}, function (data) {
-      showToast("Relay started" + (data.room ? " in room " + data.room : "") + ".");
+      showToast(data.room ? t("stream.relayStarted", { room: data.room }) : t("stream.relayStartedNoRoom"));
       pollStreamStatus();
     });
   });
@@ -983,22 +1589,22 @@
     var aiCfg = cfg.ai || {};
     if (!aiCfg.upstream_url) {
       var hint = el("div", { class: "info-hint" });
-      hint.appendChild(el("span", { text: "Set an OpenAI-compatible upstream in Settings to provide inference." }));
-      var openBtn = el("button", { type: "button", text: "Open Settings" });
+      hint.appendChild(el("span", { text: t("ai.upstreamHint") }));
+      var openBtn = el("button", { type: "button", text: t("ai.openSettings") });
       openBtn.addEventListener("click", function () { focusSettingsField("settings-ai-upstream_url"); });
       hint.appendChild(openBtn);
       aiHintsBox.appendChild(hint);
     } else if (a && !a.providing) {
       var hint2 = el("div", { class: "info-hint neutral" });
-      hint2.appendChild(el("span", { text: "Upstream is configured. Start providing to answer AI requests from the network." }));
+      hint2.appendChild(el("span", { text: t("ai.readyHint") }));
       aiHintsBox.appendChild(hint2);
     }
     if (a && a.serving) {
       var listen = aiCfg.api_listen || (typeof a.serving === "string" ? a.serving : "");
       if (listen) {
         var url = "http://" + listen + "/v1";
-        var callout = el("div", { class: "url-callout", title: "Click to copy" });
-        callout.appendChild(el("span", { class: "url-callout-label", text: "OpenAI-compatible endpoint" }));
+        var callout = el("div", { class: "url-callout", title: t("common.clickToCopy") });
+        callout.appendChild(el("span", { class: "url-callout-label", text: t("ai.endpointLabel") }));
         callout.appendChild(el("span", { class: "url-callout-url mono", text: url }));
         callout.addEventListener("click", function () { copyToClipboard(url); });
         aiHintsBox.appendChild(callout);
@@ -1010,24 +1616,24 @@
     aiKv.innerHTML = "";
     var a = state.ai;
     if (!a) {
-      addKv(aiKv, "status", "unknown");
+      addKv(aiKv, t("ai.statusLabel"), t("stream.statusUnknown"));
       aiModelsBox.innerHTML = "";
       refreshAiHints();
       return;
     }
-    addKv(aiKv, "room", a.room);
-    addKv(aiKv, "node id", a.node_id, true);
-    addKv(aiKv, "connected peers", a.connected_peers);
-    addKv(aiKv, "providing", a.providing ? "yes" : "no");
-    addKv(aiKv, "serving", a.serving ? a.serving : "no");
+    addKv(aiKv, t("ai.room"), a.room);
+    addKv(aiKv, t("ai.nodeId"), a.node_id, true);
+    addKv(aiKv, t("ai.connectedPeers"), a.connected_peers);
+    addKv(aiKv, t("ai.providing"), a.providing ? t("ai.yes") : t("ai.no"));
+    addKv(aiKv, t("ai.servingLabel"), a.serving ? a.serving : t("ai.no"));
     if (a.remote_provider) {
-      addKv(aiKv, "remote provider", a.remote_provider.node_id, true);
+      addKv(aiKv, t("ai.remoteProvider"), a.remote_provider.node_id, true);
     }
 
     aiModelsBox.innerHTML = "";
     var models = a.models || (a.remote_provider && a.remote_provider.models) || [];
     if (models.length) {
-      aiModelsBox.appendChild(el("span", { class: "muted", text: "models:" }));
+      aiModelsBox.appendChild(el("span", { class: "muted", text: t("ai.modelsLabel") }));
       models.forEach(function (m) {
         aiModelsBox.appendChild(el("span", { class: "badge", text: m }));
       });
@@ -1035,7 +1641,7 @@
 
     var prevSelected = chatModelSelect.value;
     chatModelSelect.innerHTML = "";
-    chatModelSelect.appendChild(el("option", { value: "", text: "default" }));
+    chatModelSelect.appendChild(el("option", { value: "", text: t("common.default") }));
     models.forEach(function (m) {
       var opt = el("option", { value: m, text: m });
       chatModelSelect.appendChild(opt);
@@ -1064,28 +1670,28 @@
 
   document.getElementById("btn-ai-provide-start").addEventListener("click", function (e) {
     runAction(e.currentTarget, "ai.provide.start", {}, function (data) {
-      showToast(data.already_running ? "Already providing." : "Now providing AI models.");
+      showToast(data.already_running ? t("ai.alreadyProviding") : t("ai.nowProviding"));
       pollAiStatus();
     });
   });
 
   document.getElementById("btn-ai-provide-stop").addEventListener("click", function (e) {
     runAction(e.currentTarget, "ai.provide.stop", {}, function (data) {
-      showToast(data.was_running ? "Stopped providing." : "Was not providing.");
+      showToast(data.was_running ? t("ai.stoppedProviding") : t("ai.wasNotProviding"));
       pollAiStatus();
     });
   });
 
   document.getElementById("btn-ai-serve-start").addEventListener("click", function (e) {
     runAction(e.currentTarget, "ai.serve.start", {}, function (data) {
-      showToast(data.already_running ? "API server already running at " + data.listen : "API server listening at " + data.listen);
+      showToast(data.already_running ? t("ai.serveAlready", { listen: data.listen }) : t("ai.serveStarted", { listen: data.listen }));
       pollAiStatus();
     });
   });
 
   document.getElementById("btn-ai-serve-stop").addEventListener("click", function (e) {
     runAction(e.currentTarget, "ai.serve.stop", {}, function (data) {
-      showToast(data.was_running ? "API server stopped." : "API server was not running.");
+      showToast(data.was_running ? t("ai.serveStopped") : t("ai.serveWasNotRunning"));
       pollAiStatus();
     });
   });
@@ -1100,12 +1706,13 @@
   function renderChat() {
     chatLog.innerHTML = "";
     if (!state.chatHistory.length) {
-      chatLog.appendChild(el("div", { class: "chat-empty", text: "No messages yet." }));
+      chatLog.appendChild(el("div", { class: "chat-empty", text: t("chat.empty") }));
       return;
     }
     state.chatHistory.forEach(function (msg) {
       var wrap = el("div", { class: "chat-msg " + msg.role });
-      wrap.appendChild(el("div", { class: "role", text: msg.role === "user" ? "you" : (msg.role === "error" ? "error" : (msg.via ? msg.via : "assistant")) }));
+      var roleLabel = msg.role === "user" ? t("chat.you") : (msg.role === "error" ? t("chat.error") : (msg.via ? msg.via : t("chat.assistant")));
+      wrap.appendChild(el("div", { class: "role", text: roleLabel }));
       var bubble = el("div", { class: "bubble" });
       bubble.textContent = msg.text;
       wrap.appendChild(bubble);
@@ -1116,7 +1723,7 @@
 
   function friendlyChatError(msg) {
     if (/no provider/i.test(msg)) {
-      return "No provider reachable — start providing locally or wait for a p2p provider.";
+      return t("chat.noProviderError");
     }
     return msg;
   }
@@ -1153,8 +1760,9 @@
   var mailboxFetchEmpty = document.getElementById("mailbox-fetch-empty");
 
   function renderMailboxHeld(items) {
-    mailboxHeldTbody.innerHTML = "";
     items = items || [];
+    state.mailboxHeldItems = items;
+    mailboxHeldTbody.innerHTML = "";
     mailboxHeldEmpty.style.display = items.length ? "none" : "block";
     items.forEach(function (item) {
       var tr = el("tr", {});
@@ -1174,8 +1782,9 @@
   }
 
   function renderMailboxFetch(items) {
-    mailboxFetchTbody.innerHTML = "";
     items = items || [];
+    state.mailboxFetchItems = items;
+    mailboxFetchTbody.innerHTML = "";
     mailboxFetchEmpty.style.display = items.length ? "none" : "block";
     items.forEach(function (item) {
       var tr = el("tr", {});
@@ -1189,7 +1798,7 @@
       if (item.message !== undefined && item.message !== null) {
         contentCell.textContent = item.message;
       } else if (item.file) {
-        contentCell.textContent = "file: " + item.file.name + " (" + fmtBytes(item.file.size) + ", cid " + truncateMiddle(item.file.cid, 8, 4) + ")";
+        contentCell.textContent = t("mailbox.fileContent", { name: item.file.name, size: fmtBytes(item.file.size), cid: truncateMiddle(item.file.cid, 8, 4) });
       } else {
         contentCell.textContent = "-";
       }
@@ -1219,12 +1828,12 @@
     var to = document.getElementById("mailbox-to").value.trim();
     var message = document.getElementById("mailbox-message").value.trim();
     if (!to || !message) {
-      showToast("Recipient and message are both required.");
+      showToast(t("mailbox.needBoth"));
       return;
     }
     var btn = document.getElementById("btn-mailbox-send");
     runAction(btn, "mailbox.send", { to: to, message: message }, function (data) {
-      showToast("Message " + data.status + " (id " + truncateMiddle(String(data.id), 8, 4) + ").");
+      showToast(t("mailbox.sentStatus", { status: data.status, id: truncateMiddle(String(data.id), 8, 4) }));
       document.getElementById("mailbox-message").value = "";
       pollMailboxLs();
     });
@@ -1234,10 +1843,15 @@
 
   var storeTbody = document.querySelector("#store-table tbody");
   var storeEmpty = document.getElementById("store-empty");
+  var storeDropzone = document.getElementById("store-dropzone");
+  var storeFileInput = document.getElementById("store-file-input");
+  var storeUploadStatus = document.getElementById("store-upload-status");
+  var uploadSeq = 0;
 
   function renderStore(items) {
-    storeTbody.innerHTML = "";
     items = items || [];
+    state.storeItems = items;
+    storeTbody.innerHTML = "";
     storeEmpty.style.display = items.length ? "none" : "block";
     items.forEach(function (entry) {
       var tr = el("tr", {});
@@ -1249,11 +1863,15 @@
       tr.appendChild(el("td", { text: entry.stored_at || "-" }));
 
       var actionCell = el("td", {});
-      var form = el("form", { class: "row" });
-      form.style.margin = "0";
-      var input = el("input", { type: "text", placeholder: "output path (optional)" });
-      input.style.width = "140px";
-      var btn = el("button", { type: "submit", text: "Save" });
+      var dl = el("a", { href: "/api/store/download?cid=" + encodeURIComponent(entry.cid), download: entry.name || entry.cid, class: "download-link" });
+      dl.textContent = t("store.download");
+      actionCell.appendChild(dl);
+
+      var form = el("form", { class: "row store-save-form" });
+      var input = el("input", { type: "text" });
+      input.placeholder = t("store.savePathPlaceholder");
+      var btn = el("button", { type: "submit" });
+      btn.textContent = t("store.saveToPath");
       form.appendChild(input);
       form.appendChild(btn);
       form.addEventListener("submit", function (ev) {
@@ -1262,7 +1880,7 @@
         var outputPath = input.value.trim();
         if (outputPath) args.output = outputPath;
         runAction(btn, "store.get", args, function (data) {
-          showToast("Saved to " + data.output);
+          showToast(t("store.saved", { output: data.output }));
         });
       });
       actionCell.appendChild(form);
@@ -1289,10 +1907,73 @@
     if (!path) return;
     var btn = document.getElementById("btn-store-put");
     runAction(btn, "store.put", { path: path }, function (data) {
-      showToast("Stored " + data.name + " (" + fmtBytes(data.size) + ").");
+      showToast(t("store.stored", { name: data.name, size: fmtBytes(data.size) }));
       pathInput.value = "";
       pollStoreLs();
     });
+  });
+
+  function uploadOneFile(file) {
+    var rowId = "upload-row-" + (++uploadSeq);
+    var row = el("div", { class: "upload-row", id: rowId });
+    var label = el("span", {});
+    label.textContent = t("store.uploading", { name: file.name, pct: 0 });
+    row.appendChild(label);
+    storeUploadStatus.appendChild(row);
+
+    return new Promise(function (resolve, reject) {
+      var xhr = new XMLHttpRequest();
+      xhr.open("POST", "/api/store/upload");
+      xhr.setRequestHeader("x-mistl-ui", "1");
+      xhr.setRequestHeader("x-file-name", encodeURIComponent(file.name));
+      xhr.upload.addEventListener("progress", function (e) {
+        if (e.lengthComputable) {
+          var pct = Math.round((e.loaded / e.total) * 100);
+          label.textContent = t("store.uploading", { name: file.name, pct: pct });
+        }
+      });
+      xhr.onload = function () {
+        var json = null;
+        try { json = JSON.parse(xhr.responseText); } catch (parseErr) { json = null; }
+        if (json && json.ok === true) {
+          resolve(json.data);
+        } else {
+          reject(new Error((json && json.error) || ("upload failed (" + xhr.status + ")")));
+        }
+      };
+      xhr.onerror = function () { reject(new Error("daemon unreachable")); };
+      xhr.send(file);
+    }).then(function (data) {
+      if (row.parentNode) row.parentNode.removeChild(row);
+      showToast(t("store.uploaded", { name: data.name, size: fmtBytes(data.size) }));
+      pollStoreLs();
+      return data;
+    }, function (err) {
+      if (row.parentNode) row.parentNode.removeChild(row);
+      showToast(t("store.uploadFailed", { name: file.name, error: err.message || String(err) }));
+      throw err;
+    });
+  }
+
+  function handleStoreFiles(fileList) {
+    var files = Array.prototype.slice.call(fileList || []);
+    files.forEach(function (file) { uploadOneFile(file); });
+  }
+
+  storeDropzone.addEventListener("click", function () { storeFileInput.click(); });
+  storeDropzone.addEventListener("keydown", function (e) {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); storeFileInput.click(); }
+  });
+  storeDropzone.addEventListener("dragover", function (e) { e.preventDefault(); storeDropzone.classList.add("dragover"); });
+  storeDropzone.addEventListener("dragleave", function () { storeDropzone.classList.remove("dragover"); });
+  storeDropzone.addEventListener("drop", function (e) {
+    e.preventDefault();
+    storeDropzone.classList.remove("dragover");
+    if (e.dataTransfer && e.dataTransfer.files) handleStoreFiles(e.dataTransfer.files);
+  });
+  storeFileInput.addEventListener("change", function () {
+    handleStoreFiles(storeFileInput.files);
+    storeFileInput.value = "";
   });
 
   /* ---------- profile ---------- */
@@ -1315,10 +1996,10 @@
   function renderProfile(data) {
     profileKv.innerHTML = "";
     if (!data) return;
-    addKv(profileKv, "did", truncateMiddle(data.did || "", 16, 8), true);
-    addKv(profileKv, "display name", data.display_name || "");
-    addKv(profileKv, "bio", data.bio || "");
-    addKv(profileKv, "avatar", data.avatar || "");
+    addKv(profileKv, t("profile.did"), truncateMiddle(data.did || "", 16, 8), true);
+    addKv(profileKv, t("profile.displayName"), data.display_name || "");
+    addKv(profileKv, t("profile.bio"), data.bio || "");
+    addKv(profileKv, t("profile.avatar"), data.avatar || "");
     Object.keys(data).forEach(function (key) {
       if (["did", "display_name", "bio", "avatar"].indexOf(key) === -1) {
         addKv(profileKv, key, data[key]);
@@ -1347,7 +2028,7 @@
     var value = profileDisplayNameInput.value.trim();
     var btn = document.getElementById("btn-profile-save");
     runAction(btn, "profile.set", { field: "display_name", value: value }, function (data) {
-      showToast("Profile updated.");
+      showToast(t("profile.updated"));
       renderProfile(data);
     });
   });
@@ -1357,36 +2038,36 @@
   var GIB = 1073741824;
 
   var SETTINGS_SCHEMA = [
-    { section: "identity", title: "Identity", fields: [
-      { key: "display_name", label: "Display name", desc: "Default display name written to config (applies at next start; use the Profile panel above to change it live).", type: "text" }
+    { section: "identity", titleKey: "settings.section.identity", fields: [
+      { key: "display_name", labelKey: "settings.field.identity.display_name.label", descKey: "settings.field.identity.display_name.desc", type: "text" }
     ] },
-    { section: "storage", title: "Storage", fields: [
-      { key: "capacity_bytes", label: "Storage capacity", desc: "Maximum size of the local block store.", type: "gib" }
+    { section: "storage", titleKey: "settings.section.storage", fields: [
+      { key: "capacity_bytes", labelKey: "settings.field.storage.capacity_bytes.label", descKey: "settings.field.storage.capacity_bytes.desc", type: "gib" }
     ] },
-    { section: "stream", title: "Stream", fields: [
-      { key: "rtsp_url", label: "RTSP URL", desc: "RTSP endpoint used when streaming. Leave blank to use the default.", type: "text" },
-      { key: "frame_rate", label: "Frame rate", desc: "Capture frame rate, in frames per second.", type: "number" },
-      { key: "capture_backend", label: "Capture backend", desc: "Screen capture backend to use.", type: "select", options: [["", "(default)"], ["native", "native"], ["ffmpeg", "ffmpeg"]] },
-      { key: "max_width", label: "Max width", desc: "Maximum capture width in pixels; wider input is scaled down.", type: "number" },
-      { key: "relay_room", label: "Default relay room", desc: "tc-chat room id used by “Relay a tc-chat share” when none is typed.", type: "text" },
-      { key: "audio_codec", label: "Audio codec", desc: "Audio codec used for the stream.", type: "select", options: [["", "(default)"], ["aac", "aac"], ["opus", "opus"]] }
+    { section: "stream", titleKey: "settings.section.stream", fields: [
+      { key: "rtsp_url", labelKey: "settings.field.stream.rtsp_url.label", descKey: "settings.field.stream.rtsp_url.desc", type: "text" },
+      { key: "frame_rate", labelKey: "settings.field.stream.frame_rate.label", descKey: "settings.field.stream.frame_rate.desc", type: "number" },
+      { key: "capture_backend", labelKey: "settings.field.stream.capture_backend.label", descKey: "settings.field.stream.capture_backend.desc", type: "select", options: [["", "settings.optionDefault", true], ["native", "native"], ["ffmpeg", "ffmpeg"]] },
+      { key: "max_width", labelKey: "settings.field.stream.max_width.label", descKey: "settings.field.stream.max_width.desc", type: "number" },
+      { key: "relay_room", labelKey: "settings.field.stream.relay_room.label", descKey: "settings.field.stream.relay_room.desc", type: "text" },
+      { key: "audio_codec", labelKey: "settings.field.stream.audio_codec.label", descKey: "settings.field.stream.audio_codec.desc", type: "select", options: [["", "settings.optionDefault", true], ["aac", "aac"], ["opus", "opus"]] }
     ] },
-    { section: "mailbox", title: "Mailbox", fields: [
-      { key: "room_id", label: "Room id", desc: "tc-chat room used for mailbox delivery.", type: "text" },
-      { key: "serve_as_bot", label: "Serve as bot", desc: "Answer mailbox room presence as an automated bot.", type: "toggle" }
+    { section: "mailbox", titleKey: "settings.section.mailbox", fields: [
+      { key: "room_id", labelKey: "settings.field.mailbox.room_id.label", descKey: "settings.field.mailbox.room_id.desc", type: "text" },
+      { key: "serve_as_bot", labelKey: "settings.field.mailbox.serve_as_bot.label", descKey: "settings.field.mailbox.serve_as_bot.desc", type: "toggle" }
     ] },
-    { section: "ai", title: "AI", fields: [
-      { key: "room_id", label: "Room id", desc: "tc-chat room used to discover AI providers and consumers.", type: "text" },
-      { key: "upstream_url", label: "Upstream URL", desc: "OpenAI-compatible endpoint this daemon forwards inference to when providing.", type: "text" },
-      { key: "upstream_api_key", label: "Upstream API key", desc: "API key sent to the upstream endpoint. Stored on this machine only.", type: "password" },
-      { key: "default_model", label: "Default model", desc: "Model name used when a request does not specify one.", type: "text" },
-      { key: "temperature", label: "Temperature", desc: "Default sampling temperature.", type: "number" },
-      { key: "request_timeout_secs", label: "Request timeout (seconds)", desc: "How long to wait for an upstream response before giving up.", type: "number" },
-      { key: "api_listen", label: "API listen address", desc: "Address:port the local OpenAI-compatible API server binds to.", type: "text" }
+    { section: "ai", titleKey: "settings.section.ai", fields: [
+      { key: "room_id", labelKey: "settings.field.ai.room_id.label", descKey: "settings.field.ai.room_id.desc", type: "text" },
+      { key: "upstream_url", labelKey: "settings.field.ai.upstream_url.label", descKey: "settings.field.ai.upstream_url.desc", type: "text" },
+      { key: "upstream_api_key", labelKey: "settings.field.ai.upstream_api_key.label", descKey: "settings.field.ai.upstream_api_key.desc", type: "password" },
+      { key: "default_model", labelKey: "settings.field.ai.default_model.label", descKey: "settings.field.ai.default_model.desc", type: "text" },
+      { key: "temperature", labelKey: "settings.field.ai.temperature.label", descKey: "settings.field.ai.temperature.desc", type: "number" },
+      { key: "request_timeout_secs", labelKey: "settings.field.ai.request_timeout_secs.label", descKey: "settings.field.ai.request_timeout_secs.desc", type: "number" },
+      { key: "api_listen", labelKey: "settings.field.ai.api_listen.label", descKey: "settings.field.ai.api_listen.desc", type: "text" }
     ] },
-    { section: "ui", title: "Web dashboard", fields: [
-      { key: "listen", label: "Listen address", desc: "Address:port this dashboard binds to.", type: "text" },
-      { key: "enabled", label: "Enabled", desc: "Whether the web dashboard starts with the daemon.", type: "toggle" }
+    { section: "ui", titleKey: "settings.section.ui", fields: [
+      { key: "listen", labelKey: "settings.field.ui.listen.label", descKey: "settings.field.ui.listen.desc", type: "text" },
+      { key: "enabled", labelKey: "settings.field.ui.enabled.label", descKey: "settings.field.ui.enabled.desc", type: "toggle" }
     ] }
   ];
 
@@ -1406,7 +2087,7 @@
       if (sectionCfg) sectionCfg[key] = value;
       var applies = data && data.applies === "daemon restart";
       badge.style.display = applies ? "inline-block" : "none";
-      showToast(applies ? "Saved. Restart the daemon to apply." : "Saved. Applies next time this service starts.");
+      showToast(applies ? t("settings.savedRestart") : t("settings.savedNextStart"));
       refreshAiHints();
     }, function (err) {
       showToast("config.set " + path + ": " + (err.message || err));
@@ -1416,12 +2097,18 @@
   function buildSettingsField(section, f, sectionCfg) {
     var wrap = el("div", { class: "settings-field" });
     var id = settingsFieldId(section, f.key);
-    wrap.appendChild(el("label", { class: "settings-label", for: id, text: f.label }));
-    wrap.appendChild(el("div", { class: "desc", text: f.desc }));
+    var fieldLabel = t(f.labelKey);
+    var labelEl = el("label", { class: "settings-label", for: id });
+    labelEl.textContent = fieldLabel;
+    wrap.appendChild(labelEl);
+    var descEl = el("div", { class: "desc" });
+    descEl.textContent = t(f.descKey);
+    wrap.appendChild(descEl);
     var row = el("div", { class: "settings-row" });
     var current = sectionCfg ? sectionCfg[f.key] : null;
     var path = section + "." + f.key;
-    var badge = el("span", { class: "badge restart", text: "restart the daemon to apply" });
+    var badge = el("span", { class: "badge restart" });
+    badge.textContent = t("settings.restartBadge");
     badge.style.display = "none";
     var input;
 
@@ -1438,7 +2125,8 @@
     } else if (f.type === "select") {
       input = el("select", { id: id });
       f.options.forEach(function (opt) {
-        input.appendChild(el("option", { value: opt[0], text: opt[1] }));
+        var optText = opt[2] ? t(opt[1]) : opt[1];
+        input.appendChild(el("option", { value: opt[0], text: optText }));
       });
       input.value = current === null || current === undefined ? "" : String(current);
       input.addEventListener("change", function () {
@@ -1452,11 +2140,11 @@
         var v = input.value.trim();
         if (v === "") { saveSetting(path, null, sectionCfg, f.key, badge); return; }
         var num = Number(v);
-        if (!isFinite(num)) { showToast("Enter a number of GiB for " + f.label + "."); return; }
+        if (!isFinite(num)) { showToast(t("settings.enterGib", { label: fieldLabel })); return; }
         saveSetting(path, Math.round(num * GIB), sectionCfg, f.key, badge);
       });
       row.appendChild(input);
-      row.appendChild(el("span", { class: "muted", text: "GiB" }));
+      row.appendChild(el("span", { class: "muted", text: t("settings.gibUnit") }));
     } else if (f.type === "number") {
       input = el("input", { type: "text", id: id, inputmode: "decimal" });
       input.value = current === null || current === undefined ? "" : String(current);
@@ -1464,19 +2152,20 @@
         var v = input.value.trim();
         if (v === "") { saveSetting(path, null, sectionCfg, f.key, badge); return; }
         var num = Number(v);
-        if (!isFinite(num)) { showToast("Enter a number for " + f.label + "."); return; }
+        if (!isFinite(num)) { showToast(t("settings.enterNumber", { label: fieldLabel })); return; }
         saveSetting(path, num, sectionCfg, f.key, badge);
       });
       row.appendChild(input);
     } else if (f.type === "password") {
       input = el("input", { type: "password", id: id, autocomplete: "off" });
-      input.placeholder = current === "***" ? "(set) leave blank to keep" : "not set";
+      input.placeholder = current === "***" ? t("settings.passwordSetPlaceholder") : t("settings.passwordNotSet");
       row.appendChild(input);
-      var clearBtn = el("button", { type: "button", text: "Clear" });
+      var clearBtn = el("button", { type: "button" });
+      clearBtn.textContent = t("settings.clear");
       clearBtn.addEventListener("click", function () {
         input.value = "";
         saveSetting(path, null, sectionCfg, f.key, badge).then(function () {
-          input.placeholder = "not set";
+          input.placeholder = t("settings.passwordNotSet");
         });
       });
       row.appendChild(clearBtn);
@@ -1484,7 +2173,7 @@
         if (input.value !== "") {
           saveSetting(path, input.value, sectionCfg, f.key, badge).then(function () {
             input.value = "";
-            input.placeholder = "(set) leave blank to keep";
+            input.placeholder = t("settings.passwordSetPlaceholder");
           });
         }
       });
@@ -1509,7 +2198,9 @@
     body.innerHTML = "";
     SETTINGS_SCHEMA.forEach(function (grp) {
       var sec = el("div", { class: "settings-section" });
-      sec.appendChild(el("h3", { text: grp.title }));
+      var h3 = el("h3", {});
+      h3.textContent = t(grp.titleKey);
+      sec.appendChild(h3);
       var sectionCfg = cfg ? cfg[grp.section] : null;
       grp.fields.forEach(function (f) {
         sec.appendChild(buildSettingsField(grp.section, f, sectionCfg));
@@ -1575,6 +2266,9 @@
 
   /* ---------- init ---------- */
 
+  document.documentElement.lang = currentLang;
+  applyStaticI18n();
+  updateLangButtons();
   renderChat();
   startPolling();
   startTicker();
