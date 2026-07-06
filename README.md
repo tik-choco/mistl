@@ -13,8 +13,9 @@ It integrates the [tc-storage](https://github.com/tik-choco/tc-storage) CLI and 
   p2p network
 - **mailbox** — p2p store-and-forward messaging ("p2p mail server"): when the recipient
   is offline, a bot node holds the deposit and forwards it once they come online
-- **ui** — embedded web dashboard (`mistl ui`): operate all of the above from a
-  browser at `http://127.0.0.1:6480/`
+- **ui** — embedded web dashboard (`mistl` with no args, or `mistl ui`): operate all
+  of the above from a browser at `http://127.0.0.1:6480/`, bilingual EN/JA, with
+  drag-and-drop file storage and live settings
 - **ai** — p2p AI network, wire-compatible with
   [mistai](https://github.com/tik-choco-lab/mistai) protocol v1 (tc-mistllm /
   tc-translate peers can share the room): *provide* LLM inference to peers from any
@@ -42,7 +43,14 @@ the MSVC runtime is statically linked — no external tools, DLLs, or installers
 $ cargo build --release
 ```
 
-## Usage
+## Quick start
+
+Double-click `mistl.exe` (or run `mistl` with no arguments): the daemon starts in
+the background and the dashboard opens in your browser — everything below can be
+done from there, including settings. The dashboard is bilingual (English/日本語,
+following your browser language).
+
+## Usage (CLI)
 
 The CLI acts as a client to a resident daemon (IPC: loopback TCP with token auth).
 Client commands start the daemon automatically if it isn't running.

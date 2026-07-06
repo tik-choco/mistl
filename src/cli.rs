@@ -5,10 +5,17 @@ use serde_json::{Value, json};
 use crate::daemon;
 
 #[derive(Parser)]
-#[command(name = "mistl", version, about = "Unified P2P daemon: identity, storage, RTSP screen share, offline mailbox")]
+#[command(
+    name = "mistl",
+    version,
+    about = "Unified P2P daemon: identity, storage, VRChat screen share, offline mailbox, AI network",
+    after_help = "Running `mistl` with no arguments opens the web dashboard \
+                  (starts the daemon if needed) -- double-clicking mistl.exe does the same."
+)]
 pub struct Cli {
+    /// Omitted -> open the web dashboard.
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -194,7 +201,12 @@ pub enum AiToggleAction {
 /// Dispatch a parsed CLI invocation: either run the daemon, or act as a
 /// client sending one request to the running daemon over local IPC.
 pub fn dispatch(cli: Cli) -> Result<()> {
-    match cli.command {
+    let Some(command) = cli.command else {
+        // Bare `mistl` (including an Explorer double-click on the exe):
+        // bring the whole thing up and land the user in the dashboard.
+        return open_dashboard();
+    };
+    match command {
         Command::Daemon { action } => match action {
             DaemonAction::Run => daemon::run_foreground(),
             DaemonAction::Start => daemon::start_background(),
