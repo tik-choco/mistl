@@ -25,10 +25,11 @@ mod native;
 mod relay;
 mod rtp_out;
 mod rtsp;
+mod selftest;
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
@@ -48,6 +49,11 @@ enum CaptureBackend {
     /// p2p relay of a tc-chat screen share (selected by `stream.relay.start`,
     /// not by `stream.capture_backend`).
     Relay,
+    /// Synthetic local test feed (selected by `stream.selftest.start`): a
+    /// moving H264 pattern plus an optional tone, for verifying the
+    /// RTSP/AVPro serving path (multi-viewer fan-out, the audio track) end to
+    /// end without the p2p leg the real relay needs.
+    SelfTest,
 }
 
 impl CaptureBackend {
@@ -66,6 +72,7 @@ impl CaptureBackend {
             Self::Native => "native",
             Self::Ffmpeg => "ffmpeg",
             Self::Relay => "relay",
+            Self::SelfTest => "selftest",
         }
     }
 }
@@ -80,6 +87,9 @@ enum Backend {
     #[cfg(windows)]
     Native(native::NativeCapture),
     Relay(relay::RelayCapture),
+    /// The synthetic self-test feed task (see [`selftest::run`]); stopping it
+    /// is just aborting that task, which drops its own generator tasks.
+    SelfTest(tokio::task::JoinHandle<()>),
 }
 
 impl Backend {
@@ -95,6 +105,7 @@ impl Backend {
             #[cfg(windows)]
             Backend::Native(native) => native.stop().await,
             Backend::Relay(relay) => relay.stop().await,
+            Backend::SelfTest(task) => task.abort(),
         }
     }
 }
@@ -125,7 +136,7 @@ pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Val
     match cmd {
         "stream.start" => {
             let backend = CaptureBackend::parse(&state.config().stream.capture_backend)?;
-            start(state, backend, None).await
+            start(state, backend, None, None).await
         }
         "stream.relay.start" => {
             let room = args
@@ -139,7 +150,11 @@ pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Val
                      tc-chat room id of the screen share"
                 );
             };
-            start(state, CaptureBackend::Relay, Some(room)).await
+            start(state, CaptureBackend::Relay, Some(room), None).await
+        }
+        "stream.selftest.start" => {
+            let opts = parse_selftest_opts(&args)?;
+            start(state, CaptureBackend::SelfTest, None, Some(opts)).await
         }
         "stream.stop" => stop().await,
         "stream.status" => status().await,
@@ -147,10 +162,33 @@ pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Val
     }
 }
 
+/// Parse the `stream.selftest.start` arguments into [`selftest::SelfTestOpts`].
+/// Audio defaults to AAC (the VRChat codec) so the two-track path is exercised
+/// by default; `audio: "none"` makes it video-only. Width/height/fps/seconds
+/// fall back to the [`selftest::SelfTestOpts::default`] values when absent.
+fn parse_selftest_opts(args: &Value) -> Result<selftest::SelfTestOpts> {
+    let defaults = selftest::SelfTestOpts::default();
+    let audio = match args.get("audio").and_then(Value::as_str) {
+        None | Some("aac") => Some(rtp_out::AudioCodec::Aac),
+        Some("opus") => Some(rtp_out::AudioCodec::Opus),
+        Some("none") => None,
+        Some(other) => bail!("invalid selftest audio {other:?}; valid values: \"aac\", \"opus\", \"none\""),
+    };
+    let as_u32 = |key: &str, fallback: u32| args.get(key).and_then(Value::as_u64).map_or(fallback, |v| v as u32);
+    Ok(selftest::SelfTestOpts {
+        width: as_u32("width", defaults.width),
+        height: as_u32("height", defaults.height),
+        frame_rate: as_u32("fps", defaults.frame_rate),
+        audio,
+        duration: args.get("seconds").and_then(Value::as_u64).map(Duration::from_secs),
+    })
+}
+
 async fn start(
     state: &Arc<AppState>,
     backend_kind: CaptureBackend,
     relay_room: Option<String>,
+    selftest_opts: Option<selftest::SelfTestOpts>,
 ) -> Result<Value> {
     let mut guard = pipeline().lock().await;
     if let Some(existing) = guard.as_ref() {
@@ -164,9 +202,12 @@ async fn start(
     }
 
     let cfg = &state.config().stream;
-    // Relayed shares carry audio; local capture stays video-only for now.
+    // Relayed shares carry audio; the self-test feed carries whatever audio
+    // codec its options asked for (so the two-track path is exercised); local
+    // capture stays video-only for now.
     let audio = match backend_kind {
         CaptureBackend::Relay => Some(rtp_out::AudioCodec::parse(&cfg.audio_codec)?),
+        CaptureBackend::SelfTest => selftest_opts.as_ref().and_then(|o| o.audio),
         _ => None,
     };
 
@@ -195,6 +236,16 @@ async fn start(
             relay::RelayCapture::spawn(state, room, codec, rtsp.clone())
                 .await
                 .map(Backend::Relay)
+        }
+        CaptureBackend::SelfTest => {
+            let opts = selftest_opts.expect("selftest backend requires opts");
+            let rtsp_for_selftest = rtsp.clone();
+            let handle = tokio::spawn(async move {
+                if let Err(error) = selftest::run(rtsp_for_selftest, opts).await {
+                    warn!(%error, "stream selftest feed ended with error");
+                }
+            });
+            Ok(Backend::SelfTest(handle))
         }
     };
 

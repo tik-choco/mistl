@@ -92,6 +92,7 @@ $ mistl store get <cid> --output .\file.bin
 # Screen share (VRChat)
 $ mistl stream start          # local screen -> rtsp://<LAN IP>:8554/stream
 $ mistl stream relay --room my-room   # tc-chat share (video+audio) -> same URL
+$ mistl stream selftest --audio aac   # synthetic video+audio feed for local testing
 $ mistl stream status
 $ mistl stream stop
 
@@ -142,6 +143,17 @@ the RTSP URL. Paste the printed URL into any AVPro-based VRChat video player.
 Note: the p2p transport supports multiple simultaneous rooms per process, so
 `stream.relay_room` can name its own room independent of `mailbox.room_id` and
 `ai.room_id` -- or reuse one of them if you'd rather keep everything in one room.
+
+**Any number of viewers (mesh):** VRChat's AVPro can only play a URL, not join
+the p2p swarm, so the scalable and lowest-latency arrangement is for *each*
+viewer to run `mistl stream relay --room X` on their own machine and point their
+VRChat at their own `rtsp://127.0.0.1:8554/stream`. Everyone talks to their own
+loopback (no public IP or port-forwarding), and mistlib p2p distributes the
+share; the sharer's uplink is the mesh ceiling. See
+[VERIFY.md](VERIFY.md) for the full topology, the log lines that confirm each
+stage, and `mistl stream selftest` — a synthetic video+audio feed that exercises
+the exact two-track RTSP output VRChat consumes, so you can confirm the playback
+path locally (ffprobe/ffplay) without a live p2p share.
 
 `mailbox send` returns one of three `status` values:
 

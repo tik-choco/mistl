@@ -139,6 +139,25 @@ pub enum StreamAction {
         #[arg(short, long)]
         room: Option<String>,
     },
+    /// Serve a synthetic moving test pattern + tone over RTSP, to verify the
+    /// VRChat/AVPro playback path locally (ffprobe/ffplay) without the p2p leg
+    Selftest {
+        /// Audio track: "aac" (default, what VRChat plays), "opus", or "none"
+        #[arg(short, long)]
+        audio: Option<String>,
+        /// Frame width in pixels (default 640)
+        #[arg(long)]
+        width: Option<u32>,
+        /// Frame height in pixels (default 360)
+        #[arg(long)]
+        height: Option<u32>,
+        /// Frames per second (default 30)
+        #[arg(long)]
+        fps: Option<u32>,
+        /// Stop automatically after N seconds (default: run until `stream stop`)
+        #[arg(short, long)]
+        seconds: Option<u64>,
+    },
     /// Stop the RTSP server
     Stop,
     /// Show stream status and URL
@@ -245,6 +264,24 @@ pub fn dispatch(cli: Cli) -> Result<()> {
                     println!("  Paste this URL into the VRChat video player:");
                     println!();
                     println!("      {url}");
+                    println!();
+                }
+                Ok(())
+            }
+            StreamAction::Selftest { audio, width, height, fps, seconds } => {
+                let response = request(
+                    "stream.selftest.start",
+                    json!({ "audio": audio, "width": width, "height": height, "fps": fps, "seconds": seconds }),
+                )?;
+                println!("{}", serde_json::to_string_pretty(&response)?);
+                if let Some(url) = response.get("rtsp_url").and_then(Value::as_str) {
+                    println!();
+                    println!("  Synthetic feed is live. Verify the RTSP/AVPro path with:");
+                    println!();
+                    println!("      ffprobe -rtsp_transport tcp {url}");
+                    println!("      ffplay  -rtsp_transport tcp {url}");
+                    println!();
+                    println!("  (open two ffplay windows to confirm multi-viewer fan-out)");
                     println!();
                 }
                 Ok(())
