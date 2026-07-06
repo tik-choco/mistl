@@ -31,6 +31,7 @@
 //! types.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
@@ -45,7 +46,7 @@ use mistlib::webrtc::rtp_transceiver::rtp_codec::RTPCodecType;
 use mistlib::webrtc::track::track_remote::TrackRemote;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::daemon::AppState;
 use crate::stream::rtp_out::{self, AudioCodec};
@@ -62,6 +63,11 @@ const NAL_TYPE_IDR: u8 = 5;
 /// viewer get an IDR within one interval (mistlink does the same).
 const PLI_INTERVAL: Duration = Duration::from_secs(5);
 
+/// Cadence of the periodic INFO throughput summary (`summary_task`): frequent
+/// enough that a viewer watching the log can tell within a few seconds that
+/// the pipeline is alive, without approaching debug-level chatter.
+const SUMMARY_INTERVAL: Duration = Duration::from_secs(5);
+
 /// Samples per channel in one AAC-LC frame (fixed by the codec), and the
 /// interleaved-sample chunk size (stereo) that implies.
 const AAC_FRAME_SAMPLES: usize = 1024;
@@ -70,6 +76,17 @@ const AAC_CHANNELS: usize = 2;
 /// Largest Opus frame `opus::Decoder::decode` can produce: 120 ms at 48 kHz,
 /// stereo.
 const MAX_OPUS_DECODE_SAMPLES: usize = 48_000 / 1000 * 120 * AAC_CHANNELS;
+
+/// Throughput counters shared between the media-forwarding tasks and the
+/// periodic `summary_task`: how many video access units / audio frames were
+/// actually forwarded to `rtsp` since the counters were last reset. Cheap
+/// `Relaxed` atomics -- exact ordering doesn't matter, only the totals over
+/// each summary interval.
+#[derive(Default)]
+struct RelayCounters {
+    video_au: AtomicU64,
+    audio_frames: AtomicU64,
+}
 
 /// The running relay: the control task consuming media events, plus shared
 /// state other code (`stream.status`, `stop`) needs to reach into.
@@ -101,14 +118,22 @@ impl RelayCapture {
 
         let publisher = Arc::new(StdMutex::new(None));
         let active_tasks = Arc::new(StdMutex::new(Vec::new()));
+        let counters = Arc::new(RelayCounters::default());
 
         let control_task = tokio::spawn(control_loop(
             rx,
-            rtsp,
+            rtsp.clone(),
             audio_codec,
             publisher.clone(),
             active_tasks.clone(),
+            counters.clone(),
         ));
+
+        let summary_handle = tokio::spawn(summary_task(rtsp, publisher.clone(), counters));
+        active_tasks
+            .lock()
+            .expect("relay active tasks lock poisoned")
+            .push(summary_handle);
 
         Ok(Self {
             publisher,
@@ -179,6 +204,7 @@ async fn control_loop(
     audio_codec: AudioCodec,
     publisher: Arc<StdMutex<Option<String>>>,
     active_tasks: Arc<StdMutex<Vec<JoinHandle<()>>>>,
+    counters: Arc<RelayCounters>,
 ) {
     let (ended_tx, mut ended_rx) = mpsc::unbounded_channel::<String>();
     let mut locked: Option<String> = None;
@@ -199,7 +225,7 @@ async fn control_loop(
                             continue;
                         }
 
-                        debug!(%remote_id, "relay: locking onto publisher");
+                        info!(%remote_id, "relay: locking onto publisher");
                         *publisher.lock().expect("relay publisher lock poisoned") = Some(remote_id.clone());
                         locked = Some(remote_id.clone());
                         audio_attached = false;
@@ -209,6 +235,7 @@ async fn control_loop(
                             rtsp.clone(),
                             remote_id.clone(),
                             ended_tx.clone(),
+                            counters.clone(),
                         ));
                         let pli_handle = tokio::spawn(pli_task(event.pc.clone(), event.track.ssrc()));
                         active_tasks
@@ -217,11 +244,13 @@ async fn control_loop(
                             .extend([video_handle, pli_handle]);
 
                         if let Some(audio_event) = pending_audio.remove(&remote_id) {
+                            info!(%remote_id, codec = audio_codec.as_str(), "relay: audio track attached");
                             let audio_handle = tokio::spawn(audio_task(
                                 audio_event.track,
                                 rtsp.clone(),
                                 audio_codec,
                                 remote_id.clone(),
+                                counters.clone(),
                             ));
                             active_tasks
                                 .lock()
@@ -232,11 +261,13 @@ async fn control_loop(
                     }
                     RTPCodecType::Audio => match decide_audio(locked.as_deref(), &remote_id, audio_attached) {
                         AudioDecision::Attach => {
+                            info!(%remote_id, codec = audio_codec.as_str(), "relay: audio track attached");
                             let audio_handle = tokio::spawn(audio_task(
                                 event.track,
                                 rtsp.clone(),
                                 audio_codec,
                                 remote_id.clone(),
+                                counters.clone(),
                             ));
                             active_tasks
                                 .lock()
@@ -256,7 +287,7 @@ async fn control_loop(
             }
             Some(ended_id) = ended_rx.recv() => {
                 if locked.as_deref() == Some(ended_id.as_str()) {
-                    debug!(remote_id = %ended_id, "relay: publisher's video track ended; unlocking");
+                    info!(remote_id = %ended_id, "relay: publisher's video track ended; unlocking");
                     *publisher.lock().expect("relay publisher lock poisoned") = None;
                     locked = None;
                     audio_attached = false;
@@ -283,9 +314,11 @@ async fn video_task(
     rtsp: Arc<RtspServer>,
     remote_id: String,
     ended_tx: mpsc::UnboundedSender<String>,
+    counters: Arc<RelayCounters>,
 ) {
     let mut depacketizer = H264Packet::default();
     let mut assembler = AuAssembler::new();
+    let mut seen_first_keyframe = false;
 
     loop {
         let (packet, _attrs) = match track.read_rtp().await {
@@ -317,9 +350,15 @@ async fn video_task(
                 rtsp.update_pps(pps).await;
             }
             if nals.has_idr {
-                debug!(%remote_id, "relay: forwarded IDR access unit");
+                if !seen_first_keyframe {
+                    seen_first_keyframe = true;
+                    info!(%remote_id, "relay: first keyframe (IDR) received from publisher");
+                } else {
+                    debug!(%remote_id, "relay: forwarded IDR access unit");
+                }
             }
             rtsp.send_video_access_unit_at(&au, au_ts).await;
+            counters.video_au.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -351,18 +390,30 @@ async fn send_pli(pc: &Arc<RTCPeerConnection>, media_ssrc: u32) {
 /// Reads RTP off the locked audio (Opus) track and forwards it per
 /// `codec`: passthrough for [`AudioCodec::Opus`], transcode to AAC-LC for
 /// [`AudioCodec::Aac`].
-async fn audio_task(track: Arc<TrackRemote>, rtsp: Arc<RtspServer>, codec: AudioCodec, remote_id: String) {
+async fn audio_task(
+    track: Arc<TrackRemote>,
+    rtsp: Arc<RtspServer>,
+    codec: AudioCodec,
+    remote_id: String,
+    counters: Arc<RelayCounters>,
+) {
     match codec {
-        AudioCodec::Opus => audio_task_opus(track, rtsp, remote_id).await,
-        AudioCodec::Aac => audio_task_aac(track, rtsp, remote_id).await,
+        AudioCodec::Opus => audio_task_opus(track, rtsp, remote_id, counters).await,
+        AudioCodec::Aac => audio_task_aac(track, rtsp, remote_id, counters).await,
     }
 }
 
-async fn audio_task_opus(track: Arc<TrackRemote>, rtsp: Arc<RtspServer>, remote_id: String) {
+async fn audio_task_opus(
+    track: Arc<TrackRemote>,
+    rtsp: Arc<RtspServer>,
+    remote_id: String,
+    counters: Arc<RelayCounters>,
+) {
     loop {
         match track.read_rtp().await {
             Ok((packet, _attrs)) => {
                 rtsp.send_audio_frame(&packet.payload, packet.header.timestamp).await;
+                counters.audio_frames.fetch_add(1, Ordering::Relaxed);
             }
             Err(error) => {
                 debug!(%remote_id, %error, "relay: audio track ended");
@@ -372,7 +423,12 @@ async fn audio_task_opus(track: Arc<TrackRemote>, rtsp: Arc<RtspServer>, remote_
     }
 }
 
-async fn audio_task_aac(track: Arc<TrackRemote>, rtsp: Arc<RtspServer>, remote_id: String) {
+async fn audio_task_aac(
+    track: Arc<TrackRemote>,
+    rtsp: Arc<RtspServer>,
+    remote_id: String,
+    counters: Arc<RelayCounters>,
+) {
     let mut transcoder = match OpusToAac::new() {
         Ok(t) => t,
         Err(error) => {
@@ -386,12 +442,54 @@ async fn audio_task_aac(track: Arc<TrackRemote>, rtsp: Arc<RtspServer>, remote_i
             Ok((packet, _attrs)) => {
                 for (frame, ts) in transcoder.push(&packet.payload, packet.header.timestamp) {
                     rtsp.send_audio_frame(&frame, ts).await;
+                    counters.audio_frames.fetch_add(1, Ordering::Relaxed);
                 }
             }
             Err(error) => {
                 debug!(%remote_id, %error, "relay: audio track ended");
                 break;
             }
+        }
+    }
+}
+
+/// Logs one INFO-level throughput summary every [`SUMMARY_INTERVAL`] -- the
+/// daemon's default `mistl=info` filter otherwise shows nothing between the
+/// lock/attach milestones, so this is what lets someone watching the log
+/// confirm at a glance that video and audio are still flowing and how many
+/// local VRChat/RTSP viewers are attached. Reads and resets `counters` each
+/// tick to derive a per-second rate; when no publisher is locked it logs a
+/// single quieter line instead of a zeroed-out throughput line.
+async fn summary_task(rtsp: Arc<RtspServer>, publisher: Arc<StdMutex<Option<String>>>, counters: Arc<RelayCounters>) {
+    let mut interval = tokio::time::interval(SUMMARY_INTERVAL);
+    interval.tick().await; // first tick fires immediately; nothing forwarded yet
+
+    loop {
+        interval.tick().await;
+
+        let video_au = counters.video_au.swap(0, Ordering::Relaxed);
+        let audio_frames = counters.audio_frames.swap(0, Ordering::Relaxed);
+        let secs = SUMMARY_INTERVAL.as_secs_f64();
+        let video_au_per_s = video_au as f64 / secs;
+        let audio_frames_per_s = audio_frames as f64 / secs;
+
+        let current_publisher = {
+            let guard = publisher.lock().expect("relay publisher lock poisoned");
+            guard.clone()
+        };
+
+        match current_publisher {
+            Some(publisher) => {
+                let viewers = rtsp.client_count().await;
+                info!(
+                    publisher = %publisher,
+                    video_au_per_s,
+                    audio_frames_per_s,
+                    viewers,
+                    "relay: throughput"
+                );
+            }
+            None => info!("relay: waiting for a screen share in the room"),
         }
     }
 }
