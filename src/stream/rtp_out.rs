@@ -58,6 +58,8 @@ impl AudioCodec {
         }
     }
 
+    // Inverse of `parse`; retained for symmetry, not yet called.
+    #[allow(dead_code)]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Aac => "aac",

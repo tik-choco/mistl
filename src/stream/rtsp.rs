@@ -30,7 +30,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
-use tracing::{debug, warn};
+use tracing::{info, warn};
 
 use super::rtp_out::{self, DUMMY_NALU, RtpHeaderFields};
 
@@ -40,6 +40,11 @@ const REAL_DATA_IDLE: Duration = Duration::from_millis(1000);
 /// How often RTCP Sender Reports go out per playing session/media, needed
 /// for A/V lipsync (mistlink got these for free from gortsplib).
 const SR_INTERVAL: Duration = Duration::from_secs(3);
+
+/// Minimum spacing between periodic "RTP outflow summary" diagnostic logs
+/// for a single session, so a fast-playing session doesn't spam the log at
+/// frame rate. Diagnostic only -- see [`record_rtp_outflow`].
+const RTP_LOG_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Nominal audio timestamp step substituted when a source RTP timestamp
 /// can't be trusted (see [`rebase_timestamp`]): a 20ms frame at the fixed
@@ -59,6 +64,15 @@ struct Session {
     video: Option<SessionTransport>,
     audio: Option<SessionTransport>,
     playing: bool,
+    /// RTP outflow diagnostics only (see [`record_rtp_outflow`]): running
+    /// packet/byte counters and the last sequence number sent to this
+    /// session, plus whether the first-packet-since-PLAY line has already
+    /// been logged and when the last periodic summary line was logged.
+    rtp_sent_packets: u64,
+    rtp_sent_bytes: u64,
+    rtp_last_seq: u16,
+    rtp_first_logged: bool,
+    rtp_last_summary_at: Option<Instant>,
 }
 
 /// How to reach one client for one media's RTP/RTCP traffic.
@@ -100,6 +114,13 @@ struct Inner {
     /// static screen, and AVPro drops the stream if RTP goes silent. Driven
     /// by video activity only -- mistlink has no audio keepalive.
     last_real_au: Option<Instant>,
+    /// The most recent access unit that contained an IDR (keyframe) NAL,
+    /// cached so a client that `PLAY`s during a static period (no new
+    /// frames from the damage-driven Windows.Graphics.Capture backend)
+    /// still gets a keyframe immediately instead of black video until the
+    /// next real IDR. Sending this on `PLAY` adds no latency to the live
+    /// path -- it's an extra unicast send to the joining session only.
+    last_idr_au: Option<Vec<u8>>,
     real_seq: u16,
     real_ts: u32,
     dummy_seq: u16,
@@ -141,6 +162,7 @@ impl RtspServer {
                 sps: None,
                 pps: None,
                 last_real_au: None,
+                last_idr_au: None,
                 real_seq: rand::random(),
                 real_ts: rand::random(),
                 dummy_seq: 0,
@@ -248,6 +270,9 @@ impl RtspServer {
     pub async fn send_video_access_unit(&self, annex_b: &[u8]) {
         let mut inner = self.inner.lock().await;
         inner.last_real_au = Some(Instant::now());
+        if au_contains_idr(annex_b) {
+            inner.last_idr_au = Some(annex_b.to_vec());
+        }
 
         let payloads = inner.payloader.payload(annex_b);
         if payloads.is_empty() {
@@ -273,7 +298,7 @@ impl RtspServer {
                 payload,
             );
             record_stats(&mut inner.video_stats, ts, payload.len());
-            Self::dispatch(&inner.sessions, &self.rtp_socket, Media::Video, &bytes).await;
+            Self::dispatch(&mut inner.sessions, &self.rtp_socket, Media::Video, &bytes).await;
         }
     }
 
@@ -286,6 +311,9 @@ impl RtspServer {
     pub async fn send_video_access_unit_at(&self, annex_b: &[u8], source_rtp_ts: u32) {
         let mut inner = self.inner.lock().await;
         inner.last_real_au = Some(Instant::now());
+        if au_contains_idr(annex_b) {
+            inner.last_idr_au = Some(annex_b.to_vec());
+        }
 
         let payloads = inner.payloader.payload(annex_b);
         if payloads.is_empty() {
@@ -314,7 +342,7 @@ impl RtspServer {
                 payload,
             );
             record_stats(&mut inner.video_stats, ts, payload.len());
-            Self::dispatch(&inner.sessions, &self.rtp_socket, Media::Video, &bytes).await;
+            Self::dispatch(&mut inner.sessions, &self.rtp_socket, Media::Video, &bytes).await;
         }
     }
 
@@ -366,10 +394,10 @@ impl RtspServer {
             &payload,
         );
         record_stats(&mut inner.audio_stats, ts, payload.len());
-        Self::dispatch(&inner.sessions, &self.rtp_socket, Media::Audio, &bytes).await;
+        Self::dispatch(&mut inner.sessions, &self.rtp_socket, Media::Audio, &bytes).await;
     }
 
-    async fn build_sdp(&self) -> String {
+    async fn build_sdp(&self, control_base: &str) -> String {
         let (sps, pps) = {
             let inner = self.inner.lock().await;
             match (&inner.sps, &inner.pps) {
@@ -382,6 +410,11 @@ impl RtspServer {
         let sps_b64 = base64::engine::general_purpose::STANDARD.encode(&sps);
         let pps_b64 = base64::engine::general_purpose::STANDARD.encode(&pps);
 
+        // WMPlayer/AVPro builds its SETUP URL from this per-media control
+        // line rather than the DESCRIBE URI, so it must always be present
+        // (in both video-only and two-track mode) and, when we know the
+        // request URI, an absolute URL -- see media_control.
+        let video_control = media_control(control_base, 0);
         let mut sdp = format!(
             "v=0\r\n\
              o=- 0 0 IN IP4 127.0.0.1\r\n\
@@ -393,23 +426,21 @@ impl RtspServer {
              a=recvonly\r\n\
              m=video 0 RTP/AVP {pt}\r\n\
              a=rtpmap:{pt} H264/{clock_rate}\r\n\
-             a=fmtp:{pt} packetization-mode=1;sprop-parameter-sets={sps_b64},{pps_b64}\r\n",
+             a=fmtp:{pt} packetization-mode=1;sprop-parameter-sets={sps_b64},{pps_b64}\r\n\
+             a=control:{video_control}\r\n",
             pt = rtp_out::PAYLOAD_TYPE_H264,
             clock_rate = rtp_out::CLOCK_RATE,
         );
 
-        // Video-only mode must serve byte-identical SDP to the historical
-        // single-track format -- no trailing trackID line, nothing else
-        // appended below.
         if let Some(codec) = self.audio {
-            sdp.push_str("a=control:trackID=0\r\n");
+            let audio_control = media_control(control_base, 1);
             match codec {
                 rtp_out::AudioCodec::Aac => {
                     sdp.push_str(&format!(
                         "m=audio 0 RTP/AVP {pt}\r\n\
                          a=rtpmap:{pt} mpeg4-generic/48000/2\r\n\
                          a=fmtp:{pt} profile-level-id=1;mode=AAC-hbr;sizelength=13;indexlength=3;indexdeltalength=3;config=1190\r\n\
-                         a=control:trackID=1\r\n",
+                         a=control:{audio_control}\r\n",
                         pt = rtp_out::PAYLOAD_TYPE_AAC,
                     ));
                 }
@@ -417,7 +448,7 @@ impl RtspServer {
                     sdp.push_str(&format!(
                         "m=audio 0 RTP/AVP {pt}\r\n\
                          a=rtpmap:{pt} opus/48000/2\r\n\
-                         a=control:trackID=1\r\n",
+                         a=control:{audio_control}\r\n",
                         pt = rtp_out::PAYLOAD_TYPE_OPUS,
                     ));
                 }
@@ -430,8 +461,8 @@ impl RtspServer {
     /// Send `bytes` (a full RTP packet) to every playing session's
     /// transport for `media`, over UDP or wrapped as an RTSP interleaved
     /// `Data` frame over TCP.
-    async fn dispatch(sessions: &HashMap<String, Session>, rtp_socket: &UdpSocket, media: Media, bytes: &[u8]) {
-        for session in sessions.values() {
+    async fn dispatch(sessions: &mut HashMap<String, Session>, rtp_socket: &UdpSocket, media: Media, bytes: &[u8]) {
+        for (session_id, session) in sessions.iter_mut() {
             if !session.playing {
                 continue;
             }
@@ -444,7 +475,9 @@ impl RtspServer {
             };
             match transport {
                 SessionTransport::Udp { rtp_addr, .. } => {
-                    let _ = rtp_socket.send_to(bytes, *rtp_addr).await;
+                    if let Err(error) = rtp_socket.send_to(bytes, *rtp_addr).await {
+                        warn!(%session_id, peer = %rtp_addr, %error, "RTP UDP send failed");
+                    }
                 }
                 SessionTransport::Tcp { rtp_channel, tx, .. } => {
                     let mut framed = Vec::with_capacity(4 + bytes.len());
@@ -452,19 +485,24 @@ impl RtspServer {
                     framed.push(*rtp_channel);
                     framed.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
                     framed.extend_from_slice(bytes);
-                    let _ = tx.send(framed);
+                    if let Err(error) = tx.send(framed) {
+                        warn!(%session_id, %error, "RTP TCP-interleaved send failed");
+                    }
                 }
             }
+            record_rtp_outflow(session_id, session, media, bytes);
         }
     }
 
     /// Send `bytes` (a full RTCP packet) to one session's transport for one
     /// media, over UDP (to the stored client RTCP address) or interleaved
     /// over TCP (on that media's RTCP channel).
-    async fn dispatch_rtcp(transport: &SessionTransport, rtp_socket: &UdpSocket, bytes: &[u8]) {
+    async fn dispatch_rtcp(session_id: &str, transport: &SessionTransport, rtp_socket: &UdpSocket, bytes: &[u8]) {
         match transport {
             SessionTransport::Udp { rtcp_addr, .. } => {
-                let _ = rtp_socket.send_to(bytes, *rtcp_addr).await;
+                if let Err(error) = rtp_socket.send_to(bytes, *rtcp_addr).await {
+                    warn!(%session_id, peer = %rtcp_addr, %error, "RTCP UDP send failed");
+                }
             }
             SessionTransport::Tcp { rtcp_channel, tx, .. } => {
                 let mut framed = Vec::with_capacity(4 + bytes.len());
@@ -472,10 +510,154 @@ impl RtspServer {
                 framed.push(*rtcp_channel);
                 framed.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
                 framed.extend_from_slice(bytes);
-                let _ = tx.send(framed);
+                if let Err(error) = tx.send(framed) {
+                    warn!(%session_id, %error, "RTCP TCP-interleaved send failed");
+                }
             }
         }
     }
+
+    /// Unicast the cached IDR access unit (prepended with cached SPS/PPS
+    /// for decoder init) to exactly one session's video transport. Called
+    /// right after that session issues `PLAY`, so a client connecting
+    /// during a static period -- when the damage-driven
+    /// Windows.Graphics.Capture backend emits no frames and so produces no
+    /// new IDR -- still gets a keyframe immediately instead of rendering
+    /// black until the next real one. This does not touch `real_ts`
+    /// (reuses the current live timestamp) and does not go through
+    /// [`Self::dispatch`], so it adds no latency or extra work to the live
+    /// fan-out path; it's a one-off extra send to the joining session
+    /// only. No-op if no IDR has been cached yet, or if the session is
+    /// missing, not playing, or has no video transport.
+    /// Returns the `(sequence_number, rtp_timestamp)` of the first keyframe
+    /// packet sent, for the caller to advertise in the PLAY response's
+    /// `RTP-Info` header; `None` if nothing was sent (no cached IDR yet, or
+    /// the session isn't a playing video receiver).
+    pub async fn send_keyframe_to_session(&self, session_id: &str) -> Option<(u16, u32)> {
+        enum TargetTransport {
+            Udp(SocketAddr),
+            Tcp(u8, mpsc::UnboundedSender<Vec<u8>>),
+        }
+
+        let mut inner = self.inner.lock().await;
+
+        let Some(idr_au) = inner.last_idr_au.clone() else {
+            info!(%session_id, "keyframe-on-join skipped: no cached IDR yet");
+            return None;
+        };
+
+        let Some(session) = inner.sessions.get(session_id) else {
+            info!(%session_id, "keyframe-on-join skipped: session not found");
+            return None;
+        };
+        if !session.playing {
+            info!(%session_id, "keyframe-on-join skipped: session not playing");
+            return None;
+        }
+        let Some(video_transport) = session.video.as_ref() else {
+            info!(%session_id, "keyframe-on-join skipped: no video transport");
+            return None;
+        };
+        let target = match video_transport {
+            SessionTransport::Udp { rtp_addr, .. } => TargetTransport::Udp(*rtp_addr),
+            SessionTransport::Tcp { rtp_channel, tx, .. } => TargetTransport::Tcp(*rtp_channel, tx.clone()),
+        };
+
+        // Prepend cached SPS/PPS so the decoder can init even if the
+        // cached IDR access unit didn't inline its own parameter sets;
+        // duplication here is harmless.
+        let mut bundle = Vec::with_capacity(idr_au.len() + 16);
+        if let Some(sps) = &inner.sps {
+            bundle.extend_from_slice(&[0, 0, 0, 1]);
+            bundle.extend_from_slice(sps);
+        }
+        if let Some(pps) = &inner.pps {
+            bundle.extend_from_slice(&[0, 0, 0, 1]);
+            bundle.extend_from_slice(pps);
+        }
+        bundle.extend_from_slice(&idr_au);
+
+        let payloads = inner.payloader.payload(&bundle);
+        if payloads.is_empty() {
+            info!(%session_id, "keyframe-on-join skipped: payloader produced no packets");
+            return None;
+        }
+
+        let ts = inner.real_ts;
+        let first_seq = inner.real_seq;
+        let last = payloads.len() - 1;
+        let mut packets: Vec<Vec<u8>> = Vec::with_capacity(payloads.len());
+        for (i, payload) in payloads.iter().enumerate() {
+            let seq = inner.real_seq;
+            inner.real_seq = inner.real_seq.wrapping_add(1);
+            let bytes = rtp_out::serialize_rtp_packet(
+                rtp_out::PAYLOAD_TYPE_H264,
+                rtp_out::VIDEO_SSRC,
+                RtpHeaderFields {
+                    sequence_number: seq,
+                    timestamp: ts,
+                    marker: i == last,
+                },
+                payload,
+            );
+            record_stats(&mut inner.video_stats, ts, payload.len());
+            packets.push(bytes);
+        }
+
+        drop(inner);
+
+        info!(%session_id, packets = packets.len(), first_seq, ts, "keyframe-on-join: sending cached IDR");
+
+        for bytes in packets {
+            match &target {
+                TargetTransport::Udp(rtp_addr) => {
+                    if let Err(error) = self.rtp_socket.send_to(&bytes, *rtp_addr).await {
+                        warn!(%session_id, peer = %rtp_addr, %error, "keyframe UDP send failed");
+                    }
+                }
+                TargetTransport::Tcp(rtp_channel, tx) => {
+                    let mut framed = Vec::with_capacity(4 + bytes.len());
+                    framed.push(b'$');
+                    framed.push(*rtp_channel);
+                    framed.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
+                    framed.extend_from_slice(&bytes);
+                    if let Err(error) = tx.send(framed) {
+                        warn!(%session_id, %error, "keyframe TCP-interleaved send failed");
+                    }
+                }
+            }
+        }
+
+        Some((first_seq, ts))
+    }
+}
+
+/// Scan an Annex-B buffer (one or more NAL units, each prefixed by a
+/// `00 00 01` or `00 00 00 01` start code) for an IDR slice NAL (type 5,
+/// the low 5 bits of the NAL header byte).
+fn au_contains_idr(annex_b: &[u8]) -> bool {
+    let mut i = 0;
+    while i + 2 < annex_b.len() {
+        let is_start_code_3 = annex_b[i] == 0 && annex_b[i + 1] == 0 && annex_b[i + 2] == 1;
+        let is_start_code_4 =
+            i + 3 < annex_b.len() && annex_b[i] == 0 && annex_b[i + 1] == 0 && annex_b[i + 2] == 0 && annex_b[i + 3] == 1;
+        if is_start_code_4 {
+            let header_idx = i + 4;
+            if header_idx < annex_b.len() && (annex_b[header_idx] & 0x1F) == 5 {
+                return true;
+            }
+            i = header_idx;
+        } else if is_start_code_3 {
+            let header_idx = i + 3;
+            if header_idx < annex_b.len() && (annex_b[header_idx] & 0x1F) == 5 {
+                return true;
+            }
+            i = header_idx;
+        } else {
+            i += 1;
+        }
+    }
+    false
 }
 
 /// Bump `stats` after emitting one RTP packet for a media: packet/octet
@@ -487,6 +669,50 @@ fn record_stats(stats: &mut MediaStats, ts: u32, payload_len: usize) {
     stats.last_ts = ts;
     stats.last_ts_at = Some(Instant::now());
     stats.active = true;
+}
+
+/// Diagnostic-only RTP outflow visibility for one session: logs the first
+/// packet sent to it since PLAY (seq/ts/payload size), then at most one
+/// periodic summary line per [`RTP_LOG_INTERVAL`] (packets/bytes/last seq)
+/// so a session that's actually receiving RTP doesn't spam the log while
+/// one that never gets anything stays silent -- both are useful signals when
+/// tracking down where an AVPro client stalls. `bytes` is the full
+/// serialized RTP packet (12-byte header + payload); seq/ts are read back
+/// out of the header rather than threaded through as extra arguments.
+fn record_rtp_outflow(session_id: &str, session: &mut Session, media: Media, bytes: &[u8]) {
+    if bytes.len() < 12 {
+        return;
+    }
+    let seq = u16::from_be_bytes([bytes[2], bytes[3]]);
+    let ts = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+    let payload_len = bytes.len() - 12;
+
+    session.rtp_sent_packets += 1;
+    session.rtp_sent_bytes += bytes.len() as u64;
+    session.rtp_last_seq = seq;
+
+    if !session.rtp_first_logged {
+        session.rtp_first_logged = true;
+        session.rtp_last_summary_at = Some(Instant::now());
+        info!(%session_id, ?media, seq, ts, payload_len, "first RTP packet sent to session");
+        return;
+    }
+
+    let now = Instant::now();
+    let due = match session.rtp_last_summary_at {
+        Some(at) => now.duration_since(at) >= RTP_LOG_INTERVAL,
+        None => true,
+    };
+    if due {
+        session.rtp_last_summary_at = Some(now);
+        info!(
+            %session_id,
+            packets = session.rtp_sent_packets,
+            bytes = session.rtp_sent_bytes,
+            last_seq = session.rtp_last_seq,
+            "RTP outflow summary"
+        );
+    }
 }
 
 /// Rebase a publisher's own RTP timestamp into this server's output
@@ -576,7 +802,7 @@ async fn dummy_keepalive_loop(server: Arc<RtspServer>) {
             DUMMY_NALU,
         );
         record_stats(&mut inner.video_stats, ts, DUMMY_NALU.len());
-        RtspServer::dispatch(&inner.sessions, &server.rtp_socket, Media::Video, &bytes).await;
+        RtspServer::dispatch(&mut inner.sessions, &server.rtp_socket, Media::Video, &bytes).await;
     }
 }
 
@@ -602,15 +828,15 @@ async fn sender_report_loop(server: Arc<RtspServer>) {
             .active
             .then(|| build_sender_report(&inner.audio_stats, rtp_out::AUDIO_SSRC, rtp_out::AUDIO_CLOCK_RATE));
 
-        for session in inner.sessions.values() {
+        for (session_id, session) in inner.sessions.iter() {
             if !session.playing {
                 continue;
             }
             if let (Some(bytes), Some(transport)) = (&video_sr, &session.video) {
-                RtspServer::dispatch_rtcp(transport, &server.rtp_socket, bytes).await;
+                RtspServer::dispatch_rtcp(session_id, transport, &server.rtp_socket, bytes).await;
             }
             if let (Some(bytes), Some(transport)) = (&audio_sr, &session.audio) {
-                RtspServer::dispatch_rtcp(transport, &server.rtp_socket, bytes).await;
+                RtspServer::dispatch_rtcp(session_id, transport, &server.rtp_socket, bytes).await;
             }
         }
     }
@@ -639,6 +865,8 @@ fn build_sender_report(stats: &MediaStats, ssrc: u32, clock_rate: u32) -> Vec<u8
 /// back responses (and, once a TCP-interleaved SETUP has happened, RTP/RTCP
 /// `Data` frames pushed from elsewhere via `tcp_tx`).
 async fn handle_connection(server: Arc<RtspServer>, stream: TcpStream, peer_addr: SocketAddr) {
+    info!(%peer_addr, "RTSP connection accepted");
+
     let (mut read_half, write_half) = stream.into_split();
     let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
 
@@ -654,6 +882,7 @@ async fn handle_connection(server: Arc<RtspServer>, stream: TcpStream, peer_addr
     let mut buf: Vec<u8> = Vec::new();
     let mut read_buf = [0u8; 8192];
     let mut session_ids: Vec<String> = Vec::new();
+    let mut request_count: u32 = 0;
 
     'conn: loop {
         loop {
@@ -661,29 +890,84 @@ async fn handle_connection(server: Arc<RtspServer>, stream: TcpStream, peer_addr
                 Ok((message, consumed)) => {
                     buf.drain(0..consumed);
                     if let rtsp_types::Message::Request(request) = message {
-                        let (response, new_session) =
+                        let method: &str = request.method().into();
+                        let cseq = request
+                            .typed_header::<headers::CSeq>()
+                            .ok()
+                            .flatten()
+                            .map(u32::from);
+                        let uri = request.request_uri().map(|u| u.as_str());
+                        let user_agent = request.header(&headers::USER_AGENT).map(|v| v.as_str());
+                        if request.method() == &Method::Setup {
+                            let transport = request.header(&headers::TRANSPORT).map(|v| v.as_str());
+                            info!(%peer_addr, method, ?cseq, ?uri, ?user_agent, ?transport, "RTSP request");
+                        } else {
+                            info!(%peer_addr, method, ?cseq, ?uri, ?user_agent, "RTSP request");
+                        }
+                        request_count += 1;
+
+                        let (response, new_session, play_keyframe) =
                             handle_request(&server, &request, peer_addr, tx.clone()).await;
                         if let Some(id) = new_session {
                             session_ids.push(id);
                         }
+
+                        let status = u16::from(response.status());
+                        match request.method() {
+                            Method::Setup => {
+                                let transport = response.header(&headers::TRANSPORT).map(|v| v.as_str());
+                                info!(%peer_addr, method, status, ?transport, "RTSP response");
+                            }
+                            Method::Play => {
+                                let rtp_info = response.header(&headers::RTP_INFO).map(|v| v.as_str());
+                                info!(%peer_addr, method, status, ?rtp_info, "RTSP response");
+                            }
+                            _ => {
+                                info!(%peer_addr, method, status, "RTSP response");
+                            }
+                        }
+
                         let mut out = Vec::new();
                         if response.write(&mut out).is_err() || tx.send(out).is_err() {
                             break 'conn;
+                        }
+                        // Only now that the response is queued do we blast the
+                        // join keyframe, so the PLAY 200 lands before any
+                        // interleaved RTP `$` frames (AVPro rejects data that
+                        // arrives ahead of the PLAY response).
+                        if let Some(id) = play_keyframe {
+                            server.send_keyframe_to_session(&id).await;
                         }
                     }
                     // Data/Response messages from the client (e.g. RTCP
                     // sent over an interleaved channel) are ignored.
                 }
                 Err(rtsp_types::ParseError::Incomplete(_)) => break,
-                Err(rtsp_types::ParseError::Error) => {
-                    debug!(%peer_addr, "bad RTSP message, closing connection");
+                Err(error @ rtsp_types::ParseError::Error) => {
+                    let preview_len = buf.len().min(64);
+                    let hex: String = buf[..preview_len].iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+                    let ascii: String = buf[..preview_len]
+                        .iter()
+                        .map(|&b| if b.is_ascii_graphic() || b == b' ' { b as char } else { '.' })
+                        .collect();
+                    info!(
+                        %peer_addr, %error, request_count, hex = %hex, ascii = %ascii,
+                        "bad RTSP message, closing connection"
+                    );
                     break 'conn;
                 }
             }
         }
 
         match read_half.read(&mut read_buf).await {
-            Ok(0) | Err(_) => break,
+            Ok(0) => {
+                info!(%peer_addr, request_count, "RTSP connection closed: EOF");
+                break;
+            }
+            Err(error) => {
+                info!(%peer_addr, request_count, %error, "RTSP connection closed: read error");
+                break;
+            }
             Ok(n) => buf.extend_from_slice(&read_buf[..n]),
         }
     }
@@ -691,7 +975,9 @@ async fn handle_connection(server: Arc<RtspServer>, stream: TcpStream, peer_addr
     {
         let mut inner = server.inner.lock().await;
         for id in &session_ids {
-            inner.sessions.remove(id);
+            if inner.sessions.remove(id).is_some() {
+                info!(%peer_addr, session_id = %id, "session removed: connection dropped without TEARDOWN");
+            }
         }
     }
     writer_task.abort();
@@ -714,7 +1000,10 @@ async fn handle_request(
     request: &Request<Vec<u8>>,
     peer_addr: SocketAddr,
     tcp_tx: mpsc::UnboundedSender<Vec<u8>>,
-) -> (Response<Vec<u8>>, Option<String>) {
+) -> (Response<Vec<u8>>, Option<String>, Option<String>) {
+    // Returns (response, new_session_to_clean_up, play_keyframe_session). The
+    // third element, set only by PLAY, tells the connection loop to blast the
+    // cached keyframe to that session AFTER the response is on the wire.
     let version = request.version();
     let cseq = request.typed_header::<headers::CSeq>().ok().flatten();
 
@@ -731,25 +1020,64 @@ async fn handle_request(
                         .build(),
                 )
                 .build(Vec::new());
-            (response, None)
+            (response, None, None)
         }
         Method::Describe => {
-            let sdp = server.build_sdp().await;
+            // The control base is this request's URI with any trailing '/'
+            // trimmed, so build_sdp can append "/trackID=N" to it. Absent a
+            // request URI at all, fall back to relative controls.
+            let control_base = request
+                .request_uri()
+                .map(|uri| uri.as_str().trim_end_matches('/').to_string())
+                .unwrap_or_default();
+            let sdp = server.build_sdp(&control_base).await;
             let mut builder =
                 base_response(version, StatusCode::Ok, cseq).header(headers::CONTENT_TYPE, "application/sdp");
             if let Some(uri) = request.request_uri() {
-                builder = builder.header(headers::CONTENT_BASE, uri.as_str().to_string());
+                // gortsplib parity: Content-Base always carries a trailing
+                // slash, which relative-URL resolution treats as "this is a
+                // directory" (RFC 3986 5.3) -- without it some clients would
+                // resolve a relative control against the parent path.
+                let mut content_base = uri.as_str().to_string();
+                if !content_base.ends_with('/') {
+                    content_base.push('/');
+                }
+                builder = builder.header(headers::CONTENT_BASE, content_base);
             }
-            (builder.build(sdp.into_bytes()), None)
+            (builder.build(sdp.into_bytes()), None, None)
         }
-        Method::Setup => handle_setup(server, request, peer_addr, tcp_tx, version, cseq).await,
-        Method::Play => handle_play(server, request, version, cseq).await,
-        Method::Teardown => handle_teardown(server, request, version, cseq).await,
-        Method::GetParameter => (base_response(version, StatusCode::Ok, cseq).build(Vec::new()), None),
+        Method::Setup => {
+            let (response, new_session) = handle_setup(server, request, peer_addr, tcp_tx, version, cseq).await;
+            (response, new_session, None)
+        }
+        Method::Play => {
+            let (response, play_keyframe) = handle_play(server, request, version, cseq).await;
+            (response, None, play_keyframe)
+        }
+        Method::Teardown => {
+            let (response, new_session) = handle_teardown(server, request, version, cseq).await;
+            (response, new_session, None)
+        }
+        Method::GetParameter => (base_response(version, StatusCode::Ok, cseq).build(Vec::new()), None, None),
         _ => (
             base_response(version, StatusCode::MethodNotAllowed, cseq).build(Vec::new()),
             None,
+            None,
         ),
+    }
+}
+
+/// Builds the `a=control` value for one media section: an absolute URL
+/// rooted at `control_base` (the DESCRIBE request URI, trailing '/'
+/// trimmed) when known, so WMPlayer/AVPro-style clients that build their
+/// SETUP URL straight from this line get something they can use as-is.
+/// Falls back to a bare relative track id when the DESCRIBE had no request
+/// URI to build on.
+fn media_control(control_base: &str, track_id: u32) -> String {
+    if control_base.is_empty() {
+        format!("trackID={track_id}")
+    } else {
+        format!("{control_base}/trackID={track_id}")
     }
 }
 
@@ -864,11 +1192,31 @@ async fn handle_setup(
                 video: None,
                 audio: None,
                 playing: false,
+                rtp_sent_packets: 0,
+                rtp_sent_bytes: 0,
+                rtp_last_seq: 0,
+                rtp_first_logged: false,
+                rtp_last_summary_at: None,
             },
         );
         id
     };
     let is_new_session = requested_session.is_none();
+
+    match &session_transport {
+        SessionTransport::Udp { rtp_addr, rtcp_addr } => {
+            info!(
+                %peer_addr, session_id = %session_id, ?track_kind, new_session = is_new_session,
+                %rtp_addr, %rtcp_addr, "session transport set up (UDP)"
+            );
+        }
+        SessionTransport::Tcp { rtp_channel, rtcp_channel, .. } => {
+            info!(
+                %peer_addr, session_id = %session_id, ?track_kind, new_session = is_new_session,
+                rtp_channel, rtcp_channel, "session transport set up (TCP interleaved)"
+            );
+        }
+    }
 
     {
         let session = inner
@@ -910,12 +1258,34 @@ async fn handle_play(
         );
     };
     entry.playing = true;
+    info!(session_id = %session.0, "PLAY: session marked playing");
+    // The `entry` mutable borrow ends at the assignment above, so `inner` is
+    // free to read here. Grab the next video seq/ts to advertise in RTP-Info.
+    let rtp_seq = inner.real_seq;
+    let rtp_time = inner.real_ts;
     drop(inner);
 
+    // RTP-Info advertises the sequence number and RTP timestamp of the first
+    // packet the client will see, so it can initialize playback timing.
+    // gortsplib (mistlink's RTSP stack, the known-good VRChat reference)
+    // always sends this on PLAY and AVPro relies on it to start rendering --
+    // its absence was a key reason VRChat showed nothing.
+    let rtp_info = match request.request_uri() {
+        Some(uri) => format!("url={uri};seq={rtp_seq};rtptime={rtp_time}"),
+        None => format!("seq={rtp_seq};rtptime={rtp_time}"),
+    };
+
+    let session_id = session.0.clone();
     let response = base_response(version, StatusCode::Ok, cseq)
         .typed_header(&headers::Session::from(session.0))
+        .header(headers::RTP_INFO, rtp_info)
         .build(Vec::new());
-    (response, None)
+    // The join keyframe is sent by the connection loop AFTER this response is
+    // queued (see handle_connection): the PLAY 200 must reach the client
+    // before any interleaved RTP data, or AVPro discards it. This also fixes
+    // "VRChat shows nothing" on a static screen, where the damage-driven
+    // capture backend emits no fresh IDR for a late joiner to sync on.
+    (response, Some(session_id))
 }
 
 async fn handle_teardown(
@@ -926,7 +1296,11 @@ async fn handle_teardown(
 ) -> (Response<Vec<u8>>, Option<String>) {
     if let Ok(Some(session)) = request.typed_header::<headers::Session>() {
         let mut inner = server.inner.lock().await;
-        inner.sessions.remove(session.0.as_str());
+        if inner.sessions.remove(session.0.as_str()).is_some() {
+            info!(session_id = %session.0, "session removed: TEARDOWN");
+        } else {
+            info!(session_id = %session.0, "TEARDOWN for unknown session id");
+        }
     }
     (base_response(version, StatusCode::Ok, cseq).build(Vec::new()), None)
 }
@@ -965,7 +1339,7 @@ mod tests {
             .build(Vec::new());
         let (tx, _rx) = mpsc::unbounded_channel();
 
-        let (response, session) = handle_request(&server, &request, peer(), tx).await;
+        let (response, session, _) = handle_request(&server, &request, peer(), tx).await;
 
         assert_eq!(response.status(), StatusCode::Ok);
         assert!(session.is_none());
@@ -985,7 +1359,7 @@ mod tests {
             .build(Vec::new());
         let (tx, _rx) = mpsc::unbounded_channel();
 
-        let (response, session) = handle_request(&server, &request, peer(), tx).await;
+        let (response, session, _) = handle_request(&server, &request, peer(), tx).await;
 
         assert_eq!(response.status(), StatusCode::Ok);
         assert!(session.is_none());
@@ -997,17 +1371,22 @@ mod tests {
         assert!(body.contains("m=video 0 RTP/AVP 96"));
         assert!(body.contains(&format!("rtpmap:{} H264/90000", rtp_out::PAYLOAD_TYPE_H264)));
         assert!(body.contains("sprop-parameter-sets="));
+        assert!(body.contains("a=control:rtsp://127.0.0.1:8554/stream/trackID=0\r\n"));
+        assert_eq!(
+            response.header(&headers::CONTENT_BASE).map(|v| v.as_str()),
+            Some("rtsp://127.0.0.1:8554/stream/")
+        );
     }
 
     #[tokio::test]
-    async fn video_only_sdp_matches_historical_format_exactly() {
+    async fn video_only_sdp_includes_absolute_video_control() {
         use base64::Engine as _;
 
         let server = test_server().await;
         server.update_sps(vec![0x67, 0x42, 0x00, 0x0a]).await;
         server.update_pps(vec![0x68, 0xce, 0x3c, 0x80]).await;
 
-        let sdp = server.build_sdp().await;
+        let sdp = server.build_sdp("rtsp://127.0.0.1:8554/stream").await;
 
         let sps_b64 = base64::engine::general_purpose::STANDARD.encode([0x67, 0x42, 0x00, 0x0a]);
         let pps_b64 = base64::engine::general_purpose::STANDARD.encode([0x68, 0xce, 0x3c, 0x80]);
@@ -1022,39 +1401,48 @@ mod tests {
              a=recvonly\r\n\
              m=video 0 RTP/AVP 96\r\n\
              a=rtpmap:96 H264/90000\r\n\
-             a=fmtp:96 packetization-mode=1;sprop-parameter-sets={sps_b64},{pps_b64}\r\n",
+             a=fmtp:96 packetization-mode=1;sprop-parameter-sets={sps_b64},{pps_b64}\r\n\
+             a=control:rtsp://127.0.0.1:8554/stream/trackID=0\r\n",
         );
 
         assert_eq!(sdp, expected);
-        assert!(!sdp.contains("trackID"));
         assert!(!sdp.contains("m=audio"));
     }
 
     #[tokio::test]
     async fn two_track_sdp_includes_aac_audio_section() {
         let server = test_server_with_audio(rtp_out::AudioCodec::Aac).await;
-        let sdp = server.build_sdp().await;
+        let sdp = server.build_sdp("rtsp://127.0.0.1:8554/stream").await;
 
         assert!(sdp.contains("m=video 0 RTP/AVP 96\r\n"));
-        assert!(sdp.contains("a=control:trackID=0\r\n"));
+        assert!(sdp.contains("a=control:rtsp://127.0.0.1:8554/stream/trackID=0\r\n"));
         assert!(sdp.contains("m=audio 0 RTP/AVP 112\r\n"));
         assert!(sdp.contains("a=rtpmap:112 mpeg4-generic/48000/2\r\n"));
         assert!(sdp.contains(
             "a=fmtp:112 profile-level-id=1;mode=AAC-hbr;sizelength=13;indexlength=3;indexdeltalength=3;config=1190\r\n"
         ));
-        assert!(sdp.contains("a=control:trackID=1\r\n"));
+        assert!(sdp.contains("a=control:rtsp://127.0.0.1:8554/stream/trackID=1\r\n"));
     }
 
     #[tokio::test]
     async fn two_track_sdp_includes_opus_audio_section() {
         let server = test_server_with_audio(rtp_out::AudioCodec::Opus).await;
-        let sdp = server.build_sdp().await;
+        let sdp = server.build_sdp("rtsp://127.0.0.1:8554/stream").await;
 
-        assert!(sdp.contains("a=control:trackID=0\r\n"));
+        assert!(sdp.contains("a=control:rtsp://127.0.0.1:8554/stream/trackID=0\r\n"));
         assert!(sdp.contains("m=audio 0 RTP/AVP 111\r\n"));
         assert!(sdp.contains("a=rtpmap:111 opus/48000/2\r\n"));
-        assert!(sdp.contains("a=control:trackID=1\r\n"));
+        assert!(sdp.contains("a=control:rtsp://127.0.0.1:8554/stream/trackID=1\r\n"));
         assert!(!sdp.contains("mpeg4-generic"));
+    }
+
+    #[tokio::test]
+    async fn build_sdp_falls_back_to_relative_control_without_base() {
+        let server = test_server().await;
+        let sdp = server.build_sdp("").await;
+
+        assert!(sdp.contains("a=control:trackID=0\r\n"));
+        assert!(!sdp.contains("rtsp://"));
     }
 
     #[test]
@@ -1142,7 +1530,7 @@ mod tests {
             .header(headers::TRANSPORT, "RTP/AVP;unicast;client_port=5000-5001")
             .build(Vec::new());
         let (tx, _rx) = mpsc::unbounded_channel();
-        let (response, session_id) = handle_request(&server, &setup_request, peer(), tx.clone()).await;
+        let (response, session_id, _) = handle_request(&server, &setup_request, peer(), tx.clone()).await;
         assert_eq!(response.status(), StatusCode::Ok);
         let session_id = session_id.expect("SETUP should allocate a session id");
 
@@ -1155,11 +1543,32 @@ mod tests {
             .header(headers::CSEQ, "2")
             .header(headers::SESSION, session_id.clone())
             .build(Vec::new());
-        let (response, _) = handle_request(&server, &play_request, peer(), tx).await;
+        let (response, _, _) = handle_request(&server, &play_request, peer(), tx).await;
         assert_eq!(response.status(), StatusCode::Ok);
 
         let inner = server.inner.lock().await;
         assert!(inner.sessions.get(&session_id).unwrap().playing);
+    }
+
+    #[tokio::test]
+    async fn setup_video_only_with_absolute_trackid_selects_video() {
+        // The SDP now always emits an absolute per-media control URL (e.g.
+        // "rtsp://host/stream/trackID=0") even in video-only mode, so a
+        // SETUP built from that line -- not just the bare "/stream" URI --
+        // must keep selecting the video track.
+        let server = test_server().await;
+        let setup_request = Request::builder(Method::Setup, Version::V1_0)
+            .request_uri(Url::parse("rtsp://127.0.0.1:8554/stream/trackID=0").unwrap())
+            .header(headers::CSEQ, "1")
+            .header(headers::TRANSPORT, "RTP/AVP;unicast;client_port=5000-5001")
+            .build(Vec::new());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (response, session_id, _) = handle_request(&server, &setup_request, peer(), tx).await;
+
+        assert_eq!(response.status(), StatusCode::Ok);
+        let session_id = session_id.expect("SETUP should allocate a session id");
+        let inner = server.inner.lock().await;
+        assert!(inner.sessions.get(&session_id).unwrap().video.is_some());
     }
 
     #[tokio::test]
@@ -1170,7 +1579,7 @@ mod tests {
             .header(headers::TRANSPORT, "RTP/AVP/TCP;unicast;interleaved=0-1")
             .build(Vec::new());
         let (tx, _rx) = mpsc::unbounded_channel();
-        let (response, session_id) = handle_request(&server, &setup_request, peer(), tx).await;
+        let (response, session_id, _) = handle_request(&server, &setup_request, peer(), tx).await;
 
         assert_eq!(response.status(), StatusCode::Ok);
         assert!(session_id.is_some());
@@ -1188,7 +1597,7 @@ mod tests {
             .header(headers::TRANSPORT, "RTP/AVP;unicast;client_port=5000-5001")
             .build(Vec::new());
         let (tx, _rx) = mpsc::unbounded_channel();
-        let (response, session_id) = handle_request(&server, &video_setup, peer(), tx.clone()).await;
+        let (response, session_id, _) = handle_request(&server, &video_setup, peer(), tx.clone()).await;
         assert_eq!(response.status(), StatusCode::Ok);
         let session_id = session_id.expect("first SETUP allocates a session");
 
@@ -1198,7 +1607,7 @@ mod tests {
             .header(headers::TRANSPORT, "RTP/AVP;unicast;client_port=5002-5003")
             .header(headers::SESSION, session_id.clone())
             .build(Vec::new());
-        let (response2, session_id2) = handle_request(&server, &audio_setup, peer(), tx).await;
+        let (response2, session_id2, _) = handle_request(&server, &audio_setup, peer(), tx).await;
         assert_eq!(response2.status(), StatusCode::Ok);
         // The second SETUP attaches to the existing session rather than
         // allocating a new one.
@@ -1220,7 +1629,7 @@ mod tests {
             .header(headers::SESSION, "does-not-exist".to_string())
             .build(Vec::new());
         let (tx, _rx) = mpsc::unbounded_channel();
-        let (response, session_id) = handle_request(&server, &setup_request, peer(), tx).await;
+        let (response, session_id, _) = handle_request(&server, &setup_request, peer(), tx).await;
 
         assert_eq!(response.status(), StatusCode::SessionNotFound);
         assert!(session_id.is_none());
@@ -1234,14 +1643,14 @@ mod tests {
             .header(headers::TRANSPORT, "RTP/AVP;unicast;client_port=6000-6001")
             .build(Vec::new());
         let (tx, _rx) = mpsc::unbounded_channel();
-        let (_, session_id) = handle_request(&server, &setup_request, peer(), tx.clone()).await;
+        let (_, session_id, _) = handle_request(&server, &setup_request, peer(), tx.clone()).await;
         let session_id = session_id.unwrap();
 
         let teardown_request = Request::builder(Method::Teardown, Version::V1_0)
             .header(headers::CSEQ, "2")
             .header(headers::SESSION, session_id.clone())
             .build(Vec::new());
-        let (response, _) = handle_request(&server, &teardown_request, peer(), tx).await;
+        let (response, _, _) = handle_request(&server, &teardown_request, peer(), tx).await;
         assert_eq!(response.status(), StatusCode::Ok);
 
         let inner = server.inner.lock().await;
