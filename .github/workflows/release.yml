@@ -12,7 +12,8 @@
 # Requires one repository secret:
 #   MISTLIB_DEV_TOKEN - fine-grained PAT with Contents: Read on
 #                       tik-choco-lab/mistlib-dev (private path dependency,
-#                       checked out as a sibling directory).
+#                       checked out into .mistlib-src/ like the local
+#                       scripts/fetch-mistlib workflow does).
 
 name: release
 
@@ -88,19 +89,17 @@ jobs:
     defaults:
       run:
         shell: bash
-        working-directory: mistl
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: mistl
 
-      # Path dependency `../mistlib-dev` (private) as a sibling checkout.
+      # Private path dependency `.mistlib-src/` (same location the local
+      # scripts/fetch-mistlib puts it, so Cargo.toml needs no CI special-case).
       - uses: actions/checkout@v4
         with:
           repository: ${{ env.MISTLIB_REPO }}
           ref: ${{ env.MISTLIB_REF }}
           token: ${{ secrets.MISTLIB_DEV_TOKEN }}
-          path: mistlib-dev
+          path: .mistlib-src
 
       - name: Install Linux build deps
         if: runner.os == 'Linux'
@@ -112,7 +111,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: mistl
           key: ${{ matrix.target }}
 
       - name: Stamp release version into Cargo.toml
@@ -140,7 +138,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: mistl-${{ matrix.target }}
-          path: mistl/dist/*
+          path: dist/*
           if-no-files-found: error
 
   release:

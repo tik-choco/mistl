@@ -6,9 +6,11 @@ description = "Unified P2P daemon CLI: identity (DID), storage, RTSP screen shar
 license = "MPL-2.0"
 
 [dependencies]
-# mistlib workspace (path deps; mistlib-native's lib name is `mistlib`)
-mistlib-core = { path = "../mistlib-dev/mistlib-core" }
-mistlib-native = { path = "../mistlib-dev/mistlib-native" }
+# mistlib workspace (path deps; mistlib-native's lib name is `mistlib`).
+# .mistlib-src is a git clone managed by scripts/fetch-mistlib (repo/ref set
+# in .env; `just fetch-mistlib` to update, first `just build` fetches it).
+mistlib-core = { path = ".mistlib-src/mistlib-core" }
+mistlib-native = { path = ".mistlib-src/mistlib-native" }
 
 # CLI / runtime / config
 anyhow = "1"
