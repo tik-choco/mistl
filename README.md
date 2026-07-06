@@ -1,6 +1,6 @@
-# mistl
+# MISTL
 
-A Rust daemon CLI that unifies tik-choco ecosystem features in a single binary.
+**MISTL** (binary name: `mistl`) is a Rust daemon CLI that unifies tik-choco ecosystem features in a single binary.
 It integrates the [tc-storage](https://github.com/tik-choco/tc-storage) CLI and the
 [mistlink](https://github.com/tik-choco-lab/mistlink) CLI, built on top of
 [mistlib](https://github.com/tik-choco-lab/mistlib) (path dependencies).
@@ -128,9 +128,9 @@ $ mistl stream relay --room <the tc-chat room id>
 mistl joins the room as a WebRTC peer, receives the share (H264 video + Opus audio),
 transcodes the audio to AAC (what AVPro plays over RTSP), and serves both tracks on
 the RTSP URL. Paste the printed URL into any AVPro-based VRChat video player.
-Note: mistlib supports one room per process, so the relay room is shared with
-mailbox/ai (set `stream.relay_room`, `mailbox.room_id`, `ai.room_id` consistently,
-or leave the others unset).
+Note: the p2p transport supports multiple simultaneous rooms per process, so
+`stream.relay_room` can name its own room independent of `mailbox.room_id` and
+`ai.room_id` -- or reuse one of them if you'd rather keep everything in one room.
 
 `mailbox send` returns one of three `status` values:
 
@@ -184,11 +184,52 @@ enabled = true                               # serve the dashboard from the daem
 listen = "127.0.0.1:6480"                    # keep on loopback (no auth)
 ```
 
-Note: mistlib supports **one room per process**, so mailbox and ai share it.
-`[ai] room_id` defaults to the mailbox room; to join an existing mistai app room,
-set both to the same value.
+Note: mailbox, ai, and stream relay can each join their **own** room -- the p2p
+transport supports multiple simultaneous rooms per process. `[ai] room_id`
+defaults to the mailbox room for convenience when unset; set it explicitly to
+join a different room, e.g. an existing mistai app room.
 
 Data lives in `%APPDATA%\tik-choco\mistl\data\` (keys, blocks, spools, logs).
+
+## Profile document (ecosystem interop)
+
+The user profile is a small JSON document, persisted at
+`data\identity\profile.json` and returned (merged with the identity's `did`) by
+`profile.show`. It is designed to be read as-is by sibling apps (tc-chat,
+tc-storage) that share the same `did:key` identities and CID-addressed content
+store:
+
+```json
+{
+  "did": "did:key:z6Mk…",
+  "display_name": "Ada",
+  "bio": "Loves math",
+  "avatar_cid": "baf…",
+  "updated_at": "2026-07-06T12:34:56+00:00"
+}
+```
+
+- `did` — the owner's `did:key` (Ed25519), the stable key other apps index by.
+- `display_name`, `bio` — optional free-text fields.
+- `avatar_cid` — optional. The **root CID of the profile image in the shared
+  content store** (the same store as `store put` / `POST /api/store/upload`,
+  CIDv1 / sha2-256 / dag-cbor `FileManifest`). The image itself is *not* inlined;
+  any peer holding the block (or able to resolve it over the store) fetches the
+  bytes by this CID — e.g. `GET /api/store/download?cid=<avatar_cid>` locally.
+- `updated_at` — RFC 3339 timestamp of the last change, stamped on every
+  `profile.set`, so a peer that has seen several copies can pick the freshest.
+- Any additional string fields set via `profile.set` are preserved verbatim
+  (they round-trip through the top level of the document).
+
+Read/write it over the dashboard bridge or IPC:
+
+- `profile.show` `{}` → the document above.
+- `profile.set` `{field, value}` → sets one field (`display_name`, `bio`,
+  `avatar_cid`, or a custom name); an empty `value` clears it.
+
+The dashboard's **Profile** panel sets the avatar end-to-end: it downscales the
+chosen image to 256 px client-side, uploads it to the content store
+(`POST /api/store/upload`), and points `avatar_cid` at the returned CID.
 
 ## Architecture
 

@@ -13,3 +13,6 @@ pub use server::serve;
 /// The dashboard page, embedded at compile time so the release exe stays a
 /// single file.
 pub(crate) const INDEX_HTML: &str = include_str!("assets/index.html");
+
+/// The dashboard favicon, embedded for the same single-file release flow.
+pub(crate) const FAVICON_PNG: &[u8] = include_bytes!("assets/favicon.png");

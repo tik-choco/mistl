@@ -3,10 +3,46 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title data-i18n="pageTitle">mistl dashboard</title>
+<title data-i18n="pageTitle">MISTL dashboard</title>
+<link rel="icon" type="image/png" href="/favicon.png">
 <style>
+  /* Light is the default theme (`:root`); the dark theme is opt-in via the
+     topbar toggle, which stamps `data-theme="dark"` on <html> and persists
+     the choice in localStorage (`mistl-theme`). A tiny head script sets the
+     attribute before first paint so there is no flash. The default is light
+     regardless of `prefers-color-scheme`; only an explicit stored choice
+     switches to dark, so an explicit choice always wins. */
   :root {
-    color-scheme: dark light;
+    color-scheme: light;
+    --bg: #f4f5f8;
+    --bg-alt: #eaecf1;
+    --panel: #ffffff;
+    --panel-border: #dde1e9;
+    --text: #1b1f27;
+    --text-dim: #565f70;
+    --text-faint: #8790a0;
+    --accent: #2064d6;
+    --accent-dim: #dbe8ff;
+    --ok: #12875a;
+    --ok-dim: #dcf3e9;
+    --warn: #a8650f;
+    --warn-dim: #fbe9d2;
+    --err: #c62f29;
+    --err-dim: #fbe0de;
+    --mono: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --radius: 12px;
+    /* motion + depth tokens (single source of truth for the refreshed UI) */
+    --ease: cubic-bezier(0.16, 1, 0.3, 1);       /* expo-out: soft, unhurried settle */
+    --ease-out: cubic-bezier(0.33, 1, 0.68, 1);
+    --dur: 0.34s;
+    --dur-fast: 0.16s;
+    --sidenav-w: 224px;
+    --shadow-sm: 0 1px 2px rgba(30, 40, 60, 0.08);
+    --shadow: 0 2px 6px rgba(30, 40, 60, 0.08), 0 14px 34px rgba(30, 40, 60, 0.12);
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
     --bg: #0f1115;
     --bg-alt: #161923;
     --panel: #1a1e29;
@@ -22,28 +58,8 @@
     --warn-dim: #45300f;
     --err: #f0605a;
     --err-dim: #46201e;
-    --mono: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
-    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    --radius: 10px;
-  }
-  @media (prefers-color-scheme: light) {
-    :root {
-      --bg: #f4f5f8;
-      --bg-alt: #eaecf1;
-      --panel: #ffffff;
-      --panel-border: #dde1e9;
-      --text: #1b1f27;
-      --text-dim: #565f70;
-      --text-faint: #8790a0;
-      --accent: #2064d6;
-      --accent-dim: #dbe8ff;
-      --ok: #12875a;
-      --ok-dim: #dcf3e9;
-      --warn: #a8650f;
-      --warn-dim: #fbe9d2;
-      --err: #c62f29;
-      --err-dim: #fbe0de;
-    }
+    --shadow-sm: 0 1px 2px rgba(6, 10, 20, 0.28);
+    --shadow: 0 2px 6px rgba(6, 10, 20, 0.22), 0 14px 34px rgba(6, 10, 20, 0.30);
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; }
@@ -133,68 +149,130 @@
   .lang-toggle button.active { background: var(--accent-dim); color: var(--accent); }
   .lang-toggle button:hover:not(.active) { color: var(--text); border-color: var(--accent); }
 
-  .quicknav {
-    display: flex;
-    gap: 4px;
-    overflow-x: auto;
-    padding: 0 20px 8px;
-  }
-  .quicknav a {
-    padding: 4px 10px;
+  .theme-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    flex: none;
     border-radius: 999px;
-    font-size: 12px;
+    border: 1px solid transparent;
+    background: var(--panel-border);
+    color: var(--text-dim);
+  }
+  .theme-toggle:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); transform: none; }
+  .theme-toggle svg { width: 16px; height: 16px; stroke-width: 2; }
+  .theme-toggle .icon-sun { display: none; }
+  .theme-toggle .icon-moon { display: block; }
+  :root[data-theme="dark"] .theme-toggle .icon-sun { display: block; }
+  :root[data-theme="dark"] .theme-toggle .icon-moon { display: none; }
+
+  /* ---- app shell: sidebar nav + single routed view --------------------- */
+  .shell {
+    display: flex;
+    align-items: flex-start;
+    max-width: 1280px;
+    margin: 0 auto;
+    gap: 0;
+  }
+  .sidenav {
+    position: sticky;
+    top: 57px;                       /* below the sticky topbar */
+    align-self: flex-start;
+    flex: none;
+    width: var(--sidenav-w);
+    max-height: calc(100vh - 57px);
+    overflow-y: auto;
+    padding: 16px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .sidenav a {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    padding: 9px 12px;
+    border-radius: 9px;
+    font-size: 13.5px;
     font-weight: 600;
     color: var(--text-dim);
     text-decoration: none;
-    white-space: nowrap;
+    position: relative;
+    transition: color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out);
   }
-  .quicknav a:hover { color: var(--accent); background: var(--panel-border); }
+  .sidenav a svg { width: 17px; height: 17px; flex: none; stroke-width: 1.9; opacity: 0.85; }
+  .sidenav a:hover { color: var(--text); background: var(--bg-alt); }
+  .sidenav a.active { color: var(--accent); background: var(--accent-dim); }
+  .sidenav a.active svg { opacity: 1; }
+  .sidenav a.active::before {
+    content: "";
+    position: absolute;
+    left: -12px; top: 50%;
+    height: 18px; width: 3px;
+    border-radius: 0 3px 3px 0;
+    background: var(--accent);
+    transform: translateY(-50%);
+    animation: navmark var(--dur) var(--ease);
+  }
+  @keyframes navmark { from { height: 0; opacity: 0; } to { height: 18px; opacity: 1; } }
 
   main {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
-    gap: 16px;
-    padding: 20px;
-    max-width: 1600px;
-    margin: 0 auto;
+    flex: 1;
+    min-width: 0;
+    padding: 24px clamp(16px, 3vw, 40px) 48px;
+    display: block;
   }
   .panel {
     background: var(--panel);
     border: 1px solid var(--panel-border);
     border-radius: var(--radius);
-    padding: 16px;
-    display: flex;
+    padding: 22px 24px;
+    display: none;                   /* router shows exactly one at a time */
     flex-direction: column;
-    gap: 12px;
+    gap: 16px;
     min-width: 0;
+    box-shadow: var(--shadow-sm);
   }
+  .panel.active {
+    display: flex;
+    animation: viewin var(--dur) var(--ease);
+  }
+  .panel.active > * { animation: risein var(--dur) var(--ease) backwards; }
+  .panel.active > *:nth-child(2) { animation-delay: 0.04s; }
+  .panel.active > *:nth-child(3) { animation-delay: 0.08s; }
+  .panel.active > *:nth-child(4) { animation-delay: 0.11s; }
+  .panel.active > *:nth-child(n+5) { animation-delay: 0.13s; }
+  @keyframes viewin { from { opacity: 0; transform: translateY(10px) scale(0.994); } to { opacity: 1; transform: none; } }
+  @keyframes risein { from { opacity: 0; transform: translateY(7px); } to { opacity: 1; transform: none; } }
   .panel h2 {
-    font-size: 13px;
-    margin: 0;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--text-dim);
+    font-size: 20px;
+    font-weight: 700;
+    margin: 0 0 2px;
+    letter-spacing: -0.01em;
+    color: var(--text);
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 10px;
   }
   .panel h2 .spacer { flex: 1; }
-  .panel-span2 { grid-column: span 2; }
-  @media (max-width: 760px) {
-    .panel-span2 { grid-column: span 1; }
-  }
+  .panel-span2 { grid-column: auto; }   /* legacy hook: single-view is full width */
 
   .hint-banner {
-    grid-column: 1 / -1;
     display: flex;
     align-items: center;
     gap: 10px;
     flex-wrap: wrap;
-    padding: 10px 14px;
-    border-radius: 8px;
+    padding: 11px 16px;
+    margin-bottom: 18px;
+    border-radius: 10px;
     background: var(--accent-dim);
     color: var(--text);
     font-size: 13px;
+    box-shadow: var(--shadow-sm);
+    animation: risein var(--dur) var(--ease);
   }
   .hint-banner .dismiss {
     margin-left: auto;
@@ -215,14 +293,21 @@
     font-family: var(--sans);
     font-size: 13px;
     font-weight: 600;
-    padding: 6px 12px;
-    border-radius: 7px;
+    padding: 7px 13px;
+    border-radius: 8px;
     border: 1px solid var(--panel-border);
     background: var(--bg-alt);
     color: var(--text);
     cursor: pointer;
+    transition: border-color var(--dur-fast) var(--ease-out),
+                color var(--dur-fast) var(--ease-out),
+                background var(--dur-fast) var(--ease-out),
+                transform var(--dur-fast) var(--ease-out),
+                box-shadow var(--dur-fast) var(--ease-out);
   }
-  button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); transform: translateY(-1px); }
+  button:active:not(:disabled) { transform: translateY(0); }
+  button.primary:hover:not(:disabled) { color: var(--accent); box-shadow: 0 4px 14px var(--accent-dim); }
   button:disabled { opacity: 0.55; cursor: default; }
   button.primary { background: var(--accent-dim); color: var(--accent); border-color: transparent; }
   button.danger { background: var(--err-dim); color: var(--err); border-color: transparent; }
@@ -500,30 +585,134 @@
   .download-link:hover { text-decoration: underline; }
   .store-save-form { margin: 6px 0 0; }
   .store-save-form input { width: 140px; }
+
+  /* ---- identity avatar (topbar) + profile avatar editor --------------- */
+  .identity-avatar {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    object-fit: cover;
+    flex: none;
+    background: var(--panel-border);
+    border: 1px solid var(--panel-border);
+  }
+  .profile-avatar-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .avatar-preview {
+    width: 96px;
+    height: 96px;
+    flex: none;
+    border-radius: 50%;
+    overflow: hidden;
+    border: 1px solid var(--panel-border);
+    background: var(--bg-alt);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-faint);
+    font-size: 32px;
+    font-weight: 700;
+    text-transform: uppercase;
+    box-shadow: var(--shadow-sm);
+  }
+  .avatar-preview img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .avatar-controls { flex: 1; min-width: 220px; display: flex; flex-direction: column; gap: 8px; }
+  .avatar-controls .store-dropzone { padding: 16px 14px; }
+  .avatar-controls .store-dropzone.busy-zone { opacity: 0.6; pointer-events: none; }
+  .avatar-actions { display: flex; gap: 8px; }
+
+  /* ---- refined focus ring (keyboard-friendly, non-jarring) ------------- */
+  input[type=text]:focus, input[type=password]:focus, input[type=number]:focus, textarea:focus, select:focus {
+    box-shadow: 0 0 0 3px var(--accent-dim);
+    transition: box-shadow var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
+  }
+  a:focus-visible, button:focus-visible, .sidenav a:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .url-callout { transition: transform var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out); }
+  .url-callout:hover { transform: translateY(-1px); box-shadow: 0 6px 18px var(--accent-dim); }
+  .flow-card { transition: border-color var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out); }
+  .flow-card:hover { border-color: var(--accent); transform: translateY(-1px); }
+
+  /* ---- responsive: sidebar collapses to a scrollable top rail ---------- */
+  @media (max-width: 720px) {
+    .shell { flex-direction: column; }
+    .sidenav {
+      position: sticky;
+      top: 57px;
+      z-index: 9;
+      flex-direction: row;
+      width: 100%;
+      max-height: none;
+      overflow-x: auto;
+      gap: 4px;
+      padding: 8px 12px;
+      background: var(--bg-alt);
+      border-bottom: 1px solid var(--panel-border);
+    }
+    .sidenav a { white-space: nowrap; padding: 7px 11px; }
+    .sidenav a.active::before { display: none; }
+    main { padding: 16px 14px 40px; }
+    .panel { padding: 18px 16px; }
+  }
+
+  /* ---- respect reduced-motion: keep it calm, kill the movement --------- */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+    }
+  }
 </style>
+<script>
+  /* Seed the theme before first paint (no flash). Light is the default; an
+     explicit choice the user made with the toggle (stored in localStorage)
+     wins and is the only thing that switches us to dark -- we deliberately do
+     not follow prefers-color-scheme, so the dashboard opens light by default
+     regardless of the OS setting. */
+  (function () {
+    try {
+      var stored = localStorage.getItem("mistl-theme");
+      document.documentElement.setAttribute("data-theme", stored === "dark" ? "dark" : "light");
+    } catch (e) { /* localStorage unavailable: keep the light default */ }
+  })();
+</script>
 </head>
 <body>
 
 <div class="topbar" id="topbar">
   <header>
-    <h1>mistl</h1>
+    <h1>MISTL</h1>
     <span id="daemon-pill" class="pill"><span class="dot"></span><span data-i18n="daemon.connecting">connecting&hellip;</span></span>
     <div class="identity" id="identity-summary"></div>
+    <button type="button" class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">
+      <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+      <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2v2.2M12 19.8V22M2 12h2.2M19.8 12H22M4.9 4.9l1.6 1.6M17.5 17.5l1.6 1.6M19.1 4.9l-1.6 1.6M6.5 17.5l-1.6 1.6"/></svg>
+    </button>
     <div class="lang-toggle" id="lang-toggle">
       <button type="button" id="lang-en-btn" data-lang="en">EN</button>
+      <button type="button" id="lang-zh-btn" data-lang="zh">中文</button>
       <button type="button" id="lang-ja-btn" data-lang="ja">日本語</button>
     </div>
   </header>
-  <nav class="quicknav">
-    <a href="#panel-overview" data-i18n="nav.overview">Overview</a>
-    <a href="#panel-stream" data-i18n="nav.stream">Stream</a>
-    <a href="#panel-ai" data-i18n="nav.ai">AI</a>
-    <a href="#panel-mailbox" data-i18n="nav.mailbox">Mailbox</a>
-    <a href="#panel-store" data-i18n="nav.store">Store</a>
-    <a href="#panel-profile" data-i18n="nav.profile">Profile</a>
-    <a href="#panel-settings" data-i18n="nav.settings">Settings</a>
-  </nav>
 </div>
+
+<div class="shell">
+  <nav class="sidenav" id="sidenav" aria-label="Sections">
+    <a href="#panel-overview"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9.5 12 3l9 6.5"/><path d="M5 9.5V21h14V9.5"/></svg><span data-i18n="nav.overview">Overview</span></a>
+    <a href="#panel-stream"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg><span data-i18n="nav.stream">Stream</span></a>
+    <a href="#panel-ai"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3"/></svg><span data-i18n="nav.ai">AI</span></a>
+    <a href="#panel-mailbox"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.5 5h13l3.5 7v7a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-7z"/></svg><span data-i18n="nav.mailbox">Mailbox</span></a>
+    <a href="#panel-store"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.7 4 3 9 3s9-1.3 9-3V5"/><path d="M3 12c0 1.7 4 3 9 3s9-1.3 9-3"/></svg><span data-i18n="nav.store">Store</span></a>
+    <a href="#panel-profile"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/></svg><span data-i18n="nav.profile">Profile</span></a>
+    <a href="#panel-settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg><span data-i18n="nav.settings">Settings</span></a>
+  </nav>
 
 <main id="main">
   <div class="hint-banner" id="profile-hint-banner" hidden>
@@ -694,6 +883,19 @@
       <button data-role="refresh" data-target="profile" data-i18n="common.refresh">Refresh</button>
     </h2>
     <dl class="kv" id="profile-kv"></dl>
+    <div class="profile-avatar-row">
+      <div class="avatar-preview" id="profile-avatar-preview" aria-hidden="true"></div>
+      <div class="avatar-controls">
+        <div class="store-dropzone" id="profile-avatar-dropzone" tabindex="0" role="button" data-i18n-aria-label="profile.avatarPick" aria-label="Set profile image">
+          <span data-i18n="profile.avatarDropText">Drag an image here, or click to choose</span>
+          <span class="muted" style="font-size: 11.5px;" data-i18n="profile.avatarHint">PNG, JPEG or WebP. Downscaled to 256px and stored on this node.</span>
+          <input type="file" id="profile-avatar-input" accept="image/png,image/jpeg,image/webp" hidden>
+        </div>
+        <div class="avatar-actions">
+          <button type="button" id="btn-profile-avatar-remove" class="danger" data-i18n="profile.avatarRemove" hidden>Remove image</button>
+        </div>
+      </div>
+    </div>
     <form class="inline" id="profile-form">
       <div class="field" style="flex: 1;">
         <label for="profile-display-name" data-i18n="profile.displayNameLabel">Display name</label>
@@ -710,6 +912,7 @@
     <div id="settings-body"></div>
   </section>
 </main>
+</div>
 
 <div class="toast-stack" id="toast-stack"></div>
 
@@ -721,9 +924,12 @@
 
   var T = {
     en: {
-      "pageTitle": "mistl dashboard",
+      "pageTitle": "MISTL dashboard",
       "lang.en": "EN",
+      "lang.zh": "中文",
       "lang.ja": "日本語",
+      "theme.switchToLight": "Switch to light theme",
+      "theme.switchToDark": "Switch to dark theme",
       "daemon.connecting": "connecting…",
       "daemon.running": "running · pid {pid} · v{version} · {uptime}",
       "daemon.unreachable": "daemon unreachable",
@@ -868,10 +1074,18 @@
       "profile.did": "did",
       "profile.displayName": "display name",
       "profile.bio": "bio",
-      "profile.avatar": "avatar",
+      "profile.avatarCid": "avatar cid",
+      "profile.updatedAt": "updated at",
       "profile.displayNameLabel": "Display name",
       "profile.save": "Save",
       "profile.updated": "Profile updated.",
+      "profile.avatarPick": "Set profile image",
+      "profile.avatarDropText": "Drag an image here, or click to choose",
+      "profile.avatarHint": "PNG, JPEG or WebP. Downscaled to 256px and stored on this node.",
+      "profile.avatarRemove": "Remove image",
+      "profile.avatarUpdated": "Profile image updated.",
+      "profile.avatarRemoved": "Profile image removed.",
+      "profile.avatarBadType": "Choose a PNG, JPEG or WebP image.",
       "settings.title": "Settings",
       "settings.restartBadge": "restart the daemon to apply",
       "settings.savedRestart": "Saved. Restart the daemon to apply.",
@@ -929,9 +1143,12 @@
       "settings.field.ui.enabled.desc": "Whether the web dashboard starts with the daemon."
     },
     ja: {
-      "pageTitle": "mistl ダッシュボード",
+      "pageTitle": "MISTL ダッシュボード",
       "lang.en": "EN",
+      "lang.zh": "中文",
       "lang.ja": "日本語",
+      "theme.switchToLight": "ライトモードに切り替え",
+      "theme.switchToDark": "ダークモードに切り替え",
       "daemon.connecting": "接続中…",
       "daemon.running": "稼働中 · pid {pid} · v{version} · {uptime}",
       "daemon.unreachable": "デーモンに接続できません",
@@ -1076,10 +1293,18 @@
       "profile.did": "did",
       "profile.displayName": "表示名",
       "profile.bio": "自己紹介",
-      "profile.avatar": "アバター",
+      "profile.avatarCid": "アバターCID",
+      "profile.updatedAt": "更新日時",
       "profile.displayNameLabel": "表示名",
       "profile.save": "保存",
       "profile.updated": "プロフィールを更新しました。",
+      "profile.avatarPick": "プロフィール画像を設定",
+      "profile.avatarDropText": "画像をここにドラッグ、またはクリックして選択",
+      "profile.avatarHint": "PNG、JPEG、WebPに対応。256pxに縮小してこのノードに保存します。",
+      "profile.avatarRemove": "画像を削除",
+      "profile.avatarUpdated": "プロフィール画像を更新しました。",
+      "profile.avatarRemoved": "プロフィール画像を削除しました。",
+      "profile.avatarBadType": "PNG、JPEG、またはWebP画像を選択してください。",
       "settings.title": "設定",
       "settings.restartBadge": "適用にはデーモンの再起動が必要",
       "settings.savedRestart": "保存しました。適用にはデーモンの再起動が必要です。",
@@ -1135,11 +1360,237 @@
       "settings.field.ui.listen.desc": "このダッシュボードが待ち受けるアドレス:ポートです。",
       "settings.field.ui.enabled.label": "有効化",
       "settings.field.ui.enabled.desc": "デーモン起動時にWebダッシュボードを開始するかどうかです。"
+    },
+    zh: {
+      "pageTitle": "MISTL 仪表盘",
+      "lang.en": "EN",
+      "lang.zh": "中文",
+      "lang.ja": "日本語",
+      "theme.switchToLight": "切换到浅色主题",
+      "theme.switchToDark": "切换到深色主题",
+      "daemon.connecting": "连接中…",
+      "daemon.running": "运行中 · pid {pid} · v{version} · {uptime}",
+      "daemon.unreachable": "无法连接到守护进程",
+      "nav.overview": "概览",
+      "nav.stream": "串流",
+      "nav.ai": "AI",
+      "nav.mailbox": "信箱",
+      "nav.store": "存储",
+      "nav.profile": "个人资料",
+      "nav.settings": "设置",
+      "profileHint.text": "设置显示名称，方便他人识别你。",
+      "profileHint.button": "设置显示名称",
+      "common.dismiss": "关闭",
+      "common.refresh": "刷新",
+      "common.save": "保存",
+      "common.add": "添加",
+      "common.send": "发送",
+      "common.copied": "已复制到剪贴板。",
+      "common.copyFailed": "复制失败。",
+      "common.clipboardUnavailable": "剪贴板不可用。",
+      "common.default": "默认",
+      "common.clickToCopy": "点击复制",
+      "overview.title": "概览",
+      "overview.stopDaemon": "停止守护进程",
+      "overview.stopConfirm": "确定要停止 mistl 守护进程吗？这将结束所有活动会话。",
+      "overview.stopping": "守护进程正在停止。",
+      "overview.status": "状态",
+      "overview.unreachable": "无法连接到守护进程",
+      "overview.pid": "pid",
+      "overview.version": "版本",
+      "overview.uptime": "运行时间",
+      "stream.title": "串流",
+      "stream.shareTitle": "共享此电脑的屏幕",
+      "stream.shareDesc": "将此电脑的桌面直接以 RTSP URL 推流，粘贴到 VRChat 的视频播放器中即可播放。",
+      "stream.startBtn": "开始 (此屏幕)",
+      "stream.relayTitle": "中继 tc-chat 共享",
+      "stream.relayDesc": "中继已在 tc-chat 房间中共享的屏幕，供 VRChat 观众观看。",
+      "stream.roomLabel": "tc-chat 房间 ID",
+      "stream.roomPlaceholder": "房间 ID (或在设置中指定默认值)",
+      "stream.relayBtn": "中继到 VRChat",
+      "stream.roomHint.prefix": "在上方输入房间 ID，或在",
+      "stream.roomHint.link": "设置",
+      "stream.roomHint.suffix": "中设置默认中继房间。",
+      "stream.urlLabel": "粘贴到 VRChat 视频播放器",
+      "stream.status": "状态",
+      "stream.statusUnknown": "未知",
+      "stream.statusRunning": "运行中",
+      "stream.statusStopped": "已停止",
+      "stream.clients": "客户端数",
+      "stream.backend": "后端",
+      "stream.relayRoom": "中继房间",
+      "stream.publisher": "推流方",
+      "stream.waitingPublisher": "正在等待推流方…",
+      "stream.uptime": "运行时间",
+      "stream.stopBtn": "停止",
+      "stream.stopConfirm": "确定要停止串流吗？",
+      "stream.started": "串流已开始。",
+      "stream.stopped": "串流已停止。",
+      "stream.relayStarted": "已在房间 {room} 中开始中继。",
+      "stream.relayStartedNoRoom": "中继已开始。",
+      "stream.vrchatHint.prefix": "此 URL 仅在同一台电脑上的 VRChat 中有效。要在另一台电脑或 Quest 上播放？",
+      "stream.vrchatHint.link": "在设置中将 RTSP 地址设为 0.0.0.0",
+      "stream.vrchatHint.suffix": "，然后重新启动串流。",
+      "ai.title": "AI",
+      "ai.upstreamHint": "在设置中配置 OpenAI 兼容的上游服务以提供推理。",
+      "ai.openSettings": "打开设置",
+      "ai.readyHint": "上游服务已配置。开始提供服务即可响应来自网络的 AI 请求。",
+      "ai.endpointLabel": "OpenAI 兼容端点",
+      "ai.statusLabel": "状态",
+      "ai.room": "房间",
+      "ai.nodeId": "节点 ID",
+      "ai.connectedPeers": "已连接的节点数",
+      "ai.providing": "提供中",
+      "ai.servingLabel": "API 服务",
+      "ai.remoteProvider": "远程提供方",
+      "ai.yes": "是",
+      "ai.no": "否",
+      "ai.modelsLabel": "模型：",
+      "ai.startProviding": "开始提供",
+      "ai.stopProviding": "停止提供",
+      "ai.startServe": "启动 API 服务器",
+      "ai.stopServe": "停止 API 服务器",
+      "ai.alreadyProviding": "已在提供中。",
+      "ai.nowProviding": "已开始提供 AI 模型。",
+      "ai.stoppedProviding": "已停止提供。",
+      "ai.wasNotProviding": "此前未在提供服务。",
+      "ai.serveAlready": "API 服务器已在 {listen} 运行",
+      "ai.serveStarted": "API 服务器已在 {listen} 开始监听",
+      "ai.serveStopped": "API 服务器已停止。",
+      "ai.serveWasNotRunning": "API 服务器此前未运行。",
+      "chat.promptLabel": "提示词",
+      "chat.promptPlaceholder": "输入问题…",
+      "chat.modelLabel": "模型 (可选)",
+      "chat.send": "发送",
+      "chat.empty": "暂无消息。",
+      "chat.you": "你",
+      "chat.error": "错误",
+      "chat.assistant": "助手",
+      "chat.noProviderError": "没有可用的提供方 — 请在本地开始提供服务，或等待 p2p 提供方出现。",
+      "mailbox.title": "信箱",
+      "mailbox.fetchBtn": "获取我的消息",
+      "mailbox.refreshHeld": "刷新暂存",
+      "mailbox.heldCol.id": "ID",
+      "mailbox.heldCol.from": "发件人",
+      "mailbox.heldCol.to": "收件人",
+      "mailbox.heldCol.size": "大小",
+      "mailbox.heldCol.since": "暂存时间",
+      "mailbox.heldEmpty": "没有暂存的存件 — 存件是其他节点为收件人暂时保留、待其稍后取回的消息。",
+      "mailbox.fetchCol.id": "ID",
+      "mailbox.fetchCol.from": "发件人",
+      "mailbox.fetchCol.content": "内容",
+      "mailbox.fetchEmpty": "尚未获取任何内容。点击“获取我的消息”以查看新邮件。",
+      "mailbox.fileContent": "文件：{name} ({size}，cid {cid})",
+      "mailbox.toLabel": "收件人 (DID 或节点 ID)",
+      "mailbox.toPlaceholder": "did:key:z6Mk… 或 16 位十六进制节点 ID",
+      "mailbox.messageLabel": "消息",
+      "mailbox.send": "发送",
+      "mailbox.needBoth": "收件人和消息内容均为必填。",
+      "mailbox.sentStatus": "消息{status} (id {id})。",
+      "store.title": "存储",
+      "store.col.cid": "CID",
+      "store.col.name": "名称",
+      "store.col.size": "大小",
+      "store.col.storedAt": "存储时间",
+      "store.col.actions": "操作",
+      "store.empty": "暂无存储项目。",
+      "store.download": "下载",
+      "store.saveToPath": "保存到服务器路径",
+      "store.savePathPlaceholder": "输出路径 (可选)",
+      "store.saved": "已保存到 {output}",
+      "store.dropzoneText": "将文件拖到此处，或点击浏览",
+      "store.dropzoneHint": "直接上传到此节点的存储。",
+      "store.uploading": "正在上传 {name}… {pct}%",
+      "store.uploaded": "已上传 {name} ({size})。",
+      "store.uploadFailed": "{name} 上传失败：{error}",
+      "store.addByPathSummary": "按此电脑上的文件路径添加 (适用于非常大的本地文件)",
+      "store.pathLabel": "此电脑上的路径 (由守护进程在服务器端读取)",
+      "store.pathPlaceholder": "C:\\path\\to\\file or /path/to/file",
+      "store.addBtn": "添加",
+      "store.stored": "已存储 {name} ({size})。",
+      "profile.title": "个人资料",
+      "profile.did": "did",
+      "profile.displayName": "显示名称",
+      "profile.bio": "简介",
+      "profile.avatarCid": "头像 CID",
+      "profile.updatedAt": "更新时间",
+      "profile.displayNameLabel": "显示名称",
+      "profile.save": "保存",
+      "profile.updated": "个人资料已更新。",
+      "profile.avatarPick": "设置头像",
+      "profile.avatarDropText": "将图片拖到此处，或点击选择",
+      "profile.avatarHint": "支持 PNG、JPEG 或 WebP。将缩小到 256px 并存储在此节点。",
+      "profile.avatarRemove": "移除头像",
+      "profile.avatarUpdated": "头像已更新。",
+      "profile.avatarRemoved": "头像已移除。",
+      "profile.avatarBadType": "请选择 PNG、JPEG 或 WebP 格式的图片。",
+      "settings.title": "设置",
+      "settings.restartBadge": "需要重启守护进程才能生效",
+      "settings.savedRestart": "已保存。需要重启守护进程才能生效。",
+      "settings.savedNextStart": "已保存。将在此服务下次启动时生效。",
+      "settings.enterGib": "请为{label}输入以 GiB 为单位的数值。",
+      "settings.enterNumber": "请为{label}输入一个数值。",
+      "settings.gibUnit": "GiB",
+      "settings.clear": "清除",
+      "settings.passwordSetPlaceholder": "(已设置) 留空以保持不变",
+      "settings.passwordNotSet": "未设置",
+      "settings.optionDefault": "(默认)",
+      "settings.section.identity": "身份",
+      "settings.section.storage": "存储",
+      "settings.section.stream": "串流",
+      "settings.section.mailbox": "信箱",
+      "settings.section.ai": "AI",
+      "settings.section.ui": "Web 仪表盘",
+      "settings.field.identity.display_name.label": "显示名称",
+      "settings.field.identity.display_name.desc": "写入配置文件的默认显示名称 (下次启动时生效；如需立即修改，请使用上方的个人资料面板)。",
+      "settings.field.storage.capacity_bytes.label": "存储容量",
+      "settings.field.storage.capacity_bytes.desc": "本地区块存储的最大容量。",
+      "settings.field.stream.rtsp_url.label": "RTSP URL",
+      "settings.field.stream.rtsp_url.desc": "串流时使用的 RTSP 端点。留空则使用默认值。",
+      "settings.field.stream.frame_rate.label": "帧率",
+      "settings.field.stream.frame_rate.desc": "采集帧率，单位为帧/秒。",
+      "settings.field.stream.capture_backend.label": "采集后端",
+      "settings.field.stream.capture_backend.desc": "使用的屏幕采集后端。",
+      "settings.field.stream.max_width.label": "最大宽度",
+      "settings.field.stream.max_width.desc": "采集的最大宽度 (像素)；超过此宽度的输入将被缩小。",
+      "settings.field.stream.relay_room.label": "默认中继房间",
+      "settings.field.stream.relay_room.desc": "未输入房间 ID 时，“中继 tc-chat 共享”所使用的 tc-chat 房间 ID。",
+      "settings.field.stream.audio_codec.label": "音频编码",
+      "settings.field.stream.audio_codec.desc": "串流使用的音频编码格式。",
+      "settings.field.mailbox.room_id.label": "房间 ID",
+      "settings.field.mailbox.room_id.desc": "信箱投递所使用的 tc-chat 房间。",
+      "settings.field.mailbox.serve_as_bot.label": "以机器人身份响应",
+      "settings.field.mailbox.serve_as_bot.desc": "以自动机器人身份响应信箱房间的在线状态。",
+      "settings.field.ai.room_id.label": "房间 ID",
+      "settings.field.ai.room_id.desc": "用于发现 AI 提供方与使用方的 tc-chat 房间。",
+      "settings.field.ai.upstream_url.label": "上游 URL",
+      "settings.field.ai.upstream_url.desc": "提供服务时，此守护进程转发推理请求的 OpenAI 兼容端点。",
+      "settings.field.ai.upstream_api_key.label": "上游 API 密钥",
+      "settings.field.ai.upstream_api_key.desc": "发送给上游端点的 API 密钥，仅存储在此电脑上。",
+      "settings.field.ai.default_model.label": "默认模型",
+      "settings.field.ai.default_model.desc": "请求未指定模型时使用的模型名称。",
+      "settings.field.ai.temperature.label": "Temperature",
+      "settings.field.ai.temperature.desc": "默认的采样温度 (temperature)。",
+      "settings.field.ai.request_timeout_secs.label": "请求超时 (秒)",
+      "settings.field.ai.request_timeout_secs.desc": "等待上游响应的最长时间，超过则放弃。",
+      "settings.field.ai.api_listen.label": "API 监听地址",
+      "settings.field.ai.api_listen.desc": "本地 OpenAI 兼容 API 服务器绑定的地址:端口。",
+      "settings.field.ui.listen.label": "监听地址",
+      "settings.field.ui.listen.desc": "此仪表盘绑定的地址:端口。",
+      "settings.field.ui.enabled.label": "启用",
+      "settings.field.ui.enabled.desc": "守护进程启动时是否同时启动 Web 仪表盘。"
     }
   };
 
-  var currentLang = localStorage.getItem("mistl-lang") || (navigator.language && navigator.language.indexOf("ja") === 0 ? "ja" : "en");
-  if (currentLang !== "en" && currentLang !== "ja") currentLang = "en";
+  function detectBrowserLang() {
+    var lang = navigator.language || "";
+    if (lang.indexOf("zh") === 0) return "zh";
+    if (lang.indexOf("ja") === 0) return "ja";
+    return "en";
+  }
+
+  var currentLang = localStorage.getItem("mistl-lang") || detectBrowserLang();
+  if (currentLang !== "en" && currentLang !== "ja" && currentLang !== "zh") currentLang = "en";
 
   function t(key, vars) {
     var dict = T[currentLang] || T.en;
@@ -1171,19 +1622,55 @@
 
   function updateLangButtons() {
     var enBtn = document.getElementById("lang-en-btn");
+    var zhBtn = document.getElementById("lang-zh-btn");
     var jaBtn = document.getElementById("lang-ja-btn");
     if (enBtn) enBtn.classList.toggle("active", currentLang === "en");
+    if (zhBtn) zhBtn.classList.toggle("active", currentLang === "zh");
     if (jaBtn) jaBtn.classList.toggle("active", currentLang === "ja");
   }
 
   function setLang(lang) {
-    if (lang !== "en" && lang !== "ja") return;
+    if (lang !== "en" && lang !== "ja" && lang !== "zh") return;
     currentLang = lang;
     localStorage.setItem("mistl-lang", lang);
     document.documentElement.lang = lang;
     applyStaticI18n();
     updateLangButtons();
+    updateThemeToggle();
     rerenderAllDynamic();
+  }
+
+  /* ---------- theme ---------- */
+  /* The head script already set data-theme before paint; here we only wire
+     the toggle and keep its label localized. An explicit toggle persists to
+     localStorage and wins over prefers-color-scheme on later loads. */
+
+  var themeToggleBtn = document.getElementById("theme-toggle");
+
+  function currentTheme() {
+    return document.documentElement.getAttribute("data-theme") === "dark" ? "dark" : "light";
+  }
+
+  function updateThemeToggle() {
+    if (!themeToggleBtn) return;
+    var label = t(currentTheme() === "dark" ? "theme.switchToLight" : "theme.switchToDark");
+    themeToggleBtn.setAttribute("aria-label", label);
+    themeToggleBtn.setAttribute("title", label);
+  }
+
+  function setTheme(theme, persist) {
+    if (theme !== "light" && theme !== "dark") return;
+    document.documentElement.setAttribute("data-theme", theme);
+    if (persist) {
+      try { localStorage.setItem("mistl-theme", theme); } catch (e) { /* ignore */ }
+    }
+    updateThemeToggle();
+  }
+
+  if (themeToggleBtn) {
+    themeToggleBtn.addEventListener("click", function () {
+      setTheme(currentTheme() === "dark" ? "light" : "dark", true);
+    });
   }
 
   /* ---------- helpers ---------- */
@@ -1361,6 +1848,7 @@
   var identitySummary = document.getElementById("identity-summary");
 
   document.getElementById("lang-en-btn").addEventListener("click", function () { setLang("en"); });
+  document.getElementById("lang-zh-btn").addEventListener("click", function () { setLang("zh"); });
   document.getElementById("lang-ja-btn").addEventListener("click", function () { setLang("ja"); });
 
   function renderDaemonPill() {
@@ -1384,6 +1872,13 @@
   function renderIdentitySummary() {
     identitySummary.innerHTML = "";
     if (!state.identity) return;
+    if (state.identity.avatar_cid) {
+      var av = new Image();
+      av.className = "identity-avatar";
+      av.alt = "";
+      av.src = "/api/store/download?cid=" + encodeURIComponent(state.identity.avatar_cid);
+      identitySummary.appendChild(av);
+    }
     var name = state.identity.display_name || "(no name)";
     identitySummary.appendChild(el("span", { class: "name", text: name }));
     var did = state.identity.did || "";
@@ -1983,15 +2478,37 @@
   var profileHintBanner = document.getElementById("profile-hint-banner");
   var profileHintDismissed = false;
 
+  var avatarPreview = document.getElementById("profile-avatar-preview");
+  var avatarDropzone = document.getElementById("profile-avatar-dropzone");
+  var avatarInput = document.getElementById("profile-avatar-input");
+  var avatarRemoveBtn = document.getElementById("btn-profile-avatar-remove");
+  var AVATAR_MAX = 256;
+
   document.getElementById("btn-profile-hint-dismiss").addEventListener("click", function () {
     profileHintDismissed = true;
     profileHintBanner.hidden = true;
   });
 
   document.getElementById("btn-profile-hint-focus").addEventListener("click", function () {
-    document.getElementById("panel-profile").scrollIntoView({ behavior: "smooth", block: "start" });
+    navigateTo("panel-profile");
     setTimeout(function () { profileDisplayNameInput.focus(); }, 300);
   });
+
+  function renderAvatar(data) {
+    var cid = data && data.avatar_cid;
+    avatarPreview.innerHTML = "";
+    if (cid) {
+      var img = new Image();
+      img.alt = "";
+      img.src = "/api/store/download?cid=" + encodeURIComponent(cid);
+      avatarPreview.appendChild(img);
+      avatarRemoveBtn.hidden = false;
+    } else {
+      var name = (data && data.display_name) || "";
+      avatarPreview.textContent = name ? name.charAt(0) : "?";
+      avatarRemoveBtn.hidden = true;
+    }
+  }
 
   function renderProfile(data) {
     profileKv.innerHTML = "";
@@ -1999,19 +2516,127 @@
     addKv(profileKv, t("profile.did"), truncateMiddle(data.did || "", 16, 8), true);
     addKv(profileKv, t("profile.displayName"), data.display_name || "");
     addKv(profileKv, t("profile.bio"), data.bio || "");
-    addKv(profileKv, t("profile.avatar"), data.avatar || "");
+    if (data.avatar_cid) addKv(profileKv, t("profile.avatarCid"), truncateMiddle(data.avatar_cid, 10, 6), true);
+    if (data.updated_at) addKv(profileKv, t("profile.updatedAt"), data.updated_at);
     Object.keys(data).forEach(function (key) {
-      if (["did", "display_name", "bio", "avatar"].indexOf(key) === -1) {
+      if (["did", "display_name", "bio", "avatar_cid", "updated_at"].indexOf(key) === -1) {
         addKv(profileKv, key, data[key]);
       }
     });
     state.identity = data;
     renderIdentitySummary();
+    renderAvatar(data);
     profileDisplayNameInput.value = data.display_name || "";
     if (!profileHintDismissed) {
       profileHintBanner.hidden = !!data.display_name;
     }
   }
+
+  /* ---------- profile avatar: downscale client-side, store as a blob,
+     reference by CID ----------------------------------------------------- */
+
+  function processAvatarImage(file) {
+    return new Promise(function (resolve, reject) {
+      if (!file || !/^image\/(png|jpeg|webp)$/.test(file.type)) {
+        reject(new Error(t("profile.avatarBadType")));
+        return;
+      }
+      var url = URL.createObjectURL(file);
+      var img = new Image();
+      img.onload = function () {
+        URL.revokeObjectURL(url);
+        var w = img.naturalWidth, h = img.naturalHeight;
+        if (!w || !h) { reject(new Error(t("profile.avatarBadType"))); return; }
+        var scale = Math.min(1, AVATAR_MAX / Math.max(w, h));
+        var cw = Math.max(1, Math.round(w * scale));
+        var ch = Math.max(1, Math.round(h * scale));
+        var canvas = document.createElement("canvas");
+        canvas.width = cw;
+        canvas.height = ch;
+        var ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, cw, ch);
+        var outType = file.type === "image/png" ? "image/png" : (file.type === "image/webp" ? "image/webp" : "image/jpeg");
+        canvas.toBlob(function (blob) {
+          if (!blob) { reject(new Error(t("profile.avatarBadType"))); return; }
+          var ext = outType === "image/png" ? "png" : (outType === "image/webp" ? "webp" : "jpg");
+          resolve({ blob: blob, ext: ext });
+        }, outType, 0.9);
+      };
+      img.onerror = function () { URL.revokeObjectURL(url); reject(new Error(t("profile.avatarBadType"))); };
+      img.src = url;
+    });
+  }
+
+  function uploadBlobToStore(blob, name) {
+    return new Promise(function (resolve, reject) {
+      var xhr = new XMLHttpRequest();
+      xhr.open("POST", "/api/store/upload");
+      xhr.setRequestHeader("x-mistl-ui", "1");
+      xhr.setRequestHeader("x-file-name", encodeURIComponent(name));
+      xhr.onload = function () {
+        var json = null;
+        try { json = JSON.parse(xhr.responseText); } catch (e) { json = null; }
+        if (json && json.ok === true) resolve(json.data);
+        else reject(new Error((json && json.error) || ("upload failed (" + xhr.status + ")")));
+      };
+      xhr.onerror = function () { reject(new Error("daemon unreachable")); };
+      xhr.send(blob);
+    });
+  }
+
+  function setAvatarFromFile(file) {
+    processAvatarImage(file).then(function (out) {
+      // Optimistic preview straight from the just-processed blob.
+      var localUrl = URL.createObjectURL(out.blob);
+      avatarPreview.innerHTML = "";
+      var preview = new Image();
+      preview.alt = "";
+      preview.onload = function () { URL.revokeObjectURL(localUrl); };
+      preview.src = localUrl;
+      avatarPreview.appendChild(preview);
+      avatarDropzone.classList.add("busy-zone");
+      return uploadBlobToStore(out.blob, "avatar." + out.ext).then(function (uploaded) {
+        return api("profile.set", { field: "avatar_cid", value: uploaded.cid });
+      }).then(function (profile) {
+        avatarDropzone.classList.remove("busy-zone");
+        showToast(t("profile.avatarUpdated"));
+        renderProfile(profile);
+        pollStoreLs();
+      });
+    }).catch(function (err) {
+      avatarDropzone.classList.remove("busy-zone");
+      showToast(err.message || String(err));
+      renderProfile(state.identity);
+    });
+  }
+
+  function handleAvatarFiles(fileList) {
+    var files = Array.prototype.slice.call(fileList || []);
+    if (files.length) setAvatarFromFile(files[0]);
+  }
+
+  avatarDropzone.addEventListener("click", function () { avatarInput.click(); });
+  avatarDropzone.addEventListener("keydown", function (e) {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); avatarInput.click(); }
+  });
+  avatarDropzone.addEventListener("dragover", function (e) { e.preventDefault(); avatarDropzone.classList.add("dragover"); });
+  avatarDropzone.addEventListener("dragleave", function () { avatarDropzone.classList.remove("dragover"); });
+  avatarDropzone.addEventListener("drop", function (e) {
+    e.preventDefault();
+    avatarDropzone.classList.remove("dragover");
+    if (e.dataTransfer && e.dataTransfer.files) handleAvatarFiles(e.dataTransfer.files);
+  });
+  avatarInput.addEventListener("change", function () {
+    handleAvatarFiles(avatarInput.files);
+    avatarInput.value = "";
+  });
+
+  avatarRemoveBtn.addEventListener("click", function (e) {
+    runAction(e.currentTarget, "profile.set", { field: "avatar_cid", value: "" }, function (profile) {
+      showToast(t("profile.avatarRemoved"));
+      renderProfile(profile);
+    });
+  });
 
   function pollProfile() {
     return api("profile.show", {}).then(renderProfile, function (err) {
@@ -2077,8 +2702,7 @@
 
   function focusSettingsField(id) {
     var input = document.getElementById(id);
-    var panel = document.getElementById("panel-settings");
-    if (panel) panel.scrollIntoView({ behavior: "smooth", block: "start" });
+    navigateTo("panel-settings");
     if (input) setTimeout(function () { input.focus(); }, 300);
   }
 
@@ -2264,12 +2888,61 @@
     }
   });
 
+  /* ---------- view router (single-view navigation) ---------- */
+
+  var PANEL_IDS = [
+    "panel-overview", "panel-stream", "panel-ai",
+    "panel-mailbox", "panel-store", "panel-profile", "panel-settings"
+  ];
+  var sideLinks = Array.prototype.slice.call(document.querySelectorAll("#sidenav a"));
+
+  function panelFromHash() {
+    var id = (location.hash || "").replace(/^#/, "");
+    return PANEL_IDS.indexOf(id) >= 0 ? id : "panel-overview";
+  }
+
+  function showPanel(id) {
+    PANEL_IDS.forEach(function (pid) {
+      var p = document.getElementById(pid);
+      if (!p) return;
+      var on = pid === id;
+      if (on && !p.classList.contains("active")) {
+        void p.offsetWidth;               /* restart the entrance animation cleanly */
+      }
+      p.classList.toggle("active", on);
+    });
+    sideLinks.forEach(function (a) {
+      a.classList.toggle("active", a.getAttribute("href") === "#" + id);
+    });
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function routeFromHash() { showPanel(panelFromHash()); }
+
+  function navigateTo(id) {
+    if (location.hash === "#" + id) showPanel(id);   /* same hash: no hashchange fires */
+    else location.hash = "#" + id;                   /* else hashchange -> routeFromHash */
+  }
+
+  window.addEventListener("hashchange", routeFromHash);
+  /* delegate every in-app #panel-* link (sidebar + inline hints) to the router */
+  document.addEventListener("click", function (e) {
+    var a = e.target.closest ? e.target.closest('a[href^="#panel-"]') : null;
+    if (!a) return;
+    var id = a.getAttribute("href").replace(/^#/, "");
+    if (PANEL_IDS.indexOf(id) < 0) return;
+    e.preventDefault();
+    navigateTo(id);
+  });
+
   /* ---------- init ---------- */
 
   document.documentElement.lang = currentLang;
   applyStaticI18n();
   updateLangButtons();
+  updateThemeToggle();
   renderChat();
+  routeFromHash();
   startPolling();
   startTicker();
   pollProfile();
