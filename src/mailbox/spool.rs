@@ -104,6 +104,9 @@ pub fn append(data_dir: &Path, kind: SpoolKind, entry: SpoolEntry) -> Result<()>
 
 /// Remove the entry with envelope id `id` from `kind`'s spool file, if
 /// present.
+// Part of the spool API (symmetric with `push`/`drain`); not yet called from a
+// binary path.
+#[allow(dead_code)]
 pub fn remove(data_dir: &Path, kind: SpoolKind, id: &str) -> Result<Option<SpoolEntry>> {
     let path = kind.path(data_dir);
     let mut entries = read_entries(&path)?;

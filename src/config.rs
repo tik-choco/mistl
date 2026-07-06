@@ -77,8 +77,9 @@ pub struct StreamConfig {
     /// Native backend only: downscale captured frames wider than this.
     pub max_width: u32,
     /// Room joined by `stream relay` to receive a tc-chat screen share.
-    /// mistlib supports one room per process, so this must match (or be the
-    /// only configured) room across mailbox/ai/stream.
+    /// Independent of `[mailbox] room_id` and `[ai] room_id` -- the p2p
+    /// transport supports multiple simultaneous rooms per process, so this
+    /// can name its own room, or reuse one of theirs.
     pub relay_room: Option<String>,
     /// Audio codec served over RTSP for relayed shares: "aac" (transcoded
     /// from Opus; what AVPro reliably plays) or "opus" (passthrough).
@@ -120,9 +121,11 @@ impl Default for MailboxConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AiConfig {
-    /// Room id for the AI network. mistlib supports one room per process,
-    /// so this defaults to the mailbox room; set both to the same value to
-    /// join an existing mistai (tc-mistllm etc.) room.
+    /// Room id for the AI network. Defaults to the mailbox room for
+    /// backward-compat convenience when unset, but the p2p transport now
+    /// supports multiple simultaneous rooms per process, so this no longer
+    /// needs to match `[mailbox] room_id` -- set it explicitly to join an
+    /// existing mistai (tc-mistllm etc.) room distinct from mailbox's.
     pub room_id: Option<String>,
     /// Upstream OpenAI-compatible endpoint base URL used when providing,
     /// e.g. "http://127.0.0.1:11434/v1" (Ollama) or "https://api.openai.com/v1".

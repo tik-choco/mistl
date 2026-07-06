@@ -37,13 +37,13 @@ const NET_TIMEOUT: Duration = crate::net::NET_TIMEOUT;
 const BOT_POLL_INTERVAL: Duration = Duration::from_secs(4);
 
 /// Lazily-initialized mailbox service state (module-internal singleton --
-/// mirrors the one-mistlib-engine-per-process reality: `ensure_started`
-/// initializes/joins the room only once per daemon run).
+/// the shared p2p engine initializes once per process, and this service's
+/// room is joined once per daemon run via `crate::net::ensure_started`;
+/// other services may independently join their own rooms alongside it).
 pub struct MailboxService {
     pub node_id: String,
     #[allow(dead_code)]
     pub did: String,
-    #[allow(dead_code)]
     pub room: String,
     pub serve_as_bot: bool,
     pub data_dir: PathBuf,
@@ -235,7 +235,7 @@ async fn receive_deposit(
 
     // Best-effort ack; the depositor doesn't wait on it (send already
     // returned status "deposited"), so a failure here is not fatal.
-    let _ = send_wire(from_node, &WireMessage::DepositAck { id }).await;
+    let _ = send_wire(&service.room, from_node, &WireMessage::DepositAck { id }).await;
     Ok(())
 }
 
@@ -265,6 +265,7 @@ async fn handle_fetch_request(
     }
 
     if send_wire(
+        &service.room,
         from_node,
         &WireMessage::FetchResult {
             envelopes: matching.clone(),
@@ -339,7 +340,7 @@ pub async fn send(
     let connected = connected_nodes_with_timeout().await;
 
     let status = if connected.iter().any(|n| n == &to_node) {
-        if send_wire(&to_node, &WireMessage::Mail { envelope: envelope.clone() })
+        if send_wire(&service.room, &to_node, &WireMessage::Mail { envelope: envelope.clone() })
             .await
             .is_ok()
         {
@@ -349,7 +350,7 @@ pub async fn send(
             "queued"
         }
     } else if let Some(bot) = connected.first() {
-        if send_wire(bot, &WireMessage::Deposit { envelope: envelope.clone() })
+        if send_wire(&service.room, bot, &WireMessage::Deposit { envelope: envelope.clone() })
             .await
             .is_ok()
         {
@@ -435,11 +436,11 @@ async fn flush_outbox(service: &Arc<MailboxService>) {
         }
         let to_node = node_id_for(&entry.envelope.to);
         let sent = if connected.iter().any(|n| n == &to_node) {
-            send_wire(&to_node, &WireMessage::Mail { envelope: entry.envelope.clone() })
+            send_wire(&service.room, &to_node, &WireMessage::Mail { envelope: entry.envelope.clone() })
                 .await
                 .is_ok()
         } else if let Some(bot) = connected.first() {
-            send_wire(bot, &WireMessage::Deposit { envelope: entry.envelope.clone() })
+            send_wire(&service.room, bot, &WireMessage::Deposit { envelope: entry.envelope.clone() })
                 .await
                 .is_ok()
         } else {
@@ -489,7 +490,7 @@ async fn forward_held_to_connected(service: &Arc<MailboxService>) -> Result<()> 
         if !connected.iter().any(|n| n == to_node) {
             continue;
         }
-        if send_wire(to_node, &WireMessage::Mail { envelope: entry.envelope.clone() })
+        if send_wire(&service.room, to_node, &WireMessage::Mail { envelope: entry.envelope.clone() })
             .await
             .is_ok()
         {
@@ -516,7 +517,7 @@ async fn broadcast_fetch_request(service: &Arc<MailboxService>) {
         node_id: service.node_id.clone(),
     };
     for node in connected {
-        let _ = send_wire(&node, &msg).await;
+        let _ = send_wire(&service.room, &node, &msg).await;
     }
 }
 
@@ -524,8 +525,8 @@ async fn connected_nodes_with_timeout() -> Vec<String> {
     crate::net::connected_nodes().await
 }
 
-async fn send_wire(to_node: &str, message: &WireMessage) -> Result<()> {
-    crate::net::send_direct(to_node, message.to_bytes()?).await
+async fn send_wire(room: &str, to_node: &str, message: &WireMessage) -> Result<()> {
+    crate::net::send_direct(room, to_node, message.to_bytes()?).await
 }
 
 fn now_rfc3339() -> String {
