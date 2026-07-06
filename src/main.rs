@@ -1,10 +1,13 @@
+mod ai;
 mod cli;
 mod config;
 mod daemon;
 mod identity;
 mod mailbox;
+mod net;
 mod storage;
 mod stream;
+mod web;
 
 use anyhow::Result;
 use clap::Parser;

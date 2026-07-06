@@ -1,5 +1,5 @@
-//! Mailbox engine plumbing: lazily joins the mailbox room on mistlib's
-//! global-singleton engine, registers the wire-message callback, and
+//! Mailbox engine plumbing: lazily starts the shared p2p transport
+//! (`crate::net`), registers the wire-message callback on it, and
 //! implements the send / deposit / forward / fetch flows described in the
 //! module doc comment (`mod.rs`).
 //!
@@ -27,27 +27,23 @@ use crate::daemon::AppState;
 use super::envelope::{Envelope, EnvelopeKind, WireMessage, node_id_for};
 use super::spool::{self, SpoolEntry, SpoolKind};
 
-/// Default mailbox rendezvous room, used when `config.mailbox.room_id` is
-/// unset.
-const DEFAULT_ROOM: &str = "mistl-mailbox-v1";
-
-/// Cap on any single mistlib network operation (connection lookup, send)
-/// so `mailbox.*` commands can never hang indefinitely on an unreachable
-/// signaling relay or peer -- they degrade to "queued" instead.
-const NET_TIMEOUT: Duration = Duration::from_secs(5);
+/// Cap on a whole outbox flush pass (individual sends are already bounded
+/// inside `crate::net`) so `mailbox.*` commands degrade to "queued" instead
+/// of hanging.
+const NET_TIMEOUT: Duration = crate::net::NET_TIMEOUT;
 
 /// How often the bot forward loop re-checks `get_connected_nodes()` against
 /// what it's holding.
 const BOT_POLL_INTERVAL: Duration = Duration::from_secs(4);
 
 /// Lazily-initialized mailbox service state (module-internal singleton --
-/// mirrors the one-mistlib-engine-per-process reality: `ensure_started`
-/// initializes/joins the room only once per daemon run).
+/// the shared p2p engine initializes once per process, and this service's
+/// room is joined once per daemon run via `crate::net::ensure_started`;
+/// other services may independently join their own rooms alongside it).
 pub struct MailboxService {
     pub node_id: String,
     #[allow(dead_code)]
     pub did: String,
-    #[allow(dead_code)]
     pub room: String,
     pub serve_as_bot: bool,
     pub data_dir: PathBuf,
@@ -79,13 +75,12 @@ async fn init_service(state: &Arc<AppState>) -> Result<Arc<MailboxService>> {
     let node_id = identity.node_id();
     let did = identity.did().to_string();
 
-    let room = state
-        .config
-        .mailbox
+    let mailbox_config = state.config().mailbox;
+    let room = mailbox_config
         .room_id
         .clone()
-        .unwrap_or_else(|| DEFAULT_ROOM.to_string());
-    let serve_as_bot = state.config.mailbox.serve_as_bot;
+        .unwrap_or_else(|| crate::net::DEFAULT_ROOM.to_string());
+    let serve_as_bot = mailbox_config.serve_as_bot;
 
     let data_dir = crate::config::data_dir()
         .context("mailbox: resolving data dir")?
@@ -93,35 +88,14 @@ async fn init_service(state: &Arc<AppState>) -> Result<Arc<MailboxService>> {
     std::fs::create_dir_all(&data_dir)
         .with_context(|| format!("mailbox: creating {}", data_dir.display()))?;
 
-    // Same shape tc-storage's mistStorage.ts uses for its default mailbox
-    // node: explicit Nostr signaling with no relay override, which falls
-    // back to mistlib's default public relay list
-    // (NostrSignalingConfig::effective_relay_list_url).
-    let config_json = json!({
-        "signaling": { "mode": "nostr", "nostr": { "relays": [] } }
-    })
-    .to_string();
-
-    // mistlib's sync app entry points block_on its internal runtime, which
-    // panics on a tokio worker thread -- run them on a blocking thread.
-    {
-        let node_id = node_id.clone();
-        tokio::task::spawn_blocking(move || {
-            if !mistlib::app::init_with_config(node_id.clone(), config_json.as_bytes()) {
-                warn!(
-                    "mailbox: init_with_config rejected the default signaling config; falling back to init()"
-                );
-                mistlib::app::init(node_id, String::new());
-            }
-        })
+    let transport = crate::net::ensure_started(state, room.clone())
         .await
-        .context("mailbox: initializing mistlib engine")?;
-    }
+        .context("mailbox: starting p2p transport")?;
 
     let service = Arc::new(MailboxService {
         node_id,
         did,
-        room: room.clone(),
+        room: transport.room.clone(),
         serve_as_bot,
         data_dir,
         spool_lock: Mutex::new(()),
@@ -129,10 +103,6 @@ async fn init_service(state: &Arc<AppState>) -> Result<Arc<MailboxService>> {
     });
 
     register_handler(service.clone());
-    // Same blocking-thread rule as init above.
-    tokio::task::spawn_blocking(move || mistlib::app::join_room(room))
-        .await
-        .context("mailbox: joining room")?;
 
     // Prime: ask any already-connected bot for mail held for us, without
     // blocking startup on it.
@@ -150,11 +120,12 @@ async fn init_service(state: &Arc<AppState>) -> Result<Arc<MailboxService>> {
 }
 
 fn register_handler(service: Arc<MailboxService>) {
-    mistlib::app::register_raw_handler(move |event_type, from_id, data| {
-        if event_type == mistlib::EVENT_RAW {
-            let Ok(msg) = WireMessage::from_bytes(&data) else {
+    crate::net::register_handler(move |event_type, from_id, data| {
+        if event_type == crate::net::EVENT_RAW {
+            let Ok(msg) = WireMessage::from_bytes(data) else {
                 return; // Not a mailbox wire message (or corrupt); ignore.
             };
+            let from_id = from_id.to_string();
             let service = service.clone();
             let rt = service.runtime.clone();
             rt.spawn(async move {
@@ -162,7 +133,7 @@ fn register_handler(service: Arc<MailboxService>) {
                     warn!(%err, from = %from_id, "mailbox: error handling wire message");
                 }
             });
-        } else if event_type == mistlib::EVENT_JOIN {
+        } else if event_type == crate::net::EVENT_JOIN {
             // A peer just connected: eagerly retry anything we're holding
             // or waiting on rather than sitting on the next poll tick.
             let service = service.clone();
@@ -264,7 +235,7 @@ async fn receive_deposit(
 
     // Best-effort ack; the depositor doesn't wait on it (send already
     // returned status "deposited"), so a failure here is not fatal.
-    let _ = send_wire(from_node, &WireMessage::DepositAck { id }).await;
+    let _ = send_wire(&service.room, from_node, &WireMessage::DepositAck { id }).await;
     Ok(())
 }
 
@@ -294,6 +265,7 @@ async fn handle_fetch_request(
     }
 
     if send_wire(
+        &service.room,
         from_node,
         &WireMessage::FetchResult {
             envelopes: matching.clone(),
@@ -368,7 +340,7 @@ pub async fn send(
     let connected = connected_nodes_with_timeout().await;
 
     let status = if connected.iter().any(|n| n == &to_node) {
-        if send_wire(&to_node, &WireMessage::Mail { envelope: envelope.clone() })
+        if send_wire(&service.room, &to_node, &WireMessage::Mail { envelope: envelope.clone() })
             .await
             .is_ok()
         {
@@ -378,7 +350,7 @@ pub async fn send(
             "queued"
         }
     } else if let Some(bot) = connected.first() {
-        if send_wire(bot, &WireMessage::Deposit { envelope: envelope.clone() })
+        if send_wire(&service.room, bot, &WireMessage::Deposit { envelope: envelope.clone() })
             .await
             .is_ok()
         {
@@ -464,11 +436,11 @@ async fn flush_outbox(service: &Arc<MailboxService>) {
         }
         let to_node = node_id_for(&entry.envelope.to);
         let sent = if connected.iter().any(|n| n == &to_node) {
-            send_wire(&to_node, &WireMessage::Mail { envelope: entry.envelope.clone() })
+            send_wire(&service.room, &to_node, &WireMessage::Mail { envelope: entry.envelope.clone() })
                 .await
                 .is_ok()
         } else if let Some(bot) = connected.first() {
-            send_wire(bot, &WireMessage::Deposit { envelope: entry.envelope.clone() })
+            send_wire(&service.room, bot, &WireMessage::Deposit { envelope: entry.envelope.clone() })
                 .await
                 .is_ok()
         } else {
@@ -518,7 +490,7 @@ async fn forward_held_to_connected(service: &Arc<MailboxService>) -> Result<()> 
         if !connected.iter().any(|n| n == to_node) {
             continue;
         }
-        if send_wire(to_node, &WireMessage::Mail { envelope: entry.envelope.clone() })
+        if send_wire(&service.room, to_node, &WireMessage::Mail { envelope: entry.envelope.clone() })
             .await
             .is_ok()
         {
@@ -545,30 +517,16 @@ async fn broadcast_fetch_request(service: &Arc<MailboxService>) {
         node_id: service.node_id.clone(),
     };
     for node in connected {
-        let _ = send_wire(&node, &msg).await;
+        let _ = send_wire(&service.room, &node, &msg).await;
     }
 }
 
 async fn connected_nodes_with_timeout() -> Vec<String> {
-    match tokio::time::timeout(NET_TIMEOUT, mistlib::app::get_connected_nodes_async()).await {
-        Ok(nodes) => nodes,
-        Err(_) => {
-            debug!("mailbox: get_connected_nodes timed out");
-            Vec::new()
-        }
-    }
+    crate::net::connected_nodes().await
 }
 
-async fn send_wire(to_node: &str, message: &WireMessage) -> Result<()> {
-    let bytes = message.to_bytes()?;
-    let outcome = tokio::time::timeout(
-        NET_TIMEOUT,
-        mistlib::app::send_message_direct(to_node.to_string(), bytes, mistlib::app::DELIVERY_RELIABLE),
-    )
-    .await
-    .context("mailbox: send timed out")?;
-    outcome?;
-    Ok(())
+async fn send_wire(room: &str, to_node: &str, message: &WireMessage) -> Result<()> {
+    crate::net::send_direct(room, to_node, message.to_bytes()?).await
 }
 
 fn now_rfc3339() -> String {

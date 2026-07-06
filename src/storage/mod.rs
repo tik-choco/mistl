@@ -23,7 +23,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use mistlib::storage::fs::NativeBlockStore;
-use mistlib_core::storage::StorageEngine;
+use mistlib_core::storage::{SpatialPolicy, StorageEngine};
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, OnceCell};
 
@@ -56,7 +56,15 @@ impl Store {
                 blocks_dir.display()
             )
         })?;
-        let engine = StorageEngine::new(backend, NoopResolver, storage_cfg.capacity_bytes);
+        // Local-only store: no VRChat position source, so blocks are never
+        // spatially tagged and the default (decay-disabled) policy applies.
+        let engine = StorageEngine::new(
+            backend,
+            NoopResolver,
+            storage_cfg.capacity_bytes,
+            None,
+            SpatialPolicy::default(),
+        );
         Ok(Self {
             engine,
             data_dir,
@@ -115,7 +123,7 @@ pub async fn store(state: &AppState) -> Result<Arc<Store>> {
     let store = STORE
         .get_or_try_init(|| async {
             let data_dir = crate::config::data_dir()?;
-            Store::open(&state.config.storage, data_dir)
+            Store::open(&state.config().storage, data_dir)
                 .await
                 .map(Arc::new)
         })

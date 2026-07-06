@@ -1,0 +1,2955 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title data-i18n="pageTitle">MISTL dashboard</title>
+<link rel="icon" type="image/png" href="/favicon.png">
+<style>
+  /* Light is the default theme (`:root`); the dark theme is opt-in via the
+     topbar toggle, which stamps `data-theme="dark"` on <html> and persists
+     the choice in localStorage (`mistl-theme`). A tiny head script sets the
+     attribute before first paint so there is no flash. The default is light
+     regardless of `prefers-color-scheme`; only an explicit stored choice
+     switches to dark, so an explicit choice always wins. */
+  :root {
+    color-scheme: light;
+    --bg: #f4f5f8;
+    --bg-alt: #eaecf1;
+    --panel: #ffffff;
+    --panel-border: #dde1e9;
+    --text: #1b1f27;
+    --text-dim: #565f70;
+    --text-faint: #8790a0;
+    --accent: #2064d6;
+    --accent-dim: #dbe8ff;
+    --ok: #12875a;
+    --ok-dim: #dcf3e9;
+    --warn: #a8650f;
+    --warn-dim: #fbe9d2;
+    --err: #c62f29;
+    --err-dim: #fbe0de;
+    --mono: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --radius: 12px;
+    /* motion + depth tokens (single source of truth for the refreshed UI) */
+    --ease: cubic-bezier(0.16, 1, 0.3, 1);       /* expo-out: soft, unhurried settle */
+    --ease-out: cubic-bezier(0.33, 1, 0.68, 1);
+    --dur: 0.34s;
+    --dur-fast: 0.16s;
+    --sidenav-w: 224px;
+    --shadow-sm: 0 1px 2px rgba(30, 40, 60, 0.08);
+    --shadow: 0 2px 6px rgba(30, 40, 60, 0.08), 0 14px 34px rgba(30, 40, 60, 0.12);
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #0f1115;
+    --bg-alt: #161923;
+    --panel: #1a1e29;
+    --panel-border: #2a2f3d;
+    --text: #e6e9f0;
+    --text-dim: #9aa3b5;
+    --text-faint: #6b7385;
+    --accent: #5b9dfd;
+    --accent-dim: #274261;
+    --ok: #3ecf8e;
+    --ok-dim: #163c2c;
+    --warn: #f0a84e;
+    --warn-dim: #45300f;
+    --err: #f0605a;
+    --err-dim: #46201e;
+    --shadow-sm: 0 1px 2px rgba(6, 10, 20, 0.28);
+    --shadow: 0 2px 6px rgba(6, 10, 20, 0.22), 0 14px 34px rgba(6, 10, 20, 0.30);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 14px;
+    line-height: 1.45;
+  }
+  code, .mono { font-family: var(--mono); }
+
+  .topbar {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: var(--bg-alt);
+    border-bottom: 1px solid var(--panel-border);
+  }
+  header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+    padding: 12px 20px;
+  }
+  header h1 {
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    margin: 0;
+  }
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    background: var(--panel-border);
+    color: var(--text-dim);
+  }
+  .pill .dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--text-faint);
+    flex: none;
+  }
+  .pill.ok { background: var(--ok-dim); color: var(--ok); }
+  .pill.ok .dot { background: var(--ok); }
+  .pill.err { background: var(--err-dim); color: var(--err); }
+  .pill.err .dot { background: var(--err); }
+
+  .identity {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  .identity .name { color: var(--text); font-weight: 600; }
+  .copyable {
+    cursor: pointer;
+    border: none;
+    background: none;
+    color: var(--text-dim);
+    font-family: var(--mono);
+    font-size: 12px;
+    padding: 2px 4px;
+    border-radius: 4px;
+  }
+  .copyable:hover { background: var(--panel-border); color: var(--text); }
+
+  .lang-toggle { display: flex; gap: 4px; }
+  .lang-toggle button {
+    padding: 3px 10px;
+    font-size: 11px;
+    font-weight: 700;
+    border-radius: 999px;
+    border: 1px solid transparent;
+    background: var(--panel-border);
+    color: var(--text-dim);
+  }
+  .lang-toggle button.active { background: var(--accent-dim); color: var(--accent); }
+  .lang-toggle button:hover:not(.active) { color: var(--text); border-color: var(--accent); }
+
+  .theme-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    flex: none;
+    border-radius: 999px;
+    border: 1px solid transparent;
+    background: var(--panel-border);
+    color: var(--text-dim);
+  }
+  .theme-toggle:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); transform: none; }
+  .theme-toggle svg { width: 16px; height: 16px; stroke-width: 2; }
+  .theme-toggle .icon-sun { display: none; }
+  .theme-toggle .icon-moon { display: block; }
+  :root[data-theme="dark"] .theme-toggle .icon-sun { display: block; }
+  :root[data-theme="dark"] .theme-toggle .icon-moon { display: none; }
+
+  /* ---- app shell: sidebar nav + single routed view --------------------- */
+  .shell {
+    display: flex;
+    align-items: flex-start;
+    max-width: 1280px;
+    margin: 0 auto;
+    gap: 0;
+  }
+  .sidenav {
+    position: sticky;
+    top: 57px;                       /* below the sticky topbar */
+    align-self: flex-start;
+    flex: none;
+    width: var(--sidenav-w);
+    max-height: calc(100vh - 57px);
+    overflow-y: auto;
+    padding: 16px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .sidenav a {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    padding: 9px 12px;
+    border-radius: 9px;
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--text-dim);
+    text-decoration: none;
+    position: relative;
+    transition: color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out);
+  }
+  .sidenav a svg { width: 17px; height: 17px; flex: none; stroke-width: 1.9; opacity: 0.85; }
+  .sidenav a:hover { color: var(--text); background: var(--bg-alt); }
+  .sidenav a.active { color: var(--accent); background: var(--accent-dim); }
+  .sidenav a.active svg { opacity: 1; }
+  .sidenav a.active::before {
+    content: "";
+    position: absolute;
+    left: -12px; top: 50%;
+    height: 18px; width: 3px;
+    border-radius: 0 3px 3px 0;
+    background: var(--accent);
+    transform: translateY(-50%);
+    animation: navmark var(--dur) var(--ease);
+  }
+  @keyframes navmark { from { height: 0; opacity: 0; } to { height: 18px; opacity: 1; } }
+
+  main {
+    flex: 1;
+    min-width: 0;
+    padding: 24px clamp(16px, 3vw, 40px) 48px;
+    display: block;
+  }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: var(--radius);
+    padding: 22px 24px;
+    display: none;                   /* router shows exactly one at a time */
+    flex-direction: column;
+    gap: 16px;
+    min-width: 0;
+    box-shadow: var(--shadow-sm);
+  }
+  .panel.active {
+    display: flex;
+    animation: viewin var(--dur) var(--ease);
+  }
+  .panel.active > * { animation: risein var(--dur) var(--ease) backwards; }
+  .panel.active > *:nth-child(2) { animation-delay: 0.04s; }
+  .panel.active > *:nth-child(3) { animation-delay: 0.08s; }
+  .panel.active > *:nth-child(4) { animation-delay: 0.11s; }
+  .panel.active > *:nth-child(n+5) { animation-delay: 0.13s; }
+  @keyframes viewin { from { opacity: 0; transform: translateY(10px) scale(0.994); } to { opacity: 1; transform: none; } }
+  @keyframes risein { from { opacity: 0; transform: translateY(7px); } to { opacity: 1; transform: none; } }
+  .panel h2 {
+    font-size: 20px;
+    font-weight: 700;
+    margin: 0 0 2px;
+    letter-spacing: -0.01em;
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .panel h2 .spacer { flex: 1; }
+  .panel-span2 { grid-column: auto; }   /* legacy hook: single-view is full width */
+
+  .hint-banner {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 11px 16px;
+    margin-bottom: 18px;
+    border-radius: 10px;
+    background: var(--accent-dim);
+    color: var(--text);
+    font-size: 13px;
+    box-shadow: var(--shadow-sm);
+    animation: risein var(--dur) var(--ease);
+  }
+  .hint-banner .dismiss {
+    margin-left: auto;
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    font-weight: 700;
+    cursor: pointer;
+    padding: 0 4px;
+  }
+
+  .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 13px; }
+  .kv dt { color: var(--text-faint); }
+  .kv dd { margin: 0; color: var(--text); word-break: break-all; }
+
+  button {
+    font-family: var(--sans);
+    font-size: 13px;
+    font-weight: 600;
+    padding: 7px 13px;
+    border-radius: 8px;
+    border: 1px solid var(--panel-border);
+    background: var(--bg-alt);
+    color: var(--text);
+    cursor: pointer;
+    transition: border-color var(--dur-fast) var(--ease-out),
+                color var(--dur-fast) var(--ease-out),
+                background var(--dur-fast) var(--ease-out),
+                transform var(--dur-fast) var(--ease-out),
+                box-shadow var(--dur-fast) var(--ease-out);
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); transform: translateY(-1px); }
+  button:active:not(:disabled) { transform: translateY(0); }
+  button.primary:hover:not(:disabled) { color: var(--accent); box-shadow: 0 4px 14px var(--accent-dim); }
+  button:disabled { opacity: 0.55; cursor: default; }
+  button.primary { background: var(--accent-dim); color: var(--accent); border-color: transparent; }
+  button.danger { background: var(--err-dim); color: var(--err); border-color: transparent; }
+  button.busy { position: relative; color: transparent !important; }
+  button.busy::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    margin: auto;
+    width: 13px;
+    height: 13px;
+    border-radius: 50%;
+    border: 2px solid currentColor;
+    border-top-color: transparent;
+    color: var(--text-dim);
+    animation: spin 0.7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  input[type=text], input[type=password], input[type=number], select, textarea {
+    font-family: var(--sans);
+    font-size: 13px;
+    padding: 6px 9px;
+    border-radius: 7px;
+    border: 1px solid var(--panel-border);
+    background: var(--bg-alt);
+    color: var(--text);
+    min-width: 0;
+  }
+  input[type=text]:focus, input[type=password]:focus, input[type=number]:focus, textarea:focus, select:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .field { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 120px; }
+  .field label { font-size: 11px; color: var(--text-faint); }
+  form.inline { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  thead th {
+    text-align: left;
+    color: var(--text-faint);
+    font-weight: 600;
+    border-bottom: 1px solid var(--panel-border);
+    padding: 4px 6px;
+    white-space: nowrap;
+  }
+  tbody td {
+    padding: 5px 6px;
+    border-bottom: 1px solid var(--panel-border);
+    vertical-align: top;
+    word-break: break-word;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  .table-wrap { overflow-x: auto; max-width: 100%; }
+  .empty-note { color: var(--text-faint); font-size: 12.5px; padding: 6px 0; }
+
+  .truncate {
+    max-width: 220px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    display: inline-block;
+    vertical-align: bottom;
+  }
+
+  .chat-log {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 320px;
+    overflow-y: auto;
+    padding: 8px;
+    background: var(--bg-alt);
+    border-radius: 8px;
+    border: 1px solid var(--panel-border);
+  }
+  .chat-msg { display: flex; flex-direction: column; gap: 2px; }
+  .chat-msg .role { font-size: 11px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.04em; }
+  .chat-msg .bubble {
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: var(--panel);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .chat-msg.user .bubble { background: var(--accent-dim); color: var(--text); }
+  .chat-msg.error .bubble { background: var(--err-dim); color: var(--err); }
+  .chat-empty { color: var(--text-faint); font-size: 12.5px; padding: 4px; }
+
+  .url-callout {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 12px 14px;
+    border: 1px solid var(--accent);
+    border-radius: 8px;
+    background: var(--accent-dim);
+    cursor: pointer;
+  }
+  .url-callout-label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--accent);
+  }
+  .url-callout-url {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text);
+    word-break: break-all;
+  }
+  .badge {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: var(--panel-border);
+    color: var(--text-dim);
+  }
+  .badge.delivered, .badge.ok-badge { background: var(--ok-dim); color: var(--ok); }
+  .badge.deposited { background: var(--warn-dim); color: var(--warn); }
+  .badge.queued { background: var(--panel-border); color: var(--text-dim); }
+  .badge.restart { background: var(--warn-dim); color: var(--warn); margin-left: auto; }
+
+  .toast-stack {
+    position: fixed;
+    bottom: 18px;
+    right: 18px;
+    z-index: 100;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-width: 360px;
+  }
+  .toast {
+    background: var(--err-dim);
+    color: var(--err);
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-size: 13px;
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+    box-shadow: 0 4px 18px rgba(0,0,0,0.25);
+  }
+  .toast button {
+    background: none;
+    border: none;
+    color: inherit;
+    font-weight: 700;
+    padding: 0 2px;
+    margin-left: auto;
+  }
+  .toast .msg { flex: 1; word-break: break-word; }
+
+  .muted { color: var(--text-faint); }
+  .section-actions { display: flex; gap: 8px; margin-left: auto; }
+  hr.sep { border: none; border-top: 1px solid var(--panel-border); margin: 4px 0; }
+
+  .flow-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+  @media (max-width: 600px) {
+    .flow-grid { grid-template-columns: 1fr; }
+  }
+  .flow-card {
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .flow-card h3 { margin: 0; font-size: 13px; }
+  .flow-card p { margin: 0; color: var(--text-dim); font-size: 12.5px; }
+
+  .info-hint {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: var(--warn-dim);
+    color: var(--warn);
+    font-size: 12.5px;
+  }
+  .info-hint.neutral { background: var(--bg-alt); color: var(--text-dim); }
+  .info-hint a { color: inherit; font-weight: 600; }
+
+  .settings-section { display: flex; flex-direction: column; gap: 6px; margin-bottom: 4px; }
+  .settings-section h3 {
+    margin: 0;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-faint);
+    border-bottom: 1px solid var(--panel-border);
+    padding-bottom: 4px;
+  }
+  .settings-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--panel-border);
+  }
+  .settings-field:last-child { border-bottom: none; }
+  .settings-field .settings-label { font-size: 12.5px; font-weight: 600; }
+  .settings-field .desc { font-size: 11.5px; color: var(--text-faint); }
+  .settings-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .settings-row input[type=text], .settings-row input[type=password], .settings-row input[type=number], .settings-row select {
+    flex: 1;
+    min-width: 160px;
+  }
+  .toggle-switch { position: relative; display: inline-block; width: 36px; height: 20px; flex: none; }
+  .toggle-switch input { opacity: 0; width: 0; height: 0; position: absolute; }
+  .toggle-switch .slider {
+    position: absolute; inset: 0; cursor: pointer;
+    background: var(--panel-border); border-radius: 999px; transition: background 0.15s;
+  }
+  .toggle-switch .slider::before {
+    content: ""; position: absolute; width: 14px; height: 14px; left: 3px; top: 3px;
+    background: #fff; border-radius: 50%; transition: transform 0.15s;
+  }
+  .toggle-switch input:checked + .slider { background: var(--accent); }
+  .toggle-switch input:checked + .slider::before { transform: translateX(16px); }
+
+  .store-dropzone {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    border: 2px dashed var(--panel-border);
+    border-radius: 10px;
+    padding: 22px 14px;
+    text-align: center;
+    color: var(--text-dim);
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s, color 0.15s;
+  }
+  .store-dropzone:hover, .store-dropzone:focus {
+    border-color: var(--accent);
+    color: var(--accent);
+    outline: none;
+  }
+  .store-dropzone.dragover {
+    border-color: var(--accent);
+    background: var(--accent-dim);
+    color: var(--accent);
+  }
+  #store-upload-status { display: flex; flex-direction: column; gap: 2px; }
+  .upload-row { font-size: 12.5px; color: var(--text-dim); }
+  #store-path-details summary {
+    cursor: pointer;
+    font-size: 12.5px;
+    color: var(--text-dim);
+    padding: 4px 0;
+  }
+  #store-path-details summary:hover { color: var(--accent); }
+  #store-path-details form.inline { margin-top: 8px; }
+  .download-link {
+    display: inline-block;
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--accent);
+    text-decoration: none;
+    margin-right: 10px;
+  }
+  .download-link:hover { text-decoration: underline; }
+  .store-save-form { margin: 6px 0 0; }
+  .store-save-form input { width: 140px; }
+
+  /* ---- identity avatar (topbar) + profile avatar editor --------------- */
+  .identity-avatar {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    object-fit: cover;
+    flex: none;
+    background: var(--panel-border);
+    border: 1px solid var(--panel-border);
+  }
+  .profile-avatar-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .avatar-preview {
+    width: 96px;
+    height: 96px;
+    flex: none;
+    border-radius: 50%;
+    overflow: hidden;
+    border: 1px solid var(--panel-border);
+    background: var(--bg-alt);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-faint);
+    font-size: 32px;
+    font-weight: 700;
+    text-transform: uppercase;
+    box-shadow: var(--shadow-sm);
+  }
+  .avatar-preview img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .avatar-controls { flex: 1; min-width: 220px; display: flex; flex-direction: column; gap: 8px; }
+  .avatar-controls .store-dropzone { padding: 16px 14px; }
+  .avatar-controls .store-dropzone.busy-zone { opacity: 0.6; pointer-events: none; }
+  .avatar-actions { display: flex; gap: 8px; }
+
+  /* ---- refined focus ring (keyboard-friendly, non-jarring) ------------- */
+  input[type=text]:focus, input[type=password]:focus, input[type=number]:focus, textarea:focus, select:focus {
+    box-shadow: 0 0 0 3px var(--accent-dim);
+    transition: box-shadow var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
+  }
+  a:focus-visible, button:focus-visible, .sidenav a:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .url-callout { transition: transform var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out); }
+  .url-callout:hover { transform: translateY(-1px); box-shadow: 0 6px 18px var(--accent-dim); }
+  .flow-card { transition: border-color var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out); }
+  .flow-card:hover { border-color: var(--accent); transform: translateY(-1px); }
+
+  /* ---- responsive: sidebar collapses to a scrollable top rail ---------- */
+  @media (max-width: 720px) {
+    .shell { flex-direction: column; }
+    .sidenav {
+      position: sticky;
+      top: 57px;
+      z-index: 9;
+      flex-direction: row;
+      width: 100%;
+      max-height: none;
+      overflow-x: auto;
+      gap: 4px;
+      padding: 8px 12px;
+      background: var(--bg-alt);
+      border-bottom: 1px solid var(--panel-border);
+    }
+    .sidenav a { white-space: nowrap; padding: 7px 11px; }
+    .sidenav a.active::before { display: none; }
+    main { padding: 16px 14px 40px; }
+    .panel { padding: 18px 16px; }
+  }
+
+  /* ---- respect reduced-motion: keep it calm, kill the movement --------- */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+    }
+  }
+</style>
+<script>
+  /* Seed the theme before first paint (no flash). Light is the default; an
+     explicit choice the user made with the toggle (stored in localStorage)
+     wins and is the only thing that switches us to dark -- we deliberately do
+     not follow prefers-color-scheme, so the dashboard opens light by default
+     regardless of the OS setting. */
+  (function () {
+    try {
+      var stored = localStorage.getItem("mistl-theme");
+      document.documentElement.setAttribute("data-theme", stored === "dark" ? "dark" : "light");
+    } catch (e) { /* localStorage unavailable: keep the light default */ }
+  })();
+</script>
+</head>
+<body>
+
+<div class="topbar" id="topbar">
+  <header>
+    <h1>MISTL</h1>
+    <span id="daemon-pill" class="pill"><span class="dot"></span><span data-i18n="daemon.connecting">connecting&hellip;</span></span>
+    <div class="identity" id="identity-summary"></div>
+    <button type="button" class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">
+      <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+      <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2v2.2M12 19.8V22M2 12h2.2M19.8 12H22M4.9 4.9l1.6 1.6M17.5 17.5l1.6 1.6M19.1 4.9l-1.6 1.6M6.5 17.5l-1.6 1.6"/></svg>
+    </button>
+    <div class="lang-toggle" id="lang-toggle">
+      <button type="button" id="lang-en-btn" data-lang="en">EN</button>
+      <button type="button" id="lang-zh-btn" data-lang="zh">中文</button>
+      <button type="button" id="lang-ja-btn" data-lang="ja">日本語</button>
+    </div>
+  </header>
+</div>
+
+<div class="shell">
+  <nav class="sidenav" id="sidenav" aria-label="Sections">
+    <a href="#panel-overview"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9.5 12 3l9 6.5"/><path d="M5 9.5V21h14V9.5"/></svg><span data-i18n="nav.overview">Overview</span></a>
+    <a href="#panel-stream"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg><span data-i18n="nav.stream">Stream</span></a>
+    <a href="#panel-ai"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3"/></svg><span data-i18n="nav.ai">AI</span></a>
+    <a href="#panel-mailbox"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.5 5h13l3.5 7v7a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-7z"/></svg><span data-i18n="nav.mailbox">Mailbox</span></a>
+    <a href="#panel-store"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.7 4 3 9 3s9-1.3 9-3V5"/><path d="M3 12c0 1.7 4 3 9 3s9-1.3 9-3"/></svg><span data-i18n="nav.store">Store</span></a>
+    <a href="#panel-profile"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/></svg><span data-i18n="nav.profile">Profile</span></a>
+    <a href="#panel-settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg><span data-i18n="nav.settings">Settings</span></a>
+  </nav>
+
+<main id="main">
+  <div class="hint-banner" id="profile-hint-banner" hidden>
+    <span data-i18n="profileHint.text">Set a display name so others can recognize you.</span>
+    <button type="button" id="btn-profile-hint-focus" data-i18n="profileHint.button">Set display name</button>
+    <button type="button" class="dismiss" id="btn-profile-hint-dismiss" data-i18n-aria-label="common.dismiss" aria-label="Dismiss">&times;</button>
+  </div>
+
+  <section class="panel" id="panel-overview">
+    <h2><span data-i18n="overview.title">Overview</span> <span class="spacer"></span>
+      <button id="btn-refresh-overview" data-role="refresh" data-i18n="common.refresh">Refresh</button>
+    </h2>
+    <dl class="kv" id="overview-kv"></dl>
+    <div class="row">
+      <button id="btn-stop-daemon" class="danger" data-i18n="overview.stopDaemon">Stop daemon</button>
+    </div>
+  </section>
+
+  <section class="panel" id="panel-stream">
+    <h2><span data-i18n="stream.title">Stream</span> <span class="spacer"></span>
+      <button data-role="refresh" data-target="stream" data-i18n="common.refresh">Refresh</button>
+    </h2>
+    <div class="flow-grid">
+      <div class="flow-card">
+        <h3 data-i18n="stream.shareTitle">Share this PC&#39;s screen</h3>
+        <p data-i18n="stream.shareDesc">Streams this computer&#39;s desktop directly to an RTSP URL you paste into the VRChat video player.</p>
+        <div class="row">
+          <button id="btn-stream-start" class="primary" data-i18n="stream.startBtn">Start (this screen)</button>
+        </div>
+      </div>
+      <div class="flow-card">
+        <h3 data-i18n="stream.relayTitle">Relay a tc-chat share</h3>
+        <p data-i18n="stream.relayDesc">Relays a screen already being shared in a tc-chat room, so VRChat viewers can watch it.</p>
+        <form class="inline" id="relay-form">
+          <div class="field" style="flex: 2;">
+            <label for="relay-room" data-i18n="stream.roomLabel">tc-chat room id</label>
+            <input type="text" id="relay-room" data-i18n-placeholder="stream.roomPlaceholder" placeholder="room id (or set a default in Settings)" autocomplete="off">
+          </div>
+          <button type="submit" class="primary" data-i18n="stream.relayBtn">Relay to VRChat</button>
+        </form>
+        <div class="info-hint neutral" id="relay-room-hint" hidden>
+          <span data-i18n="stream.roomHint.prefix">Type a room id above, or set a default relay room in </span><a href="#panel-settings" id="relay-room-hint-link" data-i18n="stream.roomHint.link">Settings</a><span data-i18n="stream.roomHint.suffix">.</span>
+        </div>
+      </div>
+    </div>
+    <div class="url-callout" id="stream-url-callout" hidden data-i18n-title="common.clickToCopy" title="Click to copy">
+      <span class="url-callout-label" data-i18n="stream.urlLabel">Paste into the VRChat video player</span>
+      <span class="url-callout-url mono" id="stream-url-text"></span>
+    </div>
+    <div class="info-hint" id="stream-vrchat-hint" hidden></div>
+    <dl class="kv" id="stream-kv"></dl>
+    <div class="row">
+      <button id="btn-stream-stop" class="danger" data-i18n="stream.stopBtn">Stop</button>
+    </div>
+  </section>
+
+  <section class="panel panel-span2" id="panel-ai">
+    <h2><span data-i18n="ai.title">AI</span> <span class="spacer"></span>
+      <button data-role="refresh" data-target="ai" data-i18n="common.refresh">Refresh</button>
+    </h2>
+    <div id="ai-hints"></div>
+    <dl class="kv" id="ai-kv"></dl>
+    <div class="row">
+      <button id="btn-ai-provide-start" class="primary" data-i18n="ai.startProviding">Start providing</button>
+      <button id="btn-ai-provide-stop" class="danger" data-i18n="ai.stopProviding">Stop providing</button>
+      <button id="btn-ai-serve-start" class="primary" data-i18n="ai.startServe">Start API server</button>
+      <button id="btn-ai-serve-stop" class="danger" data-i18n="ai.stopServe">Stop API server</button>
+    </div>
+    <div id="ai-models" class="row"></div>
+    <hr class="sep">
+    <div class="chat-log" id="chat-log">
+      <div class="chat-empty" data-i18n="chat.empty">No messages yet.</div>
+    </div>
+    <form class="inline" id="chat-form">
+      <div class="field" style="flex: 3;">
+        <label for="chat-prompt" data-i18n="chat.promptLabel">Prompt</label>
+        <input type="text" id="chat-prompt" data-i18n-placeholder="chat.promptPlaceholder" placeholder="Ask something&hellip;" autocomplete="off">
+      </div>
+      <div class="field" style="flex: 1; min-width: 140px;">
+        <label for="chat-model" data-i18n="chat.modelLabel">Model (optional)</label>
+        <select id="chat-model"><option value="" data-i18n="common.default">default</option></select>
+      </div>
+      <button type="submit" class="primary" id="btn-chat-send" data-i18n="chat.send">Send</button>
+    </form>
+  </section>
+
+  <section class="panel panel-span2" id="panel-mailbox">
+    <h2><span data-i18n="mailbox.title">Mailbox</span> <span class="spacer"></span>
+      <button id="btn-mailbox-fetch" data-i18n="mailbox.fetchBtn">Fetch my messages</button>
+      <button data-role="refresh" data-target="mailbox-ls" data-i18n="mailbox.refreshHeld">Refresh held</button>
+    </h2>
+    <div class="table-wrap">
+      <table id="mailbox-held-table">
+        <thead><tr>
+          <th data-i18n="mailbox.heldCol.id">ID</th>
+          <th data-i18n="mailbox.heldCol.from">From</th>
+          <th data-i18n="mailbox.heldCol.to">To</th>
+          <th data-i18n="mailbox.heldCol.size">Size</th>
+          <th data-i18n="mailbox.heldCol.since">Held since</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="empty-note" id="mailbox-held-empty" data-i18n="mailbox.heldEmpty">No held deposits &mdash; deposits are messages other nodes left here for their recipients to fetch later.</div>
+    </div>
+    <div class="table-wrap">
+      <table id="mailbox-fetch-table">
+        <thead><tr>
+          <th data-i18n="mailbox.fetchCol.id">ID</th>
+          <th data-i18n="mailbox.fetchCol.from">From</th>
+          <th data-i18n="mailbox.fetchCol.content">Content</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="empty-note" id="mailbox-fetch-empty" data-i18n="mailbox.fetchEmpty">Nothing fetched yet. Click &quot;Fetch my messages&quot; to check for new mail.</div>
+    </div>
+    <hr class="sep">
+    <form class="inline" id="mailbox-send-form">
+      <div class="field" style="flex: 1; min-width: 160px;">
+        <label for="mailbox-to" data-i18n="mailbox.toLabel">To (DID or node id)</label>
+        <input type="text" id="mailbox-to" data-i18n-placeholder="mailbox.toPlaceholder" placeholder="did:key:z6Mk&hellip; or a 16-hex node id" autocomplete="off">
+      </div>
+      <div class="field" style="flex: 2;">
+        <label for="mailbox-message" data-i18n="mailbox.messageLabel">Message</label>
+        <input type="text" id="mailbox-message" autocomplete="off">
+      </div>
+      <button type="submit" class="primary" id="btn-mailbox-send" data-i18n="mailbox.send">Send</button>
+    </form>
+  </section>
+
+  <section class="panel panel-span2" id="panel-store">
+    <h2><span data-i18n="store.title">Store</span> <span class="spacer"></span>
+      <button data-role="refresh" data-target="store" data-i18n="common.refresh">Refresh</button>
+    </h2>
+    <div class="table-wrap">
+      <table id="store-table">
+        <thead><tr>
+          <th data-i18n="store.col.cid">CID</th>
+          <th data-i18n="store.col.name">Name</th>
+          <th data-i18n="store.col.size">Size</th>
+          <th data-i18n="store.col.storedAt">Stored at</th>
+          <th data-i18n="store.col.actions">Actions</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="empty-note" id="store-empty" data-i18n="store.empty">No stored items.</div>
+    </div>
+    <hr class="sep">
+    <div class="store-dropzone" id="store-dropzone" tabindex="0" role="button">
+      <span data-i18n="store.dropzoneText">Drag files here, or click to browse</span>
+      <span class="muted" style="font-size: 11.5px;" data-i18n="store.dropzoneHint">Uploads directly to this node&#39;s store.</span>
+      <input type="file" id="store-file-input" multiple hidden>
+    </div>
+    <div id="store-upload-status"></div>
+    <details id="store-path-details">
+      <summary data-i18n="store.addByPathSummary">Add by file path on this machine (for very large local files)</summary>
+      <form class="inline" id="store-put-form">
+        <div class="field" style="flex: 1;">
+          <label for="store-path" data-i18n="store.pathLabel">Path on this machine (read server-side by the daemon)</label>
+          <input type="text" id="store-path" data-i18n-placeholder="store.pathPlaceholder" placeholder="C:\path\to\file or /path/to/file" autocomplete="off">
+        </div>
+        <button type="submit" class="primary" id="btn-store-put" data-i18n="store.addBtn">Add</button>
+      </form>
+    </details>
+  </section>
+
+  <section class="panel" id="panel-profile">
+    <h2><span data-i18n="profile.title">Profile</span> <span class="spacer"></span>
+      <button data-role="refresh" data-target="profile" data-i18n="common.refresh">Refresh</button>
+    </h2>
+    <dl class="kv" id="profile-kv"></dl>
+    <div class="profile-avatar-row">
+      <div class="avatar-preview" id="profile-avatar-preview" aria-hidden="true"></div>
+      <div class="avatar-controls">
+        <div class="store-dropzone" id="profile-avatar-dropzone" tabindex="0" role="button" data-i18n-aria-label="profile.avatarPick" aria-label="Set profile image">
+          <span data-i18n="profile.avatarDropText">Drag an image here, or click to choose</span>
+          <span class="muted" style="font-size: 11.5px;" data-i18n="profile.avatarHint">PNG, JPEG or WebP. Downscaled to 256px and stored on this node.</span>
+          <input type="file" id="profile-avatar-input" accept="image/png,image/jpeg,image/webp" hidden>
+        </div>
+        <div class="avatar-actions">
+          <button type="button" id="btn-profile-avatar-remove" class="danger" data-i18n="profile.avatarRemove" hidden>Remove image</button>
+        </div>
+      </div>
+    </div>
+    <form class="inline" id="profile-form">
+      <div class="field" style="flex: 1;">
+        <label for="profile-display-name" data-i18n="profile.displayNameLabel">Display name</label>
+        <input type="text" id="profile-display-name" autocomplete="off">
+      </div>
+      <button type="submit" class="primary" id="btn-profile-save" data-i18n="profile.save">Save</button>
+    </form>
+  </section>
+
+  <section class="panel panel-span2" id="panel-settings">
+    <h2><span data-i18n="settings.title">Settings</span> <span class="spacer"></span>
+      <button data-role="refresh" data-target="settings" data-i18n="common.refresh">Refresh</button>
+    </h2>
+    <div id="settings-body"></div>
+  </section>
+</main>
+</div>
+
+<div class="toast-stack" id="toast-stack"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  /* ---------- i18n ---------- */
+
+  var T = {
+    en: {
+      "pageTitle": "MISTL dashboard",
+      "lang.en": "EN",
+      "lang.zh": "中文",
+      "lang.ja": "日本語",
+      "theme.switchToLight": "Switch to light theme",
+      "theme.switchToDark": "Switch to dark theme",
+      "daemon.connecting": "connecting…",
+      "daemon.running": "running · pid {pid} · v{version} · {uptime}",
+      "daemon.unreachable": "daemon unreachable",
+      "nav.overview": "Overview",
+      "nav.stream": "Stream",
+      "nav.ai": "AI",
+      "nav.mailbox": "Mailbox",
+      "nav.store": "Store",
+      "nav.profile": "Profile",
+      "nav.settings": "Settings",
+      "profileHint.text": "Set a display name so others can recognize you.",
+      "profileHint.button": "Set display name",
+      "common.dismiss": "Dismiss",
+      "common.refresh": "Refresh",
+      "common.save": "Save",
+      "common.add": "Add",
+      "common.send": "Send",
+      "common.copied": "Copied to clipboard.",
+      "common.copyFailed": "Copy failed.",
+      "common.clipboardUnavailable": "Clipboard unavailable.",
+      "common.default": "default",
+      "common.clickToCopy": "Click to copy",
+      "overview.title": "Overview",
+      "overview.stopDaemon": "Stop daemon",
+      "overview.stopConfirm": "Stop the mistl daemon? This will end all active sessions.",
+      "overview.stopping": "Daemon is stopping.",
+      "overview.status": "status",
+      "overview.unreachable": "daemon unreachable",
+      "overview.pid": "pid",
+      "overview.version": "version",
+      "overview.uptime": "uptime",
+      "stream.title": "Stream",
+      "stream.shareTitle": "Share this PC's screen",
+      "stream.shareDesc": "Streams this computer's desktop directly to an RTSP URL you paste into the VRChat video player.",
+      "stream.startBtn": "Start (this screen)",
+      "stream.relayTitle": "Relay a tc-chat share",
+      "stream.relayDesc": "Relays a screen already being shared in a tc-chat room, so VRChat viewers can watch it.",
+      "stream.roomLabel": "tc-chat room id",
+      "stream.roomPlaceholder": "room id (or set a default in Settings)",
+      "stream.relayBtn": "Relay to VRChat",
+      "stream.roomHint.prefix": "Type a room id above, or set a default relay room in ",
+      "stream.roomHint.link": "Settings",
+      "stream.roomHint.suffix": ".",
+      "stream.urlLabel": "Paste into the VRChat video player",
+      "stream.status": "status",
+      "stream.statusUnknown": "unknown",
+      "stream.statusRunning": "running",
+      "stream.statusStopped": "stopped",
+      "stream.clients": "clients",
+      "stream.backend": "backend",
+      "stream.relayRoom": "relay room",
+      "stream.publisher": "publisher",
+      "stream.waitingPublisher": "waiting for a publisher…",
+      "stream.uptime": "uptime",
+      "stream.stopBtn": "Stop",
+      "stream.stopConfirm": "Stop the stream?",
+      "stream.started": "Stream started.",
+      "stream.stopped": "Stream stopped.",
+      "stream.relayStarted": "Relay started in room {room}.",
+      "stream.relayStartedNoRoom": "Relay started.",
+      "stream.vrchatHint.prefix": "This URL only works in VRChat on this same PC. Playing on another PC or Quest?",
+      "stream.vrchatHint.link": "Set the RTSP address to 0.0.0.0 in Settings",
+      "stream.vrchatHint.suffix": " and restart the stream.",
+      "ai.title": "AI",
+      "ai.upstreamHint": "Set an OpenAI-compatible upstream in Settings to provide inference.",
+      "ai.openSettings": "Open Settings",
+      "ai.readyHint": "Upstream is configured. Start providing to answer AI requests from the network.",
+      "ai.endpointLabel": "OpenAI-compatible endpoint",
+      "ai.statusLabel": "status",
+      "ai.room": "room",
+      "ai.nodeId": "node id",
+      "ai.connectedPeers": "connected peers",
+      "ai.providing": "providing",
+      "ai.servingLabel": "serving",
+      "ai.remoteProvider": "remote provider",
+      "ai.yes": "yes",
+      "ai.no": "no",
+      "ai.modelsLabel": "models:",
+      "ai.startProviding": "Start providing",
+      "ai.stopProviding": "Stop providing",
+      "ai.startServe": "Start API server",
+      "ai.stopServe": "Stop API server",
+      "ai.alreadyProviding": "Already providing.",
+      "ai.nowProviding": "Now providing AI models.",
+      "ai.stoppedProviding": "Stopped providing.",
+      "ai.wasNotProviding": "Was not providing.",
+      "ai.serveAlready": "API server already running at {listen}",
+      "ai.serveStarted": "API server listening at {listen}",
+      "ai.serveStopped": "API server stopped.",
+      "ai.serveWasNotRunning": "API server was not running.",
+      "chat.promptLabel": "Prompt",
+      "chat.promptPlaceholder": "Ask something…",
+      "chat.modelLabel": "Model (optional)",
+      "chat.send": "Send",
+      "chat.empty": "No messages yet.",
+      "chat.you": "you",
+      "chat.error": "error",
+      "chat.assistant": "assistant",
+      "chat.noProviderError": "No provider reachable — start providing locally or wait for a p2p provider.",
+      "mailbox.title": "Mailbox",
+      "mailbox.fetchBtn": "Fetch my messages",
+      "mailbox.refreshHeld": "Refresh held",
+      "mailbox.heldCol.id": "ID",
+      "mailbox.heldCol.from": "From",
+      "mailbox.heldCol.to": "To",
+      "mailbox.heldCol.size": "Size",
+      "mailbox.heldCol.since": "Held since",
+      "mailbox.heldEmpty": "No held deposits — deposits are messages other nodes left here for their recipients to fetch later.",
+      "mailbox.fetchCol.id": "ID",
+      "mailbox.fetchCol.from": "From",
+      "mailbox.fetchCol.content": "Content",
+      "mailbox.fetchEmpty": "Nothing fetched yet. Click “Fetch my messages” to check for new mail.",
+      "mailbox.fileContent": "file: {name} ({size}, cid {cid})",
+      "mailbox.toLabel": "To (DID or node id)",
+      "mailbox.toPlaceholder": "did:key:z6Mk… or a 16-hex node id",
+      "mailbox.messageLabel": "Message",
+      "mailbox.send": "Send",
+      "mailbox.needBoth": "Recipient and message are both required.",
+      "mailbox.sentStatus": "Message {status} (id {id}).",
+      "store.title": "Store",
+      "store.col.cid": "CID",
+      "store.col.name": "Name",
+      "store.col.size": "Size",
+      "store.col.storedAt": "Stored at",
+      "store.col.actions": "Actions",
+      "store.empty": "No stored items.",
+      "store.download": "Download",
+      "store.saveToPath": "Save to server path",
+      "store.savePathPlaceholder": "output path (optional)",
+      "store.saved": "Saved to {output}",
+      "store.dropzoneText": "Drag files here, or click to browse",
+      "store.dropzoneHint": "Uploads directly to this node's store.",
+      "store.uploading": "Uploading {name}… {pct}%",
+      "store.uploaded": "Uploaded {name} ({size}).",
+      "store.uploadFailed": "Upload failed for {name}: {error}",
+      "store.addByPathSummary": "Add by file path on this machine (for very large local files)",
+      "store.pathLabel": "Path on this machine (read server-side by the daemon)",
+      "store.pathPlaceholder": "C:\\path\\to\\file or /path/to/file",
+      "store.addBtn": "Add",
+      "store.stored": "Stored {name} ({size}).",
+      "profile.title": "Profile",
+      "profile.did": "did",
+      "profile.displayName": "display name",
+      "profile.bio": "bio",
+      "profile.avatarCid": "avatar cid",
+      "profile.updatedAt": "updated at",
+      "profile.displayNameLabel": "Display name",
+      "profile.save": "Save",
+      "profile.updated": "Profile updated.",
+      "profile.avatarPick": "Set profile image",
+      "profile.avatarDropText": "Drag an image here, or click to choose",
+      "profile.avatarHint": "PNG, JPEG or WebP. Downscaled to 256px and stored on this node.",
+      "profile.avatarRemove": "Remove image",
+      "profile.avatarUpdated": "Profile image updated.",
+      "profile.avatarRemoved": "Profile image removed.",
+      "profile.avatarBadType": "Choose a PNG, JPEG or WebP image.",
+      "settings.title": "Settings",
+      "settings.restartBadge": "restart the daemon to apply",
+      "settings.savedRestart": "Saved. Restart the daemon to apply.",
+      "settings.savedNextStart": "Saved. Applies next time this service starts.",
+      "settings.enterGib": "Enter a number of GiB for {label}.",
+      "settings.enterNumber": "Enter a number for {label}.",
+      "settings.gibUnit": "GiB",
+      "settings.clear": "Clear",
+      "settings.passwordSetPlaceholder": "(set) leave blank to keep",
+      "settings.passwordNotSet": "not set",
+      "settings.optionDefault": "(default)",
+      "settings.section.identity": "Identity",
+      "settings.section.storage": "Storage",
+      "settings.section.stream": "Stream",
+      "settings.section.mailbox": "Mailbox",
+      "settings.section.ai": "AI",
+      "settings.section.ui": "Web dashboard",
+      "settings.field.identity.display_name.label": "Display name",
+      "settings.field.identity.display_name.desc": "Default display name written to config (applies at next start; use the Profile panel above to change it live).",
+      "settings.field.storage.capacity_bytes.label": "Storage capacity",
+      "settings.field.storage.capacity_bytes.desc": "Maximum size of the local block store.",
+      "settings.field.stream.rtsp_url.label": "RTSP URL",
+      "settings.field.stream.rtsp_url.desc": "RTSP endpoint used when streaming. Leave blank to use the default.",
+      "settings.field.stream.frame_rate.label": "Frame rate",
+      "settings.field.stream.frame_rate.desc": "Capture frame rate, in frames per second.",
+      "settings.field.stream.capture_backend.label": "Capture backend",
+      "settings.field.stream.capture_backend.desc": "Screen capture backend to use.",
+      "settings.field.stream.max_width.label": "Max width",
+      "settings.field.stream.max_width.desc": "Maximum capture width in pixels; wider input is scaled down.",
+      "settings.field.stream.relay_room.label": "Default relay room",
+      "settings.field.stream.relay_room.desc": "tc-chat room id used by “Relay a tc-chat share” when none is typed.",
+      "settings.field.stream.audio_codec.label": "Audio codec",
+      "settings.field.stream.audio_codec.desc": "Audio codec used for the stream.",
+      "settings.field.mailbox.room_id.label": "Room id",
+      "settings.field.mailbox.room_id.desc": "tc-chat room used for mailbox delivery.",
+      "settings.field.mailbox.serve_as_bot.label": "Serve as bot",
+      "settings.field.mailbox.serve_as_bot.desc": "Answer mailbox room presence as an automated bot.",
+      "settings.field.ai.room_id.label": "Room id",
+      "settings.field.ai.room_id.desc": "tc-chat room used to discover AI providers and consumers.",
+      "settings.field.ai.upstream_url.label": "Upstream URL",
+      "settings.field.ai.upstream_url.desc": "OpenAI-compatible endpoint this daemon forwards inference to when providing.",
+      "settings.field.ai.upstream_api_key.label": "Upstream API key",
+      "settings.field.ai.upstream_api_key.desc": "API key sent to the upstream endpoint. Stored on this machine only.",
+      "settings.field.ai.default_model.label": "Default model",
+      "settings.field.ai.default_model.desc": "Model name used when a request does not specify one.",
+      "settings.field.ai.temperature.label": "Temperature",
+      "settings.field.ai.temperature.desc": "Default sampling temperature.",
+      "settings.field.ai.request_timeout_secs.label": "Request timeout (seconds)",
+      "settings.field.ai.request_timeout_secs.desc": "How long to wait for an upstream response before giving up.",
+      "settings.field.ai.api_listen.label": "API listen address",
+      "settings.field.ai.api_listen.desc": "Address:port the local OpenAI-compatible API server binds to.",
+      "settings.field.ui.listen.label": "Listen address",
+      "settings.field.ui.listen.desc": "Address:port this dashboard binds to.",
+      "settings.field.ui.enabled.label": "Enabled",
+      "settings.field.ui.enabled.desc": "Whether the web dashboard starts with the daemon."
+    },
+    ja: {
+      "pageTitle": "MISTL ダッシュボード",
+      "lang.en": "EN",
+      "lang.zh": "中文",
+      "lang.ja": "日本語",
+      "theme.switchToLight": "ライトモードに切り替え",
+      "theme.switchToDark": "ダークモードに切り替え",
+      "daemon.connecting": "接続中…",
+      "daemon.running": "稼働中 · pid {pid} · v{version} · {uptime}",
+      "daemon.unreachable": "デーモンに接続できません",
+      "nav.overview": "概要",
+      "nav.stream": "ストリーム",
+      "nav.ai": "AI",
+      "nav.mailbox": "メールボックス",
+      "nav.store": "ストア",
+      "nav.profile": "プロフィール",
+      "nav.settings": "設定",
+      "profileHint.text": "表示名を設定すると、他の人があなたを識別しやすくなります。",
+      "profileHint.button": "表示名を設定",
+      "common.dismiss": "閉じる",
+      "common.refresh": "更新",
+      "common.save": "保存",
+      "common.add": "追加",
+      "common.send": "送信",
+      "common.copied": "クリップボードにコピーしました。",
+      "common.copyFailed": "コピーに失敗しました。",
+      "common.clipboardUnavailable": "クリップボードが利用できません。",
+      "common.default": "デフォルト",
+      "common.clickToCopy": "クリックしてコピー",
+      "overview.title": "概要",
+      "overview.stopDaemon": "デーモンを停止",
+      "overview.stopConfirm": "mistlデーモンを停止しますか?すべてのアクティブなセッションが終了します。",
+      "overview.stopping": "デーモンを停止しています。",
+      "overview.status": "状態",
+      "overview.unreachable": "デーモンに接続できません",
+      "overview.pid": "pid",
+      "overview.version": "バージョン",
+      "overview.uptime": "稼働時間",
+      "stream.title": "ストリーム",
+      "stream.shareTitle": "この画面を共有",
+      "stream.shareDesc": "このPCのデスクトップをRTSP URLとして直接配信します。VRChatの動画プレイヤーに貼り付けて再生できます。",
+      "stream.startBtn": "開始 (この画面)",
+      "stream.relayTitle": "tc-chatの画面共有を中継",
+      "stream.relayDesc": "tc-chatのルームで共有中の画面をVRChatへ中継し、視聴者が見られるようにします。",
+      "stream.roomLabel": "tc-chatルームID",
+      "stream.roomPlaceholder": "ルームID (設定でデフォルトを指定できます)",
+      "stream.relayBtn": "VRChatへ中継",
+      "stream.roomHint.prefix": "上にルームIDを入力するか、",
+      "stream.roomHint.link": "設定",
+      "stream.roomHint.suffix": "でデフォルトの中継ルームを指定してください。",
+      "stream.urlLabel": "貼り付け用URL (VRChatの動画プレイヤーへ)",
+      "stream.status": "状態",
+      "stream.statusUnknown": "不明",
+      "stream.statusRunning": "配信中",
+      "stream.statusStopped": "停止中",
+      "stream.clients": "クライアント数",
+      "stream.backend": "バックエンド",
+      "stream.relayRoom": "中継ルーム",
+      "stream.publisher": "配信元",
+      "stream.waitingPublisher": "配信元を待っています…",
+      "stream.uptime": "稼働時間",
+      "stream.stopBtn": "停止",
+      "stream.stopConfirm": "ストリームを停止しますか?",
+      "stream.started": "ストリームを開始しました。",
+      "stream.stopped": "ストリームを停止しました。",
+      "stream.relayStarted": "ルーム{room}で中継を開始しました。",
+      "stream.relayStartedNoRoom": "中継を開始しました。",
+      "stream.vrchatHint.prefix": "このURLは同じPC上のVRChatでのみ機能します。別のPCやQuestで再生する場合は、",
+      "stream.vrchatHint.link": "設定でRTSPアドレスを0.0.0.0に変更",
+      "stream.vrchatHint.suffix": "し、ストリームを再起動してください。",
+      "ai.title": "AI",
+      "ai.upstreamHint": "推論を提供するには、設定でOpenAI互換のアップストリームを指定してください。",
+      "ai.openSettings": "設定を開く",
+      "ai.readyHint": "アップストリームが設定されています。「提供を開始」すると、ネットワークからのAIリクエストに応答できます。",
+      "ai.endpointLabel": "OpenAI互換エンドポイント",
+      "ai.statusLabel": "状態",
+      "ai.room": "ルーム",
+      "ai.nodeId": "ノードID",
+      "ai.connectedPeers": "接続中のピア数",
+      "ai.providing": "提供中",
+      "ai.servingLabel": "APIサーバー",
+      "ai.remoteProvider": "リモートプロバイダー",
+      "ai.yes": "はい",
+      "ai.no": "いいえ",
+      "ai.modelsLabel": "モデル:",
+      "ai.startProviding": "提供を開始",
+      "ai.stopProviding": "提供を停止",
+      "ai.startServe": "APIサーバーを開始",
+      "ai.stopServe": "APIサーバーを停止",
+      "ai.alreadyProviding": "すでに提供中です。",
+      "ai.nowProviding": "AIモデルの提供を開始しました。",
+      "ai.stoppedProviding": "提供を停止しました。",
+      "ai.wasNotProviding": "提供していませんでした。",
+      "ai.serveAlready": "APIサーバーはすでに{listen}で稼働しています",
+      "ai.serveStarted": "APIサーバーが{listen}で待ち受けを開始しました",
+      "ai.serveStopped": "APIサーバーを停止しました。",
+      "ai.serveWasNotRunning": "APIサーバーは稼働していませんでした。",
+      "chat.promptLabel": "プロンプト",
+      "chat.promptPlaceholder": "質問を入力…",
+      "chat.modelLabel": "モデル (任意)",
+      "chat.send": "送信",
+      "chat.empty": "まだメッセージはありません。",
+      "chat.you": "あなた",
+      "chat.error": "エラー",
+      "chat.assistant": "アシスタント",
+      "chat.noProviderError": "利用可能なプロバイダーがありません。ローカルで提供を開始するか、p2pプロバイダーが見つかるまでお待ちください。",
+      "mailbox.title": "メールボックス",
+      "mailbox.fetchBtn": "メッセージを取得",
+      "mailbox.refreshHeld": "保留中を更新",
+      "mailbox.heldCol.id": "ID",
+      "mailbox.heldCol.from": "差出人",
+      "mailbox.heldCol.to": "宛先",
+      "mailbox.heldCol.size": "サイズ",
+      "mailbox.heldCol.since": "保留開始",
+      "mailbox.heldEmpty": "保留中のデポジットはありません。デポジットとは、他のノードが受信者のために一時的に預けたメッセージです。",
+      "mailbox.fetchCol.id": "ID",
+      "mailbox.fetchCol.from": "差出人",
+      "mailbox.fetchCol.content": "内容",
+      "mailbox.fetchEmpty": "まだ何も取得していません。「メッセージを取得」をクリックして新着を確認してください。",
+      "mailbox.fileContent": "ファイル: {name} ({size}、cid {cid})",
+      "mailbox.toLabel": "宛先 (DIDまたはノードID)",
+      "mailbox.toPlaceholder": "did:key:z6Mk… または16桁の16進ノードID",
+      "mailbox.messageLabel": "メッセージ",
+      "mailbox.send": "送信",
+      "mailbox.needBoth": "宛先とメッセージの両方を入力してください。",
+      "mailbox.sentStatus": "メッセージは{status} (id {id})。",
+      "store.title": "ストア",
+      "store.col.cid": "CID",
+      "store.col.name": "名前",
+      "store.col.size": "サイズ",
+      "store.col.storedAt": "保存日時",
+      "store.col.actions": "操作",
+      "store.empty": "保存されたアイテムはありません。",
+      "store.download": "ダウンロード",
+      "store.saveToPath": "サーバー側パスに保存",
+      "store.savePathPlaceholder": "出力パス (任意)",
+      "store.saved": "{output} に保存しました",
+      "store.dropzoneText": "ここにファイルをドラッグ、またはクリックして選択",
+      "store.dropzoneHint": "このノードのストアに直接アップロードされます。",
+      "store.uploading": "{name} をアップロード中… {pct}%",
+      "store.uploaded": "{name} ({size}) をアップロードしました。",
+      "store.uploadFailed": "{name} のアップロードに失敗しました: {error}",
+      "store.addByPathSummary": "このPC上のファイルパスで追加 (大きなローカルファイル向け)",
+      "store.pathLabel": "このPC上のパス (デーモンがサーバー側で読み込みます)",
+      "store.pathPlaceholder": "C:\\path\\to\\file or /path/to/file",
+      "store.addBtn": "追加",
+      "store.stored": "{name} ({size}) を保存しました。",
+      "profile.title": "プロフィール",
+      "profile.did": "did",
+      "profile.displayName": "表示名",
+      "profile.bio": "自己紹介",
+      "profile.avatarCid": "アバターCID",
+      "profile.updatedAt": "更新日時",
+      "profile.displayNameLabel": "表示名",
+      "profile.save": "保存",
+      "profile.updated": "プロフィールを更新しました。",
+      "profile.avatarPick": "プロフィール画像を設定",
+      "profile.avatarDropText": "画像をここにドラッグ、またはクリックして選択",
+      "profile.avatarHint": "PNG、JPEG、WebPに対応。256pxに縮小してこのノードに保存します。",
+      "profile.avatarRemove": "画像を削除",
+      "profile.avatarUpdated": "プロフィール画像を更新しました。",
+      "profile.avatarRemoved": "プロフィール画像を削除しました。",
+      "profile.avatarBadType": "PNG、JPEG、またはWebP画像を選択してください。",
+      "settings.title": "設定",
+      "settings.restartBadge": "適用にはデーモンの再起動が必要",
+      "settings.savedRestart": "保存しました。適用にはデーモンの再起動が必要です。",
+      "settings.savedNextStart": "保存しました。次回起動時に適用されます。",
+      "settings.enterGib": "{label} にはGiB単位の数値を入力してください。",
+      "settings.enterNumber": "{label} には数値を入力してください。",
+      "settings.gibUnit": "GiB",
+      "settings.clear": "クリア",
+      "settings.passwordSetPlaceholder": "(設定済み) 変更しない場合は空欄のまま",
+      "settings.passwordNotSet": "未設定",
+      "settings.optionDefault": "(デフォルト)",
+      "settings.section.identity": "本人情報",
+      "settings.section.storage": "ストレージ",
+      "settings.section.stream": "ストリーム",
+      "settings.section.mailbox": "メールボックス",
+      "settings.section.ai": "AI",
+      "settings.section.ui": "Webダッシュボード",
+      "settings.field.identity.display_name.label": "表示名",
+      "settings.field.identity.display_name.desc": "設定ファイルに書き込まれるデフォルトの表示名です (次回起動時に適用されます。今すぐ変更する場合は上のプロフィールパネルを使ってください)。",
+      "settings.field.storage.capacity_bytes.label": "ストレージ容量",
+      "settings.field.storage.capacity_bytes.desc": "ローカルブロックストアの最大サイズです。",
+      "settings.field.stream.rtsp_url.label": "RTSP URL",
+      "settings.field.stream.rtsp_url.desc": "配信に使用するRTSPエンドポイントです。空欄の場合はデフォルトを使用します。",
+      "settings.field.stream.frame_rate.label": "フレームレート",
+      "settings.field.stream.frame_rate.desc": "キャプチャのフレームレート (1秒あたりのフレーム数) です。",
+      "settings.field.stream.capture_backend.label": "キャプチャバックエンド",
+      "settings.field.stream.capture_backend.desc": "使用する画面キャプチャのバックエンドです。",
+      "settings.field.stream.max_width.label": "最大幅",
+      "settings.field.stream.max_width.desc": "キャプチャの最大幅 (ピクセル) です。これより広い入力は縮小されます。",
+      "settings.field.stream.relay_room.label": "デフォルトの中継ルーム",
+      "settings.field.stream.relay_room.desc": "「tc-chatの画面共有を中継」でルームIDが未入力のときに使われるtc-chatルームIDです。",
+      "settings.field.stream.audio_codec.label": "音声コーデック",
+      "settings.field.stream.audio_codec.desc": "配信に使用する音声コーデックです。",
+      "settings.field.mailbox.room_id.label": "ルームID",
+      "settings.field.mailbox.room_id.desc": "メールボックスの配送に使うtc-chatルームです。",
+      "settings.field.mailbox.serve_as_bot.label": "ボットとして応答",
+      "settings.field.mailbox.serve_as_bot.desc": "メールボックスのルームプレゼンスに自動応答ボットとして応答します。",
+      "settings.field.ai.room_id.label": "ルームID",
+      "settings.field.ai.room_id.desc": "AIプロバイダーと利用者を発見するために使うtc-chatルームです。",
+      "settings.field.ai.upstream_url.label": "アップストリームURL",
+      "settings.field.ai.upstream_url.desc": "提供時にこのデーモンが推論を転送するOpenAI互換エンドポイントです。",
+      "settings.field.ai.upstream_api_key.label": "アップストリームAPIキー",
+      "settings.field.ai.upstream_api_key.desc": "アップストリームエンドポイントに送信するAPIキーです。このPCにのみ保存されます。",
+      "settings.field.ai.default_model.label": "デフォルトモデル",
+      "settings.field.ai.default_model.desc": "リクエストでモデルが指定されなかった場合に使用されるモデル名です。",
+      "settings.field.ai.temperature.label": "Temperature",
+      "settings.field.ai.temperature.desc": "デフォルトのサンプリング温度 (temperature) です。",
+      "settings.field.ai.request_timeout_secs.label": "リクエストタイムアウト (秒)",
+      "settings.field.ai.request_timeout_secs.desc": "アップストリームからの応答を待つ最大時間です。",
+      "settings.field.ai.api_listen.label": "API待ち受けアドレス",
+      "settings.field.ai.api_listen.desc": "ローカルのOpenAI互換APIサーバーが待ち受けるアドレス:ポートです。",
+      "settings.field.ui.listen.label": "待ち受けアドレス",
+      "settings.field.ui.listen.desc": "このダッシュボードが待ち受けるアドレス:ポートです。",
+      "settings.field.ui.enabled.label": "有効化",
+      "settings.field.ui.enabled.desc": "デーモン起動時にWebダッシュボードを開始するかどうかです。"
+    },
+    zh: {
+      "pageTitle": "MISTL 仪表盘",
+      "lang.en": "EN",
+      "lang.zh": "中文",
+      "lang.ja": "日本語",
+      "theme.switchToLight": "切换到浅色主题",
+      "theme.switchToDark": "切换到深色主题",
+      "daemon.connecting": "连接中…",
+      "daemon.running": "运行中 · pid {pid} · v{version} · {uptime}",
+      "daemon.unreachable": "无法连接到守护进程",
+      "nav.overview": "概览",
+      "nav.stream": "串流",
+      "nav.ai": "AI",
+      "nav.mailbox": "信箱",
+      "nav.store": "存储",
+      "nav.profile": "个人资料",
+      "nav.settings": "设置",
+      "profileHint.text": "设置显示名称，方便他人识别你。",
+      "profileHint.button": "设置显示名称",
+      "common.dismiss": "关闭",
+      "common.refresh": "刷新",
+      "common.save": "保存",
+      "common.add": "添加",
+      "common.send": "发送",
+      "common.copied": "已复制到剪贴板。",
+      "common.copyFailed": "复制失败。",
+      "common.clipboardUnavailable": "剪贴板不可用。",
+      "common.default": "默认",
+      "common.clickToCopy": "点击复制",
+      "overview.title": "概览",
+      "overview.stopDaemon": "停止守护进程",
+      "overview.stopConfirm": "确定要停止 mistl 守护进程吗？这将结束所有活动会话。",
+      "overview.stopping": "守护进程正在停止。",
+      "overview.status": "状态",
+      "overview.unreachable": "无法连接到守护进程",
+      "overview.pid": "pid",
+      "overview.version": "版本",
+      "overview.uptime": "运行时间",
+      "stream.title": "串流",
+      "stream.shareTitle": "共享此电脑的屏幕",
+      "stream.shareDesc": "将此电脑的桌面直接以 RTSP URL 推流，粘贴到 VRChat 的视频播放器中即可播放。",
+      "stream.startBtn": "开始 (此屏幕)",
+      "stream.relayTitle": "中继 tc-chat 共享",
+      "stream.relayDesc": "中继已在 tc-chat 房间中共享的屏幕，供 VRChat 观众观看。",
+      "stream.roomLabel": "tc-chat 房间 ID",
+      "stream.roomPlaceholder": "房间 ID (或在设置中指定默认值)",
+      "stream.relayBtn": "中继到 VRChat",
+      "stream.roomHint.prefix": "在上方输入房间 ID，或在",
+      "stream.roomHint.link": "设置",
+      "stream.roomHint.suffix": "中设置默认中继房间。",
+      "stream.urlLabel": "粘贴到 VRChat 视频播放器",
+      "stream.status": "状态",
+      "stream.statusUnknown": "未知",
+      "stream.statusRunning": "运行中",
+      "stream.statusStopped": "已停止",
+      "stream.clients": "客户端数",
+      "stream.backend": "后端",
+      "stream.relayRoom": "中继房间",
+      "stream.publisher": "推流方",
+      "stream.waitingPublisher": "正在等待推流方…",
+      "stream.uptime": "运行时间",
+      "stream.stopBtn": "停止",
+      "stream.stopConfirm": "确定要停止串流吗？",
+      "stream.started": "串流已开始。",
+      "stream.stopped": "串流已停止。",
+      "stream.relayStarted": "已在房间 {room} 中开始中继。",
+      "stream.relayStartedNoRoom": "中继已开始。",
+      "stream.vrchatHint.prefix": "此 URL 仅在同一台电脑上的 VRChat 中有效。要在另一台电脑或 Quest 上播放？",
+      "stream.vrchatHint.link": "在设置中将 RTSP 地址设为 0.0.0.0",
+      "stream.vrchatHint.suffix": "，然后重新启动串流。",
+      "ai.title": "AI",
+      "ai.upstreamHint": "在设置中配置 OpenAI 兼容的上游服务以提供推理。",
+      "ai.openSettings": "打开设置",
+      "ai.readyHint": "上游服务已配置。开始提供服务即可响应来自网络的 AI 请求。",
+      "ai.endpointLabel": "OpenAI 兼容端点",
+      "ai.statusLabel": "状态",
+      "ai.room": "房间",
+      "ai.nodeId": "节点 ID",
+      "ai.connectedPeers": "已连接的节点数",
+      "ai.providing": "提供中",
+      "ai.servingLabel": "API 服务",
+      "ai.remoteProvider": "远程提供方",
+      "ai.yes": "是",
+      "ai.no": "否",
+      "ai.modelsLabel": "模型：",
+      "ai.startProviding": "开始提供",
+      "ai.stopProviding": "停止提供",
+      "ai.startServe": "启动 API 服务器",
+      "ai.stopServe": "停止 API 服务器",
+      "ai.alreadyProviding": "已在提供中。",
+      "ai.nowProviding": "已开始提供 AI 模型。",
+      "ai.stoppedProviding": "已停止提供。",
+      "ai.wasNotProviding": "此前未在提供服务。",
+      "ai.serveAlready": "API 服务器已在 {listen} 运行",
+      "ai.serveStarted": "API 服务器已在 {listen} 开始监听",
+      "ai.serveStopped": "API 服务器已停止。",
+      "ai.serveWasNotRunning": "API 服务器此前未运行。",
+      "chat.promptLabel": "提示词",
+      "chat.promptPlaceholder": "输入问题…",
+      "chat.modelLabel": "模型 (可选)",
+      "chat.send": "发送",
+      "chat.empty": "暂无消息。",
+      "chat.you": "你",
+      "chat.error": "错误",
+      "chat.assistant": "助手",
+      "chat.noProviderError": "没有可用的提供方 — 请在本地开始提供服务，或等待 p2p 提供方出现。",
+      "mailbox.title": "信箱",
+      "mailbox.fetchBtn": "获取我的消息",
+      "mailbox.refreshHeld": "刷新暂存",
+      "mailbox.heldCol.id": "ID",
+      "mailbox.heldCol.from": "发件人",
+      "mailbox.heldCol.to": "收件人",
+      "mailbox.heldCol.size": "大小",
+      "mailbox.heldCol.since": "暂存时间",
+      "mailbox.heldEmpty": "没有暂存的存件 — 存件是其他节点为收件人暂时保留、待其稍后取回的消息。",
+      "mailbox.fetchCol.id": "ID",
+      "mailbox.fetchCol.from": "发件人",
+      "mailbox.fetchCol.content": "内容",
+      "mailbox.fetchEmpty": "尚未获取任何内容。点击“获取我的消息”以查看新邮件。",
+      "mailbox.fileContent": "文件：{name} ({size}，cid {cid})",
+      "mailbox.toLabel": "收件人 (DID 或节点 ID)",
+      "mailbox.toPlaceholder": "did:key:z6Mk… 或 16 位十六进制节点 ID",
+      "mailbox.messageLabel": "消息",
+      "mailbox.send": "发送",
+      "mailbox.needBoth": "收件人和消息内容均为必填。",
+      "mailbox.sentStatus": "消息{status} (id {id})。",
+      "store.title": "存储",
+      "store.col.cid": "CID",
+      "store.col.name": "名称",
+      "store.col.size": "大小",
+      "store.col.storedAt": "存储时间",
+      "store.col.actions": "操作",
+      "store.empty": "暂无存储项目。",
+      "store.download": "下载",
+      "store.saveToPath": "保存到服务器路径",
+      "store.savePathPlaceholder": "输出路径 (可选)",
+      "store.saved": "已保存到 {output}",
+      "store.dropzoneText": "将文件拖到此处，或点击浏览",
+      "store.dropzoneHint": "直接上传到此节点的存储。",
+      "store.uploading": "正在上传 {name}… {pct}%",
+      "store.uploaded": "已上传 {name} ({size})。",
+      "store.uploadFailed": "{name} 上传失败：{error}",
+      "store.addByPathSummary": "按此电脑上的文件路径添加 (适用于非常大的本地文件)",
+      "store.pathLabel": "此电脑上的路径 (由守护进程在服务器端读取)",
+      "store.pathPlaceholder": "C:\\path\\to\\file or /path/to/file",
+      "store.addBtn": "添加",
+      "store.stored": "已存储 {name} ({size})。",
+      "profile.title": "个人资料",
+      "profile.did": "did",
+      "profile.displayName": "显示名称",
+      "profile.bio": "简介",
+      "profile.avatarCid": "头像 CID",
+      "profile.updatedAt": "更新时间",
+      "profile.displayNameLabel": "显示名称",
+      "profile.save": "保存",
+      "profile.updated": "个人资料已更新。",
+      "profile.avatarPick": "设置头像",
+      "profile.avatarDropText": "将图片拖到此处，或点击选择",
+      "profile.avatarHint": "支持 PNG、JPEG 或 WebP。将缩小到 256px 并存储在此节点。",
+      "profile.avatarRemove": "移除头像",
+      "profile.avatarUpdated": "头像已更新。",
+      "profile.avatarRemoved": "头像已移除。",
+      "profile.avatarBadType": "请选择 PNG、JPEG 或 WebP 格式的图片。",
+      "settings.title": "设置",
+      "settings.restartBadge": "需要重启守护进程才能生效",
+      "settings.savedRestart": "已保存。需要重启守护进程才能生效。",
+      "settings.savedNextStart": "已保存。将在此服务下次启动时生效。",
+      "settings.enterGib": "请为{label}输入以 GiB 为单位的数值。",
+      "settings.enterNumber": "请为{label}输入一个数值。",
+      "settings.gibUnit": "GiB",
+      "settings.clear": "清除",
+      "settings.passwordSetPlaceholder": "(已设置) 留空以保持不变",
+      "settings.passwordNotSet": "未设置",
+      "settings.optionDefault": "(默认)",
+      "settings.section.identity": "身份",
+      "settings.section.storage": "存储",
+      "settings.section.stream": "串流",
+      "settings.section.mailbox": "信箱",
+      "settings.section.ai": "AI",
+      "settings.section.ui": "Web 仪表盘",
+      "settings.field.identity.display_name.label": "显示名称",
+      "settings.field.identity.display_name.desc": "写入配置文件的默认显示名称 (下次启动时生效；如需立即修改，请使用上方的个人资料面板)。",
+      "settings.field.storage.capacity_bytes.label": "存储容量",
+      "settings.field.storage.capacity_bytes.desc": "本地区块存储的最大容量。",
+      "settings.field.stream.rtsp_url.label": "RTSP URL",
+      "settings.field.stream.rtsp_url.desc": "串流时使用的 RTSP 端点。留空则使用默认值。",
+      "settings.field.stream.frame_rate.label": "帧率",
+      "settings.field.stream.frame_rate.desc": "采集帧率，单位为帧/秒。",
+      "settings.field.stream.capture_backend.label": "采集后端",
+      "settings.field.stream.capture_backend.desc": "使用的屏幕采集后端。",
+      "settings.field.stream.max_width.label": "最大宽度",
+      "settings.field.stream.max_width.desc": "采集的最大宽度 (像素)；超过此宽度的输入将被缩小。",
+      "settings.field.stream.relay_room.label": "默认中继房间",
+      "settings.field.stream.relay_room.desc": "未输入房间 ID 时，“中继 tc-chat 共享”所使用的 tc-chat 房间 ID。",
+      "settings.field.stream.audio_codec.label": "音频编码",
+      "settings.field.stream.audio_codec.desc": "串流使用的音频编码格式。",
+      "settings.field.mailbox.room_id.label": "房间 ID",
+      "settings.field.mailbox.room_id.desc": "信箱投递所使用的 tc-chat 房间。",
+      "settings.field.mailbox.serve_as_bot.label": "以机器人身份响应",
+      "settings.field.mailbox.serve_as_bot.desc": "以自动机器人身份响应信箱房间的在线状态。",
+      "settings.field.ai.room_id.label": "房间 ID",
+      "settings.field.ai.room_id.desc": "用于发现 AI 提供方与使用方的 tc-chat 房间。",
+      "settings.field.ai.upstream_url.label": "上游 URL",
+      "settings.field.ai.upstream_url.desc": "提供服务时，此守护进程转发推理请求的 OpenAI 兼容端点。",
+      "settings.field.ai.upstream_api_key.label": "上游 API 密钥",
+      "settings.field.ai.upstream_api_key.desc": "发送给上游端点的 API 密钥，仅存储在此电脑上。",
+      "settings.field.ai.default_model.label": "默认模型",
+      "settings.field.ai.default_model.desc": "请求未指定模型时使用的模型名称。",
+      "settings.field.ai.temperature.label": "Temperature",
+      "settings.field.ai.temperature.desc": "默认的采样温度 (temperature)。",
+      "settings.field.ai.request_timeout_secs.label": "请求超时 (秒)",
+      "settings.field.ai.request_timeout_secs.desc": "等待上游响应的最长时间，超过则放弃。",
+      "settings.field.ai.api_listen.label": "API 监听地址",
+      "settings.field.ai.api_listen.desc": "本地 OpenAI 兼容 API 服务器绑定的地址:端口。",
+      "settings.field.ui.listen.label": "监听地址",
+      "settings.field.ui.listen.desc": "此仪表盘绑定的地址:端口。",
+      "settings.field.ui.enabled.label": "启用",
+      "settings.field.ui.enabled.desc": "守护进程启动时是否同时启动 Web 仪表盘。"
+    }
+  };
+
+  function detectBrowserLang() {
+    var lang = navigator.language || "";
+    if (lang.indexOf("zh") === 0) return "zh";
+    if (lang.indexOf("ja") === 0) return "ja";
+    return "en";
+  }
+
+  var currentLang = localStorage.getItem("mistl-lang") || detectBrowserLang();
+  if (currentLang !== "en" && currentLang !== "ja" && currentLang !== "zh") currentLang = "en";
+
+  function t(key, vars) {
+    var dict = T[currentLang] || T.en;
+    var str = dict[key];
+    if (str === undefined) str = T.en[key] !== undefined ? T.en[key] : key;
+    if (vars) {
+      Object.keys(vars).forEach(function (k) {
+        str = str.split("{" + k + "}").join(vars[k] === null || vars[k] === undefined ? "" : String(vars[k]));
+      });
+    }
+    return str;
+  }
+
+  function applyStaticI18n(root) {
+    var scope = root || document;
+    scope.querySelectorAll("[data-i18n]").forEach(function (node) {
+      node.textContent = t(node.getAttribute("data-i18n"));
+    });
+    scope.querySelectorAll("[data-i18n-placeholder]").forEach(function (node) {
+      node.setAttribute("placeholder", t(node.getAttribute("data-i18n-placeholder")));
+    });
+    scope.querySelectorAll("[data-i18n-title]").forEach(function (node) {
+      node.setAttribute("title", t(node.getAttribute("data-i18n-title")));
+    });
+    scope.querySelectorAll("[data-i18n-aria-label]").forEach(function (node) {
+      node.setAttribute("aria-label", t(node.getAttribute("data-i18n-aria-label")));
+    });
+  }
+
+  function updateLangButtons() {
+    var enBtn = document.getElementById("lang-en-btn");
+    var zhBtn = document.getElementById("lang-zh-btn");
+    var jaBtn = document.getElementById("lang-ja-btn");
+    if (enBtn) enBtn.classList.toggle("active", currentLang === "en");
+    if (zhBtn) zhBtn.classList.toggle("active", currentLang === "zh");
+    if (jaBtn) jaBtn.classList.toggle("active", currentLang === "ja");
+  }
+
+  function setLang(lang) {
+    if (lang !== "en" && lang !== "ja" && lang !== "zh") return;
+    currentLang = lang;
+    localStorage.setItem("mistl-lang", lang);
+    document.documentElement.lang = lang;
+    applyStaticI18n();
+    updateLangButtons();
+    updateThemeToggle();
+    rerenderAllDynamic();
+  }
+
+  /* ---------- theme ---------- */
+  /* The head script already set data-theme before paint; here we only wire
+     the toggle and keep its label localized. An explicit toggle persists to
+     localStorage and wins over prefers-color-scheme on later loads. */
+
+  var themeToggleBtn = document.getElementById("theme-toggle");
+
+  function currentTheme() {
+    return document.documentElement.getAttribute("data-theme") === "dark" ? "dark" : "light";
+  }
+
+  function updateThemeToggle() {
+    if (!themeToggleBtn) return;
+    var label = t(currentTheme() === "dark" ? "theme.switchToLight" : "theme.switchToDark");
+    themeToggleBtn.setAttribute("aria-label", label);
+    themeToggleBtn.setAttribute("title", label);
+  }
+
+  function setTheme(theme, persist) {
+    if (theme !== "light" && theme !== "dark") return;
+    document.documentElement.setAttribute("data-theme", theme);
+    if (persist) {
+      try { localStorage.setItem("mistl-theme", theme); } catch (e) { /* ignore */ }
+    }
+    updateThemeToggle();
+  }
+
+  if (themeToggleBtn) {
+    themeToggleBtn.addEventListener("click", function () {
+      setTheme(currentTheme() === "dark" ? "light" : "dark", true);
+    });
+  }
+
+  /* ---------- helpers ---------- */
+
+  function escapeHtml(value) {
+    var s = value === null || value === undefined ? "" : String(value);
+    return s.replace(/[&<>"']/g, function (ch) {
+      switch (ch) {
+        case "&": return "&amp;";
+        case "<": return "&lt;";
+        case ">": return "&gt;";
+        case '"': return "&quot;";
+        case "'": return "&#39;";
+        default: return ch;
+      }
+    });
+  }
+
+  function fmtBytes(n) {
+    if (typeof n !== "number" || !isFinite(n)) return "-";
+    var units = ["B", "KB", "MB", "GB", "TB"];
+    var i = 0;
+    var v = n;
+    while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+    return (i === 0 ? v.toFixed(0) : v.toFixed(1)) + " " + units[i];
+  }
+
+  function fmtUptime(secs) {
+    secs = Math.max(0, Math.floor(secs || 0));
+    var h = Math.floor(secs / 3600);
+    var m = Math.floor((secs % 3600) / 60);
+    var s = secs % 60;
+    var parts = [];
+    if (h > 0) parts.push(h + "h");
+    if (h > 0 || m > 0) parts.push(m + "m");
+    parts.push(s + "s");
+    return parts.join(" ");
+  }
+
+  function truncateMiddle(str, head, tail) {
+    if (!str) return "";
+    head = head || 10;
+    tail = tail || 6;
+    if (str.length <= head + tail + 1) return str;
+    return str.slice(0, head) + "…" + str.slice(str.length - tail);
+  }
+
+  function el(tag, attrs, children) {
+    var node = document.createElement(tag);
+    if (attrs) {
+      Object.keys(attrs).forEach(function (k) {
+        if (k === "class") node.className = attrs[k];
+        else if (k === "text") node.textContent = attrs[k];
+        else node.setAttribute(k, attrs[k]);
+      });
+    }
+    (children || []).forEach(function (c) { if (c) node.appendChild(c); });
+    return node;
+  }
+
+  function copyToClipboard(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(
+        function () { showToast(t("common.copied"), "info"); },
+        function () { showToast(t("common.copyFailed"), "error"); }
+      );
+    } else {
+      showToast(t("common.clipboardUnavailable"), "error");
+    }
+  }
+
+  function copyButton(fullValue, displayText, extraClass) {
+    var btn = el("button", { type: "button", class: "copyable" + (extraClass ? " " + extraClass : ""), title: fullValue });
+    btn.textContent = displayText;
+    btn.addEventListener("click", function () { copyToClipboard(fullValue); });
+    return btn;
+  }
+
+  /* ---------- toasts ---------- */
+
+  var toastStack = document.getElementById("toast-stack");
+  var toastSeq = 0;
+
+  function showToast(message, kind) {
+    var id = "toast-" + (++toastSeq);
+    var toast = el("div", { class: "toast", id: id });
+    toast.appendChild(el("span", { class: "msg", text: message }));
+    var closeBtn = el("button", { type: "button", "aria-label": t("common.dismiss") });
+    closeBtn.textContent = "×";
+    closeBtn.addEventListener("click", function () { dismissToast(id); });
+    toast.appendChild(closeBtn);
+    toastStack.appendChild(toast);
+    if (kind !== "sticky") {
+      setTimeout(function () { dismissToast(id); }, 6000);
+    }
+  }
+
+  function dismissToast(id) {
+    var node = document.getElementById(id);
+    if (node && node.parentNode) node.parentNode.removeChild(node);
+  }
+
+  /* ---------- api ---------- */
+
+  function api(cmd, args) {
+    return fetch("/api/call", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-mistl-ui": "1" },
+      body: JSON.stringify({ cmd: cmd, args: args || {} })
+    }).then(function (resp) {
+      return resp.json().catch(function () {
+        throw new Error("invalid response from daemon");
+      });
+    }, function () {
+      throw new Error("daemon unreachable");
+    }).then(function (json) {
+      if (!json || json.ok !== true) {
+        var msg = (json && json.error) || "unknown error";
+        throw new Error(msg);
+      }
+      return json.data;
+    });
+  }
+
+  function withBusy(button, promiseFn) {
+    if (!button) return promiseFn();
+    button.disabled = true;
+    button.classList.add("busy");
+    return promiseFn().then(
+      function (v) { button.disabled = false; button.classList.remove("busy"); return v; },
+      function (err) { button.disabled = false; button.classList.remove("busy"); throw err; }
+    );
+  }
+
+  function runAction(button, cmd, args, onSuccess) {
+    withBusy(button, function () { return api(cmd, args); }).then(
+      function (data) { if (onSuccess) onSuccess(data); },
+      function (err) { showToast(err.message || String(err)); }
+    );
+  }
+
+  /* ---------- state ---------- */
+
+  var state = {
+    daemon: null,
+    daemonUptimeBase: null,
+    daemonUptimeAt: 0,
+    identity: null,
+    stream: null,
+    ai: null,
+    config: null,
+    chatHistory: [],
+    mailboxHeldItems: [],
+    mailboxFetchItems: [],
+    storeItems: []
+  };
+
+  function rerenderAllDynamic() {
+    renderDaemonPill();
+    renderOverview();
+    renderIdentitySummary();
+    renderStream();
+    renderAi();
+    renderChat();
+    renderMailboxHeld(state.mailboxHeldItems);
+    renderMailboxFetch(state.mailboxFetchItems);
+    renderStore(state.storeItems);
+    renderProfile(state.identity);
+    renderSettings(state.config);
+  }
+
+  /* ---------- header ---------- */
+
+  var daemonPill = document.getElementById("daemon-pill");
+  var identitySummary = document.getElementById("identity-summary");
+
+  document.getElementById("lang-en-btn").addEventListener("click", function () { setLang("en"); });
+  document.getElementById("lang-zh-btn").addEventListener("click", function () { setLang("zh"); });
+  document.getElementById("lang-ja-btn").addEventListener("click", function () { setLang("ja"); });
+
+  function renderDaemonPill() {
+    daemonPill.innerHTML = "";
+    var dot = el("span", { class: "dot" });
+    var label;
+    if (state.daemon) {
+      daemonPill.className = "pill ok";
+      var uptime = state.daemonUptimeBase !== null
+        ? state.daemonUptimeBase + Math.floor((Date.now() - state.daemonUptimeAt) / 1000)
+        : state.daemon.uptime_secs;
+      label = el("span", { text: t("daemon.running", { pid: state.daemon.pid, version: state.daemon.version, uptime: fmtUptime(uptime) }) });
+    } else {
+      daemonPill.className = "pill err";
+      label = el("span", { text: t("daemon.unreachable") });
+    }
+    daemonPill.appendChild(dot);
+    daemonPill.appendChild(label);
+  }
+
+  function renderIdentitySummary() {
+    identitySummary.innerHTML = "";
+    if (!state.identity) return;
+    if (state.identity.avatar_cid) {
+      var av = new Image();
+      av.className = "identity-avatar";
+      av.alt = "";
+      av.src = "/api/store/download?cid=" + encodeURIComponent(state.identity.avatar_cid);
+      identitySummary.appendChild(av);
+    }
+    var name = state.identity.display_name || "(no name)";
+    identitySummary.appendChild(el("span", { class: "name", text: name }));
+    var did = state.identity.did || "";
+    if (did) {
+      identitySummary.appendChild(copyButton(did, truncateMiddle(did, 14, 6)));
+    }
+  }
+
+  /* ---------- overview panel ---------- */
+
+  var overviewKv = document.getElementById("overview-kv");
+
+  function renderOverview() {
+    overviewKv.innerHTML = "";
+    if (!state.daemon) {
+      addKv(overviewKv, t("overview.status"), t("overview.unreachable"));
+      return;
+    }
+    var uptime = state.daemonUptimeBase !== null
+      ? state.daemonUptimeBase + Math.floor((Date.now() - state.daemonUptimeAt) / 1000)
+      : state.daemon.uptime_secs;
+    addKv(overviewKv, t("overview.pid"), state.daemon.pid);
+    addKv(overviewKv, t("overview.version"), state.daemon.version);
+    addKv(overviewKv, t("overview.uptime"), fmtUptime(uptime));
+  }
+
+  function addKv(container, key, value, mono) {
+    container.appendChild(el("dt", { text: key }));
+    var dd = el("dd", {});
+    if (mono) dd.classList.add("mono");
+    dd.textContent = value === null || value === undefined || value === "" ? "-" : String(value);
+    container.appendChild(dd);
+  }
+
+  function pollDaemonStatus() {
+    return api("daemon.status", {}).then(function (data) {
+      state.daemon = data;
+      state.daemonUptimeBase = data.uptime_secs;
+      state.daemonUptimeAt = Date.now();
+      renderDaemonPill();
+      renderOverview();
+    }, function (err) {
+      state.daemon = null;
+      renderDaemonPill();
+      renderOverview();
+      showToast("daemon.status: " + err.message);
+    });
+  }
+
+  document.getElementById("btn-refresh-overview").addEventListener("click", function (e) {
+    runAction(e.currentTarget, "daemon.status", {}, function (data) {
+      state.daemon = data;
+      state.daemonUptimeBase = data.uptime_secs;
+      state.daemonUptimeAt = Date.now();
+      renderDaemonPill();
+      renderOverview();
+    });
+  });
+
+  document.getElementById("btn-stop-daemon").addEventListener("click", function (e) {
+    if (!confirm(t("overview.stopConfirm"))) return;
+    runAction(e.currentTarget, "daemon.stop", {}, function () {
+      showToast(t("overview.stopping"));
+    });
+  });
+
+  /* ---------- stream panel ---------- */
+
+  var streamKv = document.getElementById("stream-kv");
+  var streamUrlCallout = document.getElementById("stream-url-callout");
+  var streamUrlText = document.getElementById("stream-url-text");
+  var relayRoomHint = document.getElementById("relay-room-hint");
+  var streamVrchatHint = document.getElementById("stream-vrchat-hint");
+
+  streamUrlCallout.addEventListener("click", function () {
+    if (streamUrlText.textContent) copyToClipboard(streamUrlText.textContent);
+  });
+
+  function showRelayRoomHint(show) {
+    relayRoomHint.hidden = !show;
+  }
+
+  function extractHost(url) {
+    if (!url) return "";
+    var m = /^[a-zA-Z][a-zA-Z0-9+.\-]*:\/\/([^\/\\?#:]+)/.exec(url);
+    return m ? m[1] : "";
+  }
+
+  function renderVrchatHint(s) {
+    streamVrchatHint.innerHTML = "";
+    if (!s || !s.running) { streamVrchatHint.hidden = true; return; }
+    var host = extractHost(s.rtsp_url);
+    if (host === "127.0.0.1" || host === "localhost") {
+      streamVrchatHint.hidden = false;
+      streamVrchatHint.appendChild(el("span", { text: t("stream.vrchatHint.prefix") + " " }));
+      var link = el("a", { href: "#panel-settings" });
+      link.textContent = t("stream.vrchatHint.link");
+      link.addEventListener("click", function (e) {
+        e.preventDefault();
+        focusSettingsField(settingsFieldId("stream", "rtsp_url"));
+      });
+      streamVrchatHint.appendChild(link);
+      streamVrchatHint.appendChild(el("span", { text: t("stream.vrchatHint.suffix") }));
+    } else {
+      streamVrchatHint.hidden = true;
+    }
+  }
+
+  function renderStream() {
+    streamKv.innerHTML = "";
+    var s = state.stream;
+    if (!s) {
+      addKv(streamKv, t("stream.status"), t("stream.statusUnknown"));
+      streamUrlCallout.hidden = true;
+      renderVrchatHint(null);
+      return;
+    }
+    if (s.running) {
+      streamUrlText.textContent = s.rtsp_url;
+      streamUrlCallout.hidden = false;
+      addKv(streamKv, t("stream.status"), t("stream.statusRunning"));
+      addKv(streamKv, t("stream.clients"), s.clients);
+      addKv(streamKv, t("stream.backend"), s.backend);
+      if (s.room) addKv(streamKv, t("stream.relayRoom"), s.room);
+      if (s.backend === "relay") {
+        addKv(streamKv, t("stream.publisher"), s.publisher ? s.publisher : t("stream.waitingPublisher"));
+      }
+      addKv(streamKv, t("stream.uptime"), fmtUptime(s.uptime_secs));
+    } else {
+      streamUrlCallout.hidden = true;
+      addKv(streamKv, t("stream.status"), t("stream.statusStopped"));
+    }
+    renderVrchatHint(s);
+  }
+
+  function pollStreamStatus() {
+    return api("stream.status", {}).then(function (data) {
+      state.stream = data;
+      renderStream();
+    }, function () {
+      state.stream = null;
+      renderStream();
+    });
+  }
+
+  document.querySelector('[data-target="stream"]').addEventListener("click", function (e) {
+    runAction(e.currentTarget, "stream.status", {}, function (data) {
+      state.stream = data;
+      renderStream();
+    });
+  });
+
+  document.getElementById("btn-stream-start").addEventListener("click", function (e) {
+    runAction(e.currentTarget, "stream.start", {}, function () {
+      showToast(t("stream.started"));
+      pollStreamStatus();
+    });
+  });
+
+  document.getElementById("btn-stream-stop").addEventListener("click", function (e) {
+    if (!confirm(t("stream.stopConfirm"))) return;
+    runAction(e.currentTarget, "stream.stop", {}, function () {
+      showToast(t("stream.stopped"));
+      pollStreamStatus();
+    });
+  });
+
+  document.getElementById("relay-form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var roomInput = document.getElementById("relay-room");
+    var room = roomInput.value.trim();
+    var configuredDefault = state.config && state.config.stream && state.config.stream.relay_room;
+    if (!room && !configuredDefault) {
+      showRelayRoomHint(true);
+      roomInput.focus();
+      return;
+    }
+    showRelayRoomHint(false);
+    var btn = e.target.querySelector("button[type=submit]");
+    runAction(btn, "stream.relay.start", room ? { room: room } : {}, function (data) {
+      showToast(data.room ? t("stream.relayStarted", { room: data.room }) : t("stream.relayStartedNoRoom"));
+      pollStreamStatus();
+    });
+  });
+
+  document.getElementById("relay-room-hint-link").addEventListener("click", function () {
+    showRelayRoomHint(false);
+  });
+
+  /* ---------- ai panel ---------- */
+
+  var aiKv = document.getElementById("ai-kv");
+  var aiModelsBox = document.getElementById("ai-models");
+  var aiHintsBox = document.getElementById("ai-hints");
+  var chatModelSelect = document.getElementById("chat-model");
+
+  function refreshAiHints() {
+    if (!aiHintsBox) return;
+    aiHintsBox.innerHTML = "";
+    var cfg = state.config;
+    var a = state.ai;
+    if (!cfg) return;
+    var aiCfg = cfg.ai || {};
+    if (!aiCfg.upstream_url) {
+      var hint = el("div", { class: "info-hint" });
+      hint.appendChild(el("span", { text: t("ai.upstreamHint") }));
+      var openBtn = el("button", { type: "button", text: t("ai.openSettings") });
+      openBtn.addEventListener("click", function () { focusSettingsField("settings-ai-upstream_url"); });
+      hint.appendChild(openBtn);
+      aiHintsBox.appendChild(hint);
+    } else if (a && !a.providing) {
+      var hint2 = el("div", { class: "info-hint neutral" });
+      hint2.appendChild(el("span", { text: t("ai.readyHint") }));
+      aiHintsBox.appendChild(hint2);
+    }
+    if (a && a.serving) {
+      var listen = aiCfg.api_listen || (typeof a.serving === "string" ? a.serving : "");
+      if (listen) {
+        var url = "http://" + listen + "/v1";
+        var callout = el("div", { class: "url-callout", title: t("common.clickToCopy") });
+        callout.appendChild(el("span", { class: "url-callout-label", text: t("ai.endpointLabel") }));
+        callout.appendChild(el("span", { class: "url-callout-url mono", text: url }));
+        callout.addEventListener("click", function () { copyToClipboard(url); });
+        aiHintsBox.appendChild(callout);
+      }
+    }
+  }
+
+  function renderAi() {
+    aiKv.innerHTML = "";
+    var a = state.ai;
+    if (!a) {
+      addKv(aiKv, t("ai.statusLabel"), t("stream.statusUnknown"));
+      aiModelsBox.innerHTML = "";
+      refreshAiHints();
+      return;
+    }
+    addKv(aiKv, t("ai.room"), a.room);
+    addKv(aiKv, t("ai.nodeId"), a.node_id, true);
+    addKv(aiKv, t("ai.connectedPeers"), a.connected_peers);
+    addKv(aiKv, t("ai.providing"), a.providing ? t("ai.yes") : t("ai.no"));
+    addKv(aiKv, t("ai.servingLabel"), a.serving ? a.serving : t("ai.no"));
+    if (a.remote_provider) {
+      addKv(aiKv, t("ai.remoteProvider"), a.remote_provider.node_id, true);
+    }
+
+    aiModelsBox.innerHTML = "";
+    var models = a.models || (a.remote_provider && a.remote_provider.models) || [];
+    if (models.length) {
+      aiModelsBox.appendChild(el("span", { class: "muted", text: t("ai.modelsLabel") }));
+      models.forEach(function (m) {
+        aiModelsBox.appendChild(el("span", { class: "badge", text: m }));
+      });
+    }
+
+    var prevSelected = chatModelSelect.value;
+    chatModelSelect.innerHTML = "";
+    chatModelSelect.appendChild(el("option", { value: "", text: t("common.default") }));
+    models.forEach(function (m) {
+      var opt = el("option", { value: m, text: m });
+      chatModelSelect.appendChild(opt);
+    });
+    if (models.indexOf(prevSelected) !== -1) chatModelSelect.value = prevSelected;
+
+    refreshAiHints();
+  }
+
+  function pollAiStatus() {
+    return api("ai.status", {}).then(function (data) {
+      state.ai = data;
+      renderAi();
+    }, function () {
+      state.ai = null;
+      renderAi();
+    });
+  }
+
+  document.querySelector('[data-target="ai"]').addEventListener("click", function (e) {
+    runAction(e.currentTarget, "ai.status", {}, function (data) {
+      state.ai = data;
+      renderAi();
+    });
+  });
+
+  document.getElementById("btn-ai-provide-start").addEventListener("click", function (e) {
+    runAction(e.currentTarget, "ai.provide.start", {}, function (data) {
+      showToast(data.already_running ? t("ai.alreadyProviding") : t("ai.nowProviding"));
+      pollAiStatus();
+    });
+  });
+
+  document.getElementById("btn-ai-provide-stop").addEventListener("click", function (e) {
+    runAction(e.currentTarget, "ai.provide.stop", {}, function (data) {
+      showToast(data.was_running ? t("ai.stoppedProviding") : t("ai.wasNotProviding"));
+      pollAiStatus();
+    });
+  });
+
+  document.getElementById("btn-ai-serve-start").addEventListener("click", function (e) {
+    runAction(e.currentTarget, "ai.serve.start", {}, function (data) {
+      showToast(data.already_running ? t("ai.serveAlready", { listen: data.listen }) : t("ai.serveStarted", { listen: data.listen }));
+      pollAiStatus();
+    });
+  });
+
+  document.getElementById("btn-ai-serve-stop").addEventListener("click", function (e) {
+    runAction(e.currentTarget, "ai.serve.stop", {}, function (data) {
+      showToast(data.was_running ? t("ai.serveStopped") : t("ai.serveWasNotRunning"));
+      pollAiStatus();
+    });
+  });
+
+  /* ---------- chat ---------- */
+
+  var chatLog = document.getElementById("chat-log");
+  var chatForm = document.getElementById("chat-form");
+  var chatPromptInput = document.getElementById("chat-prompt");
+  var btnChatSend = document.getElementById("btn-chat-send");
+
+  function renderChat() {
+    chatLog.innerHTML = "";
+    if (!state.chatHistory.length) {
+      chatLog.appendChild(el("div", { class: "chat-empty", text: t("chat.empty") }));
+      return;
+    }
+    state.chatHistory.forEach(function (msg) {
+      var wrap = el("div", { class: "chat-msg " + msg.role });
+      var roleLabel = msg.role === "user" ? t("chat.you") : (msg.role === "error" ? t("chat.error") : (msg.via ? msg.via : t("chat.assistant")));
+      wrap.appendChild(el("div", { class: "role", text: roleLabel }));
+      var bubble = el("div", { class: "bubble" });
+      bubble.textContent = msg.text;
+      wrap.appendChild(bubble);
+      chatLog.appendChild(wrap);
+    });
+    chatLog.scrollTop = chatLog.scrollHeight;
+  }
+
+  function friendlyChatError(msg) {
+    if (/no provider/i.test(msg)) {
+      return t("chat.noProviderError");
+    }
+    return msg;
+  }
+
+  chatForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    var prompt = chatPromptInput.value.trim();
+    if (!prompt) return;
+    var model = chatModelSelect.value || undefined;
+    state.chatHistory.push({ role: "user", text: prompt });
+    renderChat();
+    chatPromptInput.value = "";
+    var args = { prompt: prompt };
+    if (model) args.model = model;
+    withBusy(btnChatSend, function () { return api("ai.chat", args); }).then(
+      function (data) {
+        state.chatHistory.push({ role: "assistant", via: data.via, text: data.content });
+        renderChat();
+      },
+      function (err) {
+        var msg = friendlyChatError(err.message || String(err));
+        state.chatHistory.push({ role: "error", text: msg });
+        renderChat();
+        showToast("ai.chat: " + msg);
+      }
+    );
+  });
+
+  /* ---------- mailbox ---------- */
+
+  var mailboxHeldTbody = document.querySelector("#mailbox-held-table tbody");
+  var mailboxHeldEmpty = document.getElementById("mailbox-held-empty");
+  var mailboxFetchTbody = document.querySelector("#mailbox-fetch-table tbody");
+  var mailboxFetchEmpty = document.getElementById("mailbox-fetch-empty");
+
+  function renderMailboxHeld(items) {
+    items = items || [];
+    state.mailboxHeldItems = items;
+    mailboxHeldTbody.innerHTML = "";
+    mailboxHeldEmpty.style.display = items.length ? "none" : "block";
+    items.forEach(function (item) {
+      var tr = el("tr", {});
+      var idCell = el("td", { class: "mono" });
+      idCell.textContent = truncateMiddle(String(item.id), 10, 4);
+      tr.appendChild(idCell);
+      var fromCell = el("td", { class: "mono" });
+      fromCell.textContent = truncateMiddle(String(item.from), 12, 6);
+      tr.appendChild(fromCell);
+      var toCell = el("td", { class: "mono" });
+      toCell.textContent = truncateMiddle(String(item.to), 12, 6);
+      tr.appendChild(toCell);
+      tr.appendChild(el("td", { text: fmtBytes(item.size) }));
+      tr.appendChild(el("td", { text: item.held_since || "-" }));
+      mailboxHeldTbody.appendChild(tr);
+    });
+  }
+
+  function renderMailboxFetch(items) {
+    items = items || [];
+    state.mailboxFetchItems = items;
+    mailboxFetchTbody.innerHTML = "";
+    mailboxFetchEmpty.style.display = items.length ? "none" : "block";
+    items.forEach(function (item) {
+      var tr = el("tr", {});
+      var idCell = el("td", { class: "mono" });
+      idCell.textContent = truncateMiddle(String(item.id), 10, 4);
+      tr.appendChild(idCell);
+      var fromCell = el("td", { class: "mono" });
+      fromCell.textContent = truncateMiddle(String(item.from), 12, 6);
+      tr.appendChild(fromCell);
+      var contentCell = el("td", {});
+      if (item.message !== undefined && item.message !== null) {
+        contentCell.textContent = item.message;
+      } else if (item.file) {
+        contentCell.textContent = t("mailbox.fileContent", { name: item.file.name, size: fmtBytes(item.file.size), cid: truncateMiddle(item.file.cid, 8, 4) });
+      } else {
+        contentCell.textContent = "-";
+      }
+      tr.appendChild(contentCell);
+      mailboxFetchTbody.appendChild(tr);
+    });
+  }
+
+  function pollMailboxLs() {
+    return api("mailbox.ls", {}).then(function (data) {
+      renderMailboxHeld(data);
+    }, function (err) {
+      showToast("mailbox.ls: " + err.message);
+    });
+  }
+
+  document.querySelector('[data-target="mailbox-ls"]').addEventListener("click", function (e) {
+    runAction(e.currentTarget, "mailbox.ls", {}, renderMailboxHeld);
+  });
+
+  document.getElementById("btn-mailbox-fetch").addEventListener("click", function (e) {
+    runAction(e.currentTarget, "mailbox.fetch", {}, renderMailboxFetch);
+  });
+
+  document.getElementById("mailbox-send-form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var to = document.getElementById("mailbox-to").value.trim();
+    var message = document.getElementById("mailbox-message").value.trim();
+    if (!to || !message) {
+      showToast(t("mailbox.needBoth"));
+      return;
+    }
+    var btn = document.getElementById("btn-mailbox-send");
+    runAction(btn, "mailbox.send", { to: to, message: message }, function (data) {
+      showToast(t("mailbox.sentStatus", { status: data.status, id: truncateMiddle(String(data.id), 8, 4) }));
+      document.getElementById("mailbox-message").value = "";
+      pollMailboxLs();
+    });
+  });
+
+  /* ---------- store ---------- */
+
+  var storeTbody = document.querySelector("#store-table tbody");
+  var storeEmpty = document.getElementById("store-empty");
+  var storeDropzone = document.getElementById("store-dropzone");
+  var storeFileInput = document.getElementById("store-file-input");
+  var storeUploadStatus = document.getElementById("store-upload-status");
+  var uploadSeq = 0;
+
+  function renderStore(items) {
+    items = items || [];
+    state.storeItems = items;
+    storeTbody.innerHTML = "";
+    storeEmpty.style.display = items.length ? "none" : "block";
+    items.forEach(function (entry) {
+      var tr = el("tr", {});
+      var cidCell = el("td", {});
+      cidCell.appendChild(copyButton(entry.cid, truncateMiddle(entry.cid, 10, 6), "mono"));
+      tr.appendChild(cidCell);
+      tr.appendChild(el("td", { text: entry.name }));
+      tr.appendChild(el("td", { text: fmtBytes(entry.size) }));
+      tr.appendChild(el("td", { text: entry.stored_at || "-" }));
+
+      var actionCell = el("td", {});
+      var dl = el("a", { href: "/api/store/download?cid=" + encodeURIComponent(entry.cid), download: entry.name || entry.cid, class: "download-link" });
+      dl.textContent = t("store.download");
+      actionCell.appendChild(dl);
+
+      var form = el("form", { class: "row store-save-form" });
+      var input = el("input", { type: "text" });
+      input.placeholder = t("store.savePathPlaceholder");
+      var btn = el("button", { type: "submit" });
+      btn.textContent = t("store.saveToPath");
+      form.appendChild(input);
+      form.appendChild(btn);
+      form.addEventListener("submit", function (ev) {
+        ev.preventDefault();
+        var args = { id: entry.cid };
+        var outputPath = input.value.trim();
+        if (outputPath) args.output = outputPath;
+        runAction(btn, "store.get", args, function (data) {
+          showToast(t("store.saved", { output: data.output }));
+        });
+      });
+      actionCell.appendChild(form);
+      tr.appendChild(actionCell);
+
+      storeTbody.appendChild(tr);
+    });
+  }
+
+  function pollStoreLs() {
+    return api("store.ls", {}).then(renderStore, function (err) {
+      showToast("store.ls: " + err.message);
+    });
+  }
+
+  document.querySelector('[data-target="store"]').addEventListener("click", function (e) {
+    runAction(e.currentTarget, "store.ls", {}, renderStore);
+  });
+
+  document.getElementById("store-put-form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var pathInput = document.getElementById("store-path");
+    var path = pathInput.value.trim();
+    if (!path) return;
+    var btn = document.getElementById("btn-store-put");
+    runAction(btn, "store.put", { path: path }, function (data) {
+      showToast(t("store.stored", { name: data.name, size: fmtBytes(data.size) }));
+      pathInput.value = "";
+      pollStoreLs();
+    });
+  });
+
+  function uploadOneFile(file) {
+    var rowId = "upload-row-" + (++uploadSeq);
+    var row = el("div", { class: "upload-row", id: rowId });
+    var label = el("span", {});
+    label.textContent = t("store.uploading", { name: file.name, pct: 0 });
+    row.appendChild(label);
+    storeUploadStatus.appendChild(row);
+
+    return new Promise(function (resolve, reject) {
+      var xhr = new XMLHttpRequest();
+      xhr.open("POST", "/api/store/upload");
+      xhr.setRequestHeader("x-mistl-ui", "1");
+      xhr.setRequestHeader("x-file-name", encodeURIComponent(file.name));
+      xhr.upload.addEventListener("progress", function (e) {
+        if (e.lengthComputable) {
+          var pct = Math.round((e.loaded / e.total) * 100);
+          label.textContent = t("store.uploading", { name: file.name, pct: pct });
+        }
+      });
+      xhr.onload = function () {
+        var json = null;
+        try { json = JSON.parse(xhr.responseText); } catch (parseErr) { json = null; }
+        if (json && json.ok === true) {
+          resolve(json.data);
+        } else {
+          reject(new Error((json && json.error) || ("upload failed (" + xhr.status + ")")));
+        }
+      };
+      xhr.onerror = function () { reject(new Error("daemon unreachable")); };
+      xhr.send(file);
+    }).then(function (data) {
+      if (row.parentNode) row.parentNode.removeChild(row);
+      showToast(t("store.uploaded", { name: data.name, size: fmtBytes(data.size) }));
+      pollStoreLs();
+      return data;
+    }, function (err) {
+      if (row.parentNode) row.parentNode.removeChild(row);
+      showToast(t("store.uploadFailed", { name: file.name, error: err.message || String(err) }));
+      throw err;
+    });
+  }
+
+  function handleStoreFiles(fileList) {
+    var files = Array.prototype.slice.call(fileList || []);
+    files.forEach(function (file) { uploadOneFile(file); });
+  }
+
+  storeDropzone.addEventListener("click", function () { storeFileInput.click(); });
+  storeDropzone.addEventListener("keydown", function (e) {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); storeFileInput.click(); }
+  });
+  storeDropzone.addEventListener("dragover", function (e) { e.preventDefault(); storeDropzone.classList.add("dragover"); });
+  storeDropzone.addEventListener("dragleave", function () { storeDropzone.classList.remove("dragover"); });
+  storeDropzone.addEventListener("drop", function (e) {
+    e.preventDefault();
+    storeDropzone.classList.remove("dragover");
+    if (e.dataTransfer && e.dataTransfer.files) handleStoreFiles(e.dataTransfer.files);
+  });
+  storeFileInput.addEventListener("change", function () {
+    handleStoreFiles(storeFileInput.files);
+    storeFileInput.value = "";
+  });
+
+  /* ---------- profile ---------- */
+
+  var profileKv = document.getElementById("profile-kv");
+  var profileDisplayNameInput = document.getElementById("profile-display-name");
+  var profileHintBanner = document.getElementById("profile-hint-banner");
+  var profileHintDismissed = false;
+
+  var avatarPreview = document.getElementById("profile-avatar-preview");
+  var avatarDropzone = document.getElementById("profile-avatar-dropzone");
+  var avatarInput = document.getElementById("profile-avatar-input");
+  var avatarRemoveBtn = document.getElementById("btn-profile-avatar-remove");
+  var AVATAR_MAX = 256;
+
+  document.getElementById("btn-profile-hint-dismiss").addEventListener("click", function () {
+    profileHintDismissed = true;
+    profileHintBanner.hidden = true;
+  });
+
+  document.getElementById("btn-profile-hint-focus").addEventListener("click", function () {
+    navigateTo("panel-profile");
+    setTimeout(function () { profileDisplayNameInput.focus(); }, 300);
+  });
+
+  function renderAvatar(data) {
+    var cid = data && data.avatar_cid;
+    avatarPreview.innerHTML = "";
+    if (cid) {
+      var img = new Image();
+      img.alt = "";
+      img.src = "/api/store/download?cid=" + encodeURIComponent(cid);
+      avatarPreview.appendChild(img);
+      avatarRemoveBtn.hidden = false;
+    } else {
+      var name = (data && data.display_name) || "";
+      avatarPreview.textContent = name ? name.charAt(0) : "?";
+      avatarRemoveBtn.hidden = true;
+    }
+  }
+
+  function renderProfile(data) {
+    profileKv.innerHTML = "";
+    if (!data) return;
+    addKv(profileKv, t("profile.did"), truncateMiddle(data.did || "", 16, 8), true);
+    addKv(profileKv, t("profile.displayName"), data.display_name || "");
+    addKv(profileKv, t("profile.bio"), data.bio || "");
+    if (data.avatar_cid) addKv(profileKv, t("profile.avatarCid"), truncateMiddle(data.avatar_cid, 10, 6), true);
+    if (data.updated_at) addKv(profileKv, t("profile.updatedAt"), data.updated_at);
+    Object.keys(data).forEach(function (key) {
+      if (["did", "display_name", "bio", "avatar_cid", "updated_at"].indexOf(key) === -1) {
+        addKv(profileKv, key, data[key]);
+      }
+    });
+    state.identity = data;
+    renderIdentitySummary();
+    renderAvatar(data);
+    profileDisplayNameInput.value = data.display_name || "";
+    if (!profileHintDismissed) {
+      profileHintBanner.hidden = !!data.display_name;
+    }
+  }
+
+  /* ---------- profile avatar: downscale client-side, store as a blob,
+     reference by CID ----------------------------------------------------- */
+
+  function processAvatarImage(file) {
+    return new Promise(function (resolve, reject) {
+      if (!file || !/^image\/(png|jpeg|webp)$/.test(file.type)) {
+        reject(new Error(t("profile.avatarBadType")));
+        return;
+      }
+      var url = URL.createObjectURL(file);
+      var img = new Image();
+      img.onload = function () {
+        URL.revokeObjectURL(url);
+        var w = img.naturalWidth, h = img.naturalHeight;
+        if (!w || !h) { reject(new Error(t("profile.avatarBadType"))); return; }
+        var scale = Math.min(1, AVATAR_MAX / Math.max(w, h));
+        var cw = Math.max(1, Math.round(w * scale));
+        var ch = Math.max(1, Math.round(h * scale));
+        var canvas = document.createElement("canvas");
+        canvas.width = cw;
+        canvas.height = ch;
+        var ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, cw, ch);
+        var outType = file.type === "image/png" ? "image/png" : (file.type === "image/webp" ? "image/webp" : "image/jpeg");
+        canvas.toBlob(function (blob) {
+          if (!blob) { reject(new Error(t("profile.avatarBadType"))); return; }
+          var ext = outType === "image/png" ? "png" : (outType === "image/webp" ? "webp" : "jpg");
+          resolve({ blob: blob, ext: ext });
+        }, outType, 0.9);
+      };
+      img.onerror = function () { URL.revokeObjectURL(url); reject(new Error(t("profile.avatarBadType"))); };
+      img.src = url;
+    });
+  }
+
+  function uploadBlobToStore(blob, name) {
+    return new Promise(function (resolve, reject) {
+      var xhr = new XMLHttpRequest();
+      xhr.open("POST", "/api/store/upload");
+      xhr.setRequestHeader("x-mistl-ui", "1");
+      xhr.setRequestHeader("x-file-name", encodeURIComponent(name));
+      xhr.onload = function () {
+        var json = null;
+        try { json = JSON.parse(xhr.responseText); } catch (e) { json = null; }
+        if (json && json.ok === true) resolve(json.data);
+        else reject(new Error((json && json.error) || ("upload failed (" + xhr.status + ")")));
+      };
+      xhr.onerror = function () { reject(new Error("daemon unreachable")); };
+      xhr.send(blob);
+    });
+  }
+
+  function setAvatarFromFile(file) {
+    processAvatarImage(file).then(function (out) {
+      // Optimistic preview straight from the just-processed blob.
+      var localUrl = URL.createObjectURL(out.blob);
+      avatarPreview.innerHTML = "";
+      var preview = new Image();
+      preview.alt = "";
+      preview.onload = function () { URL.revokeObjectURL(localUrl); };
+      preview.src = localUrl;
+      avatarPreview.appendChild(preview);
+      avatarDropzone.classList.add("busy-zone");
+      return uploadBlobToStore(out.blob, "avatar." + out.ext).then(function (uploaded) {
+        return api("profile.set", { field: "avatar_cid", value: uploaded.cid });
+      }).then(function (profile) {
+        avatarDropzone.classList.remove("busy-zone");
+        showToast(t("profile.avatarUpdated"));
+        renderProfile(profile);
+        pollStoreLs();
+      });
+    }).catch(function (err) {
+      avatarDropzone.classList.remove("busy-zone");
+      showToast(err.message || String(err));
+      renderProfile(state.identity);
+    });
+  }
+
+  function handleAvatarFiles(fileList) {
+    var files = Array.prototype.slice.call(fileList || []);
+    if (files.length) setAvatarFromFile(files[0]);
+  }
+
+  avatarDropzone.addEventListener("click", function () { avatarInput.click(); });
+  avatarDropzone.addEventListener("keydown", function (e) {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); avatarInput.click(); }
+  });
+  avatarDropzone.addEventListener("dragover", function (e) { e.preventDefault(); avatarDropzone.classList.add("dragover"); });
+  avatarDropzone.addEventListener("dragleave", function () { avatarDropzone.classList.remove("dragover"); });
+  avatarDropzone.addEventListener("drop", function (e) {
+    e.preventDefault();
+    avatarDropzone.classList.remove("dragover");
+    if (e.dataTransfer && e.dataTransfer.files) handleAvatarFiles(e.dataTransfer.files);
+  });
+  avatarInput.addEventListener("change", function () {
+    handleAvatarFiles(avatarInput.files);
+    avatarInput.value = "";
+  });
+
+  avatarRemoveBtn.addEventListener("click", function (e) {
+    runAction(e.currentTarget, "profile.set", { field: "avatar_cid", value: "" }, function (profile) {
+      showToast(t("profile.avatarRemoved"));
+      renderProfile(profile);
+    });
+  });
+
+  function pollProfile() {
+    return api("profile.show", {}).then(renderProfile, function (err) {
+      showToast("profile.show: " + err.message);
+    });
+  }
+
+  document.querySelector('[data-target="profile"]').addEventListener("click", function (e) {
+    runAction(e.currentTarget, "profile.show", {}, renderProfile);
+  });
+
+  document.getElementById("profile-form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var value = profileDisplayNameInput.value.trim();
+    var btn = document.getElementById("btn-profile-save");
+    runAction(btn, "profile.set", { field: "display_name", value: value }, function (data) {
+      showToast(t("profile.updated"));
+      renderProfile(data);
+    });
+  });
+
+  /* ---------- settings ---------- */
+
+  var GIB = 1073741824;
+
+  var SETTINGS_SCHEMA = [
+    { section: "identity", titleKey: "settings.section.identity", fields: [
+      { key: "display_name", labelKey: "settings.field.identity.display_name.label", descKey: "settings.field.identity.display_name.desc", type: "text" }
+    ] },
+    { section: "storage", titleKey: "settings.section.storage", fields: [
+      { key: "capacity_bytes", labelKey: "settings.field.storage.capacity_bytes.label", descKey: "settings.field.storage.capacity_bytes.desc", type: "gib" }
+    ] },
+    { section: "stream", titleKey: "settings.section.stream", fields: [
+      { key: "rtsp_url", labelKey: "settings.field.stream.rtsp_url.label", descKey: "settings.field.stream.rtsp_url.desc", type: "text" },
+      { key: "frame_rate", labelKey: "settings.field.stream.frame_rate.label", descKey: "settings.field.stream.frame_rate.desc", type: "number" },
+      { key: "capture_backend", labelKey: "settings.field.stream.capture_backend.label", descKey: "settings.field.stream.capture_backend.desc", type: "select", options: [["", "settings.optionDefault", true], ["native", "native"], ["ffmpeg", "ffmpeg"]] },
+      { key: "max_width", labelKey: "settings.field.stream.max_width.label", descKey: "settings.field.stream.max_width.desc", type: "number" },
+      { key: "relay_room", labelKey: "settings.field.stream.relay_room.label", descKey: "settings.field.stream.relay_room.desc", type: "text" },
+      { key: "audio_codec", labelKey: "settings.field.stream.audio_codec.label", descKey: "settings.field.stream.audio_codec.desc", type: "select", options: [["", "settings.optionDefault", true], ["aac", "aac"], ["opus", "opus"]] }
+    ] },
+    { section: "mailbox", titleKey: "settings.section.mailbox", fields: [
+      { key: "room_id", labelKey: "settings.field.mailbox.room_id.label", descKey: "settings.field.mailbox.room_id.desc", type: "text" },
+      { key: "serve_as_bot", labelKey: "settings.field.mailbox.serve_as_bot.label", descKey: "settings.field.mailbox.serve_as_bot.desc", type: "toggle" }
+    ] },
+    { section: "ai", titleKey: "settings.section.ai", fields: [
+      { key: "room_id", labelKey: "settings.field.ai.room_id.label", descKey: "settings.field.ai.room_id.desc", type: "text" },
+      { key: "upstream_url", labelKey: "settings.field.ai.upstream_url.label", descKey: "settings.field.ai.upstream_url.desc", type: "text" },
+      { key: "upstream_api_key", labelKey: "settings.field.ai.upstream_api_key.label", descKey: "settings.field.ai.upstream_api_key.desc", type: "password" },
+      { key: "default_model", labelKey: "settings.field.ai.default_model.label", descKey: "settings.field.ai.default_model.desc", type: "text" },
+      { key: "temperature", labelKey: "settings.field.ai.temperature.label", descKey: "settings.field.ai.temperature.desc", type: "number" },
+      { key: "request_timeout_secs", labelKey: "settings.field.ai.request_timeout_secs.label", descKey: "settings.field.ai.request_timeout_secs.desc", type: "number" },
+      { key: "api_listen", labelKey: "settings.field.ai.api_listen.label", descKey: "settings.field.ai.api_listen.desc", type: "text" }
+    ] },
+    { section: "ui", titleKey: "settings.section.ui", fields: [
+      { key: "listen", labelKey: "settings.field.ui.listen.label", descKey: "settings.field.ui.listen.desc", type: "text" },
+      { key: "enabled", labelKey: "settings.field.ui.enabled.label", descKey: "settings.field.ui.enabled.desc", type: "toggle" }
+    ] }
+  ];
+
+  function settingsFieldId(section, key) {
+    return "settings-" + section + "-" + key;
+  }
+
+  function focusSettingsField(id) {
+    var input = document.getElementById(id);
+    navigateTo("panel-settings");
+    if (input) setTimeout(function () { input.focus(); }, 300);
+  }
+
+  function saveSetting(path, value, sectionCfg, key, badge) {
+    return api("config.set", { path: path, value: value }).then(function (data) {
+      if (sectionCfg) sectionCfg[key] = value;
+      var applies = data && data.applies === "daemon restart";
+      badge.style.display = applies ? "inline-block" : "none";
+      showToast(applies ? t("settings.savedRestart") : t("settings.savedNextStart"));
+      refreshAiHints();
+    }, function (err) {
+      showToast("config.set " + path + ": " + (err.message || err));
+    });
+  }
+
+  function buildSettingsField(section, f, sectionCfg) {
+    var wrap = el("div", { class: "settings-field" });
+    var id = settingsFieldId(section, f.key);
+    var fieldLabel = t(f.labelKey);
+    var labelEl = el("label", { class: "settings-label", for: id });
+    labelEl.textContent = fieldLabel;
+    wrap.appendChild(labelEl);
+    var descEl = el("div", { class: "desc" });
+    descEl.textContent = t(f.descKey);
+    wrap.appendChild(descEl);
+    var row = el("div", { class: "settings-row" });
+    var current = sectionCfg ? sectionCfg[f.key] : null;
+    var path = section + "." + f.key;
+    var badge = el("span", { class: "badge restart" });
+    badge.textContent = t("settings.restartBadge");
+    badge.style.display = "none";
+    var input;
+
+    if (f.type === "toggle") {
+      var toggleLabel = el("label", { class: "toggle-switch" });
+      input = el("input", { type: "checkbox", id: id });
+      input.checked = !!current;
+      toggleLabel.appendChild(input);
+      toggleLabel.appendChild(el("span", { class: "slider" }));
+      input.addEventListener("change", function () {
+        saveSetting(path, input.checked, sectionCfg, f.key, badge);
+      });
+      row.appendChild(toggleLabel);
+    } else if (f.type === "select") {
+      input = el("select", { id: id });
+      f.options.forEach(function (opt) {
+        var optText = opt[2] ? t(opt[1]) : opt[1];
+        input.appendChild(el("option", { value: opt[0], text: optText }));
+      });
+      input.value = current === null || current === undefined ? "" : String(current);
+      input.addEventListener("change", function () {
+        saveSetting(path, input.value === "" ? null : input.value, sectionCfg, f.key, badge);
+      });
+      row.appendChild(input);
+    } else if (f.type === "gib") {
+      input = el("input", { type: "text", id: id, inputmode: "decimal" });
+      input.value = typeof current === "number" ? String(current / GIB) : "";
+      input.addEventListener("blur", function () {
+        var v = input.value.trim();
+        if (v === "") { saveSetting(path, null, sectionCfg, f.key, badge); return; }
+        var num = Number(v);
+        if (!isFinite(num)) { showToast(t("settings.enterGib", { label: fieldLabel })); return; }
+        saveSetting(path, Math.round(num * GIB), sectionCfg, f.key, badge);
+      });
+      row.appendChild(input);
+      row.appendChild(el("span", { class: "muted", text: t("settings.gibUnit") }));
+    } else if (f.type === "number") {
+      input = el("input", { type: "text", id: id, inputmode: "decimal" });
+      input.value = current === null || current === undefined ? "" : String(current);
+      input.addEventListener("blur", function () {
+        var v = input.value.trim();
+        if (v === "") { saveSetting(path, null, sectionCfg, f.key, badge); return; }
+        var num = Number(v);
+        if (!isFinite(num)) { showToast(t("settings.enterNumber", { label: fieldLabel })); return; }
+        saveSetting(path, num, sectionCfg, f.key, badge);
+      });
+      row.appendChild(input);
+    } else if (f.type === "password") {
+      input = el("input", { type: "password", id: id, autocomplete: "off" });
+      input.placeholder = current === "***" ? t("settings.passwordSetPlaceholder") : t("settings.passwordNotSet");
+      row.appendChild(input);
+      var clearBtn = el("button", { type: "button" });
+      clearBtn.textContent = t("settings.clear");
+      clearBtn.addEventListener("click", function () {
+        input.value = "";
+        saveSetting(path, null, sectionCfg, f.key, badge).then(function () {
+          input.placeholder = t("settings.passwordNotSet");
+        });
+      });
+      row.appendChild(clearBtn);
+      input.addEventListener("blur", function () {
+        if (input.value !== "") {
+          saveSetting(path, input.value, sectionCfg, f.key, badge).then(function () {
+            input.value = "";
+            input.placeholder = t("settings.passwordSetPlaceholder");
+          });
+        }
+      });
+    } else {
+      input = el("input", { type: "text", id: id, autocomplete: "off" });
+      input.value = current === null || current === undefined ? "" : String(current);
+      input.addEventListener("blur", function () {
+        var v = input.value;
+        saveSetting(path, v.trim() === "" ? null : v, sectionCfg, f.key, badge);
+      });
+      row.appendChild(input);
+    }
+
+    row.appendChild(badge);
+    wrap.appendChild(row);
+    return wrap;
+  }
+
+  function renderSettings(cfg) {
+    state.config = cfg;
+    var body = document.getElementById("settings-body");
+    body.innerHTML = "";
+    SETTINGS_SCHEMA.forEach(function (grp) {
+      var sec = el("div", { class: "settings-section" });
+      var h3 = el("h3", {});
+      h3.textContent = t(grp.titleKey);
+      sec.appendChild(h3);
+      var sectionCfg = cfg ? cfg[grp.section] : null;
+      grp.fields.forEach(function (f) {
+        sec.appendChild(buildSettingsField(grp.section, f, sectionCfg));
+      });
+      body.appendChild(sec);
+    });
+    refreshAiHints();
+  }
+
+  function pollConfig() {
+    return api("config.show", {}).then(renderSettings, function (err) {
+      showToast("config.show: " + err.message);
+    });
+  }
+
+  document.querySelector('[data-target="settings"]').addEventListener("click", function (e) {
+    runAction(e.currentTarget, "config.show", {}, renderSettings);
+  });
+
+  /* ---------- polling scheduler ---------- */
+
+  var pollTimer = null;
+  var POLL_INTERVAL_MS = 5000;
+  var tickTimer = null;
+
+  function pollAll() {
+    pollDaemonStatus();
+    pollStreamStatus();
+    pollAiStatus();
+  }
+
+  function startPolling() {
+    if (pollTimer) return;
+    pollAll();
+    pollTimer = setInterval(pollAll, POLL_INTERVAL_MS);
+  }
+
+  function stopPolling() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  }
+
+  function startTicker() {
+    if (tickTimer) return;
+    tickTimer = setInterval(function () {
+      if (state.daemon) renderDaemonPill();
+      if (state.daemon) renderOverview();
+    }, 1000);
+  }
+
+  function stopTicker() {
+    if (tickTimer) { clearInterval(tickTimer); tickTimer = null; }
+  }
+
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) {
+      stopPolling();
+      stopTicker();
+    } else {
+      startPolling();
+      startTicker();
+    }
+  });
+
+  /* ---------- view router (single-view navigation) ---------- */
+
+  var PANEL_IDS = [
+    "panel-overview", "panel-stream", "panel-ai",
+    "panel-mailbox", "panel-store", "panel-profile", "panel-settings"
+  ];
+  var sideLinks = Array.prototype.slice.call(document.querySelectorAll("#sidenav a"));
+
+  function panelFromHash() {
+    var id = (location.hash || "").replace(/^#/, "");
+    return PANEL_IDS.indexOf(id) >= 0 ? id : "panel-overview";
+  }
+
+  function showPanel(id) {
+    PANEL_IDS.forEach(function (pid) {
+      var p = document.getElementById(pid);
+      if (!p) return;
+      var on = pid === id;
+      if (on && !p.classList.contains("active")) {
+        void p.offsetWidth;               /* restart the entrance animation cleanly */
+      }
+      p.classList.toggle("active", on);
+    });
+    sideLinks.forEach(function (a) {
+      a.classList.toggle("active", a.getAttribute("href") === "#" + id);
+    });
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function routeFromHash() { showPanel(panelFromHash()); }
+
+  function navigateTo(id) {
+    if (location.hash === "#" + id) showPanel(id);   /* same hash: no hashchange fires */
+    else location.hash = "#" + id;                   /* else hashchange -> routeFromHash */
+  }
+
+  window.addEventListener("hashchange", routeFromHash);
+  /* delegate every in-app #panel-* link (sidebar + inline hints) to the router */
+  document.addEventListener("click", function (e) {
+    var a = e.target.closest ? e.target.closest('a[href^="#panel-"]') : null;
+    if (!a) return;
+    var id = a.getAttribute("href").replace(/^#/, "");
+    if (PANEL_IDS.indexOf(id) < 0) return;
+    e.preventDefault();
+    navigateTo(id);
+  });
+
+  /* ---------- init ---------- */
+
+  document.documentElement.lang = currentLang;
+  applyStaticI18n();
+  updateLangButtons();
+  updateThemeToggle();
+  renderChat();
+  routeFromHash();
+  startPolling();
+  startTicker();
+  pollProfile();
+  pollMailboxLs();
+  pollStoreLs();
+  pollConfig();
+})();
+</script>
+</body>
+</html>
