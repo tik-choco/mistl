@@ -12,10 +12,30 @@ bin := "mistl"
 default:
     @just --list
 
+# --- mistlib dependency ------------------------------------------------------
+
+# Fetch/update mistlib into .mistlib-src (MISTLIB_REPO/MISTLIB_REF from .env)
+[windows]
+fetch-mistlib:
+    powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fetch-mistlib.ps1
+
+[unix]
+fetch-mistlib:
+    sh scripts/fetch-mistlib.sh
+
+# Clone mistlib on first build; run `just fetch-mistlib` to update it later
+[windows]
+_ensure-mistlib:
+    if (-not (Test-Path .mistlib-src/.git)) { just fetch-mistlib }
+
+[unix]
+_ensure-mistlib:
+    @test -d .mistlib-src/.git || just fetch-mistlib
+
 # --- release ---------------------------------------------------------------
 
 # Optimized release build (lto=thin, stripped — see Cargo.toml)
-release:
+release: _ensure-mistlib
     cargo build --release
 
 # Full release: format check, lint (deny warnings), test, then build
@@ -42,19 +62,19 @@ _copy-exe:
 # --- dev -------------------------------------------------------------------
 
 # Debug build
-build:
+build: _ensure-mistlib
     cargo build
 
 # Run the release binary, passing through args: `just run daemon start`
-run *args:
+run *args: _ensure-mistlib
     cargo run --release -- {{args}}
 
 # Fast type-check without codegen
-check:
+check: _ensure-mistlib
     cargo check
 
 # Run the test suite
-test:
+test: _ensure-mistlib
     cargo test
 
 # --- quality ---------------------------------------------------------------

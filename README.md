@@ -28,8 +28,9 @@ the MSVC runtime is statically linked — no external tools, DLLs, or installers
 
 ## Requirements
 
-- Rust (edition 2024) with [mistlib](https://github.com/tik-choco-lab/mistlib) checked
-  out as `../mistlib-dev` (path dependencies)
+- Rust (edition 2024) and git (with access to the private
+  [mistlib](https://github.com/tik-choco-lab/mistlib-dev) repository)
+- [just](https://github.com/casey/just) (optional but recommended task runner)
 - [cmake](https://cmake.org/) on PATH at build time (libopus is compiled from source
   for the relay's audio pipeline). With cmake ≥ 4.0, also set
   `CMAKE_POLICY_VERSION_MINIMUM=3.5` in the build environment.
@@ -39,9 +40,19 @@ the MSVC runtime is statically linked — no external tools, DLLs, or installers
 
 ## Build
 
+mistlib is a path dependency fetched into `.mistlib-src/` (a plain git clone,
+not committed) by `scripts/fetch-mistlib`, configured through `.env`:
+
 ```console
-$ cargo build --release
+$ cp .env.example .env        # set MISTLIB_REPO to a URL your git auth can clone
+$ just release                # fetches mistlib on first build, then cargo build --release
 ```
+
+Without `just`: run `scripts/fetch-mistlib.sh` (or `scripts\fetch-mistlib.ps1`
+on Windows) once, then `cargo build --release`. Re-run `just fetch-mistlib`
+whenever you want to update to the latest `MISTLIB_REF`; the clone in
+`.mistlib-src/` is a normal git checkout, so you can also edit, branch, and
+push mistlib changes from there while developing against it.
 
 ## Quick start
 
