@@ -4,6 +4,7 @@
 //!
 //! Routes:
 //! - `GET /` (and `GET /index.html`) -> 200 `text/html`, [`super::INDEX_HTML`]
+//! - `GET /favicon.png` -> 200 `image/png`, [`super::FAVICON_PNG`]
 //! - `POST /api/call` -> body `{"cmd": "...", "args": {...}}`; runs
 //!   [`crate::daemon::dispatch`] and answers 200 with
 //!   `{"ok":true,"data":...}` or `{"ok":false,"error":"..."}`
@@ -347,6 +348,19 @@ async fn write_html_response(stream: &mut TcpStream, status: u16, reason: &str, 
     stream.flush().await
 }
 
+async fn write_binary_response(
+    stream: &mut TcpStream,
+    status: u16,
+    reason: &str,
+    content_type: &str,
+    body: &[u8],
+) -> io::Result<()> {
+    let head = response_head(status, reason, content_type, body.len());
+    stream.write_all(head.as_bytes()).await?;
+    stream.write_all(body).await?;
+    stream.flush().await
+}
+
 /// JSON error body shape used by every non-2xx response from this server.
 async fn write_error(stream: &mut TcpStream, status: u16, reason: &str, message: &str) -> io::Result<()> {
     write_json_response(stream, status, reason, &json!({"ok": false, "error": message})).await
@@ -391,6 +405,9 @@ async fn handle_connection_inner(stream: &mut TcpStream, state: Arc<AppState>) -
 
     match (method.as_str(), path.as_str()) {
         ("GET", "/") | ("GET", "/index.html") => write_html_response(stream, 200, "OK", super::INDEX_HTML).await,
+        ("GET", "/favicon.png") => {
+            write_binary_response(stream, 200, "OK", "image/png", super::FAVICON_PNG).await
+        }
         ("POST", "/api/call") => handle_api_call(stream, &head, leftover, state).await,
         ("POST", "/api/store/upload") => handle_store_upload(stream, &head, leftover, state).await,
         ("GET", "/api/store/download") => handle_store_download(stream, &head, state).await,

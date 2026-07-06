@@ -8,7 +8,7 @@ use crate::daemon;
 #[command(
     name = "mistl",
     version,
-    about = "Unified P2P daemon: identity, storage, VRChat screen share, offline mailbox, AI network",
+    about = "MISTL - unified P2P daemon: identity, storage, VRChat screen share, offline mailbox, AI network",
     after_help = "Running `mistl` with no arguments opens the web dashboard \
                   (starts the daemon if needed) -- double-clicking mistl.exe does the same."
 )]
@@ -97,7 +97,7 @@ pub enum ProfileAction {
     Show,
     /// Set a profile field
     Set {
-        /// Field name (e.g. display_name, bio, avatar)
+        /// Field name (e.g. display_name, bio, avatar_cid)
         field: String,
         /// New value
         value: String,
