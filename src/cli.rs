@@ -5,10 +5,17 @@ use serde_json::{Value, json};
 use crate::daemon;
 
 #[derive(Parser)]
-#[command(name = "mistl", version, about = "Unified P2P daemon: identity, storage, RTSP screen share, offline mailbox")]
+#[command(
+    name = "mistl",
+    version,
+    about = "MISTL - unified P2P daemon: identity, storage, VRChat screen share, offline mailbox, AI network",
+    after_help = "Running `mistl` with no arguments opens the web dashboard \
+                  (starts the daemon if needed) -- double-clicking mistl.exe does the same."
+)]
 pub struct Cli {
+    /// Omitted -> open the web dashboard.
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -43,6 +50,33 @@ pub enum Command {
         #[command(subcommand)]
         action: MailboxAction,
     },
+    /// P2P AI network: consume or provide LLM inference (mistai compatible)
+    Ai {
+        #[command(subcommand)]
+        action: AiAction,
+    },
+    /// Open the web dashboard in the default browser (starts the daemon if needed)
+    Ui,
+    /// Show a combined status overview (daemon, stream, AI)
+    Status,
+    /// Show or change configuration (applies without editing config.toml)
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ConfigAction {
+    /// Show the current configuration (secrets masked)
+    Show,
+    /// Set one field, e.g. `mistl config set ai.upstream_url http://127.0.0.1:11434/v1`
+    Set {
+        /// Field path as section.field (see `mistl config show`)
+        path: String,
+        /// New value; JSON accepted (numbers, true/false, ["a","b"]), empty string clears
+        value: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -63,7 +97,7 @@ pub enum ProfileAction {
     Show,
     /// Set a profile field
     Set {
-        /// Field name (e.g. display_name, bio, avatar)
+        /// Field name (e.g. display_name, bio, avatar_cid)
         field: String,
         /// New value
         value: String,
@@ -97,8 +131,14 @@ pub enum StoreAction {
 
 #[derive(Subcommand)]
 pub enum StreamAction {
-    /// Start the RTSP screen-share server
+    /// Start the RTSP screen-share server (local screen capture)
     Start,
+    /// Relay a tc-chat screen share to VRChat (p2p -> RTSP, video + audio)
+    Relay {
+        /// tc-chat room id of the share (default: stream.relay_room)
+        #[arg(short, long)]
+        room: Option<String>,
+    },
     /// Stop the RTSP server
     Stop,
     /// Show stream status and URL
@@ -124,10 +164,49 @@ pub enum MailboxAction {
     Fetch,
 }
 
+#[derive(Subcommand)]
+pub enum AiAction {
+    /// One-shot chat completion (local provider or first p2p provider)
+    Chat {
+        /// The user prompt
+        prompt: String,
+        /// Model to request (default: provider's choice)
+        #[arg(short, long)]
+        model: Option<String>,
+    },
+    /// Show AI network status (room, provider, API server)
+    Status,
+    /// List models advertised by the reachable provider
+    Models,
+    /// Provide inference to the network from the configured upstream
+    Provide {
+        #[command(subcommand)]
+        action: AiToggleAction,
+    },
+    /// Local OpenAI-compatible API server backed by the network
+    Serve {
+        #[command(subcommand)]
+        action: AiToggleAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AiToggleAction {
+    /// Start the service
+    Start,
+    /// Stop the service
+    Stop,
+}
+
 /// Dispatch a parsed CLI invocation: either run the daemon, or act as a
 /// client sending one request to the running daemon over local IPC.
 pub fn dispatch(cli: Cli) -> Result<()> {
-    match cli.command {
+    let Some(command) = cli.command else {
+        // Bare `mistl` (including an Explorer double-click on the exe):
+        // bring the whole thing up and land the user in the dashboard.
+        return open_dashboard();
+    };
+    match command {
         Command::Daemon { action } => match action {
             DaemonAction::Run => daemon::run_foreground(),
             DaemonAction::Start => daemon::start_background(),
@@ -158,6 +237,18 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         },
         Command::Stream { action } => match action {
             StreamAction::Start => client_call("stream.start", json!({})),
+            StreamAction::Relay { room } => {
+                let response = request("stream.relay.start", json!({ "room": room }))?;
+                println!("{}", serde_json::to_string_pretty(&response)?);
+                if let Some(url) = response.get("rtsp_url").and_then(Value::as_str) {
+                    println!();
+                    println!("  Paste this URL into the VRChat video player:");
+                    println!();
+                    println!("      {url}");
+                    println!();
+                }
+                Ok(())
+            }
             StreamAction::Stop => client_call("stream.stop", json!({})),
             StreamAction::Status => client_call("stream.status", json!({})),
         },
@@ -174,12 +265,122 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             MailboxAction::Ls => client_call("mailbox.ls", json!({})),
             MailboxAction::Fetch => client_call("mailbox.fetch", json!({})),
         },
+        Command::Ai { action } => match action {
+            AiAction::Chat { prompt, model } => {
+                client_call("ai.chat", json!({ "prompt": prompt, "model": model }))
+            }
+            AiAction::Status => client_call("ai.status", json!({})),
+            AiAction::Models => client_call("ai.models", json!({})),
+            AiAction::Provide { action } => match action {
+                AiToggleAction::Start => client_call("ai.provide.start", json!({})),
+                AiToggleAction::Stop => client_call("ai.provide.stop", json!({})),
+            },
+            AiAction::Serve { action } => match action {
+                AiToggleAction::Start => client_call("ai.serve.start", json!({})),
+                AiToggleAction::Stop => client_call("ai.serve.stop", json!({})),
+            },
+        },
+        Command::Ui => open_dashboard(),
+        Command::Status => status_overview(),
+        Command::Config { action } => match action {
+            ConfigAction::Show => client_call("config.show", json!({})),
+            ConfigAction::Set { path, value } => {
+                // Accept JSON for typed values; fall back to a plain string
+                // ("30" stays a number, "native" a string). An empty value
+                // (also the JSON form `""`, since some shells can't pass a
+                // truly empty argument) clears optional fields.
+                let value = match serde_json::from_str(&value) {
+                    _ if value.is_empty() => Value::Null,
+                    Ok(Value::String(s)) if s.is_empty() => Value::Null,
+                    Ok(parsed) => parsed,
+                    Err(_) => Value::String(value),
+                };
+                let response = request("config.set", json!({ "path": path, "value": value }))?;
+                println!("{}", serde_json::to_string_pretty(&response)?);
+                if let Some(applies) = response.get("applies").and_then(Value::as_str) {
+                    if applies != "next service start" {
+                        println!("note: this change takes effect after a {applies}");
+                    }
+                }
+                Ok(())
+            }
+        },
+    }
+}
+
+/// One combined, human-scannable status snapshot.
+fn status_overview() -> Result<()> {
+    // The stream call goes first so its auto-start covers daemon.status
+    // (which is exempt from auto-start by design).
+    let stream = request("stream.status", json!({}))?;
+    let overview = json!({
+        "daemon": daemon::ipc::client_request("daemon.status", json!({}))?,
+        "stream": stream,
+        "ai": request("ai.status", json!({}))?,
+    });
+    println!("{}", serde_json::to_string_pretty(&overview)?);
+    Ok(())
+}
+
+/// Ensure the daemon is up, then open the dashboard URL in the default
+/// browser.
+fn open_dashboard() -> Result<()> {
+    let config = crate::config::Config::load()?;
+    if !config.ui.enabled {
+        bail!("the web dashboard is disabled ([ui] enabled = false in config.toml)");
+    }
+    if daemon::ipc::client_request("daemon.status", json!({})).is_err() {
+        daemon::start_background()?;
+    }
+    let url = format!("http://{}/", config.ui.listen);
+
+    #[cfg(windows)]
+    let opened = std::process::Command::new("cmd")
+        .args(["/c", "start", "", &url])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    #[cfg(target_os = "macos")]
+    let opened = std::process::Command::new("open")
+        .arg(&url)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let opened = std::process::Command::new("xdg-open")
+        .arg(&url)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if opened {
+        println!("dashboard: {url}");
+    } else {
+        println!("open {url} in your browser");
+    }
+    Ok(())
+}
+
+/// Send one request to the daemon, transparently starting it first if it
+/// isn't running (`daemon.*` commands are exempt so `daemon stop`/`status`
+/// never boot a daemon just to talk to it).
+fn request(cmd: &str, args: Value) -> Result<Value> {
+    match daemon::ipc::client_request(cmd, args.clone()) {
+        Err(error)
+            if !cmd.starts_with("daemon.")
+                && error.to_string().contains("daemon is not running") =>
+        {
+            eprintln!("mistl: starting daemon...");
+            daemon::start_background_quiet()?;
+            daemon::ipc::client_request(cmd, args)
+        }
+        other => other,
     }
 }
 
 /// Send one request to the daemon and pretty-print the JSON response.
 fn client_call(cmd: &str, args: Value) -> Result<()> {
-    let response = daemon::ipc::client_request(cmd, args)?;
+    let response = request(cmd, args)?;
     println!("{}", serde_json::to_string_pretty(&response)?);
     Ok(())
 }

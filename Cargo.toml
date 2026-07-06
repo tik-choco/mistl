@@ -6,9 +6,11 @@ description = "Unified P2P daemon CLI: identity (DID), storage, RTSP screen shar
 license = "MPL-2.0"
 
 [dependencies]
-# mistlib workspace (path deps; mistlib-native's lib name is `mistlib`)
-mistlib-core = { path = "../mistlib-dev/mistlib-core" }
-mistlib-native = { path = "../mistlib-dev/mistlib-native" }
+# mistlib workspace (path deps; mistlib-native's lib name is `mistlib`).
+# .mistlib-src is a git clone managed by scripts/fetch-mistlib (repo/ref set
+# in .env; `just fetch-mistlib` to update, first `just build` fetches it).
+mistlib-core = { path = ".mistlib-src/mistlib-core" }
+mistlib-native = { path = ".mistlib-src/mistlib-native" }
 
 # CLI / runtime / config
 anyhow = "1"
@@ -34,11 +36,24 @@ pbkdf2 = "0.12"
 sha2 = "0.10"
 base64 = "0.22"
 
+# ai (p2p LLM network, mistai wire-compatible; upstream OpenAI-compatible client)
+reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls"] }
+
 # stream (RTSP server + MPEG-TS ingest, VRChat/AVPro compatible)
 rtsp-types = "0.1"
 mpeg2ts = "0.3"
 rtp = "0.13"
+openh264 = "0.9.3"
+
+# stream::relay (tc-chat WebRTC share -> RTSP): Opus decode (audiopus_sys
+# builds libopus from source via cmake, matching the openh264 precedent) and
+# AAC-LC encode (fdk-aac-sys builds libfdk-aac from source via cc).
+opus = "0.3"
+fdk-aac = "0.8"
 
 [profile.release]
 lto = "thin"
 strip = true
+
+[target."cfg(windows)".dependencies]
+windows-capture = "2.0.0"

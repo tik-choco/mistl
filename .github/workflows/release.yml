@@ -1,0 +1,161 @@
+# Automatic release: every push to main builds mistl for Windows / macOS /
+# Linux, picks the next version, tags it, and publishes a GitHub Release with
+# auto-generated notes.
+#
+# Versioning rules (job: plan):
+#   - no v* tag yet                -> release the version in Cargo.toml
+#   - Cargo.toml bumped by hand    -> release that version (minor/major control)
+#   - otherwise                    -> auto-bump the patch of the latest tag
+# The chosen version is stamped into Cargo.toml before building, so
+# `mistl --version` matches the tag even without a manual bump.
+#
+# Requires one repository secret:
+#   MISTLIB_DEV_TOKEN - fine-grained PAT with Contents: Read on
+#                       tik-choco-lab/mistlib-dev (private path dependency,
+#                       checked out into .mistlib-src/ like the local
+#                       scripts/fetch-mistlib workflow does).
+
+name: release
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - ".gitignore"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  MISTLIB_REPO: tik-choco-lab/mistlib-dev
+  MISTLIB_REF: develop
+  # Runner cmake is 4.x; vendored libopus still declares an ancient minimum.
+  CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history so all existing v* tags are visible
+
+      - name: Pick the next version
+        id: ver
+        shell: bash
+        run: |
+          cargo_ver=$(sed -nE 's/^version *= *"([^"]+)".*/\1/p' Cargo.toml | head -1)
+          latest=$(git tag -l 'v*' --sort=-v:refname | head -1)
+          if [ -z "$latest" ]; then
+            next="$cargo_ver"
+          elif [ -n "$(git tag -l "v$cargo_ver")" ]; then
+            next=$(echo "${latest#v}" | awk -F. '{printf "%d.%d.%d", $1, $2, $3 + 1}')
+          else
+            # Cargo.toml holds an unreleased version; use it if it is actually
+            # newer than the latest tag, else fall back to a patch bump.
+            next=$(printf '%s\n%s\n' "$cargo_ver" "${latest#v}" | sort -V | tail -1)
+            if [ "$next" = "${latest#v}" ]; then
+              next=$(echo "${latest#v}" | awk -F. '{printf "%d.%d.%d", $1, $2, $3 + 1}')
+            fi
+          fi
+          echo "version=$next" >> "$GITHUB_OUTPUT"
+          echo "next release: v$next (Cargo.toml: $cargo_ver, latest tag: ${latest:-none})"
+
+  build:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      # Private path dependency `.mistlib-src/` (same location the local
+      # scripts/fetch-mistlib puts it, so Cargo.toml needs no CI special-case).
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MISTLIB_REPO }}
+          ref: ${{ env.MISTLIB_REF }}
+          token: ${{ secrets.MISTLIB_DEV_TOKEN }}
+          path: .mistlib-src
+
+      - name: Install Linux build deps
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y cmake nasm pkg-config libssl-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Stamp release version into Cargo.toml
+        # Only the [package] section has `version =` at column 0.
+        run: sed -i.bak -E 's/^version = "[^"]*"/version = "${{ needs.plan.outputs.version }}"/' Cargo.toml && rm Cargo.toml.bak
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package
+        run: |
+          name="mistl-v${{ needs.plan.outputs.version }}-${{ matrix.target }}"
+          mkdir -p dist
+          case "${{ matrix.target }}" in
+            *windows*)
+              cp "target/${{ matrix.target }}/release/mistl.exe" .
+              7z a "dist/$name.zip" mistl.exe README.md
+              ;;
+            *)
+              cp "target/${{ matrix.target }}/release/mistl" .
+              tar czf "dist/$name.tar.gz" mistl README.md
+              ;;
+          esac
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mistl-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS.txt
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.plan.outputs.version }}
+          name: MISTL v${{ needs.plan.outputs.version }}
+          generate_release_notes: true
+          files: dist/*

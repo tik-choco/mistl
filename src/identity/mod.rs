@@ -62,6 +62,7 @@ impl Identity {
     }
 
     /// The Ed25519 public key backing this identity.
+    #[allow(dead_code)]
     pub fn verifying_key(&self) -> VerifyingKey {
         self.signing_key.verifying_key()
     }
@@ -215,9 +216,10 @@ fn generate_identity(state: &AppState) -> Result<Identity> {
 
     if !profile_path()?.exists() {
         let mut profile = Profile::default();
-        if let Some(name) = &state.config.identity.display_name {
+        if let Some(name) = &state.config().identity.display_name {
             profile.display_name = Some(name.clone());
         }
+        profile.updated_at = Some(created_at.clone());
         save_profile(&profile)?;
     }
 
@@ -243,27 +245,48 @@ pub async fn current(state: &AppState) -> Result<Arc<Identity>> {
 
 /// User profile: a few well-known fields plus an open bag of extra string
 /// fields (`profile.set` accepts any field name).
+///
+/// This is the interop document sibling apps (tc-chat, tc-storage) read: it
+/// is persisted verbatim at `<data_dir>/identity/profile.json` and returned
+/// (merged with `did`) by `profile.show`. See the "Profile document" section
+/// in the README for the stable on-the-wire shape.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Profile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bio: Option<String>,
+    /// Root CID (in the content store, `store.put`) of the profile image.
+    /// Any ecosystem peer holding the block -- or able to resolve it over the
+    /// shared CID-addressed store -- can fetch the avatar bytes by this CID,
+    /// which keeps the profile portable without inlining image data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub avatar: Option<String>,
+    pub avatar_cid: Option<String>,
+    /// RFC 3339 timestamp of the last `profile.set`, so a peer that holds
+    /// several observed copies of a profile can pick the freshest one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, String>,
 }
 
 impl Profile {
+    /// Set (or, when `value` is empty, clear) a profile field. Known fields
+    /// are typed; anything else is kept as a free-form string in `extra`.
     fn set_field(&mut self, field: &str, value: String) {
+        let value = if value.is_empty() { None } else { Some(value) };
         match field {
-            "display_name" => self.display_name = Some(value),
-            "bio" => self.bio = Some(value),
-            "avatar" => self.avatar = Some(value),
-            other => {
-                self.extra.insert(other.to_string(), value);
-            }
+            "display_name" => self.display_name = value,
+            "bio" => self.bio = value,
+            "avatar_cid" => self.avatar_cid = value,
+            other => match value {
+                Some(v) => {
+                    self.extra.insert(other.to_string(), v);
+                }
+                None => {
+                    self.extra.remove(other);
+                }
+            },
         }
     }
 }
@@ -294,8 +317,12 @@ fn profile_with_did(profile: &Profile, did: &str) -> Result<Value> {
 }
 
 /// Handle `profile.*` and `key.*` IPC commands:
-/// - `profile.show` `{}` -> profile JSON
-/// - `profile.set` `{field, value}` -> updated profile JSON
+/// - `profile.show` `{}` -> profile JSON (`{did, display_name?, bio?,
+///   avatar_cid?, updated_at?, ...}`) -- the interop document read by peers
+/// - `profile.set` `{field, value}` -> updated profile JSON; setting
+///   `avatar_cid` points the profile at an image already in the content
+///   store, and an empty `value` clears the field. Every set stamps
+///   `updated_at`.
 /// - `key.generate` `{}` -> `{did}` (errors if one already exists)
 /// - `key.list` `{}` -> `[{did, created_at}]`
 /// - `key.did` `{}` -> `{did}`
@@ -319,6 +346,7 @@ pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Val
             let identity = current(state).await?;
             let mut profile = load_profile()?;
             profile.set_field(field, value.to_string());
+            profile.updated_at = Some(Utc::now().to_rfc3339());
             save_profile(&profile)?;
             profile_with_did(&profile, identity.did())
         }
@@ -430,14 +458,33 @@ mod tests {
         let mut profile = Profile::default();
         profile.set_field("display_name", "Ada".to_string());
         profile.set_field("bio", "Loves math".to_string());
+        profile.set_field("avatar_cid", "bafyavatarcid".to_string());
         profile.set_field("custom_field", "custom value".to_string());
 
         assert_eq!(profile.display_name.as_deref(), Some("Ada"));
         assert_eq!(profile.bio.as_deref(), Some("Loves math"));
+        assert_eq!(profile.avatar_cid.as_deref(), Some("bafyavatarcid"));
         assert_eq!(profile.extra.get("custom_field").map(String::as_str), Some("custom value"));
 
         let value = serde_json::to_value(&profile).unwrap();
         assert_eq!(value["display_name"], "Ada");
+        assert_eq!(value["avatar_cid"], "bafyavatarcid");
         assert_eq!(value["custom_field"], "custom value");
+    }
+
+    #[test]
+    fn profile_set_field_with_empty_value_clears_the_field() {
+        let mut profile = Profile::default();
+        profile.set_field("display_name", "Ada".to_string());
+        profile.set_field("avatar_cid", "bafyavatarcid".to_string());
+        profile.set_field("custom_field", "custom value".to_string());
+
+        profile.set_field("display_name", String::new());
+        profile.set_field("avatar_cid", String::new());
+        profile.set_field("custom_field", String::new());
+
+        assert_eq!(profile.display_name, None);
+        assert_eq!(profile.avatar_cid, None);
+        assert!(!profile.extra.contains_key("custom_field"));
     }
 }
