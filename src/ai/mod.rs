@@ -14,8 +14,11 @@
 //!
 //! `ai chat` is a one-shot version of the same backend selection.
 //!
-//! The AI room defaults to the mailbox room because mistlib supports one
-//! room per process (see `crate::net`); both protocols coexist by shape.
+//! The AI room defaults to the mailbox room for backward-compat convenience
+//! (so a bare config still puts mailbox and ai in the same room), but this
+//! is no longer mandatory: `crate::net` supports multiple simultaneous
+//! rooms per process, so `[ai] room_id` may name a distinct room. Either
+//! way mailbox and ai protocols coexist by shape.
 
 mod api_server;
 mod consumer;
@@ -96,9 +99,10 @@ async fn init_service(state: &Arc<AppState>) -> Result<Arc<AiService>> {
     // Single-writer send queue: preserves cross-request send order.
     let (send_tx, mut send_rx) =
         tokio::sync::mpsc::unbounded_channel::<(String, ProtocolMessage)>();
+    let ai_room = transport.room.clone();
     tokio::spawn(async move {
         while let Some((to, msg)) = send_rx.recv().await {
-            if let Err(err) = crate::net::send_direct(&to, protocol::encode(&msg)).await {
+            if let Err(err) = crate::net::send_direct(&ai_room, &to, protocol::encode(&msg)).await {
                 debug!(%err, to = %to, "ai: send failed");
             }
         }

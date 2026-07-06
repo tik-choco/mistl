@@ -20,6 +20,10 @@
 //! 16-byte GCM tag at the end of the ciphertext, matching Web Crypto's
 //! `AES-GCM` and Go's `cipher.AEAD.Seal`.
 
+// Interop API retained for tc-storage-compatible encrypted identity export;
+// not yet wired to a CLI path, so allow it to sit unused for now.
+#![allow(dead_code)]
+
 use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use anyhow::{Result, anyhow, bail};
