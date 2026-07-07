@@ -2,3 +2,11 @@
 # fully standalone file (no VC++ redistributable needed on target machines).
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
+
+# mistlib-consensus's git dependency on mistlib-core (unified with our path
+# dependency via the root Cargo.toml's [patch] section) still needs its
+# source resolved even though the patch redirects the actual checkout;
+# cargo's built-in libgit2 fetcher fails DNS resolution for github.com in
+# this environment, while the system `git` binary resolves it fine.
+[net]
+git-fetch-with-cli = true

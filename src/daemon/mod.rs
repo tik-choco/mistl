@@ -267,6 +267,7 @@ pub async fn dispatch(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<V
             Some("store") => crate::storage::handle(cmd, args, state).await,
             Some("stream") => crate::stream::handle(cmd, args, state).await,
             Some("mailbox") => crate::mailbox::handle(cmd, args, state).await,
+            Some("consensus") => crate::consensus::handle(cmd, args, state).await,
             Some("ai") => crate::ai::handle(cmd, args, state).await,
             Some("update") => crate::update::handle(cmd, args, state).await,
             Some("install") | Some("autostart") => crate::install::handle(cmd, args, state).await,

@@ -62,6 +62,11 @@
     --shadow: 0 2px 6px rgba(6, 10, 20, 0.22), 0 14px 34px rgba(6, 10, 20, 0.30);
   }
   * { box-sizing: border-box; }
+  /* Guard the native `hidden` attribute: several elements below pair it with a
+     class that sets its own `display` (flex/grid/etc). At equal specificity the
+     author rule wins over the UA `[hidden]{display:none}`, so those elements
+     would stay visible (empty) whenever JS sets `.hidden = true`. Force it. */
+  [hidden] { display: none !important; }
   html, body { margin: 0; padding: 0; }
   body {
     background: var(--bg);
@@ -434,6 +439,9 @@
   .badge.delivered, .badge.ok-badge { background: var(--ok-dim); color: var(--ok); }
   .badge.deposited { background: var(--warn-dim); color: var(--warn); }
   .badge.queued { background: var(--panel-border); color: var(--text-dim); }
+  .badge.leader { background: var(--ok-dim); color: var(--ok); }
+  .badge.follower { background: var(--accent-dim); color: var(--accent); }
+  .badge.electing { background: var(--warn-dim); color: var(--warn); }
   .badge.restart { background: var(--warn-dim); color: var(--warn); margin-left: auto; }
   button.badge.restart { border: none; font: inherit; font-weight: 600; cursor: pointer; }
   button.badge.restart:hover { filter: brightness(1.15); text-decoration: underline; }
@@ -602,6 +610,71 @@
   .flow-card h3 { margin: 0; font-size: 13px; }
   .flow-card p { margin: 0; color: var(--text-dim); font-size: 12.5px; }
 
+  /* ---- cascade card (Stream panel: leader-election relay topology) ---- */
+  .cascade-card {
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    transition: border-color var(--dur-fast) var(--ease-out);
+  }
+  .cascade-card-head { display: flex; align-items: center; gap: 10px; }
+  .cascade-card-head h3 { margin: 0; font-size: 13.5px; flex: 1; }
+  .cascade-topology {
+    display: flex;
+    align-items: stretch;
+    gap: 4px;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding: 2px 2px 6px;
+  }
+  .cascade-node {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    min-width: 84px;
+    flex: none;
+    padding: 8px 10px;
+    border-radius: 8px;
+    border: 1px solid var(--panel-border);
+    background: var(--bg-alt);
+    color: var(--text-dim);
+    font-size: 11.5px;
+    font-weight: 600;
+    text-align: center;
+    white-space: nowrap;
+    transition: border-color var(--dur-fast) var(--ease-out),
+                background var(--dur-fast) var(--ease-out),
+                color var(--dur-fast) var(--ease-out);
+  }
+  .cascade-node-sub { font-size: 10.5px; font-weight: 700; color: var(--text-faint); font-family: var(--mono); }
+  .cascade-node.is-you {
+    border-color: var(--accent);
+    background: var(--accent-dim);
+    color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-dim);
+  }
+  .cascade-node.is-you .cascade-node-sub { color: var(--accent); }
+  .cascade-arrow { display: flex; align-items: center; color: var(--text-faint); flex: none; }
+  .cascade-arrow svg { width: 18px; height: 14px; }
+  .cascade-source { font-size: 12.5px; color: var(--text-dim); }
+  .cascade-peers-list { list-style: none; margin: 4px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+  .cascade-peer-pill {
+    background: var(--bg-alt);
+    border: 1px solid var(--panel-border);
+    border-radius: 999px;
+    padding: 2px 8px;
+    font-size: 11px;
+    color: var(--text-dim);
+    font-family: var(--mono);
+  }
+  #cascade-peers-details summary { cursor: pointer; font-size: 12px; color: var(--text-dim); padding: 2px 0; }
+  #cascade-peers-details summary:hover { color: var(--accent); }
+
   .info-hint {
     display: flex;
     align-items: center;
@@ -752,6 +825,7 @@
   .url-callout:hover { transform: translateY(-1px); box-shadow: 0 6px 18px var(--accent-dim); }
   .flow-card { transition: border-color var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out); }
   .flow-card:hover { border-color: var(--accent); transform: translateY(-1px); }
+  .cascade-card:hover { border-color: var(--accent); }
 
   /* ---- responsive: sidebar collapses to a scrollable top rail ---------- */
   @media (max-width: 720px) {
@@ -872,6 +946,7 @@
         <div class="info-hint neutral" id="relay-room-hint" hidden>
           <span data-i18n="stream.roomHint.prefix">Type a room id above, or set a default relay room in </span><a href="#panel-settings" id="relay-room-hint-link" data-i18n="stream.roomHint.link">Settings</a><span data-i18n="stream.roomHint.suffix">.</span>
         </div>
+        <p class="muted" style="font-size: 11.5px; margin: 0;" data-i18n="stream.relayCascadeHint">Multiple viewers? Each runs mistl stream relay in the same room &mdash; a leader is elected automatically and the sharer only uploads once.</p>
       </div>
     </div>
     <div class="url-callout" id="stream-url-callout" hidden data-i18n-title="common.clickToCopy" title="Click to copy">
@@ -880,6 +955,22 @@
     </div>
     <div class="info-hint" id="stream-vrchat-hint" hidden></div>
     <dl class="kv" id="stream-kv"></dl>
+    <div class="cascade-card" id="cascade-card" hidden>
+      <div class="cascade-card-head">
+        <h3 data-i18n="stream.cascade.title">Cascade relay</h3>
+        <span class="badge cascade-role-badge" id="cascade-role-badge"></span>
+      </div>
+      <div class="cascade-topology" id="cascade-topology" role="img"></div>
+      <div class="cascade-source" id="cascade-source"></div>
+      <dl class="kv" id="cascade-kv"></dl>
+      <details id="cascade-peers-details" hidden>
+        <summary id="cascade-peers-summary"></summary>
+        <ul class="cascade-peers-list" id="cascade-peers-list"></ul>
+      </details>
+    </div>
+    <div class="info-hint neutral" id="cascade-off-note" hidden>
+      <span data-i18n="stream.cascade.offNote">Cascade off ([stream] cascade = false)</span>
+    </div>
     <div class="row">
       <button id="btn-stream-stop" class="danger" data-i18n="stream.stopBtn">Stop</button>
     </div>
@@ -1186,6 +1277,26 @@
       "stream.vrchatHint.prefix": "This URL only works in VRChat on this same PC. Playing on another PC or Quest?",
       "stream.vrchatHint.link": "Set the RTSP address to 0.0.0.0 in Settings",
       "stream.vrchatHint.suffix": " and restart the stream.",
+      "stream.relayCascadeHint": "Multiple viewers? Each runs mistl stream relay in the same room — a leader is elected automatically and the sharer only uploads once.",
+      "stream.cascade.title": "Cascade relay",
+      "stream.cascade.role.leader": "LEADER",
+      "stream.cascade.role.follower": "FOLLOWER",
+      "stream.cascade.role.electing": "ELECTING…",
+      "stream.cascade.node.sharer": "tc-chat sharer",
+      "stream.cascade.node.leader": "Leader",
+      "stream.cascade.node.relays": "{count} relays",
+      "stream.cascade.node.vrchat": "VRChat",
+      "stream.cascade.node.you": "you",
+      "stream.cascade.source.sharer": "Receiving from: sharer (you are the leader)",
+      "stream.cascade.source.leader": "Receiving from: leader {leader}",
+      "stream.cascade.source.waiting": "Waiting for a share…",
+      "stream.cascade.leader": "leader",
+      "stream.cascade.self": "this node",
+      "stream.cascade.relayPeers": "relay peers",
+      "stream.cascade.consensusPeers": "raft peers",
+      "stream.cascade.peersToggle": "{count} relay peers",
+      "stream.cascade.topologyAria": "{role}, relaying through {count} peers to VRChat",
+      "stream.cascade.offNote": "Cascade off ([stream] cascade = false)",
       "ai.title": "AI",
       "ai.upstreamHint": "Set an OpenAI-compatible upstream in Settings to provide inference.",
       "ai.openSettings": "Open Settings",
@@ -1445,6 +1556,26 @@
       "stream.vrchatHint.prefix": "このURLは同じPC上のVRChatでのみ機能します。別のPCやQuestで再生する場合は、",
       "stream.vrchatHint.link": "設定でRTSPアドレスを0.0.0.0に変更",
       "stream.vrchatHint.suffix": "し、ストリームを再起動してください。",
+      "stream.relayCascadeHint": "視聴者が複数いる場合は、同じルームで各自が mistl stream relay を実行してください。リーダーが自動的に選出され、共有元は一度のアップロードで済みます。",
+      "stream.cascade.title": "カスケード中継",
+      "stream.cascade.role.leader": "リーダー",
+      "stream.cascade.role.follower": "フォロワー",
+      "stream.cascade.role.electing": "選出中…",
+      "stream.cascade.node.sharer": "tc-chat 共有元",
+      "stream.cascade.node.leader": "リーダー",
+      "stream.cascade.node.relays": "中継 {count} 件",
+      "stream.cascade.node.vrchat": "VRChat",
+      "stream.cascade.node.you": "あなた",
+      "stream.cascade.source.sharer": "受信元: 共有元 (あなたがリーダーです)",
+      "stream.cascade.source.leader": "受信元: リーダー {leader}",
+      "stream.cascade.source.waiting": "共有を待っています…",
+      "stream.cascade.leader": "リーダー",
+      "stream.cascade.self": "このノード",
+      "stream.cascade.relayPeers": "中継ピア数",
+      "stream.cascade.consensusPeers": "Raftピア数",
+      "stream.cascade.peersToggle": "中継ピア {count} 件",
+      "stream.cascade.topologyAria": "{role}・中継ピア {count} 件を経由してVRChatへ",
+      "stream.cascade.offNote": "カスケードはオフです ([stream] cascade = false)",
       "ai.title": "AI",
       "ai.upstreamHint": "推論を提供するには、設定でOpenAI互換のアップストリームを指定してください。",
       "ai.openSettings": "設定を開く",
@@ -1704,6 +1835,26 @@
       "stream.vrchatHint.prefix": "此 URL 仅在同一台电脑上的 VRChat 中有效。要在另一台电脑或 Quest 上播放？",
       "stream.vrchatHint.link": "在设置中将 RTSP 地址设为 0.0.0.0",
       "stream.vrchatHint.suffix": "，然后重新启动串流。",
+      "stream.relayCascadeHint": "有多个观众？在同一房间中，每个人运行 mistl stream relay，系统会自动选举主节点，共享源只需上传一次。",
+      "stream.cascade.title": "级联中继",
+      "stream.cascade.role.leader": "主节点",
+      "stream.cascade.role.follower": "从节点",
+      "stream.cascade.role.electing": "选举中…",
+      "stream.cascade.node.sharer": "tc-chat 共享源",
+      "stream.cascade.node.leader": "主节点",
+      "stream.cascade.node.relays": "{count} 个中继",
+      "stream.cascade.node.vrchat": "VRChat",
+      "stream.cascade.node.you": "你",
+      "stream.cascade.source.sharer": "接收自：共享源（你是主节点）",
+      "stream.cascade.source.leader": "接收自：主节点 {leader}",
+      "stream.cascade.source.waiting": "正在等待共享…",
+      "stream.cascade.leader": "主节点",
+      "stream.cascade.self": "本节点",
+      "stream.cascade.relayPeers": "中继节点数",
+      "stream.cascade.consensusPeers": "Raft 节点数",
+      "stream.cascade.peersToggle": "{count} 个中继节点",
+      "stream.cascade.topologyAria": "{role}，通过 {count} 个中继节点转发到 VRChat",
+      "stream.cascade.offNote": "级联已关闭 ([stream] cascade = false)",
       "ai.title": "AI",
       "ai.upstreamHint": "在设置中配置 OpenAI 兼容的上游服务以提供推理。",
       "ai.openSettings": "打开设置",
@@ -2104,6 +2255,7 @@
     daemonUptimeAt: 0,
     identity: null,
     stream: null,
+    consensus: null,
     ai: null,
     config: null,
     chatHistory: [],
@@ -2248,6 +2400,15 @@
   var streamUrlText = document.getElementById("stream-url-text");
   var relayRoomHint = document.getElementById("relay-room-hint");
   var streamVrchatHint = document.getElementById("stream-vrchat-hint");
+  var cascadeCard = document.getElementById("cascade-card");
+  var cascadeRoleBadge = document.getElementById("cascade-role-badge");
+  var cascadeTopology = document.getElementById("cascade-topology");
+  var cascadeSource = document.getElementById("cascade-source");
+  var cascadeKv = document.getElementById("cascade-kv");
+  var cascadeOffNote = document.getElementById("cascade-off-note");
+  var cascadePeersDetails = document.getElementById("cascade-peers-details");
+  var cascadePeersSummary = document.getElementById("cascade-peers-summary");
+  var cascadePeersList = document.getElementById("cascade-peers-list");
 
   streamUrlCallout.addEventListener("click", function () {
     if (streamUrlText.textContent) copyToClipboard(streamUrlText.textContent);
@@ -2290,6 +2451,7 @@
       addKv(streamKv, t("stream.status"), t("stream.statusUnknown"));
       streamUrlCallout.hidden = true;
       renderVrchatHint(null);
+      renderCascade();
       return;
     }
     if (s.running) {
@@ -2308,23 +2470,129 @@
       addKv(streamKv, t("stream.status"), t("stream.statusStopped"));
     }
     renderVrchatHint(s);
+    renderCascade();
+  }
+
+  /* ---- cascade card: leader-elected relay topology (see stream.status.cascade
+     and consensus.status). Old daemons omit `cascade` entirely -- treat that
+     the same as "not relaying with cascade" and just hide the card. ---- */
+
+  function shortNodeId(id) {
+    if (!id) return "";
+    return id.length > 8 ? id.slice(0, 8) : id;
+  }
+
+  function addKvId(container, label, fullId) {
+    container.appendChild(el("dt", { text: label }));
+    var dd = el("dd", { class: "mono" });
+    if (fullId) {
+      dd.textContent = shortNodeId(fullId);
+      dd.title = fullId;
+    } else {
+      dd.textContent = "-";
+    }
+    container.appendChild(dd);
+  }
+
+  function cascadeNode(labelText, subText, isYou, fullTitle) {
+    var node = el("div", { class: "cascade-node" + (isYou ? " is-you" : "") });
+    if (fullTitle) node.title = fullTitle;
+    node.appendChild(el("span", { class: "cascade-node-label", text: labelText }));
+    if (subText) node.appendChild(el("span", { class: "cascade-node-sub", text: subText }));
+    return node;
+  }
+
+  function cascadeArrow() {
+    var span = el("span", { class: "cascade-arrow", "aria-hidden": "true" });
+    span.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M4 12h14M13 6l6 6-6 6"/></svg>';
+    return span;
+  }
+
+  function renderCascade() {
+    var s = state.stream;
+    var c = s && s.running && s.backend === "relay" ? s.cascade : null;
+    cascadeCard.hidden = true;
+    cascadeOffNote.hidden = true;
+    if (!c) return;
+    if (!c.enabled) {
+      cascadeOffNote.hidden = false;
+      return;
+    }
+    cascadeCard.hidden = false;
+
+    var role = c.role || "unknown";
+    var badgeKey, badgeClass;
+    if (role === "leader") { badgeKey = "stream.cascade.role.leader"; badgeClass = "badge cascade-role-badge leader"; }
+    else if (role === "follower") { badgeKey = "stream.cascade.role.follower"; badgeClass = "badge cascade-role-badge follower"; }
+    else { badgeKey = "stream.cascade.role.electing"; badgeClass = "badge cascade-role-badge electing"; }
+    cascadeRoleBadge.className = badgeClass;
+    cascadeRoleBadge.textContent = t(badgeKey);
+
+    var relayPeers = Array.isArray(c.relay_peers) ? c.relay_peers : [];
+    var isLeader = role === "leader";
+    var isFollower = role === "follower";
+
+    cascadeTopology.innerHTML = "";
+    cascadeTopology.appendChild(cascadeNode(t("stream.cascade.node.sharer"), null, false));
+    cascadeTopology.appendChild(cascadeArrow());
+    cascadeTopology.appendChild(cascadeNode(
+      t("stream.cascade.node.leader"),
+      isLeader ? t("stream.cascade.node.you") : shortNodeId(c.leader),
+      isLeader,
+      c.leader || null
+    ));
+    cascadeTopology.appendChild(cascadeArrow());
+    cascadeTopology.appendChild(cascadeNode(
+      t("stream.cascade.node.relays", { count: relayPeers.length }),
+      isFollower ? t("stream.cascade.node.you") : null,
+      isFollower
+    ));
+    cascadeTopology.appendChild(cascadeArrow());
+    cascadeTopology.appendChild(cascadeNode(t("stream.cascade.node.vrchat"), null, false));
+    cascadeTopology.setAttribute("aria-label", t("stream.cascade.topologyAria", { role: t(badgeKey), count: relayPeers.length }));
+
+    var sourceText;
+    if (c.source === "sharer") sourceText = t("stream.cascade.source.sharer");
+    else if (c.source === "leader") sourceText = t("stream.cascade.source.leader", { leader: c.leader ? shortNodeId(c.leader) : "?" });
+    else sourceText = t("stream.cascade.source.waiting");
+    cascadeSource.textContent = sourceText;
+
+    cascadeKv.innerHTML = "";
+    addKvId(cascadeKv, t("stream.cascade.leader"), c.leader);
+    addKvId(cascadeKv, t("stream.cascade.self"), c.self);
+    addKv(cascadeKv, t("stream.cascade.relayPeers"), relayPeers.length);
+    if (state.consensus && state.consensus.active && Array.isArray(state.consensus.peers)) {
+      addKv(cascadeKv, t("stream.cascade.consensusPeers"), state.consensus.peers.length);
+    }
+
+    cascadePeersList.innerHTML = "";
+    if (relayPeers.length) {
+      cascadePeersDetails.hidden = false;
+      cascadePeersSummary.textContent = t("stream.cascade.peersToggle", { count: relayPeers.length });
+      relayPeers.forEach(function (peerId) {
+        cascadePeersList.appendChild(el("li", { class: "cascade-peer-pill", title: peerId, text: shortNodeId(peerId) }));
+      });
+    } else {
+      cascadePeersDetails.hidden = true;
+    }
   }
 
   function pollStreamStatus() {
-    return api("stream.status", {}).then(function (data) {
+    var streamP = api("stream.status", {}).then(function (data) {
       state.stream = data;
-      renderStream();
     }, function () {
       state.stream = null;
-      renderStream();
     });
+    var consensusP = api("consensus.status", {}).then(function (data) {
+      state.consensus = data;
+    }, function () {
+      state.consensus = null;
+    });
+    return Promise.all([streamP, consensusP]).then(renderStream);
   }
 
   document.querySelector('[data-target="stream"]').addEventListener("click", function (e) {
-    runAction(e.currentTarget, "stream.status", {}, function (data) {
-      state.stream = data;
-      renderStream();
-    });
+    withBusy(e.currentTarget, pollStreamStatus);
   });
 
   document.getElementById("btn-stream-start").addEventListener("click", function (e) {

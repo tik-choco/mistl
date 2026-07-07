@@ -131,7 +131,10 @@ fn pipeline() -> &'static Mutex<Option<Pipeline>> {
 /// - `stream.start` `{}` -> `{rtsp_url}` (idempotent: returns existing URL)
 /// - `stream.relay.start` `{room?}` -> `{rtsp_url, room}` (tc-chat share relay)
 /// - `stream.stop` `{}` -> `{stopped: bool}`
-/// - `stream.status` `{}` -> `{running, rtsp_url?, clients?, backend?}`
+/// - `stream.status` `{}` -> `{running, rtsp_url?, clients?, backend?}` (the
+///   `relay` backend additionally reports `publisher` and `cascade` -- see
+///   `relay`'s module doc's "Cascade distribution" section for the latter's
+///   shape)
 pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Value> {
     match cmd {
         "stream.start" => {
@@ -345,6 +348,7 @@ async fn status() -> Result<Value> {
                 value["room"] = json!(room);
                 if let Backend::Relay(relay) = &pipeline.backend {
                     value["publisher"] = json!(relay.publisher());
+                    value["cascade"] = relay.cascade_status();
                 }
             }
             Ok(value)

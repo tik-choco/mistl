@@ -882,8 +882,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "wasi",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -1413,7 +1415,9 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
+ "async-trait",
  "base64",
+ "bincode",
  "bs58",
  "bytes",
  "chrono",
@@ -1421,6 +1425,8 @@ dependencies = [
  "directories",
  "ed25519-dalek",
  "fdk-aac",
+ "mistlib-consensus-core",
+ "mistlib-consensus-native",
  "mistlib-core",
  "mistlib-native",
  "mpeg2ts",
@@ -1444,6 +1450,37 @@ dependencies = [
  "tracing-subscriber",
  "windows-capture",
  "winreg",
+]
+
+[[package]]
+name = "mistlib-consensus-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bincode",
+ "bytes",
+ "ed25519-dalek",
+ "getrandom 0.2.17",
+ "mistlib-core",
+ "rand 0.8.6",
+ "serde",
+ "sha2",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "web-time",
+]
+
+[[package]]
+name = "mistlib-consensus-native"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "mistlib-consensus-core",
+ "mistlib-core",
+ "tokio",
+ "tracing",
+ "web-time",
 ]
 
 [[package]]

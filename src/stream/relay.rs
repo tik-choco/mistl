@@ -29,6 +29,47 @@
 //! peer are ignored while locked. [`decide_video`]/[`decide_audio`] are pure
 //! functions capturing that policy so it's testable without real network
 //! types.
+//!
+//! # Cascade distribution (consensus-driven)
+//!
+//! When `[stream] cascade = true` (the default) and a consensus control
+//! plane ([`crate::consensus::RelayConsensus`]) starts successfully for this
+//! room, the lock-in policy above is extended via [`CascadePolicy`]: the
+//! elected LEADER accepts video from any peer that isn't itself a relay node
+//! (i.e. the browser sharer) -- same effective behavior as the no-cascade
+//! case -- while FOLLOWERS accept only from the current leader's
+//! *re-published* tracks (see below), ignoring the sharer entirely. When
+//! cascade is disabled by config, or `RelayConsensus::start` fails, the relay
+//! falls back to the original "lock onto the first video from anyone"
+//! behavior (logged at WARN).
+//!
+//! The leader additionally re-publishes the sharer's H264/Opus RTP straight
+//! through -- raw passthrough, no transcoding -- as its own local tracks via
+//! `mistlib::publish_local_track`. The tracks are created lazily the moment
+//! the leader locks onto the sharer, and torn down (`unpublish_local_track`
+//! + dropped) on unlock, role loss, or `stop()`. This is the cascade/SFU
+//! building block: the sharer uplinks once (to the leader), and every relay
+//! in the room -- including ones with no direct connection to the sharer,
+//! since mistlib's DNVE3 overlay is a selective mesh rather than a full one
+//! -- can reach the share via the leader's re-publish instead of needing a
+//! direct link to the sharer itself.
+//!
+//! `control_loop` reacts to [`crate::consensus::RelayConsensus::subscribe`]
+//! (`tokio::select!` alongside the media-event channel): a role or leader
+//! change unlocks -- tearing down the forwarding tasks and any active
+//! re-publish -- so the next matching track re-establishes the lock under
+//! the new policy.
+//!
+//! ## v1 limitation: a follower's PLI is a no-op
+//!
+//! Followers' periodic PLI (see [`PLI_INTERVAL`]) targets the leader's
+//! re-published track, and mistlib's cascade plumbing does not forward that
+//! request back to the original sharer -- only the leader's own PLI (sent
+//! directly to the sharer) can actually trigger a keyframe. This bounds a
+//! late-joining follower's keyframe latency to the leader's existing ~5s PLI
+//! cadence rather than the follower's own PLI having any effect; acceptable
+//! for v1 since it's the same order of magnitude as the pre-cascade
+//! single-relay keyframe wait.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -37,20 +78,29 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use mistlib::MediaTrackEvent;
+use mistlib::webrtc::api::media_engine::{MIME_TYPE_H264, MIME_TYPE_OPUS};
 use mistlib::webrtc::peer_connection::RTCPeerConnection;
 use mistlib::webrtc::rtcp::packet::Packet as RtcpPacket;
 use mistlib::webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use mistlib::webrtc::rtp::codecs::h264::H264Packet;
 use mistlib::webrtc::rtp::packetizer::Depacketizer;
-use mistlib::webrtc::rtp_transceiver::rtp_codec::RTPCodecType;
+use mistlib::webrtc::rtp_transceiver::rtp_codec::{RTCRtpCodecCapability, RTPCodecType};
+use mistlib::webrtc::track::track_local::TrackLocalWriter;
+use mistlib::webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
 use mistlib::webrtc::track::track_remote::TrackRemote;
-use tokio::sync::mpsc;
+use serde_json::{Value, json};
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
+use crate::consensus::{ConsensusRole, ConsensusView, RelayConsensus};
 use crate::daemon::AppState;
 use crate::stream::rtp_out::{self, AudioCodec};
 use crate::stream::rtsp::RtspServer;
+
+/// A leader's re-published video + audio tracks, kept alive for exactly as
+/// long as it's locked onto the sharer (see [`create_and_publish_republish_tracks`]).
+type RepublishTracks = (Arc<TrackLocalStaticRTP>, Arc<TrackLocalStaticRTP>);
 
 /// H264 NAL unit type constants (RFC 6184 section 5.4), matching `native.rs`.
 const NAL_TYPE_SPS: u8 = 7;
@@ -88,12 +138,36 @@ struct RelayCounters {
     audio_frames: AtomicU64,
 }
 
+/// This relay's cascade wiring: either genuinely disabled (`[stream]
+/// cascade = false`, or a consensus start failure) or a live control-plane
+/// handle. Cheap to clone (an `Arc` clone at most), so both [`RelayCapture`]
+/// (status/stop) and `control_loop` (policy/role-change reactions) can each
+/// hold their own copy.
+#[derive(Clone)]
+enum Cascade {
+    Disabled,
+    Active(Arc<RelayConsensus>),
+}
+
 /// The running relay: the control task consuming media events, plus shared
 /// state other code (`stream.status`, `stop`) needs to reach into.
 pub struct RelayCapture {
     publisher: Arc<StdMutex<Option<String>>>,
     active_tasks: Arc<StdMutex<Vec<JoinHandle<()>>>>,
     control_task: JoinHandle<()>,
+    cascade: Cascade,
+    /// This node's mistlib node id -- needed for the `cascade.self` status
+    /// field independent of whether consensus is active.
+    node_id: String,
+    /// The room id actually joined on the wire (tc-chat's derived channel
+    /// id, not the friendly room name) -- what `mistlib::publish_local_track`
+    /// / `unpublish_local_track` expect.
+    channel_room: String,
+    /// The leader's currently-published re-broadcast tracks, if any are
+    /// live right now. Shared with `control_loop` so `stop()` can unpublish
+    /// them even though `control_task` itself is aborted rather than
+    /// awaited to completion.
+    republish: Arc<StdMutex<Option<RepublishTracks>>>,
 }
 
 impl RelayCapture {
@@ -110,8 +184,35 @@ impl RelayCapture {
         // name is never the on-wire topic. Derive the same channel here so the
         // relay lands in the same swarm and can see the shared screen. Callers
         // pass the friendly room id (e.g. `--room global`); the derivation is
-        // owned here so users never handle the opaque `tcch-…` form.
-        crate::net::ensure_started(state, crate::net::channel_id_for(&room)).await?;
+        // owned here so users never handle the opaque `tcch-…` form. The same
+        // channel id is also what the consensus control plane and
+        // `mistlib::publish_local_track`/`unpublish_local_track` need as
+        // their `room` -- it's the actual on-wire session id.
+        let channel_room = crate::net::channel_id_for(&room);
+        crate::net::ensure_started(state, channel_room.clone()).await?;
+
+        let node_id = crate::identity::current(state)
+            .await
+            .context("relay: loading identity for cascade")?
+            .node_id();
+
+        let cascade = if state.config().stream.cascade {
+            match RelayConsensus::start(state, channel_room.clone()).await {
+                Ok(consensus) => Cascade::Active(consensus),
+                Err(error) => {
+                    warn!(
+                        %error,
+                        "cascade: consensus failed to start; falling back to direct-lock relay (no leader election)"
+                    );
+                    Cascade::Disabled
+                }
+            }
+        } else {
+            warn!(
+                "cascade: disabled via [stream] cascade = false; using direct-lock relay (no leader election)"
+            );
+            Cascade::Disabled
+        };
 
         let (tx, rx) = mpsc::unbounded_channel();
         crate::net::set_media_consumer(Some(tx));
@@ -119,6 +220,7 @@ impl RelayCapture {
         let publisher = Arc::new(StdMutex::new(None));
         let active_tasks = Arc::new(StdMutex::new(Vec::new()));
         let counters = Arc::new(RelayCounters::default());
+        let republish: Arc<StdMutex<Option<RepublishTracks>>> = Arc::new(StdMutex::new(None));
 
         let control_task = tokio::spawn(control_loop(
             rx,
@@ -127,6 +229,9 @@ impl RelayCapture {
             publisher.clone(),
             active_tasks.clone(),
             counters.clone(),
+            cascade.clone(),
+            channel_room.clone(),
+            republish.clone(),
         ));
 
         let summary_handle = tokio::spawn(summary_task(rtsp, publisher.clone(), counters));
@@ -139,10 +244,16 @@ impl RelayCapture {
             publisher,
             active_tasks,
             control_task,
+            cascade,
+            node_id,
+            channel_room,
+            republish,
         })
     }
 
-    /// Node id of the peer currently being relayed, if a share is live.
+    /// Node id of the peer currently being relayed, if a share is live. In
+    /// cascade mode this is whoever we're locked onto directly -- the sharer
+    /// if we're the leader, the leader if we're a follower.
     pub fn publisher(&self) -> Option<String> {
         self.publisher
             .lock()
@@ -150,7 +261,31 @@ impl RelayCapture {
             .clone()
     }
 
-    /// Stop the relay tasks and unsubscribe from media events.
+    /// `stream.status`'s `cascade` field -- see the module doc's "Cascade
+    /// distribution" section for the exact contract (the dashboard is built
+    /// against this shape).
+    pub fn cascade_status(&self) -> Value {
+        match &self.cascade {
+            Cascade::Disabled => json!({ "enabled": false }),
+            Cascade::Active(consensus) => {
+                let locked = self
+                    .publisher
+                    .lock()
+                    .expect("relay publisher lock poisoned")
+                    .is_some();
+                cascade_status_json(
+                    consensus.role(),
+                    consensus.leader(),
+                    &self.node_id,
+                    consensus.relay_peers(),
+                    locked,
+                )
+            }
+        }
+    }
+
+    /// Stop the relay tasks, unpublish any live cascade re-broadcast, shut
+    /// down the consensus control plane, and unsubscribe from media events.
     pub async fn stop(self) {
         self.control_task.abort();
         for task in self
@@ -161,8 +296,60 @@ impl RelayCapture {
         {
             task.abort();
         }
+
+        let tracks = self
+            .republish
+            .lock()
+            .expect("relay republish lock poisoned")
+            .take();
+        if let Some((video, audio)) = tracks {
+            if let Err(error) = mistlib::unpublish_local_track(&self.channel_room, video).await {
+                debug!(%error, "cascade: unpublishing video re-broadcast track on stop failed");
+            }
+            if let Err(error) = mistlib::unpublish_local_track(&self.channel_room, audio).await {
+                debug!(%error, "cascade: unpublishing audio re-broadcast track on stop failed");
+            }
+        }
+
+        if let Cascade::Active(consensus) = &self.cascade {
+            consensus.shutdown().await;
+        }
+
         crate::net::set_media_consumer(None);
     }
+}
+
+/// Pure JSON builder for the `cascade` field of `stream.status`, decoupled
+/// from a live [`RelayConsensus`] so the exact shape is unit-testable
+/// without standing up a real consensus session (which needs a joined room
+/// and mistlib's engine running). `locked` is whether we currently have a
+/// publisher locked in (`RelayCapture::publisher().is_some()`); `source` is
+/// derived from it plus `role` (leader locked = "sharer", follower locked =
+/// "leader", not locked = `null`).
+fn cascade_status_json(
+    role: ConsensusRole,
+    leader: Option<String>,
+    self_id: &str,
+    relay_peers: Vec<String>,
+    locked: bool,
+) -> Value {
+    let source = if locked {
+        match role {
+            ConsensusRole::Leader => Some("sharer"),
+            ConsensusRole::Follower => Some("leader"),
+            ConsensusRole::Candidate | ConsensusRole::Unknown => None,
+        }
+    } else {
+        None
+    };
+    json!({
+        "enabled": true,
+        "role": role,
+        "leader": leader,
+        "self": self_id,
+        "relay_peers": relay_peers,
+        "source": source,
+    })
 }
 
 /// What to do with an incoming *audio* track, given the current lock state.
@@ -179,17 +366,182 @@ enum AudioDecision {
     Ignore,
 }
 
+/// The cascade context [`decide_video`]/[`decide_audio`] evaluate against --
+/// a snapshot of [`ConsensusView`] (or the absence of one), kept as a plain
+/// data type so the policy matrix is unit-testable without a real
+/// [`RelayConsensus`].
+#[derive(Debug, Clone, PartialEq)]
+enum CascadePolicy {
+    /// `[stream] cascade = false`, or consensus failed to start: today's
+    /// behavior -- lock onto the first video track from anyone.
+    Disabled,
+    /// Consensus is running for this room; `relay_peers` includes self.
+    Active {
+        role: ConsensusRole,
+        leader: Option<String>,
+        relay_peers: Vec<String>,
+    },
+}
+
+/// Whether `policy` would accept a video/audio track from `remote_id` as the
+/// publisher, independent of whether we're already locked onto someone else.
+/// Leader accepts anyone who isn't a known relay peer (i.e. the sharer);
+/// follower accepts only the current leader; a role that hasn't resolved
+/// past candidate/unknown, or a follower with no leader hint yet, accepts
+/// no one (safer to wait than to guess).
+fn accepts_remote(remote_id: &str, policy: &CascadePolicy) -> bool {
+    match policy {
+        CascadePolicy::Disabled => true,
+        CascadePolicy::Active { role: ConsensusRole::Leader, relay_peers, .. } => {
+            !relay_peers.iter().any(|peer| peer == remote_id)
+        }
+        CascadePolicy::Active { role: ConsensusRole::Follower, leader: Some(leader), .. } => {
+            remote_id == leader
+        }
+        CascadePolicy::Active { .. } => false,
+    }
+}
+
 /// Whether an incoming *video* track locks its peer as the publisher.
-fn decide_video(locked: Option<&str>) -> bool {
-    locked.is_none()
+fn decide_video(locked: Option<&str>, remote_id: &str, policy: &CascadePolicy) -> bool {
+    locked.is_none() && accepts_remote(remote_id, policy)
 }
 
 /// Decision for an incoming *audio* track.
-fn decide_audio(locked: Option<&str>, remote_id: &str, audio_attached: bool) -> AudioDecision {
+fn decide_audio(
+    locked: Option<&str>,
+    remote_id: &str,
+    audio_attached: bool,
+    policy: &CascadePolicy,
+) -> AudioDecision {
     match locked {
         Some(id) if id == remote_id && !audio_attached => AudioDecision::Attach,
         Some(_) => AudioDecision::Ignore,
-        None => AudioDecision::Buffer,
+        None if accepts_remote(remote_id, policy) => AudioDecision::Buffer,
+        None => AudioDecision::Ignore,
+    }
+}
+
+/// `role` rendered for the `cascade: role=... leader=... peers=...` log line
+/// (see the module doc's "Cascade distribution" section).
+fn role_str(role: ConsensusRole) -> &'static str {
+    match role {
+        ConsensusRole::Leader => "leader",
+        ConsensusRole::Follower => "follower",
+        ConsensusRole::Candidate => "candidate",
+        ConsensusRole::Unknown => "unknown",
+    }
+}
+
+fn leader_display(leader: &Option<String>) -> &str {
+    leader.as_deref().unwrap_or("none")
+}
+
+/// Builds the [`CascadePolicy`] `decide_video`/`decide_audio` should use
+/// right now, from the cascade wiring and the most recently observed
+/// [`ConsensusView`] (`None` until the control plane has published its
+/// first view).
+fn build_policy(cascade: &Cascade, view: Option<&ConsensusView>) -> CascadePolicy {
+    match cascade {
+        Cascade::Disabled => CascadePolicy::Disabled,
+        Cascade::Active(_) => match view {
+            Some(view) => CascadePolicy::Active {
+                role: view.role,
+                leader: view.leader.clone(),
+                relay_peers: view.peers.clone(),
+            },
+            None => CascadePolicy::Active {
+                role: ConsensusRole::Unknown,
+                leader: None,
+                relay_peers: Vec::new(),
+            },
+        },
+    }
+}
+
+/// Awaits the next consensus view change, or never resolves when cascade
+/// isn't active -- lets `control_loop`'s `tokio::select!` carry an optional
+/// branch without special-casing the loop body per iteration.
+async fn watch_changed(
+    view_rx: &mut Option<watch::Receiver<ConsensusView>>,
+) -> std::result::Result<(), watch::error::RecvError> {
+    match view_rx {
+        Some(rx) => rx.changed().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Creates this leader's video (H264) + audio (Opus) re-broadcast tracks and
+/// publishes both into `channel_room` via `mistlib::publish_local_track`.
+/// Codec parameters match the sharer's own tracks (H264 @ 90kHz, Opus @
+/// 48kHz stereo) since this is a raw RTP passthrough, not a transcode -- see
+/// `mistlib-native/tests/loopback_media.rs` for the same shape used against
+/// a live connection. If publishing the audio track fails after the video
+/// track already succeeded, the video track is unpublished again so a
+/// partially-published pair is never left live.
+async fn create_and_publish_republish_tracks(channel_room: &str) -> Result<RepublishTracks> {
+    let video = Arc::new(TrackLocalStaticRTP::new(
+        RTCRtpCodecCapability {
+            mime_type: MIME_TYPE_H264.to_owned(),
+            clock_rate: 90_000,
+            ..Default::default()
+        },
+        "video".to_string(),
+        "mistl-cascade".to_string(),
+    ));
+    let audio = Arc::new(TrackLocalStaticRTP::new(
+        RTCRtpCodecCapability {
+            mime_type: MIME_TYPE_OPUS.to_owned(),
+            clock_rate: rtp_out::AUDIO_CLOCK_RATE,
+            channels: 2,
+            ..Default::default()
+        },
+        "audio".to_string(),
+        "mistl-cascade".to_string(),
+    ));
+
+    mistlib::publish_local_track(channel_room, video.clone())
+        .await
+        .context("cascade: publishing re-broadcast video track")?;
+    if let Err(error) = mistlib::publish_local_track(channel_room, audio.clone()).await {
+        let _ = mistlib::unpublish_local_track(channel_room, video).await;
+        return Err(error).context("cascade: publishing re-broadcast audio track");
+    }
+
+    Ok((video, audio))
+}
+
+/// Unlocks the current publisher: clears the shared lock state, aborts the
+/// per-publisher forwarding tasks (video/PLI/audio), and -- if the leader
+/// was re-publishing -- unpublishes and drops the re-broadcast tracks.
+/// Shared by both unlock paths in `control_loop` (the publisher's track
+/// ending, and a cascade role/leader change invalidating the current lock).
+async fn unlock(
+    channel_room: &str,
+    publisher: &Arc<StdMutex<Option<String>>>,
+    active_tasks: &Arc<StdMutex<Vec<JoinHandle<()>>>>,
+    republish: &Arc<StdMutex<Option<RepublishTracks>>>,
+) {
+    *publisher.lock().expect("relay publisher lock poisoned") = None;
+    for task in active_tasks
+        .lock()
+        .expect("relay active tasks lock poisoned")
+        .drain(..)
+    {
+        task.abort();
+    }
+
+    let tracks = republish
+        .lock()
+        .expect("relay republish lock poisoned")
+        .take();
+    if let Some((video, audio)) = tracks {
+        if let Err(error) = mistlib::unpublish_local_track(channel_room, video).await {
+            debug!(%error, "cascade: unpublishing video re-broadcast track failed");
+        }
+        if let Err(error) = mistlib::unpublish_local_track(channel_room, audio).await {
+            debug!(%error, "cascade: unpublishing audio re-broadcast track failed");
+        }
     }
 }
 
@@ -197,7 +549,8 @@ fn decide_audio(locked: Option<&str>, remote_id: &str, audio_attached: bool) -> 
 /// lock-in policy above, until the channel closes (i.e. `stop()` dropped the
 /// sender via `set_media_consumer(None)` -- actually the channel itself is
 /// owned here; `stop()` instead aborts this task directly, so in practice
-/// this only returns if mistlib itself drops its sender).
+/// this only returns if mistlib itself drops its sender). Also reacts to
+/// cascade role/leader changes via `cascade`'s consensus handle, when active.
 async fn control_loop(
     mut media_rx: mpsc::UnboundedReceiver<MediaTrackEvent>,
     rtsp: Arc<RtspServer>,
@@ -205,13 +558,36 @@ async fn control_loop(
     publisher: Arc<StdMutex<Option<String>>>,
     active_tasks: Arc<StdMutex<Vec<JoinHandle<()>>>>,
     counters: Arc<RelayCounters>,
+    cascade: Cascade,
+    channel_room: String,
+    republish: Arc<StdMutex<Option<RepublishTracks>>>,
 ) {
     let (ended_tx, mut ended_rx) = mpsc::unbounded_channel::<String>();
     let mut locked: Option<String> = None;
     let mut audio_attached = false;
     let mut pending_audio: HashMap<String, MediaTrackEvent> = HashMap::new();
+    // The leader's own copy of the audio re-broadcast track, kept alongside
+    // `locked` so a sibling audio track arriving after the video lock (the
+    // common case; see `pending_audio`) still gets republished.
+    let mut audio_republish: Option<Arc<TrackLocalStaticRTP>> = None;
+
+    let mut view_rx = match &cascade {
+        Cascade::Active(consensus) => Some(consensus.subscribe()),
+        Cascade::Disabled => None,
+    };
+    let mut current_view: Option<ConsensusView> = view_rx.as_ref().map(|rx| rx.borrow().clone());
+    if let Some(view) = &current_view {
+        info!(
+            "cascade: role={} leader={} peers={}",
+            role_str(view.role),
+            leader_display(&view.leader),
+            view.peers.len()
+        );
+    }
 
     loop {
+        let policy = build_policy(&cascade, current_view.as_ref());
+
         tokio::select! {
             event = media_rx.recv() => {
                 let Some(event) = event else { break };
@@ -220,8 +596,8 @@ async fn control_loop(
 
                 match kind {
                     RTPCodecType::Video => {
-                        if !decide_video(locked.as_deref()) {
-                            debug!(%remote_id, "relay: ignoring video track (publisher already locked)");
+                        if !decide_video(locked.as_deref(), &remote_id, &policy) {
+                            debug!(%remote_id, "relay: ignoring video track (publisher already locked, or not accepted by cascade policy)");
                             continue;
                         }
 
@@ -230,12 +606,36 @@ async fn control_loop(
                         locked = Some(remote_id.clone());
                         audio_attached = false;
 
+                        let is_leader = matches!(&policy, CascadePolicy::Active { role: ConsensusRole::Leader, .. });
+                        let is_follower = matches!(&policy, CascadePolicy::Active { role: ConsensusRole::Follower, .. });
+                        let (video_republish, new_audio_republish) = if is_leader {
+                            match create_and_publish_republish_tracks(&channel_room).await {
+                                Ok((video, audio)) => {
+                                    *republish.lock().expect("relay republish lock poisoned") =
+                                        Some((video.clone(), audio.clone()));
+                                    info!("cascade: re-publishing share into room");
+                                    (Some(video), Some(audio))
+                                }
+                                Err(error) => {
+                                    warn!(%error, "cascade: failed to publish re-broadcast tracks; continuing as direct relay only");
+                                    (None, None)
+                                }
+                            }
+                        } else {
+                            if is_follower {
+                                info!("cascade: following leader {remote_id}");
+                            }
+                            (None, None)
+                        };
+                        audio_republish = new_audio_republish;
+
                         let video_handle = tokio::spawn(video_task(
                             event.track.clone(),
                             rtsp.clone(),
                             remote_id.clone(),
                             ended_tx.clone(),
                             counters.clone(),
+                            video_republish,
                         ));
                         let pli_handle = tokio::spawn(pli_task(event.pc.clone(), event.track.ssrc()));
                         active_tasks
@@ -251,6 +651,7 @@ async fn control_loop(
                                 audio_codec,
                                 remote_id.clone(),
                                 counters.clone(),
+                                audio_republish.clone(),
                             ));
                             active_tasks
                                 .lock()
@@ -259,7 +660,7 @@ async fn control_loop(
                             audio_attached = true;
                         }
                     }
-                    RTPCodecType::Audio => match decide_audio(locked.as_deref(), &remote_id, audio_attached) {
+                    RTPCodecType::Audio => match decide_audio(locked.as_deref(), &remote_id, audio_attached, &policy) {
                         AudioDecision::Attach => {
                             info!(%remote_id, codec = audio_codec.as_str(), "relay: audio track attached");
                             let audio_handle = tokio::spawn(audio_task(
@@ -268,6 +669,7 @@ async fn control_loop(
                                 audio_codec,
                                 remote_id.clone(),
                                 counters.clone(),
+                                audio_republish.clone(),
                             ));
                             active_tasks
                                 .lock()
@@ -288,16 +690,47 @@ async fn control_loop(
             Some(ended_id) = ended_rx.recv() => {
                 if locked.as_deref() == Some(ended_id.as_str()) {
                     info!(remote_id = %ended_id, "relay: publisher's video track ended; unlocking");
-                    *publisher.lock().expect("relay publisher lock poisoned") = None;
+                    unlock(&channel_room, &publisher, &active_tasks, &republish).await;
                     locked = None;
                     audio_attached = false;
+                    audio_republish = None;
                     pending_audio.remove(&ended_id);
-                    for task in active_tasks
-                        .lock()
-                        .expect("relay active tasks lock poisoned")
-                        .drain(..)
-                    {
-                        task.abort();
+                }
+            }
+            changed = watch_changed(&mut view_rx) => {
+                match changed {
+                    Ok(()) => {
+                        let new_view = view_rx
+                            .as_ref()
+                            .expect("view_rx is Some after an Ok(()) change notification")
+                            .borrow()
+                            .clone();
+                        let role_changed = current_view.as_ref().map(|v| v.role) != Some(new_view.role);
+                        let leader_changed =
+                            current_view.as_ref().map(|v| v.leader.clone()) != Some(new_view.leader.clone());
+
+                        if role_changed || leader_changed {
+                            info!(
+                                "cascade: role={} leader={} peers={}",
+                                role_str(new_view.role),
+                                leader_display(&new_view.leader),
+                                new_view.peers.len()
+                            );
+                            if locked.is_some() {
+                                info!("cascade: leader changed -> re-locking");
+                                unlock(&channel_room, &publisher, &active_tasks, &republish).await;
+                                locked = None;
+                                audio_attached = false;
+                                audio_republish = None;
+                                pending_audio.clear();
+                            }
+                        }
+                        current_view = Some(new_view);
+                    }
+                    Err(_) => {
+                        // The consensus control plane stopped (shutdown, or
+                        // the watch sender was dropped) -- stop polling it.
+                        view_rx = None;
                     }
                 }
             }
@@ -307,14 +740,18 @@ async fn control_loop(
 
 /// Reads RTP off the locked video track, depacketizes H264 into Annex-B
 /// access units, extracts SPS/PPS, and forwards each complete AU to `rtsp`.
-/// Notifies `ended_tx` with `remote_id` when the track ends (read error/EOF)
-/// so the control task can clear the lock.
+/// When `republish` is `Some` (leader, cascade active), the raw RTP packet
+/// is also written straight through to it -- before depacketization, so
+/// followers receive the exact same H264 bitstream the sharer sent, no
+/// transcode. Notifies `ended_tx` with `remote_id` when the track ends (read
+/// error/EOF) so the control task can clear the lock.
 async fn video_task(
     track: Arc<TrackRemote>,
     rtsp: Arc<RtspServer>,
     remote_id: String,
     ended_tx: mpsc::UnboundedSender<String>,
     counters: Arc<RelayCounters>,
+    republish: Option<Arc<TrackLocalStaticRTP>>,
 ) {
     let mut depacketizer = H264Packet::default();
     let mut assembler = AuAssembler::new();
@@ -328,6 +765,12 @@ async fn video_task(
                 break;
             }
         };
+
+        if let Some(republish) = &republish {
+            if let Err(error) = republish.write_rtp(&packet).await {
+                debug!(%remote_id, %error, "cascade: republishing video RTP packet failed");
+            }
+        }
 
         let chunk = match depacketizer.depacketize(&packet.payload) {
             Ok(bytes) => bytes,
@@ -389,17 +832,22 @@ async fn send_pli(pc: &Arc<RTCPeerConnection>, media_ssrc: u32) {
 
 /// Reads RTP off the locked audio (Opus) track and forwards it per
 /// `codec`: passthrough for [`AudioCodec::Opus`], transcode to AAC-LC for
-/// [`AudioCodec::Aac`].
+/// [`AudioCodec::Aac`]. When `republish` is `Some` (leader, cascade active),
+/// the raw Opus RTP packet is also written straight through to it, ahead of
+/// whichever local codec path `codec` takes -- followers always receive raw
+/// Opus from the leader regardless of what this leader serves over its own
+/// RTSP.
 async fn audio_task(
     track: Arc<TrackRemote>,
     rtsp: Arc<RtspServer>,
     codec: AudioCodec,
     remote_id: String,
     counters: Arc<RelayCounters>,
+    republish: Option<Arc<TrackLocalStaticRTP>>,
 ) {
     match codec {
-        AudioCodec::Opus => audio_task_opus(track, rtsp, remote_id, counters).await,
-        AudioCodec::Aac => audio_task_aac(track, rtsp, remote_id, counters).await,
+        AudioCodec::Opus => audio_task_opus(track, rtsp, remote_id, counters, republish).await,
+        AudioCodec::Aac => audio_task_aac(track, rtsp, remote_id, counters, republish).await,
     }
 }
 
@@ -408,10 +856,16 @@ async fn audio_task_opus(
     rtsp: Arc<RtspServer>,
     remote_id: String,
     counters: Arc<RelayCounters>,
+    republish: Option<Arc<TrackLocalStaticRTP>>,
 ) {
     loop {
         match track.read_rtp().await {
             Ok((packet, _attrs)) => {
+                if let Some(republish) = &republish {
+                    if let Err(error) = republish.write_rtp(&packet).await {
+                        debug!(%remote_id, %error, "cascade: republishing audio RTP packet failed");
+                    }
+                }
                 rtsp.send_audio_frame(&packet.payload, packet.header.timestamp).await;
                 counters.audio_frames.fetch_add(1, Ordering::Relaxed);
             }
@@ -428,6 +882,7 @@ async fn audio_task_aac(
     rtsp: Arc<RtspServer>,
     remote_id: String,
     counters: Arc<RelayCounters>,
+    republish: Option<Arc<TrackLocalStaticRTP>>,
 ) {
     let mut transcoder = match OpusToAac::new() {
         Ok(t) => t,
@@ -440,6 +895,11 @@ async fn audio_task_aac(
     loop {
         match track.read_rtp().await {
             Ok((packet, _attrs)) => {
+                if let Some(republish) = &republish {
+                    if let Err(error) = republish.write_rtp(&packet).await {
+                        debug!(%remote_id, %error, "cascade: republishing audio RTP packet failed");
+                    }
+                }
                 for (frame, ts) in transcoder.push(&packet.payload, packet.header.timestamp) {
                     rtsp.send_audio_frame(&frame, ts).await;
                     counters.audio_frames.fetch_add(1, Ordering::Relaxed);
@@ -661,27 +1121,30 @@ mod tests {
     use super::*;
     use mistlib::webrtc::rtp::packet::Packet as RtpPacket;
 
-    // --- publisher lock-in policy -----------------------------------------
+    // --- publisher lock-in policy (no cascade / cascade disabled) ----------
 
     #[test]
     fn decide_video_locks_when_unlocked() {
-        assert!(decide_video(None));
+        assert!(decide_video(None, "peer-a", &CascadePolicy::Disabled));
     }
 
     #[test]
     fn decide_video_ignores_when_already_locked() {
-        assert!(!decide_video(Some("peer-a")));
+        assert!(!decide_video(Some("peer-a"), "peer-b", &CascadePolicy::Disabled));
     }
 
     #[test]
     fn decide_audio_buffers_when_unlocked() {
-        assert_eq!(decide_audio(None, "peer-a", false), AudioDecision::Buffer);
+        assert_eq!(
+            decide_audio(None, "peer-a", false, &CascadePolicy::Disabled),
+            AudioDecision::Buffer
+        );
     }
 
     #[test]
     fn decide_audio_attaches_for_the_locked_peer() {
         assert_eq!(
-            decide_audio(Some("peer-a"), "peer-a", false),
+            decide_audio(Some("peer-a"), "peer-a", false, &CascadePolicy::Disabled),
             AudioDecision::Attach
         );
     }
@@ -689,7 +1152,7 @@ mod tests {
     #[test]
     fn decide_audio_ignores_second_audio_track_from_locked_peer() {
         assert_eq!(
-            decide_audio(Some("peer-a"), "peer-a", true),
+            decide_audio(Some("peer-a"), "peer-a", true, &CascadePolicy::Disabled),
             AudioDecision::Ignore
         );
     }
@@ -697,9 +1160,157 @@ mod tests {
     #[test]
     fn decide_audio_ignores_other_peers_while_locked() {
         assert_eq!(
-            decide_audio(Some("peer-a"), "peer-b", false),
+            decide_audio(Some("peer-a"), "peer-b", false, &CascadePolicy::Disabled),
             AudioDecision::Ignore
         );
+    }
+
+    // --- cascade policy matrix ----------------------------------------------
+
+    fn active_policy(role: ConsensusRole, leader: Option<&str>, relay_peers: &[&str]) -> CascadePolicy {
+        CascadePolicy::Active {
+            role,
+            leader: leader.map(str::to_string),
+            relay_peers: relay_peers.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn decide_video_leader_accepts_a_non_relay_peer_as_the_sharer() {
+        let policy = active_policy(ConsensusRole::Leader, Some("self-id"), &["self-id", "relay-2"]);
+        assert!(decide_video(None, "browser-sharer", &policy));
+    }
+
+    #[test]
+    fn decide_video_leader_ignores_tracks_from_other_relay_peers() {
+        let policy = active_policy(ConsensusRole::Leader, Some("self-id"), &["self-id", "relay-2"]);
+        assert!(!decide_video(None, "relay-2", &policy));
+    }
+
+    #[test]
+    fn decide_video_follower_accepts_only_the_leader_and_ignores_the_sharer() {
+        let policy = active_policy(ConsensusRole::Follower, Some("relay-1"), &["self-id", "relay-1"]);
+        assert!(decide_video(None, "relay-1", &policy));
+        assert!(!decide_video(None, "browser-sharer", &policy));
+    }
+
+    #[test]
+    fn decide_video_does_not_lock_before_a_role_or_leader_is_known() {
+        for policy in [
+            active_policy(ConsensusRole::Unknown, None, &["self-id"]),
+            active_policy(ConsensusRole::Candidate, None, &["self-id"]),
+            active_policy(ConsensusRole::Follower, None, &["self-id"]),
+        ] {
+            assert!(!decide_video(None, "anyone", &policy), "{policy:?} should not lock yet");
+        }
+    }
+
+    #[test]
+    fn decide_video_role_transition_relocks_under_the_new_policy() {
+        // Following the old leader...
+        let following_old_leader = active_policy(
+            ConsensusRole::Follower,
+            Some("relay-1"),
+            &["self-id", "relay-1", "relay-2"],
+        );
+        assert!(decide_video(None, "relay-1", &following_old_leader));
+
+        // ...after a leader change (control_loop unlocks first), the same
+        // node now follows the new leader instead, and no longer the old one.
+        let following_new_leader = active_policy(
+            ConsensusRole::Follower,
+            Some("relay-2"),
+            &["self-id", "relay-1", "relay-2"],
+        );
+        assert!(decide_video(None, "relay-2", &following_new_leader));
+        assert!(!decide_video(None, "relay-1", &following_new_leader));
+    }
+
+    #[test]
+    fn decide_video_role_transition_from_follower_to_leader_accepts_the_sharer() {
+        let as_follower = active_policy(ConsensusRole::Follower, Some("relay-1"), &["self-id", "relay-1"]);
+        assert!(!decide_video(None, "browser-sharer", &as_follower));
+
+        let as_leader = active_policy(ConsensusRole::Leader, Some("self-id"), &["self-id", "relay-1"]);
+        assert!(decide_video(None, "browser-sharer", &as_leader));
+    }
+
+    #[test]
+    fn decide_audio_follower_ignores_the_sharer_but_buffers_the_leader() {
+        let policy = active_policy(ConsensusRole::Follower, Some("relay-1"), &["self-id", "relay-1"]);
+        assert_eq!(
+            decide_audio(None, "browser-sharer", false, &policy),
+            AudioDecision::Ignore
+        );
+        assert_eq!(decide_audio(None, "relay-1", false, &policy), AudioDecision::Buffer);
+    }
+
+    #[test]
+    fn decide_audio_leader_ignores_other_relay_peers_but_buffers_the_sharer() {
+        let policy = active_policy(ConsensusRole::Leader, Some("self-id"), &["self-id", "relay-2"]);
+        assert_eq!(decide_audio(None, "relay-2", false, &policy), AudioDecision::Ignore);
+        assert_eq!(
+            decide_audio(None, "browser-sharer", false, &policy),
+            AudioDecision::Buffer
+        );
+    }
+
+    // --- cascade status JSON shape ------------------------------------------
+
+    #[test]
+    fn cascade_status_json_leader_locked_reports_source_sharer() {
+        let value = cascade_status_json(
+            ConsensusRole::Leader,
+            Some("self-id".to_string()),
+            "self-id",
+            vec!["self-id".to_string(), "relay-2".to_string()],
+            true,
+        );
+        assert_eq!(value["enabled"], json!(true));
+        assert_eq!(value["role"], json!("leader"));
+        assert_eq!(value["leader"], json!("self-id"));
+        assert_eq!(value["self"], json!("self-id"));
+        assert_eq!(value["relay_peers"], json!(["self-id", "relay-2"]));
+        assert_eq!(value["source"], json!("sharer"));
+    }
+
+    #[test]
+    fn cascade_status_json_follower_locked_reports_source_leader() {
+        let value = cascade_status_json(
+            ConsensusRole::Follower,
+            Some("relay-1".to_string()),
+            "self-id",
+            vec!["self-id".to_string(), "relay-1".to_string()],
+            true,
+        );
+        assert_eq!(value["role"], json!("follower"));
+        assert_eq!(value["leader"], json!("relay-1"));
+        assert_eq!(value["source"], json!("leader"));
+    }
+
+    #[test]
+    fn cascade_status_json_unlocked_reports_null_source() {
+        let value = cascade_status_json(
+            ConsensusRole::Follower,
+            Some("relay-1".to_string()),
+            "self-id",
+            vec!["self-id".to_string()],
+            false,
+        );
+        assert_eq!(value["source"], Value::Null);
+    }
+
+    #[test]
+    fn cascade_status_json_no_leader_yet_reports_null_leader_and_source() {
+        let value = cascade_status_json(
+            ConsensusRole::Candidate,
+            None,
+            "self-id",
+            vec!["self-id".to_string()],
+            false,
+        );
+        assert_eq!(value["leader"], Value::Null);
+        assert_eq!(value["source"], Value::Null);
     }
 
     // --- H264 RTP -> Annex-B AU regrouping ---------------------------------

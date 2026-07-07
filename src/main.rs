@@ -1,6 +1,7 @@
 mod ai;
 mod cli;
 mod config;
+mod consensus;
 mod daemon;
 mod devlog;
 mod identity;
