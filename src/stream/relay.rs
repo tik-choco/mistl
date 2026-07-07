@@ -159,10 +159,10 @@ pub struct RelayCapture {
     /// This node's mistlib node id -- needed for the `cascade.self` status
     /// field independent of whether consensus is active.
     node_id: String,
-    /// The room id actually joined on the wire (tc-chat's derived channel
-    /// id, not the friendly room name) -- what `mistlib::publish_local_track`
-    /// / `unpublish_local_track` expect.
-    channel_room: String,
+    /// The room id joined on the wire -- the same raw room id tc-chat joins
+    /// under (no derivation), and what `mistlib::publish_local_track` /
+    /// `unpublish_local_track` expect as their `room`.
+    room: String,
     /// The leader's currently-published re-broadcast tracks, if any are
     /// live right now. Shared with `control_loop` so `stop()` can unpublish
     /// them even though `control_task` itself is aborted rather than
@@ -179,17 +179,13 @@ impl RelayCapture {
         audio_codec: AudioCodec,
         rtsp: Arc<RtspServer>,
     ) -> Result<Self> {
-        // tc-chat joins its rooms under a derived channel id (not the raw room
-        // name — see net::channel_id_for / tc-chat's channelIdFor), so the raw
-        // name is never the on-wire topic. Derive the same channel here so the
-        // relay lands in the same swarm and can see the shared screen. Callers
-        // pass the friendly room id (e.g. `--room global`); the derivation is
-        // owned here so users never handle the opaque `tcch-…` form. The same
-        // channel id is also what the consensus control plane and
+        // tc-chat joins its rooms under the raw room id -- no derivation, no
+        // prefix -- so this joins the exact same swarm topic tc-chat uses,
+        // and lands the relay in the same room it can see the shared screen
+        // from. The same room id is also what the consensus control plane and
         // `mistlib::publish_local_track`/`unpublish_local_track` need as
         // their `room` -- it's the actual on-wire session id.
-        let channel_room = crate::net::channel_id_for(&room);
-        crate::net::ensure_started(state, channel_room.clone()).await?;
+        crate::net::ensure_started(state, room.clone()).await?;
 
         let node_id = crate::identity::current(state)
             .await
@@ -197,7 +193,7 @@ impl RelayCapture {
             .node_id();
 
         let cascade = if state.config().stream.cascade {
-            match RelayConsensus::start(state, channel_room.clone()).await {
+            match RelayConsensus::start(state, room.clone()).await {
                 Ok(consensus) => Cascade::Active(consensus),
                 Err(error) => {
                     warn!(
@@ -230,7 +226,7 @@ impl RelayCapture {
             active_tasks.clone(),
             counters.clone(),
             cascade.clone(),
-            channel_room.clone(),
+            room.clone(),
             republish.clone(),
         ));
 
@@ -246,7 +242,7 @@ impl RelayCapture {
             control_task,
             cascade,
             node_id,
-            channel_room,
+            room,
             republish,
         })
     }
@@ -303,10 +299,10 @@ impl RelayCapture {
             .expect("relay republish lock poisoned")
             .take();
         if let Some((video, audio)) = tracks {
-            if let Err(error) = mistlib::unpublish_local_track(&self.channel_room, video).await {
+            if let Err(error) = mistlib::unpublish_local_track(&self.room, video).await {
                 debug!(%error, "cascade: unpublishing video re-broadcast track on stop failed");
             }
-            if let Err(error) = mistlib::unpublish_local_track(&self.channel_room, audio).await {
+            if let Err(error) = mistlib::unpublish_local_track(&self.room, audio).await {
                 debug!(%error, "cascade: unpublishing audio re-broadcast track on stop failed");
             }
         }
@@ -472,14 +468,14 @@ async fn watch_changed(
 }
 
 /// Creates this leader's video (H264) + audio (Opus) re-broadcast tracks and
-/// publishes both into `channel_room` via `mistlib::publish_local_track`.
-/// Codec parameters match the sharer's own tracks (H264 @ 90kHz, Opus @
-/// 48kHz stereo) since this is a raw RTP passthrough, not a transcode -- see
+/// publishes both into `room` via `mistlib::publish_local_track`. Codec
+/// parameters match the sharer's own tracks (H264 @ 90kHz, Opus @ 48kHz
+/// stereo) since this is a raw RTP passthrough, not a transcode -- see
 /// `mistlib-native/tests/loopback_media.rs` for the same shape used against
 /// a live connection. If publishing the audio track fails after the video
 /// track already succeeded, the video track is unpublished again so a
 /// partially-published pair is never left live.
-async fn create_and_publish_republish_tracks(channel_room: &str) -> Result<RepublishTracks> {
+async fn create_and_publish_republish_tracks(room: &str) -> Result<RepublishTracks> {
     let video = Arc::new(TrackLocalStaticRTP::new(
         RTCRtpCodecCapability {
             mime_type: MIME_TYPE_H264.to_owned(),
@@ -500,11 +496,11 @@ async fn create_and_publish_republish_tracks(channel_room: &str) -> Result<Repub
         "mistl-cascade".to_string(),
     ));
 
-    mistlib::publish_local_track(channel_room, video.clone())
+    mistlib::publish_local_track(room, video.clone())
         .await
         .context("cascade: publishing re-broadcast video track")?;
-    if let Err(error) = mistlib::publish_local_track(channel_room, audio.clone()).await {
-        let _ = mistlib::unpublish_local_track(channel_room, video).await;
+    if let Err(error) = mistlib::publish_local_track(room, audio.clone()).await {
+        let _ = mistlib::unpublish_local_track(room, video).await;
         return Err(error).context("cascade: publishing re-broadcast audio track");
     }
 
@@ -517,7 +513,7 @@ async fn create_and_publish_republish_tracks(channel_room: &str) -> Result<Repub
 /// Shared by both unlock paths in `control_loop` (the publisher's track
 /// ending, and a cascade role/leader change invalidating the current lock).
 async fn unlock(
-    channel_room: &str,
+    room: &str,
     publisher: &Arc<StdMutex<Option<String>>>,
     active_tasks: &Arc<StdMutex<Vec<JoinHandle<()>>>>,
     republish: &Arc<StdMutex<Option<RepublishTracks>>>,
@@ -536,10 +532,10 @@ async fn unlock(
         .expect("relay republish lock poisoned")
         .take();
     if let Some((video, audio)) = tracks {
-        if let Err(error) = mistlib::unpublish_local_track(channel_room, video).await {
+        if let Err(error) = mistlib::unpublish_local_track(room, video).await {
             debug!(%error, "cascade: unpublishing video re-broadcast track failed");
         }
-        if let Err(error) = mistlib::unpublish_local_track(channel_room, audio).await {
+        if let Err(error) = mistlib::unpublish_local_track(room, audio).await {
             debug!(%error, "cascade: unpublishing audio re-broadcast track failed");
         }
     }
@@ -559,7 +555,7 @@ async fn control_loop(
     active_tasks: Arc<StdMutex<Vec<JoinHandle<()>>>>,
     counters: Arc<RelayCounters>,
     cascade: Cascade,
-    channel_room: String,
+    room: String,
     republish: Arc<StdMutex<Option<RepublishTracks>>>,
 ) {
     let (ended_tx, mut ended_rx) = mpsc::unbounded_channel::<String>();
@@ -609,7 +605,7 @@ async fn control_loop(
                         let is_leader = matches!(&policy, CascadePolicy::Active { role: ConsensusRole::Leader, .. });
                         let is_follower = matches!(&policy, CascadePolicy::Active { role: ConsensusRole::Follower, .. });
                         let (video_republish, new_audio_republish) = if is_leader {
-                            match create_and_publish_republish_tracks(&channel_room).await {
+                            match create_and_publish_republish_tracks(&room).await {
                                 Ok((video, audio)) => {
                                     *republish.lock().expect("relay republish lock poisoned") =
                                         Some((video.clone(), audio.clone()));
@@ -690,7 +686,7 @@ async fn control_loop(
             Some(ended_id) = ended_rx.recv() => {
                 if locked.as_deref() == Some(ended_id.as_str()) {
                     info!(remote_id = %ended_id, "relay: publisher's video track ended; unlocking");
-                    unlock(&channel_room, &publisher, &active_tasks, &republish).await;
+                    unlock(&room, &publisher, &active_tasks, &republish).await;
                     locked = None;
                     audio_attached = false;
                     audio_republish = None;
@@ -718,7 +714,7 @@ async fn control_loop(
                             );
                             if locked.is_some() {
                                 info!("cascade: leader changed -> re-locking");
-                                unlock(&channel_room, &publisher, &active_tasks, &republish).await;
+                                unlock(&room, &publisher, &active_tasks, &republish).await;
                                 locked = None;
                                 audio_attached = false;
                                 audio_republish = None;
@@ -770,6 +766,20 @@ async fn video_task(
             if let Err(error) = republish.write_rtp(&packet).await {
                 debug!(%remote_id, %error, "cascade: republishing video RTP packet failed");
             }
+        }
+
+        if packet.payload.len() <= 2 {
+            // RTP padding-only packets -- browsers routinely send these on
+            // the media SSRC for bandwidth-estimation probing (most visibly
+            // in a burst right after the connection comes up, which is
+            // exactly when this used to flood the log) -- have their
+            // padding stripped by `rtp::packet::Packet::unmarshal` down to
+            // an empty (or otherwise too-short-to-carry-a-NAL) payload.
+            // `H264Packet::depacketize` treats anything this short as
+            // `ErrShortPacket` unconditionally; that's not a bitstream
+            // problem, just "no NAL here", so skip it rather than warn.
+            debug!(%remote_id, len = packet.payload.len(), "relay: skipping short/padding-only RTP payload");
+            continue;
         }
 
         let chunk = match depacketizer.depacketize(&packet.payload) {
