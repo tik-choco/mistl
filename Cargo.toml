@@ -51,9 +51,17 @@ openh264 = "0.9.3"
 opus = "0.3"
 fdk-aac = "0.8"
 
+# self-update (GitHub Releases): version compare + atomic replace of the
+# running executable (handles the Windows "can't delete a running exe" dance).
+semver = "1"
+# crates.io package is `self-replace`; keep the `self_replace` import name.
+self_replace = { package = "self-replace", version = "1" }
+
 [profile.release]
 lto = "thin"
 strip = true
 
 [target."cfg(windows)".dependencies]
 windows-capture = "2.0.0"
+# Per-user login autostart (HKCU\...\Run) for `mistl autostart`.
+winreg = "0.52"

@@ -285,6 +285,8 @@
   }
 
   .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .checkline { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13.5px; }
+  .checkline input { width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; }
   .kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 13px; }
   .kv dt { color: var(--text-faint); }
   .kv dd { margin: 0; color: var(--text); word-break: break-all; }
@@ -433,6 +435,118 @@
   .badge.deposited { background: var(--warn-dim); color: var(--warn); }
   .badge.queued { background: var(--panel-border); color: var(--text-dim); }
   .badge.restart { background: var(--warn-dim); color: var(--warn); margin-left: auto; }
+  button.badge.restart { border: none; font: inherit; font-weight: 600; cursor: pointer; }
+  button.badge.restart:hover { filter: brightness(1.15); text-decoration: underline; }
+  button.badge.restart:disabled { cursor: default; opacity: 0.7; text-decoration: none; }
+
+  /* ---- Developer console (see logs.tail/logs.clear) ---- */
+  .dev-console {
+    position: fixed;
+    left: 16px;
+    right: 16px;
+    bottom: 16px;
+    z-index: 90;
+    max-width: 960px;
+    margin: 0 auto;
+    height: 240px;
+    min-height: 140px;
+    max-height: 75vh;
+    display: flex;
+    flex-direction: column;
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-sm);
+    overflow: hidden;
+    resize: vertical;
+    font-size: 12.5px;
+  }
+  .dev-console[hidden] { display: none; }
+  .dev-console.collapsed { height: auto; resize: none; }
+  .dev-console.collapsed .dev-console-levels,
+  .dev-console.collapsed .dev-console-body { display: none; }
+  .dev-console-header {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--panel-border);
+    background: var(--bg-alt);
+  }
+  .dev-console-count {
+    font-size: 11px;
+    color: var(--text-dim);
+    background: var(--panel-border);
+    border-radius: 999px;
+    padding: 1px 7px;
+  }
+  .dev-console-header input[type="text"] {
+    flex: 0 1 200px;
+    padding: 4px 8px;
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 12px;
+  }
+  .dev-console-header button { font-size: 11.5px; padding: 4px 8px; }
+  .dev-console-levels {
+    flex: none;
+    display: flex;
+    gap: 4px;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--panel-border);
+    flex-wrap: wrap;
+  }
+  .dev-console-level {
+    border: 1px solid var(--panel-border);
+    background: var(--bg);
+    color: var(--text-dim);
+    border-radius: 999px;
+    padding: 1px 8px;
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    cursor: pointer;
+    opacity: 0.55;
+  }
+  .dev-console-level.active { opacity: 1; }
+  .dev-console-level[data-level="WARN"].active { color: var(--warn); border-color: var(--warn); background: var(--warn-dim); }
+  .dev-console-level[data-level="ERROR"].active { color: var(--err); border-color: var(--err); background: var(--err-dim); }
+  .dev-console-level[data-level="INFO"].active { color: var(--accent); border-color: var(--accent); background: var(--accent-dim); }
+  .dev-console-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 6px 10px;
+    font-family: var(--mono);
+    background: var(--bg);
+  }
+  .dev-console-line {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    padding: 2px 6px;
+    border-bottom: 1px solid var(--panel-border);
+    border-left: 3px solid var(--panel-border);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .dev-console-line-time { flex: none; color: var(--text-dim); font-size: 10.5px; }
+  .dev-console-line-level { flex: none; width: 3.6em; font-weight: 700; font-size: 10.5px; }
+  .dev-console-line-text { color: var(--text); flex: 1; min-width: 0; }
+  .dev-console-line[data-level="TRACE"] { border-left-color: var(--panel-border); opacity: 0.7; }
+  .dev-console-line[data-level="TRACE"] .dev-console-line-level { color: var(--text-dim); }
+  .dev-console-line[data-level="DEBUG"] { border-left-color: var(--text-dim); }
+  .dev-console-line[data-level="DEBUG"] .dev-console-line-level { color: var(--text-dim); }
+  .dev-console-line[data-level="INFO"] { border-left-color: var(--accent); }
+  .dev-console-line[data-level="INFO"] .dev-console-line-level { color: var(--accent); }
+  .dev-console-line[data-level="WARN"] { border-left-color: var(--warn); background: var(--warn-dim); }
+  .dev-console-line[data-level="WARN"] .dev-console-line-level { color: var(--warn); }
+  .dev-console-line[data-level="ERROR"] { border-left-color: var(--err); background: var(--err-dim); }
+  .dev-console-line[data-level="ERROR"] .dev-console-line-level,
+  .dev-console-line[data-level="ERROR"] .dev-console-line-text { color: var(--err); }
+  .dev-console-empty { color: var(--text-dim); text-align: center; padding: 12px; }
 
   .toast-stack {
     position: fixed;
@@ -711,6 +825,7 @@
     <a href="#panel-mailbox"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.5 5h13l3.5 7v7a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-7z"/></svg><span data-i18n="nav.mailbox">Mailbox</span></a>
     <a href="#panel-store"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.7 4 3 9 3s9-1.3 9-3V5"/><path d="M3 12c0 1.7 4 3 9 3s9-1.3 9-3"/></svg><span data-i18n="nav.store">Store</span></a>
     <a href="#panel-profile"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/></svg><span data-i18n="nav.profile">Profile</span></a>
+    <a href="#panel-update"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m8 11 4 4 4-4"/><path d="M4 17v2a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-2"/></svg><span data-i18n="nav.update">Updates</span></a>
     <a href="#panel-settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg><span data-i18n="nav.settings">Settings</span></a>
   </nav>
 
@@ -727,6 +842,7 @@
     </h2>
     <dl class="kv" id="overview-kv"></dl>
     <div class="row">
+      <button id="btn-restart-daemon" data-i18n="overview.restartDaemon">Restart daemon</button>
       <button id="btn-stop-daemon" class="danger" data-i18n="overview.stopDaemon">Stop daemon</button>
     </div>
   </section>
@@ -905,13 +1021,61 @@
     </form>
   </section>
 
+  <section class="panel" id="panel-update">
+    <h2><span data-i18n="update.title">Updates</span> <span class="spacer"></span>
+      <button data-role="refresh" data-target="update" data-i18n="common.refresh">Refresh</button>
+    </h2>
+    <dl class="kv" id="update-kv"></dl>
+    <div class="info-hint" id="update-available-hint" hidden></div>
+    <div class="row">
+      <button id="btn-update-check" class="primary" data-i18n="update.checkBtn">Check now</button>
+      <button id="btn-update-apply" class="primary" data-i18n="update.applyBtn" hidden>Update now</button>
+    </div>
+    <hr class="sep">
+    <div class="flow-grid">
+      <div class="flow-card">
+        <h3 data-i18n="update.installTitle">Install for your user</h3>
+        <p data-i18n="update.installDesc">Copies mistl to a fixed per-user location so updates and start-at-login work reliably. No admin needed.</p>
+        <div class="row">
+          <button id="btn-install" class="primary" data-i18n="update.installBtn">Install mistl</button>
+        </div>
+      </div>
+      <div class="flow-card">
+        <h3 data-i18n="update.autostartTitle">Start at login</h3>
+        <p data-i18n="update.autostartDesc">Launch the mistl daemon automatically when you sign in.</p>
+        <label class="checkline"><input type="checkbox" id="chk-autostart"> <span data-i18n="update.autostartLabel">Start mistl at login</span></label>
+      </div>
+    </div>
+  </section>
+
   <section class="panel panel-span2" id="panel-settings">
     <h2><span data-i18n="settings.title">Settings</span> <span class="spacer"></span>
       <button data-role="refresh" data-target="settings" data-i18n="common.refresh">Refresh</button>
     </h2>
+    <div class="flow-card" id="dev-mode-card">
+      <h3 data-i18n="settings.developerTitle">Developer mode</h3>
+      <p data-i18n="settings.developerDesc">Shows this daemon's detailed debug logs in real time, docked at the bottom of the dashboard.</p>
+      <label class="checkline"><input type="checkbox" id="chk-dev-mode"> <span data-i18n="settings.developerLabel">Enable developer mode</span></label>
+    </div>
+    <hr class="sep">
     <div id="settings-body"></div>
   </section>
 </main>
+</div>
+
+<div class="dev-console" id="dev-console" hidden>
+  <div class="dev-console-header">
+    <strong data-i18n="devlog.title">Developer console</strong>
+    <span class="dev-console-count" id="dev-console-count">0</span>
+    <span class="spacer"></span>
+    <input type="text" id="dev-console-search" data-i18n-placeholder="devlog.searchPlaceholder" placeholder="Search logs">
+    <button type="button" id="dev-console-copy" data-i18n="devlog.copyAll" title="Copy all">Copy all</button>
+    <button type="button" id="dev-console-clear" data-i18n="devlog.clear">Clear</button>
+    <button type="button" id="dev-console-collapse" data-i18n-aria-label="devlog.collapse" aria-label="Collapse">&minus;</button>
+    <button type="button" id="dev-console-close" data-i18n-aria-label="common.close" aria-label="Close">&times;</button>
+  </div>
+  <div class="dev-console-levels" id="dev-console-levels"></div>
+  <div class="dev-console-body" id="dev-console-body"></div>
 </div>
 
 <div class="toast-stack" id="toast-stack"></div>
@@ -940,6 +1104,33 @@
       "nav.store": "Store",
       "nav.profile": "Profile",
       "nav.settings": "Settings",
+      "nav.update": "Updates",
+      "update.title": "Updates",
+      "update.current": "Current version",
+      "update.latest": "Latest release",
+      "update.target": "Platform",
+      "update.autoUpdate": "Auto-update",
+      "update.installed": "Installed",
+      "update.autostart": "Start at login",
+      "update.checkBtn": "Check now",
+      "update.applyBtn": "Update now",
+      "update.installTitle": "Install for your user",
+      "update.installDesc": "Copies mistl to a fixed per-user location so updates and start-at-login work reliably. No admin needed.",
+      "update.installBtn": "Install mistl",
+      "update.reinstallBtn": "Reinstall",
+      "update.autostartTitle": "Start at login",
+      "update.autostartDesc": "Launch the mistl daemon automatically when you sign in.",
+      "update.autostartLabel": "Start mistl at login",
+      "update.availMsg": "v{version} is available.",
+      "update.availNoAsset": "v{version} is available, but has no binary for this platform — download it from the releases page.",
+      "update.upToDate": "You’re on the latest version.",
+      "update.staged": "Update downloaded. It applies on the next daemon start.",
+      "update.installedToast": "mistl installed.",
+      "update.applyConfirm": "Download and install the latest version now?",
+      "update.on": "On",
+      "update.off": "Off",
+      "update.yes": "Yes",
+      "update.no": "No",
       "profileHint.text": "Set a display name so others can recognize you.",
       "profileHint.button": "Set display name",
       "common.dismiss": "Dismiss",
@@ -956,6 +1147,8 @@
       "overview.stopDaemon": "Stop daemon",
       "overview.stopConfirm": "Stop the mistl daemon? This will end all active sessions.",
       "overview.stopping": "Daemon is stopping.",
+      "overview.restartDaemon": "Restart daemon",
+      "overview.restarting": "Daemon is restarting; the dashboard will reconnect automatically.",
       "overview.status": "status",
       "overview.unreachable": "daemon unreachable",
       "overview.pid": "pid",
@@ -1087,7 +1280,18 @@
       "profile.avatarRemoved": "Profile image removed.",
       "profile.avatarBadType": "Choose a PNG, JPEG or WebP image.",
       "settings.title": "Settings",
+      "settings.developerTitle": "Developer mode",
+      "settings.developerDesc": "Shows this daemon's detailed debug logs in real time, docked at the bottom of the dashboard.",
+      "settings.developerLabel": "Enable developer mode",
+      "devlog.title": "Developer console",
+      "devlog.searchPlaceholder": "Search logs",
+      "devlog.copyAll": "Copy all",
+      "devlog.clear": "Clear",
+      "devlog.collapse": "Collapse",
+      "devlog.expand": "Expand",
+      "devlog.empty": "No log entries yet.",
       "settings.restartBadge": "restart the daemon to apply",
+      "settings.restartBadgeTitle": "Click to restart the daemon now",
       "settings.savedRestart": "Saved. Restart the daemon to apply.",
       "settings.savedNextStart": "Saved. Applies next time this service starts.",
       "settings.enterGib": "Enter a number of GiB for {label}.",
@@ -1159,6 +1363,33 @@
       "nav.store": "ストア",
       "nav.profile": "プロフィール",
       "nav.settings": "設定",
+      "nav.update": "更新",
+      "update.title": "更新",
+      "update.current": "現在のバージョン",
+      "update.latest": "最新リリース",
+      "update.target": "プラットフォーム",
+      "update.autoUpdate": "自動更新",
+      "update.installed": "インストール済み",
+      "update.autostart": "ログイン時に起動",
+      "update.checkBtn": "今すぐ確認",
+      "update.applyBtn": "今すぐ更新",
+      "update.installTitle": "ユーザーにインストール",
+      "update.installDesc": "mistl を固定のユーザー専用フォルダーにコピーし、更新とログイン時の起動を確実に動作させます。管理者権限は不要です。",
+      "update.installBtn": "mistl をインストール",
+      "update.reinstallBtn": "再インストール",
+      "update.autostartTitle": "ログイン時に起動",
+      "update.autostartDesc": "サインイン時に mistl デーモンを自動的に起動します。",
+      "update.autostartLabel": "ログイン時に mistl を起動",
+      "update.availMsg": "v{version} が利用可能です。",
+      "update.availNoAsset": "v{version} が利用可能ですが、このプラットフォーム向けのバイナリがありません。リリースページからダウンロードしてください。",
+      "update.upToDate": "最新バージョンです。",
+      "update.staged": "更新をダウンロードしました。次回のデーモン起動時に適用されます。",
+      "update.installedToast": "mistl をインストールしました。",
+      "update.applyConfirm": "最新バージョンを今すぐダウンロードしてインストールしますか？",
+      "update.on": "オン",
+      "update.off": "オフ",
+      "update.yes": "はい",
+      "update.no": "いいえ",
       "profileHint.text": "表示名を設定すると、他の人があなたを識別しやすくなります。",
       "profileHint.button": "表示名を設定",
       "common.dismiss": "閉じる",
@@ -1175,6 +1406,8 @@
       "overview.stopDaemon": "デーモンを停止",
       "overview.stopConfirm": "mistlデーモンを停止しますか?すべてのアクティブなセッションが終了します。",
       "overview.stopping": "デーモンを停止しています。",
+      "overview.restartDaemon": "デーモンを再起動",
+      "overview.restarting": "デーモンを再起動しています。ダッシュボードは自動的に再接続します。",
       "overview.status": "状態",
       "overview.unreachable": "デーモンに接続できません",
       "overview.pid": "pid",
@@ -1306,7 +1539,18 @@
       "profile.avatarRemoved": "プロフィール画像を削除しました。",
       "profile.avatarBadType": "PNG、JPEG、またはWebP画像を選択してください。",
       "settings.title": "設定",
+      "settings.developerTitle": "開発者モード",
+      "settings.developerDesc": "このデーモンの詳細なデバッグログを、ダッシュボード下部にリアルタイムで表示します。",
+      "settings.developerLabel": "開発者モードを有効にする",
+      "devlog.title": "開発者コンソール",
+      "devlog.searchPlaceholder": "ログを検索",
+      "devlog.copyAll": "すべてコピー",
+      "devlog.clear": "クリア",
+      "devlog.collapse": "折りたたむ",
+      "devlog.expand": "開く",
+      "devlog.empty": "ログはまだありません。",
       "settings.restartBadge": "適用にはデーモンの再起動が必要",
+      "settings.restartBadgeTitle": "クリックして今すぐデーモンを再起動",
       "settings.savedRestart": "保存しました。適用にはデーモンの再起動が必要です。",
       "settings.savedNextStart": "保存しました。次回起動時に適用されます。",
       "settings.enterGib": "{label} にはGiB単位の数値を入力してください。",
@@ -1378,6 +1622,33 @@
       "nav.store": "存储",
       "nav.profile": "个人资料",
       "nav.settings": "设置",
+      "nav.update": "更新",
+      "update.title": "更新",
+      "update.current": "当前版本",
+      "update.latest": "最新版本",
+      "update.target": "平台",
+      "update.autoUpdate": "自动更新",
+      "update.installed": "已安装",
+      "update.autostart": "登录时启动",
+      "update.checkBtn": "立即检查",
+      "update.applyBtn": "立即更新",
+      "update.installTitle": "为当前用户安装",
+      "update.installDesc": "将 mistl 复制到固定的用户目录，使更新和开机自启动可靠运行。无需管理员权限。",
+      "update.installBtn": "安装 mistl",
+      "update.reinstallBtn": "重新安装",
+      "update.autostartTitle": "登录时启动",
+      "update.autostartDesc": "登录时自动启动 mistl 守护进程。",
+      "update.autostartLabel": "登录时启动 mistl",
+      "update.availMsg": "有可用版本 v{version}。",
+      "update.availNoAsset": "有可用版本 v{version}，但没有适用于此平台的二进制文件——请从发布页面下载。",
+      "update.upToDate": "已是最新版本。",
+      "update.staged": "更新已下载，将在下次守护进程启动时生效。",
+      "update.installedToast": "已安装 mistl。",
+      "update.applyConfirm": "现在下载并安装最新版本？",
+      "update.on": "开",
+      "update.off": "关",
+      "update.yes": "是",
+      "update.no": "否",
       "profileHint.text": "设置显示名称，方便他人识别你。",
       "profileHint.button": "设置显示名称",
       "common.dismiss": "关闭",
@@ -1394,6 +1665,8 @@
       "overview.stopDaemon": "停止守护进程",
       "overview.stopConfirm": "确定要停止 mistl 守护进程吗？这将结束所有活动会话。",
       "overview.stopping": "守护进程正在停止。",
+      "overview.restartDaemon": "重启守护进程",
+      "overview.restarting": "守护进程正在重启，控制台将自动重新连接。",
       "overview.status": "状态",
       "overview.unreachable": "无法连接到守护进程",
       "overview.pid": "pid",
@@ -1525,7 +1798,18 @@
       "profile.avatarRemoved": "头像已移除。",
       "profile.avatarBadType": "请选择 PNG、JPEG 或 WebP 格式的图片。",
       "settings.title": "设置",
+      "settings.developerTitle": "开发者模式",
+      "settings.developerDesc": "实时显示该守护进程的详细调试日志，停靠在控制台底部。",
+      "settings.developerLabel": "启用开发者模式",
+      "devlog.title": "开发者控制台",
+      "devlog.searchPlaceholder": "搜索日志",
+      "devlog.copyAll": "复制全部",
+      "devlog.clear": "清除",
+      "devlog.collapse": "折叠",
+      "devlog.expand": "展开",
+      "devlog.empty": "暂无日志。",
       "settings.restartBadge": "需要重启守护进程才能生效",
+      "settings.restartBadgeTitle": "点击立即重启守护进程",
       "settings.savedRestart": "已保存。需要重启守护进程才能生效。",
       "settings.savedNextStart": "已保存。将在此服务下次启动时生效。",
       "settings.enterGib": "请为{label}输入以 GiB 为单位的数值。",
@@ -1825,7 +2109,8 @@
     chatHistory: [],
     mailboxHeldItems: [],
     mailboxFetchItems: [],
-    storeItems: []
+    storeItems: [],
+    update: null
   };
 
   function rerenderAllDynamic() {
@@ -1840,6 +2125,7 @@
     renderStore(state.storeItems);
     renderProfile(state.identity);
     renderSettings(state.config);
+    renderUpdate();
   }
 
   /* ---------- header ---------- */
@@ -1943,6 +2229,16 @@
     runAction(e.currentTarget, "daemon.stop", {}, function () {
       showToast(t("overview.stopping"));
     });
+  });
+
+  function restartDaemon(trigger) {
+    runAction(trigger, "daemon.restart", {}, function () {
+      showToast(t("overview.restarting"));
+    });
+  }
+
+  document.getElementById("btn-restart-daemon").addEventListener("click", function (e) {
+    restartDaemon(e.currentTarget);
   });
 
   /* ---------- stream panel ---------- */
@@ -2731,9 +3027,13 @@
     var row = el("div", { class: "settings-row" });
     var current = sectionCfg ? sectionCfg[f.key] : null;
     var path = section + "." + f.key;
-    var badge = el("span", { class: "badge restart" });
+    var badge = el("button", { type: "button", class: "badge restart" });
     badge.textContent = t("settings.restartBadge");
+    badge.title = t("settings.restartBadgeTitle");
     badge.style.display = "none";
+    badge.addEventListener("click", function () {
+      restartDaemon(badge);
+    });
     var input;
 
     if (f.type === "toggle") {
@@ -2850,6 +3150,245 @@
   var POLL_INTERVAL_MS = 5000;
   var tickTimer = null;
 
+  /* ---------- updates / install ---------- */
+
+  var updateKv = document.getElementById("update-kv");
+  var updateAvailHint = document.getElementById("update-available-hint");
+  var btnUpdateApply = document.getElementById("btn-update-apply");
+  var btnInstall = document.getElementById("btn-install");
+  var chkAutostart = document.getElementById("chk-autostart");
+
+  function mergeUpdate(data) {
+    var u = state.update || {};
+    for (var k in data) {
+      if (Object.prototype.hasOwnProperty.call(data, k)) u[k] = data[k];
+    }
+    state.update = u;
+  }
+
+  function onOff(v) { return v ? t("update.on") : t("update.off"); }
+
+  function renderUpdate() {
+    if (!updateKv) return;
+    updateKv.innerHTML = "";
+    var u = state.update;
+    if (!u) {
+      addKv(updateKv, t("update.current"), "…");
+      return;
+    }
+    addKv(updateKv, t("update.current"), "v" + u.current, true);
+    if (u.latest) addKv(updateKv, t("update.latest"), "v" + u.latest, true);
+    addKv(updateKv, t("update.target"), u.target, true);
+    addKv(updateKv, t("update.autoUpdate"), onOff(u.auto_apply));
+    addKv(updateKv, t("update.installed"), u.installed ? t("update.yes") : t("update.no"));
+    addKv(updateKv, t("update.autostart"), onOff(u.autostart_enabled));
+
+    var avail = u.update_available === true;
+    if (updateAvailHint) {
+      updateAvailHint.hidden = !avail;
+      if (avail) {
+        updateAvailHint.textContent = u.asset_available === false
+          ? t("update.availNoAsset", { version: u.latest })
+          : t("update.availMsg", { version: u.latest });
+      }
+    }
+    if (btnUpdateApply) btnUpdateApply.hidden = !(avail && u.asset_available !== false);
+    if (chkAutostart) chkAutostart.checked = !!u.autostart_enabled;
+    if (btnInstall) btnInstall.textContent = u.installed ? t("update.reinstallBtn") : t("update.installBtn");
+  }
+
+  function pollUpdate() {
+    return api("update.status", {}).then(function (data) {
+      mergeUpdate(data);
+      renderUpdate();
+    }, function () { /* daemon may be down; leave last-known state */ });
+  }
+
+  var updateRefreshBtn = document.querySelector('[data-target="update"]');
+  if (updateRefreshBtn) {
+    updateRefreshBtn.addEventListener("click", function (e) {
+      withBusy(e.currentTarget, function () { return pollUpdate(); });
+    });
+  }
+
+  if (document.getElementById("btn-update-check")) {
+    document.getElementById("btn-update-check").addEventListener("click", function (e) {
+      runAction(e.currentTarget, "update.check", {}, function (data) {
+        mergeUpdate(data);
+        renderUpdate();
+        showToast(data.update_available ? t("update.availMsg", { version: data.latest }) : t("update.upToDate"));
+      });
+    });
+  }
+
+  if (btnUpdateApply) {
+    btnUpdateApply.addEventListener("click", function (e) {
+      if (!confirm(t("update.applyConfirm"))) return;
+      runAction(e.currentTarget, "update.apply", { restart: false }, function () {
+        showToast(t("update.staged"));
+        pollUpdate();
+      });
+    });
+  }
+
+  if (btnInstall) {
+    btnInstall.addEventListener("click", function (e) {
+      var autostart = chkAutostart ? chkAutostart.checked : true;
+      runAction(e.currentTarget, "install.install", { autostart: autostart }, function () {
+        showToast(t("update.installedToast"));
+        pollUpdate();
+      });
+    });
+  }
+
+  if (chkAutostart) {
+    chkAutostart.addEventListener("change", function () {
+      var cmd = chkAutostart.checked ? "autostart.enable" : "autostart.disable";
+      runAction(null, cmd, {}, function () { pollUpdate(); });
+    });
+  }
+
+  /* ---------- developer console (logs.tail / logs.clear) ---------- */
+
+  var DEV_MODE_KEY = "mistl-dev-mode";
+  var DEV_LOG_LEVELS = ["TRACE", "DEBUG", "INFO", "WARN", "ERROR"];
+  var devConsoleEl = document.getElementById("dev-console");
+  var devConsoleBody = document.getElementById("dev-console-body");
+  var devConsoleCount = document.getElementById("dev-console-count");
+  var devConsoleLevels = document.getElementById("dev-console-levels");
+  var devConsoleSearch = document.getElementById("dev-console-search");
+  var chkDevMode = document.getElementById("chk-dev-mode");
+
+  var devLog = { entries: [], sinceId: 0, activeLevels: {}, timer: null, pinnedToBottom: true };
+  DEV_LOG_LEVELS.forEach(function (lvl) { devLog.activeLevels[lvl] = true; });
+
+  DEV_LOG_LEVELS.forEach(function (lvl) {
+    var btn = el("button", { type: "button", class: "dev-console-level active", "data-level": lvl, text: lvl });
+    btn.addEventListener("click", function () {
+      devLog.activeLevels[lvl] = !devLog.activeLevels[lvl];
+      btn.classList.toggle("active", devLog.activeLevels[lvl]);
+      renderDevLog();
+    });
+    devConsoleLevels.appendChild(btn);
+  });
+
+  function devLogFiltered() {
+    var q = (devConsoleSearch.value || "").trim().toLowerCase();
+    return devLog.entries.filter(function (e) {
+      if (!devLog.activeLevels[e.level]) return false;
+      if (q && e.message.toLowerCase().indexOf(q) < 0 && e.target.toLowerCase().indexOf(q) < 0) return false;
+      return true;
+    });
+  }
+
+  function fmtLogTime(tsMs) {
+    var d = new Date(tsMs);
+    function pad(n, w) { w = w || 2; var s = String(n); while (s.length < w) s = "0" + s; return s; }
+    return pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds()) + "." + pad(d.getMilliseconds(), 3);
+  }
+
+  function renderDevLog() {
+    var filtered = devLogFiltered();
+    devConsoleCount.textContent = String(filtered.length);
+    var wasAtBottom = devLog.pinnedToBottom;
+    devConsoleBody.innerHTML = "";
+    if (filtered.length === 0) {
+      devConsoleBody.appendChild(el("div", { class: "dev-console-empty", text: t("devlog.empty") }));
+    } else {
+      filtered.forEach(function (e) {
+        var line = el("div", { class: "dev-console-line", "data-level": e.level });
+        line.appendChild(el("span", { class: "dev-console-line-time", text: fmtLogTime(e.ts_ms) }));
+        line.appendChild(el("span", { class: "dev-console-line-level", text: e.level }));
+        line.appendChild(el("span", { class: "dev-console-line-text", text: e.target + ": " + e.message }));
+        devConsoleBody.appendChild(line);
+      });
+    }
+    if (wasAtBottom) devConsoleBody.scrollTop = devConsoleBody.scrollHeight;
+  }
+
+  devConsoleBody.addEventListener("scroll", function () {
+    devLog.pinnedToBottom = devConsoleBody.scrollHeight - devConsoleBody.scrollTop - devConsoleBody.clientHeight < 24;
+  });
+
+  devConsoleSearch.addEventListener("input", renderDevLog);
+
+  function pollDevLog() {
+    return api("logs.tail", { since: devLog.sinceId }).then(function (data) {
+      var entries = (data && data.entries) || [];
+      if (entries.length) {
+        devLog.entries = devLog.entries.concat(entries).slice(-1000);
+        devLog.sinceId = entries[entries.length - 1].id + 1;
+        renderDevLog();
+      }
+    }, function () { /* daemon may be down; keep last-known lines */ });
+  }
+
+  document.getElementById("dev-console-clear").addEventListener("click", function (e) {
+    runAction(e.currentTarget, "logs.clear", {}, function () {
+      devLog.entries = [];
+      renderDevLog();
+    });
+  });
+
+  document.getElementById("dev-console-copy").addEventListener("click", function () {
+    var text = devLogFiltered().map(function (e) {
+      return "[" + fmtLogTime(e.ts_ms) + "] " + e.level + " " + e.target + ": " + e.message;
+    }).join("\n");
+    copyToClipboard(text);
+  });
+
+  var devConsoleCollapseBtn = document.getElementById("dev-console-collapse");
+  devConsoleCollapseBtn.addEventListener("click", function () {
+    var collapsed = devConsoleEl.classList.toggle("collapsed");
+    var label = t(collapsed ? "devlog.expand" : "devlog.collapse");
+    devConsoleCollapseBtn.setAttribute("aria-label", label);
+    devConsoleCollapseBtn.title = label;
+  });
+
+  // The console is a fixed overlay docked to the bottom of the viewport; this
+  // reserves matching space at the bottom of the scrollable content so it
+  // never permanently covers whatever panel is behind it -- users can still
+  // scroll the page clear of it. Re-measured on show/hide, collapse/expand,
+  // and manual drag-resize (ResizeObserver), so it always matches the
+  // console's actual rendered height.
+  var mainEl = document.getElementById("main");
+  function updateMainReservedSpace() {
+    if (!mainEl) return;
+    mainEl.style.paddingBottom = devConsoleEl.hidden
+      ? ""
+      : (devConsoleEl.getBoundingClientRect().height + 24) + "px";
+  }
+  if (typeof ResizeObserver !== "undefined") {
+    new ResizeObserver(updateMainReservedSpace).observe(devConsoleEl);
+  }
+
+  function setDevMode(enabled) {
+    try { localStorage.setItem(DEV_MODE_KEY, enabled ? "1" : "0"); } catch (e) { /* ignore */ }
+    if (chkDevMode) chkDevMode.checked = enabled;
+    devConsoleEl.hidden = !enabled;
+    updateMainReservedSpace();
+    if (enabled) {
+      devLog.entries = [];
+      devLog.sinceId = 0;
+      pollDevLog();
+      if (!devLog.timer) devLog.timer = setInterval(pollDevLog, 1000);
+    } else if (devLog.timer) {
+      clearInterval(devLog.timer);
+      devLog.timer = null;
+    }
+  }
+
+  if (chkDevMode) {
+    chkDevMode.addEventListener("change", function () { setDevMode(chkDevMode.checked); });
+  }
+  document.getElementById("dev-console-close").addEventListener("click", function () { setDevMode(false); });
+
+  function initDevMode() {
+    var stored = false;
+    try { stored = localStorage.getItem(DEV_MODE_KEY) === "1"; } catch (e) { /* ignore */ }
+    setDevMode(stored);
+  }
+
   function pollAll() {
     pollDaemonStatus();
     pollStreamStatus();
@@ -2892,7 +3431,7 @@
 
   var PANEL_IDS = [
     "panel-overview", "panel-stream", "panel-ai",
-    "panel-mailbox", "panel-store", "panel-profile", "panel-settings"
+    "panel-mailbox", "panel-store", "panel-profile", "panel-update", "panel-settings"
   ];
   var sideLinks = Array.prototype.slice.call(document.querySelectorAll("#sidenav a"));
 
@@ -2949,6 +3488,8 @@
   pollMailboxLs();
   pollStoreLs();
   pollConfig();
+  pollUpdate();
+  initDevMode();
 })();
 </script>
 </body>
