@@ -95,27 +95,72 @@ Log lines to look for, in order:
 If `audio_frames_per_s` stays 0, the sharer didn't tick the browser's "share
 audio" box; if `viewers` stays 0, no VRChat client has opened the URL yet.
 
+### Cascade distribution — leader election across relay nodes
+
+With `[stream] cascade = true` (the default), every relay node running
+`stream relay` for the same room also runs a Raft control plane
+(`crate::consensus::RelayConsensus`) to elect a **leader** among the relay
+nodes themselves -- separate from, and invisible to, the tc-chat browser
+peers. The leader locks onto the sharer directly (exactly like the
+non-cascade case) and additionally re-publishes what it receives back into
+the room as its own tracks (raw H264/Opus passthrough, no re-encoding).
+Every other relay node (**follower**) locks onto the *leader's* re-published
+tracks instead of the sharer's. All of this is visible at `info` level:
+
+| Log line (`info`) | Confirms |
+| --- | --- |
+| `cascade: role=unknown leader=none peers=1` | consensus started, no election yet (self-only view) |
+| `cascade: role=leader leader=<id> peers=N` | this node won the election (a lone relay always ends up here) |
+| `cascade: role=follower leader=<id> peers=N` | this node is following `<id>` |
+| `cascade: re-publishing share into room` | (leader only) locked onto the sharer and started re-publishing |
+| `cascade: following leader <id>` | (follower only) locked onto the leader's re-published tracks |
+| `cascade: leader changed -> re-locking` | a role/leader change invalidated the current lock; re-evaluating |
+
+`mistl stream status`'s `cascade` field reports the same state as JSON at any
+time (`{enabled, role, leader, self, relay_peers, source}`; `source` is
+`"sharer"` for a leader locked onto the browser share, `"leader"` for a
+follower locked onto the leader's re-publish, or `null` while unlocked).
+When cascade is disabled (`[stream] cascade = false`) or the control plane
+fails to start, a WARN is logged once at relay startup and the node falls
+back to locking onto the sharer directly, exactly like before cascade
+existed; `cascade` then reports just `{"enabled": false}`.
+
+> **v1 limitation:** a follower's own PLI (keyframe request) targets the
+> leader's re-published track, and mistlib's cascade plumbing does not
+> forward that request back to the original sharer -- only the leader's own
+> PLI (sent directly to the sharer) actually reaches it. A late-joining
+> follower's keyframe wait is therefore bounded by the leader's existing ~5s
+> PLI cadence, not its own PLI having any effect. This is the same order of
+> magnitude as the pre-cascade single-relay keyframe wait, so it's acceptable
+> for v1.
+
 ## Topology — how "any number of viewers" works
 
 VRChat's AVPro can only play a URL; it can't join the p2p swarm. The scalable,
-lowest-latency arrangement is therefore a **mesh of local relays**:
+lowest-latency arrangement is therefore a **mesh of local relays**, now with
+cascade distribution layered on top:
 
 - each viewer runs `mistl stream relay --room X` on their own machine;
-- each receives the share directly over mistlib p2p and re-serves it on **their
-  own localhost**;
+- the relay nodes elect a leader among themselves (see above); the leader
+  locks onto the sharer, and every other relay locks onto the leader's
+  re-published tracks instead;
+- each relay re-serves what it locked onto on **their own localhost**;
 - each viewer's VRChat plays `rtsp://127.0.0.1:8554/stream` (localhost).
 
 No public IP or port-forwarding is needed — everyone talks to their own
-loopback. The ceiling is the **sharer's uplink**: in a mesh the publisher sends
-one copy per viewer, so this scales to a handful comfortably and to more with a
-fast uplink. Scaling to very large audiences would need a cascade/SFU relay
-tree (mistl re-publishing to downstream relays) — a future addition.
+loopback. Without cascade, the ceiling was the **sharer's uplink** (one copy
+per viewer sent directly from the browser); with cascade, the sharer uplinks
+**once** (to the leader) regardless of viewer count, and the leader's
+re-publish reaches every other relay in the room -- including ones with no
+direct p2p connection to the sharer, since mistlib's overlay (DNVE3) is a
+selective mesh rather than a full one. If the leader disappears, the
+remaining relays elect a new one and re-lock automatically.
 
-> Consensus (`../mistlib-consensus`, Raft/HotStuff) is **not** used for the
-> media data-plane and should not be: agreeing on an ordered log adds
-> round-trips per commit, the opposite of low latency. It is only relevant to
-> control-plane coordination (e.g. electing relay nodes in a future cascade),
-> never to carrying the video/audio itself.
+> Consensus (`mistlib-consensus`, Raft) is **not** used for the media
+> data-plane and should not be: agreeing on an ordered log adds round-trips
+> per commit, the opposite of low latency. It is only used for control-plane
+> coordination -- electing which relay node re-publishes -- never to carry
+> the video/audio itself.
 
 ## Latency
 

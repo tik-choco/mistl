@@ -35,6 +35,8 @@ concurrency:
 env:
   MISTLIB_REPO: tik-choco-lab/mistlib-dev
   MISTLIB_REF: develop
+  MISTLIB_CONSENSUS_REPO: tik-choco-lab/mistlib-consensus
+  MISTLIB_CONSENSUS_REF: main
   # Runner cmake is 4.x; vendored libopus still declares an ancient minimum.
   CMAKE_POLICY_VERSION_MINIMUM: "3.5"
 
@@ -100,6 +102,15 @@ jobs:
           ref: ${{ env.MISTLIB_REF }}
           token: ${{ secrets.MISTLIB_DEV_TOKEN }}
           path: .mistlib-src
+
+      # Path dependency `.mistlib-consensus-src/` (same location the local
+      # scripts/fetch-mistlib-consensus puts it).
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MISTLIB_CONSENSUS_REPO }}
+          ref: ${{ env.MISTLIB_CONSENSUS_REF }}
+          token: ${{ secrets.MISTLIB_DEV_TOKEN }}
+          path: .mistlib-consensus-src
 
       - name: Install Linux build deps
         if: runner.os == 'Linux'

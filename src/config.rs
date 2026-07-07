@@ -115,6 +115,14 @@ pub struct StreamConfig {
     /// Audio codec served over RTSP for relayed shares: "aac" (transcoded
     /// from Opus; what AVPro reliably plays) or "opus" (passthrough).
     pub audio_codec: String,
+    /// Cascade distribution for `stream relay`: relay nodes in the room run
+    /// a Raft control plane (`crate::consensus`) to elect a leader, which
+    /// re-publishes the sharer's tracks into the room so followers relay
+    /// from it instead of the sharer directly. When `false` -- or when the
+    /// control plane fails to start -- falls back to the pre-cascade
+    /// behavior of locking onto the first video track from anyone, with a
+    /// WARN log.
+    pub cascade: bool,
 }
 
 impl Default for StreamConfig {
@@ -127,6 +135,7 @@ impl Default for StreamConfig {
             max_width: 1920,
             relay_room: None,
             audio_codec: "aac".into(),
+            cascade: true,
         }
     }
 }
