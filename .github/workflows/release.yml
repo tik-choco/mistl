@@ -121,6 +121,10 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Package
+        # Ship BOTH an archive (for humans) and the raw binary named per
+        # target. The self-updater (`mistl update`) downloads the raw binary
+        # and verifies it against SHA256SUMS.txt, so it never has to unpack an
+        # archive to replace the running exe.
         run: |
           name="mistl-v${{ needs.plan.outputs.version }}-${{ matrix.target }}"
           mkdir -p dist
@@ -128,10 +132,12 @@ jobs:
             *windows*)
               cp "target/${{ matrix.target }}/release/mistl.exe" .
               7z a "dist/$name.zip" mistl.exe README.md
+              cp mistl.exe "dist/$name.exe"
               ;;
             *)
               cp "target/${{ matrix.target }}/release/mistl" .
               tar czf "dist/$name.tar.gz" mistl README.md
+              cp mistl "dist/$name"
               ;;
           esac
 

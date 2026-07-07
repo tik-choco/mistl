@@ -64,6 +64,49 @@ pub enum Command {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// Check for and install updates from GitHub Releases
+    Update {
+        #[command(subcommand)]
+        action: Option<UpdateAction>,
+    },
+    /// Install mistl into a fixed per-user location (%LOCALAPPDATA%\Programs\mistl)
+    Install {
+        /// Do not enable start-on-login
+        #[arg(long)]
+        no_autostart: bool,
+    },
+    /// Remove the per-user install, Start Menu shortcut, and autostart entry
+    Uninstall,
+    /// Manage start-on-login (launches the daemon headless at login)
+    Autostart {
+        #[command(subcommand)]
+        action: AutostartAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum UpdateAction {
+    /// Check GitHub for a newer release (this is the default)
+    Check,
+    /// Download, verify (sha256), and install the latest release
+    Apply {
+        /// Restart the daemon now so the update takes effect immediately
+        /// (otherwise it applies on the next daemon start)
+        #[arg(long)]
+        restart: bool,
+    },
+    /// Show updater status (current version, target, auto-update settings)
+    Status,
+}
+
+#[derive(Subcommand)]
+pub enum AutostartAction {
+    /// Start the mistl daemon automatically at login
+    Enable,
+    /// Stop starting the mistl daemon at login
+    Disable,
+    /// Show whether login autostart is enabled
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -87,6 +130,8 @@ pub enum DaemonAction {
     Start,
     /// Stop the running daemon
     Stop,
+    /// Restart the running daemon (e.g. after a settings change that needs one)
+    Restart,
     /// Show daemon status
     Status,
 }
@@ -230,6 +275,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             DaemonAction::Run => daemon::run_foreground(),
             DaemonAction::Start => daemon::start_background(),
             DaemonAction::Stop => client_call("daemon.stop", json!({})),
+            DaemonAction::Restart => client_call("daemon.restart", json!({})),
             DaemonAction::Status => client_call("daemon.status", json!({})),
         },
         Command::Profile { action } => match action {
@@ -342,7 +388,72 @@ pub fn dispatch(cli: Cli) -> Result<()> {
                 Ok(())
             }
         },
+        Command::Update { action } => match action.unwrap_or(UpdateAction::Check) {
+            UpdateAction::Check => {
+                let response = request("update.check", json!({}))?;
+                println!("{}", serde_json::to_string_pretty(&response)?);
+                if response.get("update_available").and_then(Value::as_bool) == Some(true) {
+                    let latest = response.get("latest").and_then(Value::as_str).unwrap_or("?");
+                    println!();
+                    if response.get("asset_available").and_then(Value::as_bool) == Some(false) {
+                        let notes = response.get("notes_url").and_then(Value::as_str).unwrap_or("");
+                        println!("  v{latest} is available but has no binary for this platform.");
+                        println!("  Download it manually: {notes}");
+                    } else {
+                        println!("  Run `mistl update apply` to install v{latest}.");
+                    }
+                    println!();
+                }
+                Ok(())
+            }
+            UpdateAction::Apply { restart } => {
+                let response = request("update.apply", json!({ "restart": restart }))?;
+                println!("{}", serde_json::to_string_pretty(&response)?);
+                Ok(())
+            }
+            UpdateAction::Status => client_call("update.status", json!({})),
+        },
+        Command::Install { no_autostart } => install_cli(!no_autostart),
+        Command::Uninstall => {
+            crate::install::uninstall()?;
+            println!("mistl uninstalled (per-user install, shortcut, and autostart removed)");
+            Ok(())
+        }
+        Command::Autostart { action } => match action {
+            AutostartAction::Enable => {
+                crate::install::set_autostart(true)?;
+                println!("autostart enabled: the mistl daemon will start at login");
+                Ok(())
+            }
+            AutostartAction::Disable => {
+                crate::install::set_autostart(false)?;
+                println!("autostart disabled");
+                Ok(())
+            }
+            AutostartAction::Status => {
+                let on = crate::install::autostart_enabled();
+                println!("autostart: {}", if on { "enabled" } else { "disabled" });
+                Ok(())
+            }
+        },
     }
+}
+
+/// `mistl install`: copy this exe into the fixed per-user location, add a
+/// Start Menu shortcut, and (unless opted out) enable login autostart. Runs
+/// in the client process directly -- it must work from a freshly-downloaded
+/// exe with no daemon running yet.
+fn install_cli(enable_autostart: bool) -> Result<()> {
+    let exe = crate::install::install(enable_autostart)?;
+    println!("installed: {}", exe.display());
+    if enable_autostart {
+        println!("autostart: enabled (the mistl daemon starts at login)");
+    }
+    println!();
+    println!("  Run `mistl` or use the Start Menu shortcut to open the dashboard.");
+    println!("  You can delete the copy you just ran; the installed one is used from now on.");
+    println!();
+    Ok(())
 }
 
 /// One combined, human-scannable status snapshot.
@@ -394,6 +505,9 @@ fn open_dashboard() -> Result<()> {
         println!("dashboard: {url}");
     } else {
         println!("open {url} in your browser");
+    }
+    if !crate::install::is_installed() {
+        println!("tip: run `mistl install` to install mistl for your user and start it at login");
     }
     Ok(())
 }
