@@ -10,8 +10,15 @@
 //!    -> depacketize (single NAL / STAP-A / FU-A) -> group into Annex-B
 //!    access units -> extract SPS/PPS -> `rtsp.update_sps/update_pps` +
 //!    `rtsp.send_video_access_unit_at(au, rtp_ts)`. Send PLI on start and
-//!    periodically until the first IDR arrives (browsers only emit keyframes
-//!    on request).
+//!    periodically thereafter (browsers only emit keyframes on request; this
+//!    also bounds a late-joining viewer's or a loss-recovery's keyframe wait
+//!    to one [`PLI_INTERVAL`]). mistlib registers `nack`/`pli` RTCP feedback
+//!    in its SDP but never wires up an interceptor registry, so no NACK
+//!    retransmission or reorder/jitter buffering actually happens upstream of
+//!    `read_rtp` (see `video_task`'s handling of `awaiting_keyframe`); every
+//!    RTP packet is checked for a sequence-number gap and any access unit
+//!    that might be corrupt as a result is dropped until the next IDR rather
+//!    than forwarded to `rtsp`.
 //! 3. Audio track (Opus): `read_rtp` loop -> per `AudioCodec` either decode
 //!    Opus + encode AAC-LC (48 kHz stereo, 1024-sample frames, mistlink's
 //!    scheme) or pass Opus packets through ->
@@ -752,6 +759,11 @@ async fn video_task(
     let mut depacketizer = H264Packet::default();
     let mut assembler = AuAssembler::new();
     let mut seen_first_keyframe = false;
+    // No packet has been forwarded yet (nothing to reference), so gate on
+    // the first IDR just like a mid-stream loss recovery -- see
+    // `awaiting_keyframe`'s doc below.
+    let mut awaiting_keyframe = true;
+    let mut last_seq: Option<u16> = None;
 
     loop {
         let (packet, _attrs) = match track.read_rtp().await {
@@ -766,6 +778,50 @@ async fn video_task(
             if let Err(error) = republish.write_rtp(&packet).await {
                 debug!(%remote_id, %error, "cascade: republishing video RTP packet failed");
             }
+        }
+
+        // Sequence-number continuity check -- tracked on every packet
+        // (including short/padding ones, which still consume sequence
+        // number space) so a gap is never masked by the padding-skip below.
+        // mistlib's `WebRtcTransport` registers `nack`/`pli` in the SDP RTCP
+        // feedback lines (see `register_h264_opus_codecs` in
+        // `.mistlib-src/mistlib-native/src/transports/webrtc.rs`) but never
+        // builds an `InterceptorRegistry` (no
+        // `register_default_interceptors`/`.with_interceptor_registry` call
+        // on the `APIBuilder`), so no NACK generator ever asks the browser to
+        // retransmit a lost packet, and `TrackRemote::read_rtp` hands packets
+        // straight through in arrival order with no jitter/reorder buffer.
+        // `H264Packet::depacketize` (rtp 0.13.0) has no idea any of this
+        // happened either -- on a lost FU-A fragment it just keeps
+        // concatenating whatever arrives next into `fua_buffer` and emits a
+        // "complete" NAL once the end bit shows up, silently truncated/
+        // corrupt in the middle. That corrupt NAL used to sail straight
+        // through to `rtsp` (and get cached as `last_idr_au` if it happened
+        // to carry an IDR type byte), which is a real freeze mechanism: a
+        // decoder fed a mangled reference frame has nothing good to show
+        // until the *next* real IDR, and a late joiner unlucky enough to
+        // land on the cached corrupt IDR would freeze immediately. Since
+        // mistlib exposes no hook to fix this upstream (no interceptor
+        // registry, no reorder buffer to plug into), the mitigation lives
+        // here: detect the discontinuity from the RTP sequence numbers we
+        // already have, discard whatever NAL/AU was in flight, and drop
+        // every subsequent access unit until a fresh IDR arrives -- exactly
+        // what the periodic PLI in `pli_task` is there to solicit.
+        let seq = packet.header.sequence_number;
+        let gap = last_seq.is_some_and(|last| seq != last.wrapping_add(1));
+        last_seq = Some(seq);
+
+        if gap {
+            if !awaiting_keyframe {
+                warn!(
+                    %remote_id,
+                    seq,
+                    "relay: RTP sequence gap on video track; dropping frames until next keyframe"
+                );
+            }
+            depacketizer = H264Packet::default();
+            assembler = AuAssembler::new();
+            awaiting_keyframe = true;
         }
 
         if packet.payload.len() <= 2 {
@@ -786,6 +842,14 @@ async fn video_task(
             Ok(bytes) => bytes,
             Err(error) => {
                 warn!(%remote_id, %error, "relay: failed to depacketize H264 RTP packet");
+                // The depacketizer's own FU-A reassembly state may now be
+                // out of sync too (e.g. this packet was a stray FU-A
+                // continuation with no matching start) -- treat it the same
+                // as a sequence gap rather than risk stitching a later
+                // fragment onto whatever's left in `fua_buffer`.
+                depacketizer = H264Packet::default();
+                assembler = AuAssembler::new();
+                awaiting_keyframe = true;
                 continue;
             }
         };
@@ -803,6 +867,7 @@ async fn video_task(
                 rtsp.update_pps(pps).await;
             }
             if nals.has_idr {
+                awaiting_keyframe = false;
                 if !seen_first_keyframe {
                     seen_first_keyframe = true;
                     info!(%remote_id, "relay: first keyframe (IDR) received from publisher");
@@ -810,6 +875,12 @@ async fn video_task(
                     debug!(%remote_id, "relay: forwarded IDR access unit");
                 }
             }
+
+            if awaiting_keyframe {
+                debug!(%remote_id, "relay: dropping access unit while awaiting a keyframe");
+                continue;
+            }
+
             rtsp.send_video_access_unit_at(&au, au_ts).await;
             counters.video_au.fetch_add(1, Ordering::Relaxed);
         }
