@@ -203,6 +203,38 @@ pub async fn connected_nodes() -> Vec<String> {
     }
 }
 
+/// Rooms this process has joined so far (via any module's [`ensure_started`]
+/// call, first or not), sorted for a deterministic result. Read for
+/// `topology.status`'s dashboard view -- e.g. mailbox/ai/stream relay each
+/// sitting in their own room, or sharing one.
+pub async fn joined_rooms() -> Vec<String> {
+    let rooms = ROOMS.lock().await;
+    let mut list: Vec<String> = rooms.iter().cloned().collect();
+    list.sort();
+    list
+}
+
+/// Best-known connection state for `node_id`, bounded by [`NET_TIMEOUT`] the
+/// same way [`connected_nodes`] is. Backed by
+/// `mistlib::app::get_connection_state_async`'s "most-connected session
+/// wins" union across every room this process has joined -- one of
+/// `"disconnected"`, `"connecting"`, `"connected"`, `"reconnecting"`,
+/// `"failed"` (mistlib's `ConnectionState` `Display` impl), or `"unknown"` on
+/// timeout.
+///
+/// mistlib exposes no finer-grained per-peer detail than this (no ICE state,
+/// RTT, or bitrate, and no room-scoped breakdown) -- this is genuinely all
+/// that's observable about one peer's link right now.
+pub async fn peer_connection_state(node_id: &str) -> String {
+    match tokio::time::timeout(NET_TIMEOUT, mistlib::app::get_connection_state_async(node_id)).await {
+        Ok(state) => state,
+        Err(_) => {
+            tracing::debug!(%node_id, "net: get_connection_state timed out");
+            "unknown".to_string()
+        }
+    }
+}
+
 /// Reliable direct send to one peer, scoped to `room` (the peer must be
 /// reachable in that specific room's session -- unlike a bare broadcast,
 /// there's no reasonable cross-room fallback).
