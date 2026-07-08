@@ -832,17 +832,36 @@ async fn control_loop(
                             let is_leader = matches!(&policy, CascadePolicy::Active { role: ConsensusRole::Leader, .. });
                             let is_follower = matches!(&policy, CascadePolicy::Active { role: ConsensusRole::Follower, .. });
                             let (video_republish, new_audio_republish) = if is_leader {
-                                match create_and_publish_republish_tracks(&room).await {
-                                    Ok((video, audio)) => {
+                                // Lock-in happens right when the sharer's own
+                                // renegotiation traffic peaks, so this publish's
+                                // offer is often rejected with "signaling is not
+                                // stable". That's transient: retry briefly
+                                // before degrading to direct relay for good.
+                                const REPUBLISH_ATTEMPTS: u32 = 3;
+                                let mut published = None;
+                                for attempt in 1..=REPUBLISH_ATTEMPTS {
+                                    match create_and_publish_republish_tracks(&room).await {
+                                        Ok(tracks) => {
+                                            published = Some(tracks);
+                                            break;
+                                        }
+                                        Err(error) if attempt < REPUBLISH_ATTEMPTS => {
+                                            warn!(%error, attempt, "cascade: publishing re-broadcast tracks failed; retrying");
+                                            tokio::time::sleep(Duration::from_secs(1)).await;
+                                        }
+                                        Err(error) => {
+                                            warn!(%error, "cascade: failed to publish re-broadcast tracks; continuing as direct relay only");
+                                        }
+                                    }
+                                }
+                                match published {
+                                    Some((video, audio)) => {
                                         *republish.lock().expect("relay republish lock poisoned") =
                                             Some((video.clone(), audio.clone()));
                                         info!("cascade: re-publishing share into room");
                                         (Some(video), Some(audio))
                                     }
-                                    Err(error) => {
-                                        warn!(%error, "cascade: failed to publish re-broadcast tracks; continuing as direct relay only");
-                                        (None, None)
-                                    }
+                                    None => (None, None),
                                 }
                             } else {
                                 if is_follower {

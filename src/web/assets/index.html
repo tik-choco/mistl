@@ -1552,6 +1552,7 @@
       "topology.legend.flowing": "media flowing",
       "topology.legend.idle": "idle (connected, no media)",
       "topology.flow.flowing": "flowing",
+      "topology.flow.ingestOnly": "receiving (no client)",
       "topology.flow.idle": "idle",
       "topology.kv.videoFlow": "video",
       "topology.kv.audioFlow": "audio",
@@ -1888,6 +1889,7 @@
       "topology.legend.flowing": "メディア転送中",
       "topology.legend.idle": "アイドル（接続中・メディアなし）",
       "topology.flow.flowing": "転送中",
+      "topology.flow.ingestOnly": "受信中（クライアント未受信）",
       "topology.flow.idle": "アイドル",
       "topology.kv.videoFlow": "映像",
       "topology.kv.audioFlow": "音声",
@@ -2224,6 +2226,7 @@
       "topology.legend.flowing": "媒体传输中",
       "topology.legend.idle": "空闲（已连接，无媒体）",
       "topology.flow.flowing": "传输中",
+      "topology.flow.ingestOnly": "接收中（无客户端）",
       "topology.flow.idle": "空闲",
       "topology.kv.videoFlow": "视频",
       "topology.kv.audioFlow": "音频",
@@ -3045,11 +3048,29 @@
   var TOPO_NODE_W = 132;
   var TOPO_NODE_H = 40;
   var TOPO_ROW_H = 48;
+  /* Auto-layout: once a side's node count exceeds this, it wraps into a new
+     sub-column instead of growing one very tall column. */
+  var TOPO_MAX_ROWS_PER_COL = 5;
+  var TOPO_COL_W = TOPO_NODE_W + 28;
+  /* Minimum vertical pitch between rows in the same column -- keep
+     TOPO_ROW_H too, in case it's ever tuned larger than node height + gap. */
+  var TOPO_ROW_PITCH = Math.max(TOPO_NODE_H + 16, TOPO_ROW_H);
   /* Media older than this (ms since the last real frame, per
      stream.status.flow) is considered stalled: edges stop animating. Real
      video ticks every few dozen ms, so 3s cleanly separates "flowing" from
      "keepalive only" without flickering on jitter. */
   var FLOW_STALL_MS = 3000;
+
+  /* Three-state i18n key for one media's video/audio kv row: a client
+     actually received it recently ("flowing"), it only arrived from the
+     browser with nobody attached to play it back ("ingestOnly" -- the gap
+     that used to render as a false-positive "転送中"), or neither
+     ("idle"). */
+  function flowStatusKey(deliveredFresh, ingestFresh) {
+    if (deliveredFresh) return "topology.flow.flowing";
+    if (ingestFresh) return "topology.flow.ingestOnly";
+    return "topology.flow.idle";
+  }
 
   function topologyStateClass(connState) {
     if (connState === "connected") return "state-connected";
@@ -3075,11 +3096,24 @@
     /* Is media *actually* moving right now? `flow` ages are ms since the
        last real video AU / audio frame went through the RTSP server (null =
        never); keepalives don't refresh them, so keepalive-only correctly
-       reads as idle here. */
+       reads as idle here. This (ingest) side only proves media arrived from
+       the browser -- it says nothing about whether any RTSP client ever got
+       it, which is what drives the edges below (publisher/follower edges
+       represent ingest into this node, so they intentionally stay on the
+       ingest signal). */
     var flow = stream.running && stream.flow ? stream.flow : null;
     var videoFlowing = !!(flow && flow.video_age_ms != null && flow.video_age_ms < FLOW_STALL_MS);
     var audioFlowing = !!(flow && flow.audio_age_ms != null && flow.audio_age_ms < FLOW_STALL_MS);
     var mediaFlowing = videoFlowing || audioFlowing;
+
+    /* Delivery-aware siblings: ms since media was last actually dispatched
+       to a *playing* RTSP session, i.e. since a client plausibly received
+       it -- see `video_delivered_age_ms`/`audio_delivered_age_ms` on
+       `stream.status`. Used only for the video/audio kv rows below, so
+       "転送中" (flowing) there means a client actually got it, not merely
+       that it arrived from the browser. */
+    var videoDelivered = !!(flow && flow.video_delivered_age_ms != null && flow.video_delivered_age_ms < FLOW_STALL_MS);
+    var audioDelivered = !!(flow && flow.audio_delivered_age_ms != null && flow.audio_delivered_age_ms < FLOW_STALL_MS);
 
     var shown = {};
     if (selfInfo.node_id) shown[selfInfo.node_id] = true;
@@ -3145,7 +3179,8 @@
       self: selfInfo, leftNodes: leftNodes, rightNodes: rightNodes, viewerNode: viewerNode,
       cascadeActive: cascadeActive, role: role, roomsCount: roomsCount,
       stream: stream, cascade: cascadeActive ? cascade : null, relayPeersCount: relayPeers.length,
-      videoFlowing: videoFlowing, audioFlowing: audioFlowing
+      videoFlowing: videoFlowing, audioFlowing: audioFlowing,
+      videoDelivered: videoDelivered, audioDelivered: audioDelivered
     };
   }
 
@@ -3175,6 +3210,87 @@
     return { x: x, y: y, w: TOPO_NODE_W, h: TOPO_NODE_H };
   }
 
+  /* ---- auto-layout helpers (column wrapping + label collision avoidance) ----
+     Kept as small pure functions so renderTopologyGraph reads as: compute
+     positions, draw boxes, draw edges. No randomness and no dependence on
+     the previous render -- same graph in always produces the same layout
+     out, which matters because the card re-renders on every topology poll. */
+
+  /* How a side (leftNodes or rightNodes) with `count` entries wraps into
+     sub-columns of at most TOPO_MAX_ROWS_PER_COL rows each. `maxRows` is the
+     tallest column on that side (needed for the shared card height), and
+     `extraCols` is how many sub-columns beyond the first it needed (needed
+     for the shared viewBox width / x-offsets). */
+  function topologyColStats(count) {
+    var numCols = count > 0 ? Math.ceil(count / TOPO_MAX_ROWS_PER_COL) : 0;
+    var maxRows = count > 0 ? Math.min(count, TOPO_MAX_ROWS_PER_COL) : 0;
+    return { numCols: numCols, maxRows: maxRows, extraCols: Math.max(numCols - 1, 0) };
+  }
+
+  /* y for row `rowInCol` of `rowsInCol` total rows in one sub-column, with
+     the column centered as a group around centerY (so a short column
+     clusters near the self node's row instead of being spread over the
+     whole card). */
+  function topologyColRowY(rowInCol, rowsInCol, centerY) {
+    var groupH = (rowsInCol - 1) * TOPO_ROW_PITCH;
+    return centerY - groupH / 2 + rowInCol * TOPO_ROW_PITCH;
+  }
+
+  function topologyRectsOverlap(a, b) {
+    return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+  }
+
+  function topologyCountOverlaps(rects, rect) {
+    var n = 0;
+    for (var i = 0; i < rects.length; i++) {
+      if (topologyRectsOverlap(rects[i], rect)) n++;
+    }
+    return n;
+  }
+
+  /* Places one edge label clear of every rect placed so far (node boxes,
+     then earlier labels -- draw order is deterministic so this never
+     depends on anything but the graph itself). Candidates, in order: the
+     straight-line midpoint (which is also the bezier's parametric midpoint
+     here, since the curve's control points share the midpoint's x); that
+     same x nudged up/down; then two points shifted along the straight line
+     toward either endpoint. First collision-free candidate wins; if every
+     candidate collides, the least-bad one is used so the label always ends
+     up somewhere. */
+  function placeTopologyEdgeLabel(parent, placedRects, label, x1, y1, x2, y2) {
+    var midX = (x1 + x2) / 2;
+    var midY = (y1 + y2) / 2;
+    var w = label.length * 6.2 + 8;
+    var h = 12;
+    var candidates = [];
+    [0, -10, 10, -20, 20, -30, 30].forEach(function (dy) {
+      candidates.push({ x: midX, y: midY - 5 + dy });
+    });
+    [0.38, 0.62].forEach(function (t) {
+      candidates.push({ x: x1 + t * (x2 - x1), y: y1 + t * (y2 - y1) - 5 });
+    });
+
+    var bestPos = candidates[0];
+    var bestRect = null;
+    var bestOverlaps = Infinity;
+    for (var i = 0; i < candidates.length; i++) {
+      var c = candidates[i];
+      var rect = { x: c.x - w / 2, y: c.y - h / 2, w: w, h: h };
+      var overlaps = topologyCountOverlaps(placedRects, rect);
+      if (overlaps < bestOverlaps) {
+        bestOverlaps = overlaps;
+        bestPos = c;
+        bestRect = rect;
+      }
+      if (overlaps === 0) break;
+    }
+
+    placedRects.push(bestRect);
+    var labelEl = svgEl("text", { class: "topology-edge-label", x: bestPos.x, y: bestPos.y, "text-anchor": "middle" });
+    labelEl.textContent = label;
+    parent.appendChild(labelEl);
+  }
+
   function topologyEdge(parent, from, to, label, opts) {
     opts = opts || {};
     /* Direction is encoded by the caller's (from, to) order -- e.g. a
@@ -3184,6 +3300,12 @@
        flag. */
     var x1 = from.x <= to.x ? from.x + from.w / 2 : from.x - from.w / 2;
     var x2 = from.x <= to.x ? to.x - to.w / 2 : to.x + to.w / 2;
+    /* Wrapped-column edges (self <-> a node in a second-or-later
+       sub-column) may visually cross an earlier sub-column's boxes -- we
+       accept that rather than bending the curve's control points per row,
+       since at this stroke weight a crossing curve reads fine and the
+       actual reported problem is labels landing on boxes, which
+       placeTopologyEdgeLabel (below) solves directly. */
     var path = svgEl("path", {
       class: "topology-edge" + (opts.dashed ? " dashed" : "") + (opts.flowing ? " flowing" : ""),
       d: "M" + x1 + " " + from.y + " C " + (x1 + (x2 - x1) / 2) + " " + from.y + ", " + (x1 + (x2 - x1) / 2) + " " + to.y + ", " + x2 + " " + to.y
@@ -3191,11 +3313,17 @@
     if (!opts.noArrow) path.setAttribute("marker-end", "url(#topology-arrow)");
     parent.appendChild(path);
     if (label) {
-      var midX = (x1 + x2) / 2;
-      var midY = (from.y + to.y) / 2;
-      var labelEl = svgEl("text", { class: "topology-edge-label", x: midX, y: midY - 5, "text-anchor": "middle" });
-      labelEl.textContent = label;
-      parent.appendChild(labelEl);
+      if (opts.placedRects) {
+        placeTopologyEdgeLabel(parent, opts.placedRects, label, x1, from.y, x2, to.y);
+      } else {
+        /* No collision-tracking array passed -- fall back to the old plain
+           midpoint placement so this signature stays usable standalone. */
+        var midX = (x1 + x2) / 2;
+        var midY = (from.y + to.y) / 2;
+        var labelEl = svgEl("text", { class: "topology-edge-label", x: midX, y: midY - 5, "text-anchor": "middle" });
+        labelEl.textContent = label;
+        parent.appendChild(labelEl);
+      }
     }
   }
 
@@ -3227,13 +3355,29 @@
     topologySvg.appendChild(topologyArrowDefs());
 
     var rightCount = graph.rightNodes.length;
-    var rows = Math.max(rightCount, graph.leftNodes.length, 1);
-    var height = Math.max(rows * TOPO_ROW_H + 40, 160);
-    var centerY = height / 2;
-    topologySvg.setAttribute("viewBox", "0 0 640 " + height);
+    var leftCount = graph.leftNodes.length;
+    var leftStats = topologyColStats(leftCount);
+    var rightStats = topologyColStats(rightCount);
 
-    var xLeft = 90, xSelf = 250, xRight = 420, xViewers = 570;
-    if (!graph.viewerNode) xRight = 480;
+    /* Height only depends on the tallest single sub-column on either side
+       (not on the raw node count), because taller sides wrap into more
+       columns instead of one long one. */
+    var rows = Math.max(leftStats.maxRows, rightStats.maxRows, 1);
+    var height = Math.max(rows * TOPO_ROW_PITCH + 40, 160);
+    var centerY = height / 2;
+
+    /* Left sub-columns grow away from self (further left); to keep the
+       outermost one pinned at the original x=90 margin instead of running
+       off the left edge, the whole left-of-self side (self included) shifts
+       right by the extra columns' width. Right sub-columns grow away from
+       self too, but to the right, so they just extend the viewBox. */
+    var xLeft = 90, xSelf = 250;
+    var offsetX = leftStats.extraCols * TOPO_COL_W;
+    xSelf += offsetX;
+    var xRight = (graph.viewerNode ? 420 : 480) + offsetX;
+    var xViewers = xRight + rightStats.extraCols * TOPO_COL_W + 150;
+    var viewBoxW = 640 + offsetX + rightStats.extraCols * TOPO_COL_W;
+    topologySvg.setAttribute("viewBox", "0 0 " + viewBoxW + " " + height);
 
     var selfLabel = graph.self.display_name || shortNodeId(graph.self.node_id) || t("topology.node.self");
     var selfSub = graph.cascadeActive
@@ -3241,35 +3385,68 @@
       : t("topology.node.self");
     var selfBox = topologyNodeBox(topologySvg, xSelf, centerY, selfLabel, selfSub, "kind-self", graph.self.node_id || null);
 
+    /* All node boxes are placed and drawn before any edge/label, so label
+       collision-avoidance below can see every box up front -- including
+       ones in sub-columns drawn later in source order but visually to the
+       right of an earlier edge's label. */
+    var placedRects = [{ x: selfBox.x - selfBox.w / 2, y: selfBox.y - selfBox.h / 2, w: selfBox.w, h: selfBox.h }];
+
+    var leftBoxes = graph.leftNodes.map(function (n, i) {
+      var colIndex = Math.floor(i / TOPO_MAX_ROWS_PER_COL);
+      var rowIndex = i % TOPO_MAX_ROWS_PER_COL;
+      var rowsInCol = Math.min(TOPO_MAX_ROWS_PER_COL, leftCount - colIndex * TOPO_MAX_ROWS_PER_COL);
+      var x = xLeft + offsetX - colIndex * TOPO_COL_W;
+      var y = topologyColRowY(rowIndex, rowsInCol, centerY);
+      var box = topologyNodeBox(topologySvg, x, y, n.label, n.sub, "kind-" + n.kind, n.id || null);
+      placedRects.push({ x: x - box.w / 2, y: y - box.h / 2, w: box.w, h: box.h });
+      return box;
+    });
+
+    var rightBoxes = graph.rightNodes.map(function (n, i) {
+      var colIndex = Math.floor(i / TOPO_MAX_ROWS_PER_COL);
+      var rowIndex = i % TOPO_MAX_ROWS_PER_COL;
+      var rowsInCol = Math.min(TOPO_MAX_ROWS_PER_COL, rightCount - colIndex * TOPO_MAX_ROWS_PER_COL);
+      var x = xRight + colIndex * TOPO_COL_W;
+      var y = topologyColRowY(rowIndex, rowsInCol, centerY);
+      var kindClass = n.kind === "peer" ? "kind-peer" : "kind-" + n.kind;
+      var box = topologyNodeBox(topologySvg, x, y, n.label, n.sub, kindClass, n.id || null);
+      if (n.kind === "peer") {
+        var dot = svgEl("circle", { class: "topology-dot " + topologyStateClass(n.state), cx: x - TOPO_NODE_W / 2 + 8, cy: y - TOPO_NODE_H / 2 + 8, r: 4 });
+        topologySvg.appendChild(dot);
+      }
+      placedRects.push({ x: x - box.w / 2, y: y - box.h / 2, w: box.w, h: box.h });
+      return box;
+    });
+
+    var viewerBox = null;
+    if (graph.viewerNode) {
+      viewerBox = topologyNodeBox(topologySvg, xViewers, centerY, graph.viewerNode.label, graph.viewerNode.sub, "kind-viewers");
+      placedRects.push({ x: viewerBox.x - viewerBox.w / 2, y: viewerBox.y - viewerBox.h / 2, w: viewerBox.w, h: viewerBox.h });
+    }
+
+    /* Edges + labels, in the same draw order as before, now sharing
+       placedRects so every label dodges every box (and every
+       already-placed label). */
     graph.leftNodes.forEach(function (n, i) {
-      var y = graph.leftNodes.length === 1 ? centerY : (i + 0.5) * (height / graph.leftNodes.length);
-      var box = topologyNodeBox(topologySvg, xLeft, y, n.label, n.sub, "kind-" + n.kind, n.id || null);
-      topologyEdge(topologySvg, box, selfBox, edgeLabelFor(n.edge), { flowing: !!n.flowing });
+      topologyEdge(topologySvg, leftBoxes[i], selfBox, edgeLabelFor(n.edge), { flowing: !!n.flowing, placedRects: placedRects });
     });
 
     graph.rightNodes.forEach(function (n, i) {
-      var y = rightCount === 1 ? centerY : (i + 0.5) * (height / rightCount);
-      var kindClass = n.kind === "peer" ? "kind-peer" : "kind-" + n.kind;
-      var box = topologyNodeBox(topologySvg, xRight, y, n.label, n.sub, kindClass, n.id || null);
-      if (n.kind === "peer") {
-        var dot = svgEl("circle", { class: "topology-dot " + topologyStateClass(n.state), cx: xRight - TOPO_NODE_W / 2 + 8, cy: y - TOPO_NODE_H / 2 + 8, r: 4 });
-        topologySvg.appendChild(dot);
-      }
+      var box = rightBoxes[i];
       var dashed = n.edge === "sibling";
       var noArrow = n.edge === "peer" || n.edge === "sibling";
       // A cascade leader feeds *this* node, so that edge is drawn
       // leader-box -> self-box (arrowhead lands on self); every other edge
       // in this column is drawn self -> peer.
       if (n.edge === "leaderToYou") {
-        topologyEdge(topologySvg, box, selfBox, edgeLabelFor(n.edge), { flowing: !!n.flowing });
+        topologyEdge(topologySvg, box, selfBox, edgeLabelFor(n.edge), { flowing: !!n.flowing, placedRects: placedRects });
       } else {
-        topologyEdge(topologySvg, selfBox, box, edgeLabelFor(n.edge), { dashed: dashed, noArrow: noArrow, flowing: !!n.flowing });
+        topologyEdge(topologySvg, selfBox, box, edgeLabelFor(n.edge), { dashed: dashed, noArrow: noArrow, flowing: !!n.flowing, placedRects: placedRects });
       }
     });
 
-    if (graph.viewerNode) {
-      var viewerBox = topologyNodeBox(topologySvg, xViewers, centerY, graph.viewerNode.label, graph.viewerNode.sub, "kind-viewers");
-      topologyEdge(topologySvg, selfBox, viewerBox, edgeLabelFor("viewers"), { flowing: !!graph.viewerNode.flowing });
+    if (viewerBox) {
+      topologyEdge(topologySvg, selfBox, viewerBox, edgeLabelFor("viewers"), { flowing: !!graph.viewerNode.flowing, placedRects: placedRects });
     }
 
     topologySvg.setAttribute("aria-label", t("topology.aria", {
@@ -3430,8 +3607,8 @@
       }
     }
     if (graph.stream.running) {
-      addKv(topologyKv, t("topology.kv.videoFlow"), t(graph.videoFlowing ? "topology.flow.flowing" : "topology.flow.idle"));
-      addKv(topologyKv, t("topology.kv.audioFlow"), t(graph.audioFlowing ? "topology.flow.flowing" : "topology.flow.idle"));
+      addKv(topologyKv, t("topology.kv.videoFlow"), t(flowStatusKey(graph.videoDelivered, graph.videoFlowing)));
+      addKv(topologyKv, t("topology.kv.audioFlow"), t(flowStatusKey(graph.audioDelivered, graph.audioFlowing)));
     }
 
     var rooms = data.rooms || [];

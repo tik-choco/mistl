@@ -51,6 +51,12 @@ const RTP_LOG_INTERVAL: Duration = Duration::from_secs(5);
 /// 48 kHz audio clock rate.
 const AUDIO_NOMINAL_STEP: u32 = 960;
 
+/// Fixed RTP timestamp step per emitted AAC-LC frame: AAC-LC is always 1024
+/// samples per frame at the fixed 48 kHz clock this track uses (see
+/// [`RtspServer::send_audio_frame`] for why this is stamped instead of the
+/// source-derived rebase used for Opus).
+const AAC_TIMESTAMP_STEP: u32 = 1024;
+
 /// Which media track a session transport or dispatch targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Media {
@@ -146,6 +152,13 @@ struct Inner {
     last_source_audio_ts: Option<u32>,
     video_stats: MediaStats,
     audio_stats: MediaStats,
+    /// When a real video access unit / audio frame was last actually
+    /// dispatched to at least one playing session's transport (as opposed
+    /// to merely having arrived from the browser) -- see
+    /// [`RtspServer::delivered_flow_ages_ms`]. `None` if that media has
+    /// never reached an actual RTSP client.
+    last_delivered_video: Option<Instant>,
+    last_delivered_audio: Option<Instant>,
 }
 
 impl Inner {
@@ -217,6 +230,8 @@ impl RtspServer {
                 last_source_audio_ts: None,
                 video_stats: MediaStats::default(),
                 audio_stats: MediaStats::default(),
+                last_delivered_video: None,
+                last_delivered_audio: None,
             }),
             background_tasks: std::sync::Mutex::new(Vec::new()),
         })
@@ -314,6 +329,30 @@ impl RtspServer {
         (video, audio)
     }
 
+    /// Sibling of [`Self::flow_ages_ms`], but delivery-aware: milliseconds
+    /// since a real video access unit / audio frame was last actually
+    /// dispatched to at least one *playing* session's transport for that
+    /// media, i.e. since an RTSP client (not just this server) plausibly
+    /// received it -- `(video_ms, audio_ms)`, each `None` if that media has
+    /// never been delivered to any client. `flow_ages_ms` only proves media
+    /// arrived at this server *from* the browser; a stream with zero RTSP
+    /// clients attached (or one that only ever SETUP'd the other track)
+    /// reads as "flowing" there even though nothing has ever gone out.
+    /// Backs `stream.status`'s `flow.video_delivered_age_ms` /
+    /// `audio_delivered_age_ms`, which the web dashboard uses to tell
+    /// "receiving, no client attached" apart from genuinely flowing to a
+    /// client.
+    pub async fn delivered_flow_ages_ms(&self) -> (Option<u64>, Option<u64>) {
+        let inner = self.inner.lock().await;
+        let video = inner
+            .last_delivered_video
+            .map(|at| at.elapsed().as_millis() as u64);
+        let audio = inner
+            .last_delivered_audio
+            .map(|at| at.elapsed().as_millis() as u64);
+        (video, audio)
+    }
+
     /// Cache the latest SPS NAL (used for SDP `sprop-parameter-sets`).
     pub async fn update_sps(&self, sps: Vec<u8>) {
         self.inner.lock().await.sps = Some(sps);
@@ -358,7 +397,10 @@ impl RtspServer {
                 payload,
             );
             record_stats(&mut inner.video_stats, ts, payload.len());
-            Self::dispatch(&mut inner.sessions, &self.rtp_socket, Media::Video, &bytes).await;
+            let delivered = Self::dispatch(&mut inner.sessions, &self.rtp_socket, Media::Video, &bytes).await;
+            if delivered {
+                inner.last_delivered_video = Some(Instant::now());
+            }
         }
     }
 
@@ -402,14 +444,31 @@ impl RtspServer {
                 payload,
             );
             record_stats(&mut inner.video_stats, ts, payload.len());
-            Self::dispatch(&mut inner.sessions, &self.rtp_socket, Media::Video, &bytes).await;
+            let delivered = Self::dispatch(&mut inner.sessions, &self.rtp_socket, Media::Video, &bytes).await;
+            if delivered {
+                inner.last_delivered_video = Some(Instant::now());
+            }
         }
     }
 
     /// Send one encoded audio frame (AAC raw frame or Opus packet, per the
     /// configured audio codec) with its source RTP timestamp (48 kHz
-    /// clock), rebased the same way as video. No-op if this server wasn't
-    /// configured with an audio codec.
+    /// clock). No-op if this server wasn't configured with an audio codec.
+    ///
+    /// Opus keeps the historical rebase path (`source_rtp_ts` carried over
+    /// into this server's output timestamp space, nominal-stepped through
+    /// discontinuities -- see [`rebase_timestamp`]). AAC-LC frames are
+    /// always exactly 1024 samples at 48 kHz, so instead the output
+    /// timestamp advances by a fixed `+1024` per frame regardless of the
+    /// source timestamp's own cadence/jitter: stamping the Opus-derived
+    /// rebase (960/frame, with occasional larger jumps) onto AAC access
+    /// units would give the decoder a timeline that disagrees with the
+    /// payload duration, which is exactly the kind of mismatch that leaves
+    /// legacy parsers (Windows Media Foundation's RTSP stack, in
+    /// particular) unable to play the audio at all. Mirrors mistlink's
+    /// `aac_processor.go`. `last_source_audio_ts` doubles as the "have we
+    /// seeded yet" flag for the AAC path, exactly as it's used for Opus's
+    /// rebase.
     pub async fn send_audio_frame(&self, frame: &[u8], source_rtp_ts: u32) {
         let Some(codec) = self.audio else {
             return;
@@ -417,17 +476,32 @@ impl RtspServer {
 
         let mut inner = self.inner.lock().await;
 
-        let mut last_source = inner.last_source_audio_ts;
-        let mut output_ts = inner.audio_ts;
-        let ts = rebase_timestamp(
-            &mut last_source,
-            &mut output_ts,
-            source_rtp_ts,
-            rtp_out::AUDIO_CLOCK_RATE,
-            AUDIO_NOMINAL_STEP,
-        );
-        inner.last_source_audio_ts = last_source;
-        inner.audio_ts = output_ts;
+        let ts = match codec {
+            rtp_out::AudioCodec::Aac => {
+                let ts = if inner.last_source_audio_ts.is_none() {
+                    inner.audio_ts
+                } else {
+                    inner.audio_ts.wrapping_add(AAC_TIMESTAMP_STEP)
+                };
+                inner.last_source_audio_ts = Some(source_rtp_ts);
+                inner.audio_ts = ts;
+                ts
+            }
+            rtp_out::AudioCodec::Opus => {
+                let mut last_source = inner.last_source_audio_ts;
+                let mut output_ts = inner.audio_ts;
+                let ts = rebase_timestamp(
+                    &mut last_source,
+                    &mut output_ts,
+                    source_rtp_ts,
+                    rtp_out::AUDIO_CLOCK_RATE,
+                    AUDIO_NOMINAL_STEP,
+                );
+                inner.last_source_audio_ts = last_source;
+                inner.audio_ts = output_ts;
+                ts
+            }
+        };
 
         let seq = inner.audio_seq;
         inner.audio_seq = inner.audio_seq.wrapping_add(1);
@@ -443,18 +517,27 @@ impl RtspServer {
             rtp_out::AudioCodec::Opus => (rtp_out::PAYLOAD_TYPE_OPUS, frame.to_vec()),
         };
 
+        // RFC 3640 §3.1: the marker bit MUST be set on the packet containing
+        // the end of an Access Unit. Every AAC packet mistl sends is one
+        // complete AU, so it's always set; RFC 7587 doesn't use the marker
+        // for Opus, so it stays clear there.
+        let marker = matches!(codec, rtp_out::AudioCodec::Aac);
+
         let bytes = rtp_out::serialize_rtp_packet(
             payload_type,
             rtp_out::AUDIO_SSRC,
             RtpHeaderFields {
                 sequence_number: seq,
                 timestamp: ts,
-                marker: false,
+                marker,
             },
             &payload,
         );
         record_stats(&mut inner.audio_stats, ts, payload.len());
-        Self::dispatch(&mut inner.sessions, &self.rtp_socket, Media::Audio, &bytes).await;
+        let delivered = Self::dispatch(&mut inner.sessions, &self.rtp_socket, Media::Audio, &bytes).await;
+        if delivered {
+            inner.last_delivered_audio = Some(Instant::now());
+        }
     }
 
     async fn build_sdp(&self, control_base: &str) -> String {
@@ -499,7 +582,7 @@ impl RtspServer {
                     sdp.push_str(&format!(
                         "m=audio 0 RTP/AVP {pt}\r\n\
                          a=rtpmap:{pt} mpeg4-generic/48000/2\r\n\
-                         a=fmtp:{pt} profile-level-id=1;mode=AAC-hbr;sizelength=13;indexlength=3;indexdeltalength=3;config=1190\r\n\
+                         a=fmtp:{pt} config=1190; indexdeltalength=3; indexlength=3; mode=AAC-hbr; profile-level-id=1; sizelength=13; streamtype=5\r\n\
                          a=control:{audio_control}\r\n",
                         pt = rtp_out::PAYLOAD_TYPE_AAC,
                     ));
@@ -520,8 +603,16 @@ impl RtspServer {
 
     /// Send `bytes` (a full RTP packet) to every playing session's
     /// transport for `media`, over UDP or wrapped as an RTSP interleaved
-    /// `Data` frame over TCP.
-    async fn dispatch(sessions: &mut HashMap<String, Session>, rtp_socket: &UdpSocket, media: Media, bytes: &[u8]) {
+    /// `Data` frame over TCP. Returns whether at least one playing session
+    /// had a transport for `media` (i.e. this packet was actually handed to
+    /// a client, not just produced by this server) -- used to stamp
+    /// `last_delivered_video`/`last_delivered_audio` for the delivery-aware
+    /// flow indicator. UDP is fire-and-forget and the TCP path just queues
+    /// onto an mpsc channel, so this can't confirm the client's socket
+    /// actually got the bytes -- it only distinguishes "nobody is attached
+    /// to this media" from "at least one attached client was sent this".
+    async fn dispatch(sessions: &mut HashMap<String, Session>, rtp_socket: &UdpSocket, media: Media, bytes: &[u8]) -> bool {
+        let mut delivered = false;
         for (session_id, session) in sessions.iter_mut() {
             if !session.playing {
                 continue;
@@ -533,6 +624,7 @@ impl RtspServer {
             let Some(transport) = transport else {
                 continue;
             };
+            delivered = true;
             match transport {
                 SessionTransport::Udp { rtp_addr, .. } => {
                     if let Err(error) = rtp_socket.send_to(bytes, *rtp_addr).await {
@@ -552,6 +644,7 @@ impl RtspServer {
             }
             record_rtp_outflow(session_id, session, media, bytes);
         }
+        delivered
     }
 
     /// Send `bytes` (a full RTCP packet) to one session's transport for one
@@ -848,7 +941,9 @@ async fn dummy_keepalive_loop(server: Arc<RtspServer>) {
         }
 
         let bytes = inner.next_keepalive_packet();
-        RtspServer::dispatch(&mut inner.sessions, &server.rtp_socket, Media::Video, &bytes).await;
+        // Keepalives are diagnostic filler, not real media -- deliberately
+        // not counted toward `last_delivered_video`, mirroring `last_real_au`.
+        let _ = RtspServer::dispatch(&mut inner.sessions, &server.rtp_socket, Media::Video, &bytes).await;
     }
 }
 
@@ -1305,10 +1400,14 @@ async fn handle_play(
     };
     entry.playing = true;
     info!(session_id = %session.0, "PLAY: session marked playing");
-    // The `entry` mutable borrow ends at the assignment above, so `inner` is
-    // free to read here. Grab the next video seq/ts to advertise in RTP-Info.
-    let rtp_seq = inner.real_seq;
-    let rtp_time = inner.real_ts;
+    let has_video = entry.video.is_some();
+    let has_audio = entry.audio.is_some();
+    // The `entry` mutable borrow ends above, so `inner` is free to read here.
+    // Grab the next seq/ts of each media to advertise in RTP-Info.
+    let video_seq = inner.real_seq;
+    let video_ts = inner.real_ts;
+    let audio_seq = inner.audio_seq;
+    let audio_ts = inner.audio_ts;
     drop(inner);
 
     // RTP-Info advertises the sequence number and RTP timestamp of the first
@@ -1316,10 +1415,39 @@ async fn handle_play(
     // gortsplib (mistlink's RTSP stack, the known-good VRChat reference)
     // always sends this on PLAY and AVPro relies on it to start rendering --
     // its absence was a key reason VRChat showed nothing.
-    let rtp_info = match request.request_uri() {
-        Some(uri) => format!("url={uri};seq={rtp_seq};rtptime={rtp_time}"),
-        None => format!("seq={rtp_seq};rtptime={rtp_time}"),
+    //
+    // One entry PER set-up track (RFC 2326 §12.33), addressed by the same
+    // `<base>/trackID=N` control URLs the SDP hands out. Windows' MF/AVPro
+    // RTSP client anchors each stream's timeline on its own rtptime; the old
+    // single aggregate entry carried only the *video* timeline, so the audio
+    // track -- whose timestamps sit on a completely unrelated base -- was
+    // treated as far-future data and never rendered (video fine, audio
+    // silent, while ffmpeg-based clients that ignore RTP-Info played both).
+    let base = request
+        .request_uri()
+        .map(|uri| uri.to_string())
+        .unwrap_or_default();
+    let base = base.trim_end_matches('/');
+    let track_entry = |track_id: u8, seq: u16, ts: u32| {
+        if base.is_empty() {
+            format!("seq={seq};rtptime={ts}")
+        } else {
+            format!("url={base}/trackID={track_id};seq={seq};rtptime={ts}")
+        }
     };
+    let mut entries = Vec::new();
+    if has_video {
+        entries.push(track_entry(0, video_seq, video_ts));
+    }
+    if has_audio {
+        entries.push(track_entry(1, audio_seq, audio_ts));
+    }
+    if entries.is_empty() {
+        // No transport set up at all (degenerate but legal): keep the old
+        // aggregate-URL shape rather than sending an empty header.
+        entries.push(track_entry(0, video_seq, video_ts));
+    }
+    let rtp_info = entries.join(",");
 
     let session_id = session.0.clone();
     let response = base_response(version, StatusCode::Ok, cseq)
@@ -1465,8 +1593,9 @@ mod tests {
         assert!(sdp.contains("m=audio 0 RTP/AVP 112\r\n"));
         assert!(sdp.contains("a=rtpmap:112 mpeg4-generic/48000/2\r\n"));
         assert!(sdp.contains(
-            "a=fmtp:112 profile-level-id=1;mode=AAC-hbr;sizelength=13;indexlength=3;indexdeltalength=3;config=1190\r\n"
+            "a=fmtp:112 config=1190; indexdeltalength=3; indexlength=3; mode=AAC-hbr; profile-level-id=1; sizelength=13; streamtype=5\r\n"
         ));
+        assert!(sdp.contains("streamtype=5"));
         assert!(sdp.contains("a=control:rtsp://127.0.0.1:8554/stream/trackID=1\r\n"));
     }
 
@@ -1594,6 +1723,62 @@ mod tests {
 
         let inner = server.inner.lock().await;
         assert!(inner.sessions.get(&session_id).unwrap().playing);
+    }
+
+    #[tokio::test]
+    async fn play_advertises_per_track_rtp_info_with_each_medias_own_timeline() {
+        // Windows' MF/AVPro RTSP client anchors each stream's playback
+        // timeline on its own RTP-Info rtptime. A single aggregate entry
+        // carrying the video timeline made the audio track (independent
+        // timestamp base) look like far-future data: video played, audio
+        // stayed silent. PLAY must emit one entry per set-up track.
+        let server = test_server_with_audio(rtp_out::AudioCodec::Aac).await;
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        let setup_video = Request::builder(Method::Setup, Version::V1_0)
+            .request_uri(Url::parse("rtsp://127.0.0.1:8554/stream/trackID=0").unwrap())
+            .header(headers::CSEQ, "1")
+            .header(headers::TRANSPORT, "RTP/AVP;unicast;client_port=5000-5001")
+            .build(Vec::new());
+        let (response, session_id, _) = handle_request(&server, &setup_video, peer(), tx.clone()).await;
+        assert_eq!(response.status(), StatusCode::Ok);
+        let session_id = session_id.expect("SETUP should allocate a session id");
+
+        let setup_audio = Request::builder(Method::Setup, Version::V1_0)
+            .request_uri(Url::parse("rtsp://127.0.0.1:8554/stream/trackID=1").unwrap())
+            .header(headers::CSEQ, "2")
+            .header(headers::SESSION, session_id.clone())
+            .header(headers::TRANSPORT, "RTP/AVP;unicast;client_port=5002-5003")
+            .build(Vec::new());
+        let (response, _, _) = handle_request(&server, &setup_audio, peer(), tx.clone()).await;
+        assert_eq!(response.status(), StatusCode::Ok);
+
+        // Give the two media distinct, recognizable timelines.
+        {
+            let mut inner = server.inner.lock().await;
+            inner.real_seq = 100;
+            inner.real_ts = 90_000;
+            inner.audio_seq = 200;
+            inner.audio_ts = 48_000;
+        }
+
+        let play_request = Request::builder(Method::Play, Version::V1_0)
+            .request_uri(Url::parse("rtsp://127.0.0.1:8554/stream/").unwrap())
+            .header(headers::CSEQ, "3")
+            .header(headers::SESSION, session_id)
+            .build(Vec::new());
+        let (response, _, _) = handle_request(&server, &play_request, peer(), tx).await;
+        assert_eq!(response.status(), StatusCode::Ok);
+
+        let rtp_info = response
+            .header(&headers::RTP_INFO)
+            .expect("PLAY must carry RTP-Info")
+            .as_str();
+        assert_eq!(
+            rtp_info,
+            "url=rtsp://127.0.0.1:8554/stream/trackID=0;seq=100;rtptime=90000,\
+             url=rtsp://127.0.0.1:8554/stream/trackID=1;seq=200;rtptime=48000"
+        );
     }
 
     #[tokio::test]
@@ -1803,5 +1988,142 @@ mod tests {
             inner.video_stats.last_ts, inner.real_ts,
             "the packet itself went out at the keepalive-advanced (nominal-stepped) ts"
         );
+    }
+
+    // --- AAC output cadence/marker (RFC 3640) --------------------------------
+
+    #[tokio::test]
+    async fn aac_frames_step_ts_by_fixed_1024_regardless_of_source_jitter() {
+        let server = test_server_with_audio(rtp_out::AudioCodec::Aac).await;
+
+        server.send_audio_frame(&[0u8; 4], 1_000).await;
+        let ts_a = server.inner.lock().await.audio_ts;
+
+        // A big forward jump and then a backwards jump in the *source*
+        // timestamp -- neither should perturb the AAC output cadence, unlike
+        // the Opus rebase path this deliberately bypasses.
+        server.send_audio_frame(&[0u8; 4], 50_000).await;
+        let ts_b = server.inner.lock().await.audio_ts;
+        server.send_audio_frame(&[0u8; 4], 1_200).await;
+        let ts_c = server.inner.lock().await.audio_ts;
+
+        assert_eq!(ts_b.wrapping_sub(ts_a), AAC_TIMESTAMP_STEP);
+        assert_eq!(ts_c.wrapping_sub(ts_b), AAC_TIMESTAMP_STEP);
+    }
+
+    #[tokio::test]
+    async fn opus_frames_still_use_the_rebase_path() {
+        // Guards against the AAC fixed-step change leaking into Opus:
+        // consecutive normal-cadence source timestamps should rebase 1:1 as
+        // before, not step by the AAC constant.
+        let server = test_server_with_audio(rtp_out::AudioCodec::Opus).await;
+
+        server.send_audio_frame(&[0u8; 2], 1_000).await;
+        let ts_a = server.inner.lock().await.audio_ts;
+        server.send_audio_frame(&[0u8; 2], 1_960).await;
+        let ts_b = server.inner.lock().await.audio_ts;
+
+        assert_eq!(ts_b.wrapping_sub(ts_a), 960);
+    }
+
+    /// Sets up a TCP-interleaved session for `codec`'s audio track, PLAYs
+    /// it, sends one audio frame, and returns the raw RTP packet bytes
+    /// (interleave framing stripped) that went out on the channel.
+    async fn first_audio_packet(codec: rtp_out::AudioCodec) -> Vec<u8> {
+        let server = test_server_with_audio(codec).await;
+        let setup_request = Request::builder(Method::Setup, Version::V1_0)
+            .request_uri(Url::parse("rtsp://127.0.0.1:8554/stream/trackID=1").unwrap())
+            .header(headers::CSEQ, "1")
+            .header(headers::TRANSPORT, "RTP/AVP/TCP;unicast;interleaved=2-3")
+            .build(Vec::new());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (response, session_id, _) = handle_request(&server, &setup_request, peer(), tx.clone()).await;
+        assert_eq!(response.status(), StatusCode::Ok);
+        let session_id = session_id.expect("SETUP should allocate a session id");
+
+        let play_request = Request::builder(Method::Play, Version::V1_0)
+            .header(headers::CSEQ, "2")
+            .header(headers::SESSION, session_id)
+            .build(Vec::new());
+        let (response, _, _) = handle_request(&server, &play_request, peer(), tx).await;
+        assert_eq!(response.status(), StatusCode::Ok);
+
+        server.send_audio_frame(&[0xAA, 0xBB], 1_000).await;
+
+        let framed = rx.recv().await.expect("expected an interleaved RTP frame");
+        // Strip the 4-byte "$" + channel + 2-byte length interleave header.
+        framed[4..].to_vec()
+    }
+
+    #[tokio::test]
+    async fn aac_packet_has_marker_bit_set() {
+        let bytes = first_audio_packet(rtp_out::AudioCodec::Aac).await;
+        assert_eq!(
+            bytes[1] & 0x80,
+            0x80,
+            "RFC 3640 3.1: the marker bit must be set on the packet containing the end of an AU"
+        );
+    }
+
+    #[tokio::test]
+    async fn opus_packet_does_not_have_marker_bit_set() {
+        let bytes = first_audio_packet(rtp_out::AudioCodec::Opus).await;
+        assert_eq!(bytes[1] & 0x80, 0, "RFC 7587 doesn't use the marker bit for Opus");
+    }
+
+    // --- delivery-aware flow indicator ---------------------------------------
+
+    fn tcp_session(playing: bool, video: bool, audio: bool) -> Session {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        Session {
+            video: video.then(|| SessionTransport::Tcp { rtp_channel: 0, rtcp_channel: 1, tx: tx.clone() }),
+            audio: audio.then(|| SessionTransport::Tcp { rtp_channel: 2, rtcp_channel: 3, tx }),
+            playing,
+            rtp_sent_packets: 0,
+            rtp_sent_bytes: 0,
+            rtp_last_seq: 0,
+            rtp_first_logged: false,
+            rtp_last_summary_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_reports_whether_any_playing_session_received_the_media() {
+        let rtp_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let bytes = [0u8; 12];
+
+        // No sessions at all.
+        let mut sessions: HashMap<String, Session> = HashMap::new();
+        assert!(!RtspServer::dispatch(&mut sessions, &rtp_socket, Media::Video, &bytes).await);
+
+        // A session that SETUP'd video but hasn't PLAYed yet -- not delivered.
+        sessions.insert("s1".to_string(), tcp_session(false, true, false));
+        assert!(!RtspServer::dispatch(&mut sessions, &rtp_socket, Media::Video, &bytes).await);
+
+        // Now playing, with a video transport -- delivered.
+        sessions.get_mut("s1").unwrap().playing = true;
+        assert!(RtspServer::dispatch(&mut sessions, &rtp_socket, Media::Video, &bytes).await);
+
+        // Same session has no audio transport, so audio is not delivered.
+        assert!(!RtspServer::dispatch(&mut sessions, &rtp_socket, Media::Audio, &bytes).await);
+    }
+
+    #[tokio::test]
+    async fn audio_frame_stamps_last_delivered_audio_only_when_a_session_receives_it() {
+        let server = test_server_with_audio(rtp_out::AudioCodec::Aac).await;
+
+        // No sessions attached: the frame is produced but never delivered.
+        server.send_audio_frame(&[0u8; 4], 1_000).await;
+        assert!(server.inner.lock().await.last_delivered_audio.is_none());
+
+        // Attach a playing session with an audio transport, then send again.
+        {
+            let mut inner = server.inner.lock().await;
+            inner.sessions.insert("s1".to_string(), tcp_session(true, false, true));
+        }
+        server.send_audio_frame(&[0u8; 4], 2_000).await;
+        assert!(server.inner.lock().await.last_delivered_audio.is_some());
+        // Video was never dispatched to any session.
+        assert!(server.inner.lock().await.last_delivered_video.is_none());
     }
 }
