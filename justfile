@@ -32,10 +32,32 @@ _ensure-mistlib:
 _ensure-mistlib:
     @test -d .mistlib-src/.git || just fetch-mistlib
 
+# --- mistlib-consensus dependency -------------------------------------------
+
+# Fetch/update mistlib-consensus into .mistlib-consensus-src
+# (MISTLIB_CONSENSUS_REPO/MISTLIB_CONSENSUS_REF from .env)
+[windows]
+fetch-mistlib-consensus:
+    powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fetch-mistlib-consensus.ps1
+
+[unix]
+fetch-mistlib-consensus:
+    sh scripts/fetch-mistlib-consensus.sh
+
+# Clone mistlib-consensus on first build; run `just fetch-mistlib-consensus`
+# to update it later
+[windows]
+_ensure-mistlib-consensus:
+    if (-not (Test-Path .mistlib-consensus-src/.git)) { just fetch-mistlib-consensus }
+
+[unix]
+_ensure-mistlib-consensus:
+    @test -d .mistlib-consensus-src/.git || just fetch-mistlib-consensus
+
 # --- release ---------------------------------------------------------------
 
 # Optimized release build (lto=thin, stripped — see Cargo.toml)
-release: _ensure-mistlib
+release: _ensure-mistlib _ensure-mistlib-consensus
     cargo build --release
 
 # Full release: format check, lint (deny warnings), test, then build
@@ -62,19 +84,19 @@ _copy-exe:
 # --- dev -------------------------------------------------------------------
 
 # Debug build
-build: _ensure-mistlib
+build: _ensure-mistlib _ensure-mistlib-consensus
     cargo build
 
 # Run the release binary, passing through args: `just run daemon start`
-run *args: _ensure-mistlib
+run *args: _ensure-mistlib _ensure-mistlib-consensus
     cargo run --release -- {{args}}
 
 # Fast type-check without codegen
-check: _ensure-mistlib
+check: _ensure-mistlib _ensure-mistlib-consensus
     cargo check
 
 # Run the test suite
-test: _ensure-mistlib
+test: _ensure-mistlib _ensure-mistlib-consensus
     cargo test
 
 # --- quality ---------------------------------------------------------------

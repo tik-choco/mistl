@@ -2,6 +2,7 @@ pub mod ipc;
 
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
@@ -19,6 +20,9 @@ pub struct AppState {
     config: std::sync::RwLock<Config>,
     pub started_at: Instant,
     shutdown: watch::Sender<bool>,
+    /// Set by [`AppState::request_restart`]: after the daemon shuts down it
+    /// relaunches itself from the (freshly self-updated) executable.
+    restart: AtomicBool,
 }
 
 impl AppState {
@@ -33,6 +37,18 @@ impl AppState {
 
     pub fn request_shutdown(&self) {
         let _ = self.shutdown.send(true);
+    }
+
+    /// Shut the daemon down and relaunch it once the sockets are released.
+    /// Used by `update apply --restart` so a staged self-update takes effect
+    /// immediately instead of on the next manual start.
+    pub fn request_restart(&self) {
+        self.restart.store(true, Ordering::SeqCst);
+        self.request_shutdown();
+    }
+
+    fn wants_restart(&self) -> bool {
+        self.restart.load(Ordering::SeqCst)
     }
 }
 
@@ -49,6 +65,7 @@ async fn daemon_main() -> Result<()> {
         config: std::sync::RwLock::new(config),
         started_at: Instant::now(),
         shutdown: shutdown_tx,
+        restart: AtomicBool::new(false),
     });
 
     let server = ipc::serve(state.clone()).await?;
@@ -70,6 +87,10 @@ async fn daemon_main() -> Result<()> {
         None
     };
 
+    // Background self-update: periodically check GitHub Releases and, if
+    // enabled, stage a newer binary (applied on the next daemon start).
+    crate::update::spawn_auto_update(state.clone());
+
     tokio::select! {
         _ = tokio::signal::ctrl_c() => info!("interrupted, shutting down"),
         _ = shutdown_rx.wait_for(|&stop| stop) => info!("stop requested, shutting down"),
@@ -79,6 +100,53 @@ async fn daemon_main() -> Result<()> {
         web.close().await;
     }
     server.close().await;
+
+    // A self-update applied with `--restart` asks us to come back up on the
+    // new binary. The sockets are now released, so relaunch is safe.
+    if state.wants_restart() {
+        match spawn_detached_daemon() {
+            Ok(()) => info!("relaunched daemon on the updated binary"),
+            Err(error) => tracing::warn!(%error, "failed to relaunch daemon after update"),
+        }
+    }
+    Ok(())
+}
+
+/// Relaunch the daemon from the current executable path, detached. The path
+/// is unchanged by a self-update (the bytes at it are swapped in place), so
+/// this starts the freshly-updated binary. Called from [`daemon_main`] once
+/// the IPC/web sockets have been released.
+fn spawn_detached_daemon() -> Result<()> {
+    let exe = std::env::current_exe().context("resolving current executable")?;
+    let log_path = config::data_dir()?.join("daemon.log");
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("opening {}", log_path.display()))?;
+
+    let mut command = std::process::Command::new(exe);
+    command
+        .args(["daemon", "run"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(log));
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        command.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+
+    command.spawn().context("relaunching daemon process")?;
     Ok(())
 }
 
@@ -162,6 +230,18 @@ pub async fn dispatch(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<V
             state.request_shutdown();
             Ok(json!({ "stopping": true }))
         }
+        "daemon.restart" => {
+            state.request_restart();
+            Ok(json!({ "restarting": true }))
+        }
+        "logs.tail" => {
+            let since = args.get("since").and_then(Value::as_u64).unwrap_or(0);
+            Ok(json!({ "entries": crate::devlog::tail(since) }))
+        }
+        "logs.clear" => {
+            crate::devlog::clear();
+            Ok(json!({ "cleared": true }))
+        }
         "config.show" => {
             let mut value = serde_json::to_value(state.config())?;
             // Never hand secrets to clients; \"***\" marks \"set\" and is
@@ -187,7 +267,11 @@ pub async fn dispatch(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<V
             Some("store") => crate::storage::handle(cmd, args, state).await,
             Some("stream") => crate::stream::handle(cmd, args, state).await,
             Some("mailbox") => crate::mailbox::handle(cmd, args, state).await,
+            Some("consensus") => crate::consensus::handle(cmd, args, state).await,
+            Some("topology") => crate::topology::handle(cmd, args, state).await,
             Some("ai") => crate::ai::handle(cmd, args, state).await,
+            Some("update") => crate::update::handle(cmd, args, state).await,
+            Some("install") | Some("autostart") => crate::install::handle(cmd, args, state).await,
             _ => bail!("unknown command: {cmd}"),
         },
     }

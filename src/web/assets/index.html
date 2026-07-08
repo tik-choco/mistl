@@ -62,6 +62,11 @@
     --shadow: 0 2px 6px rgba(6, 10, 20, 0.22), 0 14px 34px rgba(6, 10, 20, 0.30);
   }
   * { box-sizing: border-box; }
+  /* Guard the native `hidden` attribute: several elements below pair it with a
+     class that sets its own `display` (flex/grid/etc). At equal specificity the
+     author rule wins over the UA `[hidden]{display:none}`, so those elements
+     would stay visible (empty) whenever JS sets `.hidden = true`. Force it. */
+  [hidden] { display: none !important; }
   html, body { margin: 0; padding: 0; }
   body {
     background: var(--bg);
@@ -285,6 +290,8 @@
   }
 
   .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .checkline { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13.5px; }
+  .checkline input { width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; }
   .kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 13px; }
   .kv dt { color: var(--text-faint); }
   .kv dd { margin: 0; color: var(--text); word-break: break-all; }
@@ -432,7 +439,122 @@
   .badge.delivered, .badge.ok-badge { background: var(--ok-dim); color: var(--ok); }
   .badge.deposited { background: var(--warn-dim); color: var(--warn); }
   .badge.queued { background: var(--panel-border); color: var(--text-dim); }
+  .badge.leader { background: var(--ok-dim); color: var(--ok); }
+  .badge.follower { background: var(--accent-dim); color: var(--accent); }
+  .badge.electing { background: var(--warn-dim); color: var(--warn); }
   .badge.restart { background: var(--warn-dim); color: var(--warn); margin-left: auto; }
+  button.badge.restart { border: none; font: inherit; font-weight: 600; cursor: pointer; }
+  button.badge.restart:hover { filter: brightness(1.15); text-decoration: underline; }
+  button.badge.restart:disabled { cursor: default; opacity: 0.7; text-decoration: none; }
+
+  /* ---- Developer console (see logs.tail/logs.clear) ---- */
+  .dev-console {
+    position: fixed;
+    left: 16px;
+    right: 16px;
+    bottom: 16px;
+    z-index: 90;
+    max-width: 960px;
+    margin: 0 auto;
+    height: 240px;
+    min-height: 140px;
+    max-height: 75vh;
+    display: flex;
+    flex-direction: column;
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-sm);
+    overflow: hidden;
+    resize: vertical;
+    font-size: 12.5px;
+  }
+  .dev-console[hidden] { display: none; }
+  .dev-console.collapsed { height: auto; resize: none; }
+  .dev-console.collapsed .dev-console-levels,
+  .dev-console.collapsed .dev-console-body { display: none; }
+  .dev-console-header {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--panel-border);
+    background: var(--bg-alt);
+  }
+  .dev-console-count {
+    font-size: 11px;
+    color: var(--text-dim);
+    background: var(--panel-border);
+    border-radius: 999px;
+    padding: 1px 7px;
+  }
+  .dev-console-header input[type="text"] {
+    flex: 0 1 200px;
+    padding: 4px 8px;
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 12px;
+  }
+  .dev-console-header button { font-size: 11.5px; padding: 4px 8px; }
+  .dev-console-levels {
+    flex: none;
+    display: flex;
+    gap: 4px;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--panel-border);
+    flex-wrap: wrap;
+  }
+  .dev-console-level {
+    border: 1px solid var(--panel-border);
+    background: var(--bg);
+    color: var(--text-dim);
+    border-radius: 999px;
+    padding: 1px 8px;
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    cursor: pointer;
+    opacity: 0.55;
+  }
+  .dev-console-level.active { opacity: 1; }
+  .dev-console-level[data-level="WARN"].active { color: var(--warn); border-color: var(--warn); background: var(--warn-dim); }
+  .dev-console-level[data-level="ERROR"].active { color: var(--err); border-color: var(--err); background: var(--err-dim); }
+  .dev-console-level[data-level="INFO"].active { color: var(--accent); border-color: var(--accent); background: var(--accent-dim); }
+  .dev-console-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 6px 10px;
+    font-family: var(--mono);
+    background: var(--bg);
+  }
+  .dev-console-line {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    padding: 2px 6px;
+    border-bottom: 1px solid var(--panel-border);
+    border-left: 3px solid var(--panel-border);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .dev-console-line-time { flex: none; color: var(--text-dim); font-size: 10.5px; }
+  .dev-console-line-level { flex: none; width: 3.6em; font-weight: 700; font-size: 10.5px; }
+  .dev-console-line-text { color: var(--text); flex: 1; min-width: 0; }
+  .dev-console-line[data-level="TRACE"] { border-left-color: var(--panel-border); opacity: 0.7; }
+  .dev-console-line[data-level="TRACE"] .dev-console-line-level { color: var(--text-dim); }
+  .dev-console-line[data-level="DEBUG"] { border-left-color: var(--text-dim); }
+  .dev-console-line[data-level="DEBUG"] .dev-console-line-level { color: var(--text-dim); }
+  .dev-console-line[data-level="INFO"] { border-left-color: var(--accent); }
+  .dev-console-line[data-level="INFO"] .dev-console-line-level { color: var(--accent); }
+  .dev-console-line[data-level="WARN"] { border-left-color: var(--warn); background: var(--warn-dim); }
+  .dev-console-line[data-level="WARN"] .dev-console-line-level { color: var(--warn); }
+  .dev-console-line[data-level="ERROR"] { border-left-color: var(--err); background: var(--err-dim); }
+  .dev-console-line[data-level="ERROR"] .dev-console-line-level,
+  .dev-console-line[data-level="ERROR"] .dev-console-line-text { color: var(--err); }
+  .dev-console-empty { color: var(--text-dim); text-align: center; padding: 12px; }
 
   .toast-stack {
     position: fixed;
@@ -445,15 +567,24 @@
     max-width: 360px;
   }
   .toast {
-    background: var(--err-dim);
-    color: var(--err);
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--panel-border);
+    border-left: 3px solid var(--accent);
     border-radius: 8px;
     padding: 10px 12px;
     font-size: 13px;
     display: flex;
     gap: 10px;
     align-items: flex-start;
-    box-shadow: 0 4px 18px rgba(0,0,0,0.25);
+    box-shadow: var(--shadow);
+  }
+  .toast.success { border-left-color: var(--ok); }
+  .toast.error {
+    background: var(--err-dim);
+    border-color: var(--err-dim);
+    border-left-color: var(--err);
+    color: var(--err);
   }
   .toast button {
     background: none;
@@ -487,6 +618,131 @@
   }
   .flow-card h3 { margin: 0; font-size: 13px; }
   .flow-card p { margin: 0; color: var(--text-dim); font-size: 12.5px; }
+
+  /* ---- native screen share (Stream panel): state line under the buttons ---- */
+  .share-status { font-size: 12px; color: var(--text-dim); font-family: var(--mono); }
+  .share-status.on { color: var(--ok); }
+
+  /* ---- topology card (Stream panel): node-link graph (topology.status),
+     with the cascade role badge / source line merged into its header ---- */
+  .cascade-card {
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-width: 0;   /* same reason as .panel: never let the 620px graph min-width propagate up */
+    transition: border-color var(--dur-fast) var(--ease-out);
+  }
+  /* Where the single #topology-card currently lives (Overview or Stream).
+     A flex item of .panel, so it needs the same min-width: 0 escape hatch
+     as .panel itself -- otherwise the SVG's min-width bubbles up and the
+     whole panel overflows a phone viewport (measured: 696px panel on a
+     390px screen before this rule). */
+  .topology-slot { min-width: 0; }
+  .cascade-card-head { display: flex; align-items: center; gap: 10px; }
+  .cascade-card-head h3 { margin: 0; font-size: 13.5px; flex: 1; }
+  .cascade-source { font-size: 12.5px; color: var(--text-dim); }
+  .topology-graph-wrap {
+    overflow-x: auto;
+    min-width: 0;
+    max-width: 100%;
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    background: var(--bg-alt);
+    padding: 4px;
+  }
+  .topology-svg { display: block; min-width: 620px; width: 100%; height: auto; }
+  .topology-node-box {
+    fill: var(--panel);
+    stroke: var(--panel-border);
+    stroke-width: 1.4;
+    transition: stroke var(--dur-fast) var(--ease-out);
+  }
+  .topology-node-box.kind-self { stroke: var(--accent); fill: var(--accent-dim); }
+  .topology-node-box.kind-leader { stroke: var(--warn); }
+  .topology-node-box.kind-publisher { stroke: var(--ok); }
+  .topology-node-box.kind-follower { stroke: var(--accent); }
+  .topology-node-box.kind-viewers { stroke-dasharray: 3 2; }
+  .topology-node-label { fill: var(--text); font: 600 11.5px var(--sans); }
+  .topology-node-sub { fill: var(--text-faint); font: 700 9.5px var(--mono); }
+  .topology-edge { stroke: var(--text-faint); stroke-width: 1.3; fill: none; }
+  .topology-edge.dashed { stroke-dasharray: 4 3; }
+  /* An edge that is actually carrying media right now (per stream.status's
+     flow ages, not mere connectivity): green "marching ants". The color
+     shift alone keeps flowing distinguishable from idle when the animation
+     is disabled by prefers-reduced-motion. */
+  .topology-edge.flowing {
+    stroke: var(--ok);
+    stroke-width: 1.6;
+    stroke-dasharray: 6 4;
+    animation: topology-flow 0.8s linear infinite;
+  }
+  @keyframes topology-flow { to { stroke-dashoffset: -10; } }
+  .topology-edge-arrowhead { fill: var(--text-faint); }
+  .topology-edge-label {
+    fill: var(--text-dim);
+    font: 600 9.5px var(--sans);
+    paint-order: stroke;
+    stroke: var(--bg-alt);
+    stroke-width: 4px;
+  }
+  .topology-dot { stroke: var(--panel); stroke-width: 1px; }
+  .topology-dot.state-connected { fill: var(--ok); }
+  .topology-dot.state-connecting { fill: var(--warn); }
+  .topology-dot.state-down { fill: var(--err); }
+  .topology-empty { padding: 20px; text-align: center; color: var(--text-faint); font-size: 12.5px; }
+  .topology-legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 11px; color: var(--text-dim); margin: 8px 0 0; }
+  .topology-legend-item { display: inline-flex; align-items: center; gap: 5px; }
+  .topology-legend-dot { width: 9px; height: 9px; border-radius: 3px; display: inline-block; border: 1.4px solid var(--panel-border); flex: none; }
+  .topology-legend-dot.kind-self { border-color: var(--accent); background: var(--accent-dim); }
+  .topology-legend-dot.kind-leader { border-color: var(--warn); background: var(--panel); }
+  .topology-legend-dot.kind-publisher { border-color: var(--ok); background: var(--panel); }
+  .topology-legend-dot.kind-follower { border-color: var(--accent); background: var(--panel); }
+  .topology-legend-dot.kind-viewers { border-color: var(--text-faint); background: var(--panel); border-style: dashed; }
+  /* Legend swatches for edge states: a short line sample, dashed+animated
+     for "media flowing", plain for "idle". */
+  .topology-legend-line { width: 20px; height: 0; border-top: 2px solid var(--text-faint); display: inline-block; flex: none; }
+  .topology-legend-line.flowing {
+    border-top: none;
+    height: 2px;
+    background: repeating-linear-gradient(90deg, var(--ok) 0 6px, transparent 6px 10px);
+    animation: topology-flow-legend 0.8s linear infinite;
+  }
+  @keyframes topology-flow-legend { to { background-position: 10px 0; } }
+  @media (prefers-reduced-motion: reduce) {
+    .topology-edge.flowing, .topology-legend-line.flowing { animation: none; }
+  }
+  .topology-rooms { font-size: 12px; color: var(--text-dim); margin-top: 8px; }
+  .topology-rooms .mono { color: var(--text); }
+
+  /* ---- per-module topology mini-strips (Mailbox / AI / Store) ----
+     One compact row: the module's room id, connection-state dots for the
+     process-wide peer set (per-room membership isn't observable -- the
+     dots' tooltip says so), and a link to the full graph on Overview. */
+  .topo-strip {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px 12px;
+    padding: 7px 10px;
+    margin: 0 0 10px;
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    background: var(--bg-alt);
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  .topo-strip .mono { color: var(--text); word-break: break-all; }
+  .topo-strip-label { color: var(--text-faint); font-weight: 600; }
+  .topo-strip-note { color: var(--text-faint); }
+  .topo-strip-peers { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+  .topo-strip-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }
+  .topo-strip-dot.state-connected { background: var(--ok); }
+  .topo-strip-dot.state-connecting { background: var(--warn); }
+  .topo-strip-dot.state-down { background: var(--err); }
+  .topo-strip a { color: var(--accent); margin-left: auto; white-space: nowrap; }
 
   .info-hint {
     display: flex;
@@ -527,6 +783,64 @@
     flex: 1;
     min-width: 160px;
   }
+
+  /* ---- in-panel settings drawer (relocated settings sections) ---------- */
+  .settings-drawer {
+    margin-top: 12px;
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .settings-drawer > summary {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+    list-style: none;
+    color: var(--text-dim);
+    transition: color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out);
+  }
+  .settings-drawer > summary::-webkit-details-marker { display: none; }
+  .settings-drawer > summary:hover { color: var(--accent); background: var(--bg-alt); }
+  .settings-drawer > summary .gear { width: 14px; height: 14px; stroke-width: 2; flex: none; }
+  .settings-drawer[open] > summary { border-bottom: 1px solid var(--panel-border); }
+  .drawer-chevron {
+    margin-left: auto;
+    flex: none;
+    font-size: 10px;
+    line-height: 1;
+    color: var(--text-faint);
+    transition: transform var(--dur-fast) var(--ease-out);
+  }
+  .drawer-chevron::after { content: "\25be"; }
+  .settings-drawer[open] > summary .drawer-chevron { transform: rotate(-180deg); }
+  .settings-drawer-body { padding: 4px 14px 12px; }
+
+  /* ---- topology card fold (collapsible body, reuses .drawer-chevron) --- */
+  /* .cascade-card's own flex/gap only had one child once the body moved
+     inside <details>; recreate the same column + 10px gap on the fold
+     itself so the open card looks identical to the pre-fold layout. */
+  .topology-fold { display: flex; flex-direction: column; gap: 10px; }
+  .topology-fold > summary { cursor: pointer; list-style: none; }
+  .topology-fold > summary::-webkit-details-marker { display: none; }
+  .topology-fold[open] > summary .drawer-chevron { transform: rotate(-180deg); }
+  .topology-fold > summary:hover h3 { color: var(--accent); }
+  .topology-context { font-size: 12px; color: var(--text-dim); word-break: break-all; }
+
+  .settings-advanced { margin-top: 8px; }
+  .settings-advanced > summary {
+    font-size: 12px;
+    color: var(--text-faint);
+    cursor: pointer;
+    list-style: none;
+    padding: 4px 0;
+  }
+  .settings-advanced > summary::-webkit-details-marker { display: none; }
+  .settings-advanced > summary:hover { color: var(--accent); }
+
   .toggle-switch { position: relative; display: inline-block; width: 36px; height: 20px; flex: none; }
   .toggle-switch input { opacity: 0; width: 0; height: 0; position: absolute; }
   .toggle-switch .slider {
@@ -638,10 +952,18 @@
   .url-callout:hover { transform: translateY(-1px); box-shadow: 0 6px 18px var(--accent-dim); }
   .flow-card { transition: border-color var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out); }
   .flow-card:hover { border-color: var(--accent); transform: translateY(-1px); }
+  .cascade-card:hover { border-color: var(--accent); }
 
   /* ---- responsive: sidebar collapses to a scrollable top rail ---------- */
   @media (max-width: 720px) {
-    .shell { flex-direction: column; }
+    /* Column layout on phones. align-items must flip from the desktop
+       row's flex-start to stretch: a non-stretching column flex item
+       shrink-to-fits its content's min-content width, so <main> would be
+       floored at the topology SVG's min-width (measured: 666px on a 390px
+       screen) and drag the whole page into horizontal overflow -- stretch
+       plus main's existing min-width: 0 pins it to the viewport and lets
+       the graph's own overflow-x wrapper do the scrolling. */
+    .shell { flex-direction: column; align-items: stretch; }
     .sidenav {
       position: sticky;
       top: 57px;
@@ -659,6 +981,14 @@
     .sidenav a.active::before { display: none; }
     main { padding: 16px 14px 40px; }
     .panel { padding: 18px 16px; }
+    /* Topology graph on a phone: the wrap scrolls horizontally (the SVG
+       keeps a readable min-width instead of shrinking its text into
+       illegibility), with a slightly smaller floor so a ~390px screen pans
+       less. Momentum scrolling for touch. */
+    .topology-svg { min-width: 560px; }
+    .topology-graph-wrap { -webkit-overflow-scrolling: touch; }
+    .topo-strip { font-size: 11.5px; }
+    .topo-strip a { margin-left: 0; }   /* wrap under the peers row instead of forcing width */
   }
 
   /* ---- respect reduced-motion: keep it calm, kill the movement --------- */
@@ -711,6 +1041,7 @@
     <a href="#panel-mailbox"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.5 5h13l3.5 7v7a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-7z"/></svg><span data-i18n="nav.mailbox">Mailbox</span></a>
     <a href="#panel-store"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.7 4 3 9 3s9-1.3 9-3V5"/><path d="M3 12c0 1.7 4 3 9 3s9-1.3 9-3"/></svg><span data-i18n="nav.store">Store</span></a>
     <a href="#panel-profile"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/></svg><span data-i18n="nav.profile">Profile</span></a>
+    <a href="#panel-update"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m8 11 4 4 4-4"/><path d="M4 17v2a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-2"/></svg><span data-i18n="nav.update">Updates</span></a>
     <a href="#panel-settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg><span data-i18n="nav.settings">Settings</span></a>
   </nav>
 
@@ -727,8 +1058,12 @@
     </h2>
     <dl class="kv" id="overview-kv"></dl>
     <div class="row">
+      <button id="btn-restart-daemon" data-i18n="overview.restartDaemon">Restart daemon</button>
       <button id="btn-stop-daemon" class="danger" data-i18n="overview.stopDaemon">Stop daemon</button>
     </div>
+    <!-- The one topology card (#topology-card) is re-parented into whichever
+         of these slots belongs to the active panel; see placeTopologyCard(). -->
+    <div class="topology-slot" id="topology-slot-overview"></div>
   </section>
 
   <section class="panel" id="panel-stream">
@@ -756,6 +1091,17 @@
         <div class="info-hint neutral" id="relay-room-hint" hidden>
           <span data-i18n="stream.roomHint.prefix">Type a room id above, or set a default relay room in </span><a href="#panel-settings" id="relay-room-hint-link" data-i18n="stream.roomHint.link">Settings</a><span data-i18n="stream.roomHint.suffix">.</span>
         </div>
+        <p class="muted" style="font-size: 11.5px; margin: 0;" data-i18n="stream.relayCascadeHint">Multiple viewers? Each runs mistl stream relay in the same room &mdash; a leader is elected automatically and the sharer only uploads once.</p>
+      </div>
+      <div class="flow-card">
+        <h3 data-i18n="stream.share.title">Share screen to the room</h3>
+        <p data-i18n="stream.share.desc">The daemon captures this PC&#39;s screen and publishes it into the room through mistlib &mdash; no tc-chat client needed.</p>
+        <p class="muted" style="font-size: 11.5px; margin: 0;" data-i18n="stream.share.monitorNote">Captures the primary monitor (monitor selection may come later); audio is not shared yet.</p>
+        <div class="row">
+          <button id="btn-share-start" class="primary" data-i18n="stream.share.startBtn">Start sharing</button>
+          <button id="btn-share-stop" class="danger" data-i18n="stream.share.stopBtn" hidden>Stop sharing</button>
+        </div>
+        <div class="share-status" id="share-status"></div>
       </div>
     </div>
     <div class="url-callout" id="stream-url-callout" hidden data-i18n-title="common.clickToCopy" title="Click to copy">
@@ -764,15 +1110,53 @@
     </div>
     <div class="info-hint" id="stream-vrchat-hint" hidden></div>
     <dl class="kv" id="stream-kv"></dl>
+    <div class="info-hint neutral" id="cascade-off-note" hidden>
+      <span data-i18n="stream.cascade.offNote">Cascade off ([stream] cascade = false)</span>
+    </div>
+    <div class="topology-slot" id="topology-slot-stream">
+      <div class="cascade-card" id="topology-card">
+        <details class="topology-fold" id="topology-fold" open>
+          <summary class="cascade-card-head">
+            <h3 data-i18n="topology.title">Topology</h3>
+            <span class="badge cascade-role-badge" id="cascade-role-badge" hidden></span>
+            <span class="drawer-chevron" aria-hidden="true"></span>
+          </summary>
+          <p class="muted" style="font-size: 12.5px; margin: 0;" data-i18n="topology.desc">Who this node is connected to and how, from what mistlib and the relay/cascade control plane can actually observe.</p>
+          <div class="topology-context" id="topology-context" hidden></div>
+          <div class="topology-graph-wrap">
+            <svg id="topology-svg" class="topology-svg" role="img" viewBox="0 0 640 200"></svg>
+          </div>
+          <div class="cascade-source" id="cascade-source" hidden></div>
+          <div class="topology-legend" id="topology-legend"></div>
+          <dl class="kv" id="topology-kv"></dl>
+          <div class="topology-rooms" id="topology-rooms"></div>
+        </details>
+      </div>
+    </div>
     <div class="row">
       <button id="btn-stream-stop" class="danger" data-i18n="stream.stopBtn">Stop</button>
     </div>
+    <details class="settings-drawer" id="settings-drawer-stream">
+      <summary>
+        <svg class="gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg>
+        <span data-i18n="settings.drawer.stream">Stream settings</span>
+        <span class="drawer-chevron" aria-hidden="true"></span>
+      </summary>
+      <div class="settings-drawer-body" id="settings-drawer-body-stream"></div>
+    </details>
   </section>
 
   <section class="panel panel-span2" id="panel-ai">
     <h2><span data-i18n="ai.title">AI</span> <span class="spacer"></span>
       <button data-role="refresh" data-target="ai" data-i18n="common.refresh">Refresh</button>
     </h2>
+    <div class="topo-strip" id="topo-strip-ai">
+      <span class="topo-strip-label" data-i18n="topoStrip.room">room</span>
+      <span class="mono" data-role="room">&mdash;</span>
+      <span class="topo-strip-note" data-role="note" hidden></span>
+      <span class="topo-strip-peers" data-role="peers"></span>
+      <a href="#topology-card" data-i18n="topoStrip.viewFull">View full topology</a>
+    </div>
     <div id="ai-hints"></div>
     <dl class="kv" id="ai-kv"></dl>
     <div class="row">
@@ -797,6 +1181,15 @@
       </div>
       <button type="submit" class="primary" id="btn-chat-send" data-i18n="chat.send">Send</button>
     </form>
+    <div class="topology-slot" id="topology-slot-ai"></div>
+    <details class="settings-drawer" id="settings-drawer-ai">
+      <summary>
+        <svg class="gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg>
+        <span data-i18n="settings.drawer.ai">AI settings</span>
+        <span class="drawer-chevron" aria-hidden="true"></span>
+      </summary>
+      <div class="settings-drawer-body" id="settings-drawer-body-ai"></div>
+    </details>
   </section>
 
   <section class="panel panel-span2" id="panel-mailbox">
@@ -804,6 +1197,13 @@
       <button id="btn-mailbox-fetch" data-i18n="mailbox.fetchBtn">Fetch my messages</button>
       <button data-role="refresh" data-target="mailbox-ls" data-i18n="mailbox.refreshHeld">Refresh held</button>
     </h2>
+    <div class="topo-strip" id="topo-strip-mailbox">
+      <span class="topo-strip-label" data-i18n="topoStrip.room">room</span>
+      <span class="mono" data-role="room">&mdash;</span>
+      <span class="topo-strip-note" data-role="note" hidden></span>
+      <span class="topo-strip-peers" data-role="peers"></span>
+      <a href="#topology-card" data-i18n="topoStrip.viewFull">View full topology</a>
+    </div>
     <div class="table-wrap">
       <table id="mailbox-held-table">
         <thead><tr>
@@ -840,12 +1240,26 @@
       </div>
       <button type="submit" class="primary" id="btn-mailbox-send" data-i18n="mailbox.send">Send</button>
     </form>
+    <div class="topology-slot" id="topology-slot-mailbox"></div>
+    <details class="settings-drawer" id="settings-drawer-mailbox">
+      <summary>
+        <svg class="gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg>
+        <span data-i18n="settings.drawer.mailbox">Mailbox settings</span>
+        <span class="drawer-chevron" aria-hidden="true"></span>
+      </summary>
+      <div class="settings-drawer-body" id="settings-drawer-body-mailbox"></div>
+    </details>
   </section>
 
   <section class="panel panel-span2" id="panel-store">
     <h2><span data-i18n="store.title">Store</span> <span class="spacer"></span>
       <button data-role="refresh" data-target="store" data-i18n="common.refresh">Refresh</button>
     </h2>
+    <div class="topo-strip" id="topo-strip-store">
+      <span class="topo-strip-label" data-i18n="topoStrip.room">room</span>
+      <span class="topo-strip-note" data-i18n="topoStrip.storeLocal">local content store &mdash; no room</span>
+      <a href="#topology-card" data-i18n="topoStrip.viewFull">View full topology</a>
+    </div>
     <div class="table-wrap">
       <table id="store-table">
         <thead><tr>
@@ -876,6 +1290,15 @@
         <button type="submit" class="primary" id="btn-store-put" data-i18n="store.addBtn">Add</button>
       </form>
     </details>
+    <div class="topology-slot" id="topology-slot-store"></div>
+    <details class="settings-drawer" id="settings-drawer-storage">
+      <summary>
+        <svg class="gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg>
+        <span data-i18n="settings.drawer.storage">Storage settings</span>
+        <span class="drawer-chevron" aria-hidden="true"></span>
+      </summary>
+      <div class="settings-drawer-body" id="settings-drawer-body-storage"></div>
+    </details>
   </section>
 
   <section class="panel" id="panel-profile">
@@ -903,15 +1326,72 @@
       </div>
       <button type="submit" class="primary" id="btn-profile-save" data-i18n="profile.save">Save</button>
     </form>
+    <details class="settings-drawer" id="settings-drawer-identity">
+      <summary>
+        <svg class="gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg>
+        <span data-i18n="settings.drawer.identity">Identity settings</span>
+        <span class="drawer-chevron" aria-hidden="true"></span>
+      </summary>
+      <div class="settings-drawer-body" id="settings-drawer-body-identity"></div>
+    </details>
+  </section>
+
+  <section class="panel" id="panel-update">
+    <h2><span data-i18n="update.title">Updates</span> <span class="spacer"></span>
+      <button data-role="refresh" data-target="update" data-i18n="common.refresh">Refresh</button>
+    </h2>
+    <dl class="kv" id="update-kv"></dl>
+    <div class="info-hint" id="update-available-hint" hidden></div>
+    <div class="row">
+      <button id="btn-update-check" class="primary" data-i18n="update.checkBtn">Check now</button>
+      <button id="btn-update-apply" class="primary" data-i18n="update.applyBtn" hidden>Update now</button>
+    </div>
+    <hr class="sep">
+    <div class="flow-grid">
+      <div class="flow-card">
+        <h3 data-i18n="update.installTitle">Install for your user</h3>
+        <p data-i18n="update.installDesc">Copies mistl to a fixed per-user location so updates and start-at-login work reliably. No admin needed.</p>
+        <div class="row">
+          <button id="btn-install" class="primary" data-i18n="update.installBtn">Install mistl</button>
+        </div>
+      </div>
+      <div class="flow-card">
+        <h3 data-i18n="update.autostartTitle">Start at login</h3>
+        <p data-i18n="update.autostartDesc">Launch the mistl daemon automatically when you sign in.</p>
+        <label class="checkline"><input type="checkbox" id="chk-autostart"> <span data-i18n="update.autostartLabel">Start mistl at login</span></label>
+      </div>
+    </div>
   </section>
 
   <section class="panel panel-span2" id="panel-settings">
     <h2><span data-i18n="settings.title">Settings</span> <span class="spacer"></span>
       <button data-role="refresh" data-target="settings" data-i18n="common.refresh">Refresh</button>
     </h2>
+    <div class="flow-card" id="dev-mode-card">
+      <h3 data-i18n="settings.developerTitle">Developer mode</h3>
+      <p data-i18n="settings.developerDesc">Shows this daemon's detailed debug logs in real time, docked at the bottom of the dashboard.</p>
+      <label class="checkline"><input type="checkbox" id="chk-dev-mode"> <span data-i18n="settings.developerLabel">Enable developer mode</span></label>
+    </div>
+    <p class="muted" style="font-size: 12px;" data-i18n="settings.movedNote">Stream, AI, Mailbox, Storage and Identity settings now live inside their own tabs.</p>
+    <hr class="sep">
     <div id="settings-body"></div>
   </section>
 </main>
+</div>
+
+<div class="dev-console" id="dev-console" hidden>
+  <div class="dev-console-header">
+    <strong data-i18n="devlog.title">Developer console</strong>
+    <span class="dev-console-count" id="dev-console-count">0</span>
+    <span class="spacer"></span>
+    <input type="text" id="dev-console-search" data-i18n-placeholder="devlog.searchPlaceholder" placeholder="Search logs">
+    <button type="button" id="dev-console-copy" data-i18n="devlog.copyAll" title="Copy all">Copy all</button>
+    <button type="button" id="dev-console-clear" data-i18n="devlog.clear">Clear</button>
+    <button type="button" id="dev-console-collapse" data-i18n-aria-label="devlog.collapse" aria-label="Collapse">&minus;</button>
+    <button type="button" id="dev-console-close" data-i18n-aria-label="common.close" aria-label="Close">&times;</button>
+  </div>
+  <div class="dev-console-levels" id="dev-console-levels"></div>
+  <div class="dev-console-body" id="dev-console-body"></div>
 </div>
 
 <div class="toast-stack" id="toast-stack"></div>
@@ -940,6 +1420,33 @@
       "nav.store": "Store",
       "nav.profile": "Profile",
       "nav.settings": "Settings",
+      "nav.update": "Updates",
+      "update.title": "Updates",
+      "update.current": "Current version",
+      "update.latest": "Latest release",
+      "update.target": "Platform",
+      "update.autoUpdate": "Auto-update",
+      "update.installed": "Installed",
+      "update.autostart": "Start at login",
+      "update.checkBtn": "Check now",
+      "update.applyBtn": "Update now",
+      "update.installTitle": "Install for your user",
+      "update.installDesc": "Copies mistl to a fixed per-user location so updates and start-at-login work reliably. No admin needed.",
+      "update.installBtn": "Install mistl",
+      "update.reinstallBtn": "Reinstall",
+      "update.autostartTitle": "Start at login",
+      "update.autostartDesc": "Launch the mistl daemon automatically when you sign in.",
+      "update.autostartLabel": "Start mistl at login",
+      "update.availMsg": "v{version} is available.",
+      "update.availNoAsset": "v{version} is available, but has no binary for this platform — download it from the releases page.",
+      "update.upToDate": "You’re on the latest version.",
+      "update.staged": "Update downloaded. It applies on the next daemon start.",
+      "update.installedToast": "mistl installed.",
+      "update.applyConfirm": "Download and install the latest version now?",
+      "update.on": "On",
+      "update.off": "Off",
+      "update.yes": "Yes",
+      "update.no": "No",
       "profileHint.text": "Set a display name so others can recognize you.",
       "profileHint.button": "Set display name",
       "common.dismiss": "Dismiss",
@@ -956,6 +1463,8 @@
       "overview.stopDaemon": "Stop daemon",
       "overview.stopConfirm": "Stop the mistl daemon? This will end all active sessions.",
       "overview.stopping": "Daemon is stopping.",
+      "overview.restartDaemon": "Restart daemon",
+      "overview.restarting": "Daemon is restarting; the dashboard will reconnect automatically.",
       "overview.status": "status",
       "overview.unreachable": "daemon unreachable",
       "overview.pid": "pid",
@@ -970,8 +1479,8 @@
       "stream.roomLabel": "tc-chat room id",
       "stream.roomPlaceholder": "room id (or set a default in Settings)",
       "stream.relayBtn": "Relay to VRChat",
-      "stream.roomHint.prefix": "Type a room id above, or set a default relay room in ",
-      "stream.roomHint.link": "Settings",
+      "stream.roomHint.prefix": "Type a room id above, or set a default in ",
+      "stream.roomHint.link": "Stream settings",
       "stream.roomHint.suffix": ".",
       "stream.urlLabel": "Paste into the VRChat video player",
       "stream.status": "status",
@@ -993,9 +1502,80 @@
       "stream.vrchatHint.prefix": "This URL only works in VRChat on this same PC. Playing on another PC or Quest?",
       "stream.vrchatHint.link": "Set the RTSP address to 0.0.0.0 in Settings",
       "stream.vrchatHint.suffix": " and restart the stream.",
+      "stream.relayCascadeHint": "Multiple viewers? Each runs mistl stream relay in the same room — a leader is elected automatically and the sharer only uploads once.",
+      "stream.share.title": "Share screen to the room",
+      "stream.share.desc": "The daemon captures this PC's screen and publishes it into the room through mistlib — no tc-chat client needed.",
+      "stream.share.monitorNote": "Captures the primary monitor (monitor selection may come later); audio is not shared yet.",
+      "stream.share.startBtn": "Start sharing",
+      "stream.share.stopBtn": "Stop sharing",
+      "stream.share.stateSharing": "sharing",
+      "stream.share.stateIdle": "idle",
+      "stream.share.started": "Screen share started.",
+      "stream.share.stopped": "Screen share stopped.",
+      "stream.cascade.role.leader": "LEADER",
+      "stream.cascade.role.follower": "FOLLOWER",
+      "stream.cascade.role.electing": "ELECTING…",
+      "stream.cascade.source.sharer": "Receiving from: sharer (you are the leader)",
+      "stream.cascade.source.leader": "Receiving from: leader {leader}",
+      "stream.cascade.source.waiting": "Waiting for a share…",
+      "stream.cascade.leader": "leader",
+      "stream.cascade.self": "this node",
+      "stream.cascade.relayPeers": "relay peers",
+      "stream.cascade.consensusPeers": "raft peers",
+      "stream.cascade.offNote": "Cascade off ([stream] cascade = false)",
+      "topology.title": "Topology",
+      "topology.desc": "Who this node is connected to and how, from what mistlib and the relay/cascade control plane can actually observe.",
+      "topology.node.self": "this node",
+      "topology.node.viewers": "VRChat viewers",
+      "topology.role.leader": "leader",
+      "topology.role.follower": "follower",
+      "topology.role.sibling": "cascade peer",
+      "topology.role.sharer": "sharer",
+      "topology.role.electing": "electing…",
+      "topology.state.connected": "connected",
+      "topology.state.connecting": "connecting",
+      "topology.state.reconnecting": "reconnecting",
+      "topology.state.failed": "failed",
+      "topology.state.disconnected": "disconnected",
+      "topology.state.unknown": "unknown",
+      "topology.edge.publishing": "publishing",
+      "topology.edge.leaderToYou": "cascade: leader",
+      "topology.edge.youToFollower": "cascade: follower",
+      "topology.edge.sibling": "cascade peer",
+      "topology.edge.viewers": "RTSP",
+      "topology.edge.peer": "connected",
+      "topology.legend.self": "This node",
+      "topology.legend.publisher": "Publisher / sharer",
+      "topology.legend.leader": "Cascade leader",
+      "topology.legend.follower": "Cascade follower",
+      "topology.legend.viewers": "VRChat viewers over RTSP (count only)",
+      "topology.legend.flowing": "media flowing",
+      "topology.legend.idle": "idle (connected, no media)",
+      "topology.flow.flowing": "flowing",
+      "topology.flow.ingestOnly": "receiving (no client)",
+      "topology.flow.idle": "idle",
+      "topology.kv.videoFlow": "video",
+      "topology.kv.audioFlow": "audio",
+      "topology.kv.status": "status",
+      "topology.kv.unknown": "unavailable (daemon unreachable)",
+      "topology.kv.peers": "connected peers",
+      "topology.kv.rooms": "joined rooms",
+      "topology.kv.cascade": "cascade",
+      "topology.kv.cascadeOff": "off",
+      "topology.rooms": "Joined rooms",
+      "topology.noRooms": "No rooms joined yet.",
+      "topology.aria": "Topology: {peers} connected peers across {rooms} joined rooms",
+      "topology.contextRoom": "This tab's room",
+      "topology.contextNotJoined": "(not joined yet)",
+      "topoStrip.room": "room",
+      "topoStrip.notJoined": "not joined yet",
+      "topoStrip.peersCount": "{count} peers",
+      "topoStrip.processWide": "Peers shown are process-wide (all joined rooms) — mistlib doesn't expose per-room membership.",
+      "topoStrip.storeLocal": "local content store — no room",
+      "topoStrip.viewFull": "View topology",
       "ai.title": "AI",
       "ai.upstreamHint": "Set an OpenAI-compatible upstream in Settings to provide inference.",
-      "ai.openSettings": "Open Settings",
+      "ai.openSettings": "Open AI settings",
       "ai.readyHint": "Upstream is configured. Start providing to answer AI requests from the network.",
       "ai.endpointLabel": "OpenAI-compatible endpoint",
       "ai.statusLabel": "status",
@@ -1087,7 +1667,18 @@
       "profile.avatarRemoved": "Profile image removed.",
       "profile.avatarBadType": "Choose a PNG, JPEG or WebP image.",
       "settings.title": "Settings",
+      "settings.developerTitle": "Developer mode",
+      "settings.developerDesc": "Shows this daemon's detailed debug logs in real time, docked at the bottom of the dashboard.",
+      "settings.developerLabel": "Enable developer mode",
+      "devlog.title": "Developer console",
+      "devlog.searchPlaceholder": "Search logs",
+      "devlog.copyAll": "Copy all",
+      "devlog.clear": "Clear",
+      "devlog.collapse": "Collapse",
+      "devlog.expand": "Expand",
+      "devlog.empty": "No log entries yet.",
       "settings.restartBadge": "restart the daemon to apply",
+      "settings.restartBadgeTitle": "Click to restart the daemon now",
       "settings.savedRestart": "Saved. Restart the daemon to apply.",
       "settings.savedNextStart": "Saved. Applies next time this service starts.",
       "settings.enterGib": "Enter a number of GiB for {label}.",
@@ -1097,6 +1688,13 @@
       "settings.passwordSetPlaceholder": "(set) leave blank to keep",
       "settings.passwordNotSet": "not set",
       "settings.optionDefault": "(default)",
+      "settings.drawer.stream": "Stream settings",
+      "settings.drawer.ai": "AI settings",
+      "settings.drawer.mailbox": "Mailbox settings",
+      "settings.drawer.storage": "Storage settings",
+      "settings.drawer.identity": "Identity settings",
+      "settings.advanced": "Advanced",
+      "settings.movedNote": "Stream, AI, Mailbox, Storage and Identity settings now live inside their own tabs.",
       "settings.section.identity": "Identity",
       "settings.section.storage": "Storage",
       "settings.section.stream": "Stream",
@@ -1159,6 +1757,33 @@
       "nav.store": "ストア",
       "nav.profile": "プロフィール",
       "nav.settings": "設定",
+      "nav.update": "更新",
+      "update.title": "更新",
+      "update.current": "現在のバージョン",
+      "update.latest": "最新リリース",
+      "update.target": "プラットフォーム",
+      "update.autoUpdate": "自動更新",
+      "update.installed": "インストール済み",
+      "update.autostart": "ログイン時に起動",
+      "update.checkBtn": "今すぐ確認",
+      "update.applyBtn": "今すぐ更新",
+      "update.installTitle": "ユーザーにインストール",
+      "update.installDesc": "mistl を固定のユーザー専用フォルダーにコピーし、更新とログイン時の起動を確実に動作させます。管理者権限は不要です。",
+      "update.installBtn": "mistl をインストール",
+      "update.reinstallBtn": "再インストール",
+      "update.autostartTitle": "ログイン時に起動",
+      "update.autostartDesc": "サインイン時に mistl デーモンを自動的に起動します。",
+      "update.autostartLabel": "ログイン時に mistl を起動",
+      "update.availMsg": "v{version} が利用可能です。",
+      "update.availNoAsset": "v{version} が利用可能ですが、このプラットフォーム向けのバイナリがありません。リリースページからダウンロードしてください。",
+      "update.upToDate": "最新バージョンです。",
+      "update.staged": "更新をダウンロードしました。次回のデーモン起動時に適用されます。",
+      "update.installedToast": "mistl をインストールしました。",
+      "update.applyConfirm": "最新バージョンを今すぐダウンロードしてインストールしますか？",
+      "update.on": "オン",
+      "update.off": "オフ",
+      "update.yes": "はい",
+      "update.no": "いいえ",
       "profileHint.text": "表示名を設定すると、他の人があなたを識別しやすくなります。",
       "profileHint.button": "表示名を設定",
       "common.dismiss": "閉じる",
@@ -1175,6 +1800,8 @@
       "overview.stopDaemon": "デーモンを停止",
       "overview.stopConfirm": "mistlデーモンを停止しますか?すべてのアクティブなセッションが終了します。",
       "overview.stopping": "デーモンを停止しています。",
+      "overview.restartDaemon": "デーモンを再起動",
+      "overview.restarting": "デーモンを再起動しています。ダッシュボードは自動的に再接続します。",
       "overview.status": "状態",
       "overview.unreachable": "デーモンに接続できません",
       "overview.pid": "pid",
@@ -1190,8 +1817,8 @@
       "stream.roomPlaceholder": "ルームID (設定でデフォルトを指定できます)",
       "stream.relayBtn": "VRChatへ中継",
       "stream.roomHint.prefix": "上にルームIDを入力するか、",
-      "stream.roomHint.link": "設定",
-      "stream.roomHint.suffix": "でデフォルトの中継ルームを指定してください。",
+      "stream.roomHint.link": "ストリーム設定",
+      "stream.roomHint.suffix": "でデフォルトを指定できます。",
       "stream.urlLabel": "貼り付け用URL (VRChatの動画プレイヤーへ)",
       "stream.status": "状態",
       "stream.statusUnknown": "不明",
@@ -1212,9 +1839,80 @@
       "stream.vrchatHint.prefix": "このURLは同じPC上のVRChatでのみ機能します。別のPCやQuestで再生する場合は、",
       "stream.vrchatHint.link": "設定でRTSPアドレスを0.0.0.0に変更",
       "stream.vrchatHint.suffix": "し、ストリームを再起動してください。",
+      "stream.relayCascadeHint": "視聴者が複数いる場合は、同じルームで各自が mistl stream relay を実行してください。リーダーが自動的に選出され、共有元は一度のアップロードで済みます。",
+      "stream.share.title": "画面をルームへ共有",
+      "stream.share.desc": "デーモンがこのPCの画面をキャプチャし、mistlib 経由でルームに配信します — tc-chat クライアントは不要です。",
+      "stream.share.monitorNote": "プライマリモニターをキャプチャします（モニター選択は今後対応予定）。音声の共有はまだ対応していません。",
+      "stream.share.startBtn": "共有を開始",
+      "stream.share.stopBtn": "共有を停止",
+      "stream.share.stateSharing": "共有中",
+      "stream.share.stateIdle": "待機中",
+      "stream.share.started": "画面共有を開始しました。",
+      "stream.share.stopped": "画面共有を停止しました。",
+      "stream.cascade.role.leader": "リーダー",
+      "stream.cascade.role.follower": "フォロワー",
+      "stream.cascade.role.electing": "選出中…",
+      "stream.cascade.source.sharer": "受信元: 共有元 (あなたがリーダーです)",
+      "stream.cascade.source.leader": "受信元: リーダー {leader}",
+      "stream.cascade.source.waiting": "共有を待っています…",
+      "stream.cascade.leader": "リーダー",
+      "stream.cascade.self": "このノード",
+      "stream.cascade.relayPeers": "中継ピア数",
+      "stream.cascade.consensusPeers": "Raftピア数",
+      "stream.cascade.offNote": "カスケードはオフです ([stream] cascade = false)",
+      "topology.title": "トポロジー",
+      "topology.desc": "このノードが誰と、どのようにつながっているか — mistlibと中継/カスケード制御プレーンから実際に観測できる範囲で表示します。",
+      "topology.node.self": "このノード",
+      "topology.node.viewers": "VRChat視聴者",
+      "topology.role.leader": "リーダー",
+      "topology.role.follower": "フォロワー",
+      "topology.role.sibling": "カスケードピア",
+      "topology.role.sharer": "共有元",
+      "topology.role.electing": "選出中…",
+      "topology.state.connected": "接続中",
+      "topology.state.connecting": "接続処理中",
+      "topology.state.reconnecting": "再接続中",
+      "topology.state.failed": "失敗",
+      "topology.state.disconnected": "切断",
+      "topology.state.unknown": "不明",
+      "topology.edge.publishing": "配信中",
+      "topology.edge.leaderToYou": "カスケード: リーダー",
+      "topology.edge.youToFollower": "カスケード: フォロワー",
+      "topology.edge.sibling": "カスケードピア",
+      "topology.edge.viewers": "RTSP",
+      "topology.edge.peer": "接続中",
+      "topology.legend.self": "このノード",
+      "topology.legend.publisher": "配信元 / 共有元",
+      "topology.legend.leader": "カスケードリーダー",
+      "topology.legend.follower": "カスケードフォロワー",
+      "topology.legend.viewers": "VRChat視聴者・RTSP経由（件数のみ）",
+      "topology.legend.flowing": "メディア転送中",
+      "topology.legend.idle": "アイドル（接続中・メディアなし）",
+      "topology.flow.flowing": "転送中",
+      "topology.flow.ingestOnly": "受信中（クライアント未受信）",
+      "topology.flow.idle": "アイドル",
+      "topology.kv.videoFlow": "映像",
+      "topology.kv.audioFlow": "音声",
+      "topology.kv.status": "状態",
+      "topology.kv.unknown": "取得不可（デーモンに接続できません）",
+      "topology.kv.peers": "接続中のピア数",
+      "topology.kv.rooms": "参加中のルーム数",
+      "topology.kv.cascade": "カスケード",
+      "topology.kv.cascadeOff": "オフ",
+      "topology.rooms": "参加中のルーム",
+      "topology.noRooms": "まだルームに参加していません。",
+      "topology.aria": "トポロジー: {rooms} ルームで {peers} 件のピアと接続中",
+      "topology.contextRoom": "このタブのルーム",
+      "topology.contextNotJoined": "（未参加）",
+      "topoStrip.room": "ルーム",
+      "topoStrip.notJoined": "未参加",
+      "topoStrip.peersCount": "ピア {count} 件",
+      "topoStrip.processWide": "表示されるピアはプロセス全体（参加中の全ルーム）の集計です — mistlib はルーム別の内訳を公開していません。",
+      "topoStrip.storeLocal": "ローカルのコンテンツストア — ルームなし",
+      "topoStrip.viewFull": "トポロジーを表示",
       "ai.title": "AI",
       "ai.upstreamHint": "推論を提供するには、設定でOpenAI互換のアップストリームを指定してください。",
-      "ai.openSettings": "設定を開く",
+      "ai.openSettings": "AI設定を開く",
       "ai.readyHint": "アップストリームが設定されています。「提供を開始」すると、ネットワークからのAIリクエストに応答できます。",
       "ai.endpointLabel": "OpenAI互換エンドポイント",
       "ai.statusLabel": "状態",
@@ -1306,7 +2004,18 @@
       "profile.avatarRemoved": "プロフィール画像を削除しました。",
       "profile.avatarBadType": "PNG、JPEG、またはWebP画像を選択してください。",
       "settings.title": "設定",
+      "settings.developerTitle": "開発者モード",
+      "settings.developerDesc": "このデーモンの詳細なデバッグログを、ダッシュボード下部にリアルタイムで表示します。",
+      "settings.developerLabel": "開発者モードを有効にする",
+      "devlog.title": "開発者コンソール",
+      "devlog.searchPlaceholder": "ログを検索",
+      "devlog.copyAll": "すべてコピー",
+      "devlog.clear": "クリア",
+      "devlog.collapse": "折りたたむ",
+      "devlog.expand": "開く",
+      "devlog.empty": "ログはまだありません。",
       "settings.restartBadge": "適用にはデーモンの再起動が必要",
+      "settings.restartBadgeTitle": "クリックして今すぐデーモンを再起動",
       "settings.savedRestart": "保存しました。適用にはデーモンの再起動が必要です。",
       "settings.savedNextStart": "保存しました。次回起動時に適用されます。",
       "settings.enterGib": "{label} にはGiB単位の数値を入力してください。",
@@ -1316,6 +2025,13 @@
       "settings.passwordSetPlaceholder": "(設定済み) 変更しない場合は空欄のまま",
       "settings.passwordNotSet": "未設定",
       "settings.optionDefault": "(デフォルト)",
+      "settings.drawer.stream": "ストリーム設定",
+      "settings.drawer.ai": "AI設定",
+      "settings.drawer.mailbox": "メールボックス設定",
+      "settings.drawer.storage": "ストレージ設定",
+      "settings.drawer.identity": "アイデンティティ設定",
+      "settings.advanced": "詳細設定",
+      "settings.movedNote": "ストリーム・AI・メールボックス・ストレージ・アイデンティティの設定は、各タブ内に移動しました。",
       "settings.section.identity": "本人情報",
       "settings.section.storage": "ストレージ",
       "settings.section.stream": "ストリーム",
@@ -1378,6 +2094,33 @@
       "nav.store": "存储",
       "nav.profile": "个人资料",
       "nav.settings": "设置",
+      "nav.update": "更新",
+      "update.title": "更新",
+      "update.current": "当前版本",
+      "update.latest": "最新版本",
+      "update.target": "平台",
+      "update.autoUpdate": "自动更新",
+      "update.installed": "已安装",
+      "update.autostart": "登录时启动",
+      "update.checkBtn": "立即检查",
+      "update.applyBtn": "立即更新",
+      "update.installTitle": "为当前用户安装",
+      "update.installDesc": "将 mistl 复制到固定的用户目录，使更新和开机自启动可靠运行。无需管理员权限。",
+      "update.installBtn": "安装 mistl",
+      "update.reinstallBtn": "重新安装",
+      "update.autostartTitle": "登录时启动",
+      "update.autostartDesc": "登录时自动启动 mistl 守护进程。",
+      "update.autostartLabel": "登录时启动 mistl",
+      "update.availMsg": "有可用版本 v{version}。",
+      "update.availNoAsset": "有可用版本 v{version}，但没有适用于此平台的二进制文件——请从发布页面下载。",
+      "update.upToDate": "已是最新版本。",
+      "update.staged": "更新已下载，将在下次守护进程启动时生效。",
+      "update.installedToast": "已安装 mistl。",
+      "update.applyConfirm": "现在下载并安装最新版本？",
+      "update.on": "开",
+      "update.off": "关",
+      "update.yes": "是",
+      "update.no": "否",
       "profileHint.text": "设置显示名称，方便他人识别你。",
       "profileHint.button": "设置显示名称",
       "common.dismiss": "关闭",
@@ -1394,6 +2137,8 @@
       "overview.stopDaemon": "停止守护进程",
       "overview.stopConfirm": "确定要停止 mistl 守护进程吗？这将结束所有活动会话。",
       "overview.stopping": "守护进程正在停止。",
+      "overview.restartDaemon": "重启守护进程",
+      "overview.restarting": "守护进程正在重启，控制台将自动重新连接。",
       "overview.status": "状态",
       "overview.unreachable": "无法连接到守护进程",
       "overview.pid": "pid",
@@ -1409,8 +2154,8 @@
       "stream.roomPlaceholder": "房间 ID (或在设置中指定默认值)",
       "stream.relayBtn": "中继到 VRChat",
       "stream.roomHint.prefix": "在上方输入房间 ID，或在",
-      "stream.roomHint.link": "设置",
-      "stream.roomHint.suffix": "中设置默认中继房间。",
+      "stream.roomHint.link": "串流设置",
+      "stream.roomHint.suffix": "中设置默认值。",
       "stream.urlLabel": "粘贴到 VRChat 视频播放器",
       "stream.status": "状态",
       "stream.statusUnknown": "未知",
@@ -1431,9 +2176,80 @@
       "stream.vrchatHint.prefix": "此 URL 仅在同一台电脑上的 VRChat 中有效。要在另一台电脑或 Quest 上播放？",
       "stream.vrchatHint.link": "在设置中将 RTSP 地址设为 0.0.0.0",
       "stream.vrchatHint.suffix": "，然后重新启动串流。",
+      "stream.relayCascadeHint": "有多个观众？在同一房间中，每个人运行 mistl stream relay，系统会自动选举主节点，共享源只需上传一次。",
+      "stream.share.title": "将屏幕共享到房间",
+      "stream.share.desc": "守护进程捕获本机屏幕，并通过 mistlib 发布到房间 — 无需 tc-chat 客户端。",
+      "stream.share.monitorNote": "捕获主显示器（显示器选择功能后续提供）；暂不支持共享音频。",
+      "stream.share.startBtn": "开始共享",
+      "stream.share.stopBtn": "停止共享",
+      "stream.share.stateSharing": "共享中",
+      "stream.share.stateIdle": "空闲",
+      "stream.share.started": "已开始屏幕共享。",
+      "stream.share.stopped": "已停止屏幕共享。",
+      "stream.cascade.role.leader": "主节点",
+      "stream.cascade.role.follower": "从节点",
+      "stream.cascade.role.electing": "选举中…",
+      "stream.cascade.source.sharer": "接收自：共享源（你是主节点）",
+      "stream.cascade.source.leader": "接收自：主节点 {leader}",
+      "stream.cascade.source.waiting": "正在等待共享…",
+      "stream.cascade.leader": "主节点",
+      "stream.cascade.self": "本节点",
+      "stream.cascade.relayPeers": "中继节点数",
+      "stream.cascade.consensusPeers": "Raft 节点数",
+      "stream.cascade.offNote": "级联已关闭 ([stream] cascade = false)",
+      "topology.title": "拓扑",
+      "topology.desc": "本节点当前与谁相连、如何相连 —— 仅展示 mistlib 与中继/级联控制平面实际能观测到的信息。",
+      "topology.node.self": "本节点",
+      "topology.node.viewers": "VRChat 观看者",
+      "topology.role.leader": "主节点",
+      "topology.role.follower": "从节点",
+      "topology.role.sibling": "级联节点",
+      "topology.role.sharer": "共享源",
+      "topology.role.electing": "选举中…",
+      "topology.state.connected": "已连接",
+      "topology.state.connecting": "连接中",
+      "topology.state.reconnecting": "重连中",
+      "topology.state.failed": "失败",
+      "topology.state.disconnected": "已断开",
+      "topology.state.unknown": "未知",
+      "topology.edge.publishing": "推流中",
+      "topology.edge.leaderToYou": "级联：主节点",
+      "topology.edge.youToFollower": "级联：从节点",
+      "topology.edge.sibling": "级联节点",
+      "topology.edge.viewers": "RTSP",
+      "topology.edge.peer": "已连接",
+      "topology.legend.self": "本节点",
+      "topology.legend.publisher": "推流源 / 共享源",
+      "topology.legend.leader": "级联主节点",
+      "topology.legend.follower": "级联从节点",
+      "topology.legend.viewers": "VRChat 观看者，经 RTSP（仅计数）",
+      "topology.legend.flowing": "媒体传输中",
+      "topology.legend.idle": "空闲（已连接，无媒体）",
+      "topology.flow.flowing": "传输中",
+      "topology.flow.ingestOnly": "接收中（无客户端）",
+      "topology.flow.idle": "空闲",
+      "topology.kv.videoFlow": "视频",
+      "topology.kv.audioFlow": "音频",
+      "topology.kv.status": "状态",
+      "topology.kv.unknown": "不可用（无法连接守护进程）",
+      "topology.kv.peers": "已连接的节点数",
+      "topology.kv.rooms": "已加入的房间数",
+      "topology.kv.cascade": "级联",
+      "topology.kv.cascadeOff": "关闭",
+      "topology.rooms": "已加入的房间",
+      "topology.noRooms": "尚未加入任何房间。",
+      "topology.aria": "拓扑：在 {rooms} 个房间中与 {peers} 个节点相连",
+      "topology.contextRoom": "此标签页的房间",
+      "topology.contextNotJoined": "（尚未加入）",
+      "topoStrip.room": "房间",
+      "topoStrip.notJoined": "尚未加入",
+      "topoStrip.peersCount": "{count} 个节点",
+      "topoStrip.processWide": "所示节点为进程级统计（所有已加入的房间）— mistlib 不提供按房间的成员列表。",
+      "topoStrip.storeLocal": "本地内容存储 — 无房间",
+      "topoStrip.viewFull": "查看拓扑",
       "ai.title": "AI",
       "ai.upstreamHint": "在设置中配置 OpenAI 兼容的上游服务以提供推理。",
-      "ai.openSettings": "打开设置",
+      "ai.openSettings": "打开 AI 设置",
       "ai.readyHint": "上游服务已配置。开始提供服务即可响应来自网络的 AI 请求。",
       "ai.endpointLabel": "OpenAI 兼容端点",
       "ai.statusLabel": "状态",
@@ -1525,7 +2341,18 @@
       "profile.avatarRemoved": "头像已移除。",
       "profile.avatarBadType": "请选择 PNG、JPEG 或 WebP 格式的图片。",
       "settings.title": "设置",
+      "settings.developerTitle": "开发者模式",
+      "settings.developerDesc": "实时显示该守护进程的详细调试日志，停靠在控制台底部。",
+      "settings.developerLabel": "启用开发者模式",
+      "devlog.title": "开发者控制台",
+      "devlog.searchPlaceholder": "搜索日志",
+      "devlog.copyAll": "复制全部",
+      "devlog.clear": "清除",
+      "devlog.collapse": "折叠",
+      "devlog.expand": "展开",
+      "devlog.empty": "暂无日志。",
       "settings.restartBadge": "需要重启守护进程才能生效",
+      "settings.restartBadgeTitle": "点击立即重启守护进程",
       "settings.savedRestart": "已保存。需要重启守护进程才能生效。",
       "settings.savedNextStart": "已保存。将在此服务下次启动时生效。",
       "settings.enterGib": "请为{label}输入以 GiB 为单位的数值。",
@@ -1535,6 +2362,13 @@
       "settings.passwordSetPlaceholder": "(已设置) 留空以保持不变",
       "settings.passwordNotSet": "未设置",
       "settings.optionDefault": "(默认)",
+      "settings.drawer.stream": "串流设置",
+      "settings.drawer.ai": "AI 设置",
+      "settings.drawer.mailbox": "邮箱设置",
+      "settings.drawer.storage": "存储设置",
+      "settings.drawer.identity": "身份设置",
+      "settings.advanced": "高级",
+      "settings.movedNote": "串流、AI、邮箱、存储和身份设置现在位于各自的标签页中。",
       "settings.section.identity": "身份",
       "settings.section.storage": "存储",
       "settings.section.stream": "串流",
@@ -1734,7 +2568,7 @@
   function copyToClipboard(text) {
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(text).then(
-        function () { showToast(t("common.copied"), "info"); },
+        function () { showToast(t("common.copied"), "success"); },
         function () { showToast(t("common.copyFailed"), "error"); }
       );
     } else {
@@ -1754,18 +2588,19 @@
   var toastStack = document.getElementById("toast-stack");
   var toastSeq = 0;
 
+  /* kind: "success" (green bar) | "error" (red, lingers longer) | anything
+     else / omitted = neutral info (accent bar) */
   function showToast(message, kind) {
     var id = "toast-" + (++toastSeq);
-    var toast = el("div", { class: "toast", id: id });
+    var cls = "toast" + (kind === "error" ? " error" : kind === "success" ? " success" : "");
+    var toast = el("div", { class: cls, id: id });
     toast.appendChild(el("span", { class: "msg", text: message }));
     var closeBtn = el("button", { type: "button", "aria-label": t("common.dismiss") });
     closeBtn.textContent = "×";
     closeBtn.addEventListener("click", function () { dismissToast(id); });
     toast.appendChild(closeBtn);
     toastStack.appendChild(toast);
-    if (kind !== "sticky") {
-      setTimeout(function () { dismissToast(id); }, 6000);
-    }
+    setTimeout(function () { dismissToast(id); }, kind === "error" ? 8000 : 6000);
   }
 
   function dismissToast(id) {
@@ -1808,7 +2643,7 @@
   function runAction(button, cmd, args, onSuccess) {
     withBusy(button, function () { return api(cmd, args); }).then(
       function (data) { if (onSuccess) onSuccess(data); },
-      function (err) { showToast(err.message || String(err)); }
+      function (err) { showToast(err.message || String(err), "error"); }
     );
   }
 
@@ -1820,12 +2655,14 @@
     daemonUptimeAt: 0,
     identity: null,
     stream: null,
+    topology: null,
     ai: null,
     config: null,
     chatHistory: [],
     mailboxHeldItems: [],
     mailboxFetchItems: [],
-    storeItems: []
+    storeItems: [],
+    update: null
   };
 
   function rerenderAllDynamic() {
@@ -1833,6 +2670,7 @@
     renderOverview();
     renderIdentitySummary();
     renderStream();
+    renderTopology();
     renderAi();
     renderChat();
     renderMailboxHeld(state.mailboxHeldItems);
@@ -1840,6 +2678,7 @@
     renderStore(state.storeItems);
     renderProfile(state.identity);
     renderSettings(state.config);
+    renderUpdate();
   }
 
   /* ---------- header ---------- */
@@ -1924,7 +2763,7 @@
       state.daemon = null;
       renderDaemonPill();
       renderOverview();
-      showToast("daemon.status: " + err.message);
+      showToast("daemon.status: " + err.message, "error");
     });
   }
 
@@ -1935,6 +2774,7 @@
       state.daemonUptimeAt = Date.now();
       renderDaemonPill();
       renderOverview();
+      pollTopology();   /* the topology card lives here too */
     });
   });
 
@@ -1945,6 +2785,16 @@
     });
   });
 
+  function restartDaemon(trigger) {
+    runAction(trigger, "daemon.restart", {}, function () {
+      showToast(t("overview.restarting"));
+    });
+  }
+
+  document.getElementById("btn-restart-daemon").addEventListener("click", function (e) {
+    restartDaemon(e.currentTarget);
+  });
+
   /* ---------- stream panel ---------- */
 
   var streamKv = document.getElementById("stream-kv");
@@ -1952,6 +2802,9 @@
   var streamUrlText = document.getElementById("stream-url-text");
   var relayRoomHint = document.getElementById("relay-room-hint");
   var streamVrchatHint = document.getElementById("stream-vrchat-hint");
+  var cascadeRoleBadge = document.getElementById("cascade-role-badge");
+  var cascadeSource = document.getElementById("cascade-source");
+  var cascadeOffNote = document.getElementById("cascade-off-note");
 
   streamUrlCallout.addEventListener("click", function () {
     if (streamUrlText.textContent) copyToClipboard(streamUrlText.textContent);
@@ -1978,6 +2831,7 @@
       link.textContent = t("stream.vrchatHint.link");
       link.addEventListener("click", function (e) {
         e.preventDefault();
+        e.stopPropagation();
         focusSettingsField(settingsFieldId("stream", "rtsp_url"));
       });
       streamVrchatHint.appendChild(link);
@@ -1994,6 +2848,7 @@
       addKv(streamKv, t("stream.status"), t("stream.statusUnknown"));
       streamUrlCallout.hidden = true;
       renderVrchatHint(null);
+      renderShareCard();
       return;
     }
     if (s.running) {
@@ -2012,37 +2867,57 @@
       addKv(streamKv, t("stream.status"), t("stream.statusStopped"));
     }
     renderVrchatHint(s);
+    renderShareCard();
+  }
+
+  function shortNodeId(id) {
+    if (!id) return "";
+    return id.length > 8 ? id.slice(0, 8) : id;
+  }
+
+  function addKvId(container, label, fullId) {
+    container.appendChild(el("dt", { text: label }));
+    var dd = el("dd", { class: "mono" });
+    if (fullId) {
+      dd.textContent = shortNodeId(fullId);
+      dd.title = fullId;
+    } else {
+      dd.textContent = "-";
+    }
+    container.appendChild(dd);
   }
 
   function pollStreamStatus() {
     return api("stream.status", {}).then(function (data) {
       state.stream = data;
-      renderStream();
     }, function () {
       state.stream = null;
-      renderStream();
-    });
+    }).then(renderStream);
+  }
+
+  /* One refresh path for everything the Stream panel shows: its kv/URL
+     summary (stream.status) and the topology card (topology.status, which
+     embeds the same stream + consensus state the graph draws from). */
+  function pollStreamViews() {
+    return Promise.all([pollStreamStatus(), pollTopology()]);
   }
 
   document.querySelector('[data-target="stream"]').addEventListener("click", function (e) {
-    runAction(e.currentTarget, "stream.status", {}, function (data) {
-      state.stream = data;
-      renderStream();
-    });
+    withBusy(e.currentTarget, pollStreamViews);
   });
 
   document.getElementById("btn-stream-start").addEventListener("click", function (e) {
     runAction(e.currentTarget, "stream.start", {}, function () {
-      showToast(t("stream.started"));
-      pollStreamStatus();
+      showToast(t("stream.started"), "success");
+      pollStreamViews();
     });
   });
 
   document.getElementById("btn-stream-stop").addEventListener("click", function (e) {
     if (!confirm(t("stream.stopConfirm"))) return;
     runAction(e.currentTarget, "stream.stop", {}, function () {
-      showToast(t("stream.stopped"));
-      pollStreamStatus();
+      showToast(t("stream.stopped"), "success");
+      pollStreamViews();
     });
   });
 
@@ -2059,14 +2934,712 @@
     showRelayRoomHint(false);
     var btn = e.target.querySelector("button[type=submit]");
     runAction(btn, "stream.relay.start", room ? { room: room } : {}, function (data) {
-      showToast(data.room ? t("stream.relayStarted", { room: data.room }) : t("stream.relayStartedNoRoom"));
-      pollStreamStatus();
+      showToast(data.room ? t("stream.relayStarted", { room: data.room }) : t("stream.relayStartedNoRoom"), "success");
+      pollStreamViews();
     });
   });
 
-  document.getElementById("relay-room-hint-link").addEventListener("click", function () {
+  document.getElementById("relay-room-hint-link").addEventListener("click", function (e) {
+    e.preventDefault();
+    e.stopPropagation();
     showRelayRoomHint(false);
+    focusSettingsField(settingsFieldId("stream", "relay_room"));
   });
+
+  /* ---------- native screen share (stream.share.*) ----------
+     The daemon captures the primary monitor itself (the existing native
+     capture + OpenH264 pipeline) and publishes it into the room via
+     mistlib's publish_local_track -- the browser never touches media, this
+     card just drives daemon commands through the normal /api/call path:
+       stream.share.start {}   stream.share.stop {}
+     Share state comes from stream.status when it carries share fields (a
+     `share` object with a running/active flag is honored if the daemon
+     grows one); until then it's tracked optimistically from the command
+     responses, and any server-side error text is surfaced verbatim via the
+     usual runAction toast. */
+
+  var btnShareStart = document.getElementById("btn-share-start");
+  var btnShareStop = document.getElementById("btn-share-stop");
+  var shareStatusLine = document.getElementById("share-status");
+  var shareOptimistic = false;
+
+  function shareActive() {
+    var s = state.stream;
+    /* Prefer whatever stream.status reports once the backend exposes share
+       state; the exact field name isn't fixed yet, so accept the obvious
+       shapes and fall back to our optimistic local flag. */
+    if (s && typeof s.share === "object" && s.share !== null) {
+      return !!(s.share.running || s.share.active);
+    }
+    if (s && typeof s.sharing === "boolean") return s.sharing;
+    return shareOptimistic;
+  }
+
+  function renderShareCard() {
+    var active = shareActive();
+    btnShareStart.hidden = active;
+    btnShareStop.hidden = !active;
+    shareStatusLine.textContent = t(active ? "stream.share.stateSharing" : "stream.share.stateIdle");
+    shareStatusLine.className = "share-status" + (active ? " on" : "");
+  }
+
+  btnShareStart.addEventListener("click", function (e) {
+    runAction(e.currentTarget, "stream.share.start", {}, function () {
+      shareOptimistic = true;
+      showToast(t("stream.share.started"), "success");
+      renderShareCard();
+      pollStreamViews();
+    });
+  });
+
+  btnShareStop.addEventListener("click", function (e) {
+    runAction(e.currentTarget, "stream.share.stop", {}, function () {
+      shareOptimistic = false;
+      showToast(t("stream.share.stopped"), "success");
+      renderShareCard();
+      pollStreamViews();
+    });
+  });
+
+  /* ---------- topology card (topology.status), embedded in the Stream
+     panel ----------
+     Node-link graph, drawn with plain inline SVG (no library): this node
+     fixed at the vertical center, a publisher/sharer column to its left, a
+     peers column (cascade leader/follower/sibling, or a generic connected
+     peer from `net`) to its right, and an aggregate viewers node furthest
+     right. Layout is a deterministic left-to-right column assignment by
+     role, not a physics simulation -- see the module doc in
+     `src/topology.rs` for exactly what's genuinely observable versus
+     inferred here (e.g. RTSP viewers are a count only, never per-viewer
+     identity).
+
+     This card is the *single* stream visualization: it absorbed both the
+     old standalone "Topology" nav tab and the old linear cascade
+     mini-diagram (sharer -> leader -> relays -> VRChat) that used to sit
+     beside it. What those conveyed lives on here as: the cascade role
+     badge + "receiving from" source line in the card header, hop order
+     (leader pinned to the top of the cascade column), full node ids as
+     hover tooltips, and the cascade leader/self/peer-count rows merged
+     into this card's kv list.
+
+     Edges that are actually carrying media *right now* animate ("marching
+     ants") and turn green. "Now" comes from stream.status's `flow` ages --
+     milliseconds since the last real video access unit / audio frame went
+     through the RTSP server -- compared against FLOW_STALL_MS at render
+     time. RTSP dummy keepalives deliberately don't refresh those ages, so
+     a keepalive-only stall (static screen, publisher gone quiet) renders
+     as idle even though the connection is up. */
+
+  var SVG_NS = "http://www.w3.org/2000/svg";
+  var topologySvg = document.getElementById("topology-svg");
+  var topologyLegend = document.getElementById("topology-legend");
+  var topologyKv = document.getElementById("topology-kv");
+  var topologyRooms = document.getElementById("topology-rooms");
+  var topologyContextEl = document.getElementById("topology-context");
+
+  function svgEl(tag, attrs) {
+    var node = document.createElementNS(SVG_NS, tag);
+    if (attrs) {
+      Object.keys(attrs).forEach(function (k) { node.setAttribute(k, attrs[k]); });
+    }
+    return node;
+  }
+
+  var TOPO_NODE_W = 132;
+  var TOPO_NODE_H = 40;
+  var TOPO_ROW_H = 48;
+  /* Auto-layout: once a side's node count exceeds this, it wraps into a new
+     sub-column instead of growing one very tall column. */
+  var TOPO_MAX_ROWS_PER_COL = 5;
+  var TOPO_COL_W = TOPO_NODE_W + 28;
+  /* Minimum vertical pitch between rows in the same column -- keep
+     TOPO_ROW_H too, in case it's ever tuned larger than node height + gap. */
+  var TOPO_ROW_PITCH = Math.max(TOPO_NODE_H + 16, TOPO_ROW_H);
+  /* Media older than this (ms since the last real frame, per
+     stream.status.flow) is considered stalled: edges stop animating. Real
+     video ticks every few dozen ms, so 3s cleanly separates "flowing" from
+     "keepalive only" without flickering on jitter. */
+  var FLOW_STALL_MS = 3000;
+
+  /* Three-state i18n key for one media's video/audio kv row: a client
+     actually received it recently ("flowing"), it only arrived from the
+     browser with nobody attached to play it back ("ingestOnly" -- the gap
+     that used to render as a false-positive "転送中"), or neither
+     ("idle"). */
+  function flowStatusKey(deliveredFresh, ingestFresh) {
+    if (deliveredFresh) return "topology.flow.flowing";
+    if (ingestFresh) return "topology.flow.ingestOnly";
+    return "topology.flow.idle";
+  }
+
+  function topologyStateClass(connState) {
+    if (connState === "connected") return "state-connected";
+    if (connState === "connecting" || connState === "reconnecting") return "state-connecting";
+    return "state-down"; // failed / disconnected / unknown
+  }
+
+  /* Pure: turns a `topology.status` payload into the node/edge lists the
+     renderer lays out and draws. Kept separate from the drawing code so the
+     categorization logic (who's a cascade leader/follower/sibling versus a
+     plain connected peer) is easy to read in isolation. */
+  function buildTopologyGraph(data) {
+    var selfInfo = (data && data.self) || {};
+    var netPeers = (data && Array.isArray(data.peers)) ? data.peers : [];
+    var stream = (data && data.stream) || { running: false };
+    var cascade = stream.running && stream.backend === "relay" ? stream.cascade : null;
+    var cascadeActive = !!(cascade && cascade.enabled);
+    var role = cascadeActive ? (cascade.role || "unknown") : null;
+    var leaderId = cascadeActive ? cascade.leader : null;
+    var relayPeers = cascadeActive && Array.isArray(cascade.relay_peers) ? cascade.relay_peers : [];
+    var publisherId = stream.running ? (stream.publisher || null) : null;
+
+    /* Is media *actually* moving right now? `flow` ages are ms since the
+       last real video AU / audio frame went through the RTSP server (null =
+       never); keepalives don't refresh them, so keepalive-only correctly
+       reads as idle here. This (ingest) side only proves media arrived from
+       the browser -- it says nothing about whether any RTSP client ever got
+       it, which is what drives the edges below (publisher/follower edges
+       represent ingest into this node, so they intentionally stay on the
+       ingest signal). */
+    var flow = stream.running && stream.flow ? stream.flow : null;
+    var videoFlowing = !!(flow && flow.video_age_ms != null && flow.video_age_ms < FLOW_STALL_MS);
+    var audioFlowing = !!(flow && flow.audio_age_ms != null && flow.audio_age_ms < FLOW_STALL_MS);
+    var mediaFlowing = videoFlowing || audioFlowing;
+
+    /* Delivery-aware siblings: ms since media was last actually dispatched
+       to a *playing* RTSP session, i.e. since a client plausibly received
+       it -- see `video_delivered_age_ms`/`audio_delivered_age_ms` on
+       `stream.status`. Used only for the video/audio kv rows below, so
+       "転送中" (flowing) there means a client actually got it, not merely
+       that it arrived from the browser. */
+    var videoDelivered = !!(flow && flow.video_delivered_age_ms != null && flow.video_delivered_age_ms < FLOW_STALL_MS);
+    var audioDelivered = !!(flow && flow.audio_delivered_age_ms != null && flow.audio_delivered_age_ms < FLOW_STALL_MS);
+
+    var shown = {};
+    if (selfInfo.node_id) shown[selfInfo.node_id] = true;
+
+    var leftNodes = [];
+    var rightNodes = [];
+    var viewerNode = null;
+
+    if (publisherId) {
+      var pubSub = cascadeActive && role !== "leader" ? t("topology.role.leader") : t("topology.role.sharer");
+      /* Everything this node forwards came in on this edge, so it flows
+         exactly when the stream as a whole does. */
+      leftNodes.push({ id: publisherId, label: shortNodeId(publisherId), sub: pubSub, kind: "publisher", edge: "publishing", flowing: mediaFlowing });
+      shown[publisherId] = true;
+    }
+
+    relayPeers.forEach(function (peerId) {
+      if (shown[peerId]) return;
+      shown[peerId] = true;
+      var isLeader = peerId === leaderId;
+      if (isLeader) {
+        rightNodes.push({ id: peerId, label: shortNodeId(peerId), sub: t("topology.role.leader"), kind: "leader", edge: "leaderToYou" });
+      } else if (role === "leader") {
+        /* As leader we re-publish what we forward, so follower edges carry
+           media whenever the stream flows. */
+        rightNodes.push({ id: peerId, label: shortNodeId(peerId), sub: t("topology.role.follower"), kind: "follower", edge: "youToFollower", flowing: mediaFlowing });
+      } else {
+        rightNodes.push({ id: peerId, label: shortNodeId(peerId), sub: t("topology.role.sibling"), kind: "sibling", edge: "sibling" });
+      }
+    });
+
+    /* The old linear cascade diagram always showed the chain in hop order
+       (sharer -> leader -> relays); preserve that by pinning the leader to
+       the top of the cascade column. Only cascade nodes are in rightNodes
+       at this point, and Array#sort is stable, so follower order is kept. */
+    rightNodes.sort(function (a, b) {
+      return (a.kind === "leader" ? 0 : 1) - (b.kind === "leader" ? 0 : 1);
+    });
+
+    netPeers.forEach(function (p) {
+      if (!p || !p.node_id || shown[p.node_id]) return;
+      shown[p.node_id] = true;
+      var stateKey = "topology.state." + p.state;
+      rightNodes.push({
+        id: p.node_id,
+        label: shortNodeId(p.node_id),
+        sub: t(stateKey) === stateKey ? p.state : t(stateKey),
+        kind: "peer",
+        state: p.state,
+        edge: "peer"
+      });
+    });
+
+    if (stream.running) {
+      var clients = stream.clients != null ? stream.clients : 0;
+      /* RTSP fans out to playing sessions only: no viewers, no media on
+         this edge no matter how fresh the input is. */
+      viewerNode = { label: t("topology.node.viewers"), sub: String(clients), kind: "viewers", edge: "viewers", flowing: mediaFlowing && clients > 0 };
+    }
+
+    var roomsCount = (data && Array.isArray(data.rooms)) ? data.rooms.length : 0;
+    return {
+      self: selfInfo, leftNodes: leftNodes, rightNodes: rightNodes, viewerNode: viewerNode,
+      cascadeActive: cascadeActive, role: role, roomsCount: roomsCount,
+      stream: stream, cascade: cascadeActive ? cascade : null, relayPeersCount: relayPeers.length,
+      videoFlowing: videoFlowing, audioFlowing: audioFlowing,
+      videoDelivered: videoDelivered, audioDelivered: audioDelivered
+    };
+  }
+
+  function topologyNodeBox(parent, x, y, label, sub, kindClass, fullTitle) {
+    var g = svgEl("g", { transform: "translate(" + (x - TOPO_NODE_W / 2) + "," + (y - TOPO_NODE_H / 2) + ")" });
+    if (fullTitle) {
+      /* Hover tooltip with the untruncated node id (SVG <title>) -- the
+         merged-away cascade peer-pill list used to be where full ids
+         lived. */
+      var titleEl = svgEl("title");
+      titleEl.textContent = fullTitle;
+      g.appendChild(titleEl);
+    }
+    g.appendChild(svgEl("rect", {
+      class: "topology-node-box " + kindClass, x: 0, y: 0,
+      width: TOPO_NODE_W, height: TOPO_NODE_H, rx: 8
+    }));
+    var labelEl = svgEl("text", { class: "topology-node-label", x: TOPO_NODE_W / 2, y: sub ? 17 : TOPO_NODE_H / 2 + 4, "text-anchor": "middle" });
+    labelEl.textContent = label;
+    g.appendChild(labelEl);
+    if (sub) {
+      var subEl = svgEl("text", { class: "topology-node-sub", x: TOPO_NODE_W / 2, y: 30, "text-anchor": "middle" });
+      subEl.textContent = sub;
+      g.appendChild(subEl);
+    }
+    parent.appendChild(g);
+    return { x: x, y: y, w: TOPO_NODE_W, h: TOPO_NODE_H };
+  }
+
+  /* ---- auto-layout helpers (column wrapping + label collision avoidance) ----
+     Kept as small pure functions so renderTopologyGraph reads as: compute
+     positions, draw boxes, draw edges. No randomness and no dependence on
+     the previous render -- same graph in always produces the same layout
+     out, which matters because the card re-renders on every topology poll. */
+
+  /* How a side (leftNodes or rightNodes) with `count` entries wraps into
+     sub-columns of at most TOPO_MAX_ROWS_PER_COL rows each. `maxRows` is the
+     tallest column on that side (needed for the shared card height), and
+     `extraCols` is how many sub-columns beyond the first it needed (needed
+     for the shared viewBox width / x-offsets). */
+  function topologyColStats(count) {
+    var numCols = count > 0 ? Math.ceil(count / TOPO_MAX_ROWS_PER_COL) : 0;
+    var maxRows = count > 0 ? Math.min(count, TOPO_MAX_ROWS_PER_COL) : 0;
+    return { numCols: numCols, maxRows: maxRows, extraCols: Math.max(numCols - 1, 0) };
+  }
+
+  /* y for row `rowInCol` of `rowsInCol` total rows in one sub-column, with
+     the column centered as a group around centerY (so a short column
+     clusters near the self node's row instead of being spread over the
+     whole card). */
+  function topologyColRowY(rowInCol, rowsInCol, centerY) {
+    var groupH = (rowsInCol - 1) * TOPO_ROW_PITCH;
+    return centerY - groupH / 2 + rowInCol * TOPO_ROW_PITCH;
+  }
+
+  function topologyRectsOverlap(a, b) {
+    return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+  }
+
+  function topologyCountOverlaps(rects, rect) {
+    var n = 0;
+    for (var i = 0; i < rects.length; i++) {
+      if (topologyRectsOverlap(rects[i], rect)) n++;
+    }
+    return n;
+  }
+
+  /* Places one edge label clear of every rect placed so far (node boxes,
+     then earlier labels -- draw order is deterministic so this never
+     depends on anything but the graph itself). Candidates, in order: the
+     straight-line midpoint (which is also the bezier's parametric midpoint
+     here, since the curve's control points share the midpoint's x); that
+     same x nudged up/down; then two points shifted along the straight line
+     toward either endpoint. First collision-free candidate wins; if every
+     candidate collides, the least-bad one is used so the label always ends
+     up somewhere. */
+  function placeTopologyEdgeLabel(parent, placedRects, label, x1, y1, x2, y2) {
+    var midX = (x1 + x2) / 2;
+    var midY = (y1 + y2) / 2;
+    var w = label.length * 6.2 + 8;
+    var h = 12;
+    var candidates = [];
+    [0, -10, 10, -20, 20, -30, 30].forEach(function (dy) {
+      candidates.push({ x: midX, y: midY - 5 + dy });
+    });
+    [0.38, 0.62].forEach(function (t) {
+      candidates.push({ x: x1 + t * (x2 - x1), y: y1 + t * (y2 - y1) - 5 });
+    });
+
+    var bestPos = candidates[0];
+    var bestRect = null;
+    var bestOverlaps = Infinity;
+    for (var i = 0; i < candidates.length; i++) {
+      var c = candidates[i];
+      var rect = { x: c.x - w / 2, y: c.y - h / 2, w: w, h: h };
+      var overlaps = topologyCountOverlaps(placedRects, rect);
+      if (overlaps < bestOverlaps) {
+        bestOverlaps = overlaps;
+        bestPos = c;
+        bestRect = rect;
+      }
+      if (overlaps === 0) break;
+    }
+
+    placedRects.push(bestRect);
+    var labelEl = svgEl("text", { class: "topology-edge-label", x: bestPos.x, y: bestPos.y, "text-anchor": "middle" });
+    labelEl.textContent = label;
+    parent.appendChild(labelEl);
+  }
+
+  function topologyEdge(parent, from, to, label, opts) {
+    opts = opts || {};
+    /* Direction is encoded by the caller's (from, to) order -- e.g. a
+       cascade leader feeding this node is passed as (leaderBox, selfBox) --
+       so the arrowhead (always at the path's end, via marker-end) lands on
+       the right node without this function needing a separate "reverse"
+       flag. */
+    var x1 = from.x <= to.x ? from.x + from.w / 2 : from.x - from.w / 2;
+    var x2 = from.x <= to.x ? to.x - to.w / 2 : to.x + to.w / 2;
+    /* Wrapped-column edges (self <-> a node in a second-or-later
+       sub-column) may visually cross an earlier sub-column's boxes -- we
+       accept that rather than bending the curve's control points per row,
+       since at this stroke weight a crossing curve reads fine and the
+       actual reported problem is labels landing on boxes, which
+       placeTopologyEdgeLabel (below) solves directly. */
+    var path = svgEl("path", {
+      class: "topology-edge" + (opts.dashed ? " dashed" : "") + (opts.flowing ? " flowing" : ""),
+      d: "M" + x1 + " " + from.y + " C " + (x1 + (x2 - x1) / 2) + " " + from.y + ", " + (x1 + (x2 - x1) / 2) + " " + to.y + ", " + x2 + " " + to.y
+    });
+    if (!opts.noArrow) path.setAttribute("marker-end", "url(#topology-arrow)");
+    parent.appendChild(path);
+    if (label) {
+      if (opts.placedRects) {
+        placeTopologyEdgeLabel(parent, opts.placedRects, label, x1, from.y, x2, to.y);
+      } else {
+        /* No collision-tracking array passed -- fall back to the old plain
+           midpoint placement so this signature stays usable standalone. */
+        var midX = (x1 + x2) / 2;
+        var midY = (from.y + to.y) / 2;
+        var labelEl = svgEl("text", { class: "topology-edge-label", x: midX, y: midY - 5, "text-anchor": "middle" });
+        labelEl.textContent = label;
+        parent.appendChild(labelEl);
+      }
+    }
+  }
+
+  function topologyArrowDefs() {
+    var defs = svgEl("defs");
+    var arrow = svgEl("marker", {
+      id: "topology-arrow", viewBox: "0 0 10 10", refX: 9, refY: 5,
+      markerWidth: 7, markerHeight: 7, orient: "auto-start-reverse"
+    });
+    var arrowPath = svgEl("path", { d: "M0 0 L10 5 L0 10 z", class: "topology-edge-arrowhead" });
+    arrow.appendChild(arrowPath);
+    defs.appendChild(arrow);
+    return defs;
+  }
+
+  function edgeLabelFor(kind) {
+    switch (kind) {
+      case "publishing": return t("topology.edge.publishing");
+      case "leaderToYou": return t("topology.edge.leaderToYou");
+      case "youToFollower": return t("topology.edge.youToFollower");
+      case "sibling": return t("topology.edge.sibling");
+      case "viewers": return t("topology.edge.viewers");
+      default: return t("topology.edge.peer");
+    }
+  }
+
+  function renderTopologyGraph(graph) {
+    topologySvg.innerHTML = "";
+    topologySvg.appendChild(topologyArrowDefs());
+
+    var rightCount = graph.rightNodes.length;
+    var leftCount = graph.leftNodes.length;
+    var leftStats = topologyColStats(leftCount);
+    var rightStats = topologyColStats(rightCount);
+
+    /* Height only depends on the tallest single sub-column on either side
+       (not on the raw node count), because taller sides wrap into more
+       columns instead of one long one. */
+    var rows = Math.max(leftStats.maxRows, rightStats.maxRows, 1);
+    var height = Math.max(rows * TOPO_ROW_PITCH + 40, 160);
+    var centerY = height / 2;
+
+    /* Left sub-columns grow away from self (further left); to keep the
+       outermost one pinned at the original x=90 margin instead of running
+       off the left edge, the whole left-of-self side (self included) shifts
+       right by the extra columns' width. Right sub-columns grow away from
+       self too, but to the right, so they just extend the viewBox. */
+    var xLeft = 90, xSelf = 250;
+    var offsetX = leftStats.extraCols * TOPO_COL_W;
+    xSelf += offsetX;
+    var xRight = (graph.viewerNode ? 420 : 480) + offsetX;
+    var xViewers = xRight + rightStats.extraCols * TOPO_COL_W + 150;
+    var viewBoxW = 640 + offsetX + rightStats.extraCols * TOPO_COL_W;
+    topologySvg.setAttribute("viewBox", "0 0 " + viewBoxW + " " + height);
+
+    var selfLabel = graph.self.display_name || shortNodeId(graph.self.node_id) || t("topology.node.self");
+    var selfSub = graph.cascadeActive
+      ? (graph.role === "leader" ? t("topology.role.leader") : graph.role === "follower" ? t("topology.role.follower") : t("topology.role.electing"))
+      : t("topology.node.self");
+    var selfBox = topologyNodeBox(topologySvg, xSelf, centerY, selfLabel, selfSub, "kind-self", graph.self.node_id || null);
+
+    /* All node boxes are placed and drawn before any edge/label, so label
+       collision-avoidance below can see every box up front -- including
+       ones in sub-columns drawn later in source order but visually to the
+       right of an earlier edge's label. */
+    var placedRects = [{ x: selfBox.x - selfBox.w / 2, y: selfBox.y - selfBox.h / 2, w: selfBox.w, h: selfBox.h }];
+
+    var leftBoxes = graph.leftNodes.map(function (n, i) {
+      var colIndex = Math.floor(i / TOPO_MAX_ROWS_PER_COL);
+      var rowIndex = i % TOPO_MAX_ROWS_PER_COL;
+      var rowsInCol = Math.min(TOPO_MAX_ROWS_PER_COL, leftCount - colIndex * TOPO_MAX_ROWS_PER_COL);
+      var x = xLeft + offsetX - colIndex * TOPO_COL_W;
+      var y = topologyColRowY(rowIndex, rowsInCol, centerY);
+      var box = topologyNodeBox(topologySvg, x, y, n.label, n.sub, "kind-" + n.kind, n.id || null);
+      placedRects.push({ x: x - box.w / 2, y: y - box.h / 2, w: box.w, h: box.h });
+      return box;
+    });
+
+    var rightBoxes = graph.rightNodes.map(function (n, i) {
+      var colIndex = Math.floor(i / TOPO_MAX_ROWS_PER_COL);
+      var rowIndex = i % TOPO_MAX_ROWS_PER_COL;
+      var rowsInCol = Math.min(TOPO_MAX_ROWS_PER_COL, rightCount - colIndex * TOPO_MAX_ROWS_PER_COL);
+      var x = xRight + colIndex * TOPO_COL_W;
+      var y = topologyColRowY(rowIndex, rowsInCol, centerY);
+      var kindClass = n.kind === "peer" ? "kind-peer" : "kind-" + n.kind;
+      var box = topologyNodeBox(topologySvg, x, y, n.label, n.sub, kindClass, n.id || null);
+      if (n.kind === "peer") {
+        var dot = svgEl("circle", { class: "topology-dot " + topologyStateClass(n.state), cx: x - TOPO_NODE_W / 2 + 8, cy: y - TOPO_NODE_H / 2 + 8, r: 4 });
+        topologySvg.appendChild(dot);
+      }
+      placedRects.push({ x: x - box.w / 2, y: y - box.h / 2, w: box.w, h: box.h });
+      return box;
+    });
+
+    var viewerBox = null;
+    if (graph.viewerNode) {
+      viewerBox = topologyNodeBox(topologySvg, xViewers, centerY, graph.viewerNode.label, graph.viewerNode.sub, "kind-viewers");
+      placedRects.push({ x: viewerBox.x - viewerBox.w / 2, y: viewerBox.y - viewerBox.h / 2, w: viewerBox.w, h: viewerBox.h });
+    }
+
+    /* Edges + labels, in the same draw order as before, now sharing
+       placedRects so every label dodges every box (and every
+       already-placed label). */
+    graph.leftNodes.forEach(function (n, i) {
+      topologyEdge(topologySvg, leftBoxes[i], selfBox, edgeLabelFor(n.edge), { flowing: !!n.flowing, placedRects: placedRects });
+    });
+
+    graph.rightNodes.forEach(function (n, i) {
+      var box = rightBoxes[i];
+      var dashed = n.edge === "sibling";
+      var noArrow = n.edge === "peer" || n.edge === "sibling";
+      // A cascade leader feeds *this* node, so that edge is drawn
+      // leader-box -> self-box (arrowhead lands on self); every other edge
+      // in this column is drawn self -> peer.
+      if (n.edge === "leaderToYou") {
+        topologyEdge(topologySvg, box, selfBox, edgeLabelFor(n.edge), { flowing: !!n.flowing, placedRects: placedRects });
+      } else {
+        topologyEdge(topologySvg, selfBox, box, edgeLabelFor(n.edge), { dashed: dashed, noArrow: noArrow, flowing: !!n.flowing, placedRects: placedRects });
+      }
+    });
+
+    if (viewerBox) {
+      topologyEdge(topologySvg, selfBox, viewerBox, edgeLabelFor("viewers"), { flowing: !!graph.viewerNode.flowing, placedRects: placedRects });
+    }
+
+    topologySvg.setAttribute("aria-label", t("topology.aria", {
+      peers: graph.rightNodes.length,
+      rooms: graph.roomsCount
+    }));
+  }
+
+  function renderTopologyLegend() {
+    topologyLegend.innerHTML = "";
+    var items = [
+      ["kind-self", "topology.legend.self"],
+      ["kind-publisher", "topology.legend.publisher"],
+      ["kind-leader", "topology.legend.leader"],
+      ["kind-follower", "topology.legend.follower"],
+      ["kind-viewers", "topology.legend.viewers"]
+    ];
+    items.forEach(function (item) {
+      var wrap = el("span", { class: "topology-legend-item" });
+      wrap.appendChild(el("span", { class: "topology-legend-dot " + item[0] }));
+      wrap.appendChild(el("span", { text: t(item[1]) }));
+      topologyLegend.appendChild(wrap);
+    });
+    /* Edge-state swatches: media flowing (animated) vs idle. */
+    [["flowing", "topology.legend.flowing"], ["", "topology.legend.idle"]].forEach(function (item) {
+      var wrap = el("span", { class: "topology-legend-item" });
+      wrap.appendChild(el("span", { class: "topology-legend-line" + (item[0] ? " " + item[0] : "") }));
+      wrap.appendChild(el("span", { text: t(item[1]) }));
+      topologyLegend.appendChild(wrap);
+    });
+  }
+
+  /* Card-header chrome absorbed from the old cascade card: the LEADER /
+     FOLLOWER / ELECTING role badge and the "Receiving from: …" source
+     line, plus the "cascade off" config note below the card. */
+  function renderCascadeChrome(graph) {
+    var c = graph && graph.cascade;
+    var stream = graph && graph.stream;
+    cascadeOffNote.hidden = !(stream && stream.running && stream.backend === "relay" && stream.cascade && !stream.cascade.enabled);
+    if (!c) {
+      cascadeRoleBadge.hidden = true;
+      cascadeSource.hidden = true;
+      return;
+    }
+
+    var role = c.role || "unknown";
+    var badgeKey, badgeClass;
+    if (role === "leader") { badgeKey = "stream.cascade.role.leader"; badgeClass = "badge cascade-role-badge leader"; }
+    else if (role === "follower") { badgeKey = "stream.cascade.role.follower"; badgeClass = "badge cascade-role-badge follower"; }
+    else { badgeKey = "stream.cascade.role.electing"; badgeClass = "badge cascade-role-badge electing"; }
+    cascadeRoleBadge.className = badgeClass;
+    cascadeRoleBadge.textContent = t(badgeKey);
+    cascadeRoleBadge.hidden = false;
+
+    var sourceText;
+    if (c.source === "sharer") sourceText = t("stream.cascade.source.sharer");
+    else if (c.source === "leader") sourceText = t("stream.cascade.source.leader", { leader: c.leader ? shortNodeId(c.leader) : "?" });
+    else sourceText = t("stream.cascade.source.waiting");
+    cascadeSource.textContent = sourceText;
+    cascadeSource.hidden = false;
+  }
+
+  /* ---- per-module mini-strips (Mailbox / AI panels; the Store strip is
+     static because the content store never joins a room) ----
+     Shows the module's room id (from topology.status.modules -- the same
+     config-or-default resolution the module itself uses) and the
+     process-wide peer dots. Per-room peer membership is not observable
+     from mistlib's public API (see src/topology.rs's module doc), so the
+     dots deliberately show all connected peers with a tooltip saying so
+     rather than pretending to be room-scoped. */
+  function renderTopoStrip(module) {
+    var root = document.getElementById("topo-strip-" + module);
+    var roomEl = root.querySelector('[data-role="room"]');
+    var noteEl = root.querySelector('[data-role="note"]');
+    var peersEl = root.querySelector('[data-role="peers"]');
+    var data = state.topology;
+    var info = data && data.modules && data.modules[module] ? data.modules[module] : null;
+
+    roomEl.textContent = info && info.room ? info.room : "—";
+    noteEl.hidden = !(info && !info.joined);
+    if (info && !info.joined) noteEl.textContent = t("topoStrip.notJoined");
+
+    peersEl.innerHTML = "";
+    var peers = data && Array.isArray(data.peers) ? data.peers : [];
+    peersEl.title = t("topoStrip.processWide");
+    peersEl.appendChild(el("span", { text: t("topoStrip.peersCount", { count: peers.length }) }));
+    peers.forEach(function (p) {
+      peersEl.appendChild(el("span", {
+        class: "topo-strip-dot " + topologyStateClass(p.state),
+        title: shortNodeId(p.node_id) + " · " + p.state
+      }));
+    });
+  }
+
+  function renderTopoStrips() {
+    renderTopoStrip("mailbox");
+    renderTopoStrip("ai");
+  }
+
+  /* Names the room the topology card's *current host panel* is showing, so
+     the same re-parented card reads correctly no matter which panel it's
+     sitting in. Only panels backed by a networked module get a line (Stream
+     maps to "stream" for forward-compat -- topology.status's `modules` map
+     doesn't have a "stream" entry today, so that lookup simply misses and
+     the line stays hidden until/unless it's added). */
+  var TOPOLOGY_PANEL_MODULE = { "panel-stream": "stream", "panel-ai": "ai", "panel-mailbox": "mailbox" };
+
+  function renderTopologyContext() {
+    if (!topologyContextEl) return;
+    var module = TOPOLOGY_PANEL_MODULE[topologyHostPanel];
+    var data = state.topology;
+    var info = module && data && data.modules && data.modules[module] ? data.modules[module] : null;
+    if (!info) {
+      topologyContextEl.hidden = true;
+      return;
+    }
+    var text = t("topology.contextRoom") + ": " + (info.room || "—");
+    if (!info.joined) text += " " + t("topology.contextNotJoined");
+    topologyContextEl.textContent = text;
+    topologyContextEl.hidden = false;
+  }
+
+  function renderTopology() {
+    var data = state.topology;
+    topologyKv.innerHTML = "";
+    topologyRooms.innerHTML = "";
+    renderTopoStrips();
+    if (!data) {
+      topologySvg.innerHTML = "";
+      topologySvg.setAttribute("viewBox", "0 0 640 80");
+      var placeholder = svgEl("text", { x: "320", y: "44", "text-anchor": "middle", class: "topology-node-sub" });
+      placeholder.textContent = t("topology.kv.unknown");
+      topologySvg.appendChild(placeholder);
+      addKv(topologyKv, t("topology.kv.status"), t("topology.kv.unknown"));
+      renderTopologyLegend();
+      renderCascadeChrome(null);
+      renderTopologyContext();
+      return;
+    }
+
+    var graph = buildTopologyGraph(data);
+    renderTopologyGraph(graph);
+    renderTopologyLegend();
+    renderCascadeChrome(graph);
+
+    addKv(topologyKv, t("topology.kv.peers"), (data.peers || []).length);
+    addKv(topologyKv, t("topology.kv.rooms"), (data.rooms || []).length);
+    var cascadeText = graph.cascadeActive
+      ? (graph.role === "leader" ? t("topology.role.leader") : graph.role === "follower" ? t("topology.role.follower") : t("topology.role.electing"))
+      : t("topology.kv.cascadeOff");
+    addKv(topologyKv, t("topology.kv.cascade"), cascadeText);
+    if (graph.cascade) {
+      addKvId(topologyKv, t("stream.cascade.leader"), graph.cascade.leader);
+      addKvId(topologyKv, t("stream.cascade.self"), graph.cascade.self);
+      addKv(topologyKv, t("stream.cascade.relayPeers"), graph.relayPeersCount);
+      if (data.consensus && data.consensus.active && Array.isArray(data.consensus.peers)) {
+        addKv(topologyKv, t("stream.cascade.consensusPeers"), data.consensus.peers.length);
+      }
+    }
+    if (graph.stream.running) {
+      addKv(topologyKv, t("topology.kv.videoFlow"), t(flowStatusKey(graph.videoDelivered, graph.videoFlowing)));
+      addKv(topologyKv, t("topology.kv.audioFlow"), t(flowStatusKey(graph.audioDelivered, graph.audioFlowing)));
+    }
+
+    var rooms = data.rooms || [];
+    if (rooms.length) {
+      topologyRooms.appendChild(el("span", { text: t("topology.rooms") + ": " }));
+      rooms.forEach(function (room, i) {
+        if (i > 0) topologyRooms.appendChild(el("span", { text: ", " }));
+        topologyRooms.appendChild(el("span", { class: "mono", text: room }));
+      });
+    } else {
+      topologyRooms.appendChild(el("span", { text: t("topology.noRooms") }));
+    }
+    renderTopologyContext();
+  }
+
+  function pollTopology() {
+    return api("topology.status", {}).then(function (data) {
+      state.topology = data;
+      renderTopology();
+    }, function () {
+      state.topology = null;
+      renderTopology();
+    });
+  }
+
+  /* No dedicated refresh button for the topology card: the Overview and
+     Stream panels' own refresh buttons re-poll it alongside their status,
+     and it's covered by the regular pollAll() interval like every other
+     panel's data. There is exactly one card instance (re-parented between
+     the five panels by placeTopologyCard in the router), so the one poll
+     feeds the one render target wherever it currently lives. */
 
   /* ---------- ai panel ---------- */
 
@@ -2165,28 +3738,28 @@
 
   document.getElementById("btn-ai-provide-start").addEventListener("click", function (e) {
     runAction(e.currentTarget, "ai.provide.start", {}, function (data) {
-      showToast(data.already_running ? t("ai.alreadyProviding") : t("ai.nowProviding"));
+      showToast(data.already_running ? t("ai.alreadyProviding") : t("ai.nowProviding"), "success");
       pollAiStatus();
     });
   });
 
   document.getElementById("btn-ai-provide-stop").addEventListener("click", function (e) {
     runAction(e.currentTarget, "ai.provide.stop", {}, function (data) {
-      showToast(data.was_running ? t("ai.stoppedProviding") : t("ai.wasNotProviding"));
+      showToast(data.was_running ? t("ai.stoppedProviding") : t("ai.wasNotProviding"), "success");
       pollAiStatus();
     });
   });
 
   document.getElementById("btn-ai-serve-start").addEventListener("click", function (e) {
     runAction(e.currentTarget, "ai.serve.start", {}, function (data) {
-      showToast(data.already_running ? t("ai.serveAlready", { listen: data.listen }) : t("ai.serveStarted", { listen: data.listen }));
+      showToast(data.already_running ? t("ai.serveAlready", { listen: data.listen }) : t("ai.serveStarted", { listen: data.listen }), "success");
       pollAiStatus();
     });
   });
 
   document.getElementById("btn-ai-serve-stop").addEventListener("click", function (e) {
     runAction(e.currentTarget, "ai.serve.stop", {}, function (data) {
-      showToast(data.was_running ? t("ai.serveStopped") : t("ai.serveWasNotRunning"));
+      showToast(data.was_running ? t("ai.serveStopped") : t("ai.serveWasNotRunning"), "success");
       pollAiStatus();
     });
   });
@@ -2242,7 +3815,7 @@
         var msg = friendlyChatError(err.message || String(err));
         state.chatHistory.push({ role: "error", text: msg });
         renderChat();
-        showToast("ai.chat: " + msg);
+        showToast("ai.chat: " + msg, "error");
       }
     );
   });
@@ -2306,7 +3879,7 @@
     return api("mailbox.ls", {}).then(function (data) {
       renderMailboxHeld(data);
     }, function (err) {
-      showToast("mailbox.ls: " + err.message);
+      showToast("mailbox.ls: " + err.message, "error");
     });
   }
 
@@ -2323,12 +3896,12 @@
     var to = document.getElementById("mailbox-to").value.trim();
     var message = document.getElementById("mailbox-message").value.trim();
     if (!to || !message) {
-      showToast(t("mailbox.needBoth"));
+      showToast(t("mailbox.needBoth"), "error");
       return;
     }
     var btn = document.getElementById("btn-mailbox-send");
     runAction(btn, "mailbox.send", { to: to, message: message }, function (data) {
-      showToast(t("mailbox.sentStatus", { status: data.status, id: truncateMiddle(String(data.id), 8, 4) }));
+      showToast(t("mailbox.sentStatus", { status: data.status, id: truncateMiddle(String(data.id), 8, 4) }), "success");
       document.getElementById("mailbox-message").value = "";
       pollMailboxLs();
     });
@@ -2375,7 +3948,7 @@
         var outputPath = input.value.trim();
         if (outputPath) args.output = outputPath;
         runAction(btn, "store.get", args, function (data) {
-          showToast(t("store.saved", { output: data.output }));
+          showToast(t("store.saved", { output: data.output }), "success");
         });
       });
       actionCell.appendChild(form);
@@ -2387,7 +3960,7 @@
 
   function pollStoreLs() {
     return api("store.ls", {}).then(renderStore, function (err) {
-      showToast("store.ls: " + err.message);
+      showToast("store.ls: " + err.message, "error");
     });
   }
 
@@ -2402,7 +3975,7 @@
     if (!path) return;
     var btn = document.getElementById("btn-store-put");
     runAction(btn, "store.put", { path: path }, function (data) {
-      showToast(t("store.stored", { name: data.name, size: fmtBytes(data.size) }));
+      showToast(t("store.stored", { name: data.name, size: fmtBytes(data.size) }), "success");
       pathInput.value = "";
       pollStoreLs();
     });
@@ -2440,12 +4013,12 @@
       xhr.send(file);
     }).then(function (data) {
       if (row.parentNode) row.parentNode.removeChild(row);
-      showToast(t("store.uploaded", { name: data.name, size: fmtBytes(data.size) }));
+      showToast(t("store.uploaded", { name: data.name, size: fmtBytes(data.size) }), "success");
       pollStoreLs();
       return data;
     }, function (err) {
       if (row.parentNode) row.parentNode.removeChild(row);
-      showToast(t("store.uploadFailed", { name: file.name, error: err.message || String(err) }));
+      showToast(t("store.uploadFailed", { name: file.name, error: err.message || String(err) }), "error");
       throw err;
     });
   }
@@ -2599,13 +4172,13 @@
         return api("profile.set", { field: "avatar_cid", value: uploaded.cid });
       }).then(function (profile) {
         avatarDropzone.classList.remove("busy-zone");
-        showToast(t("profile.avatarUpdated"));
+        showToast(t("profile.avatarUpdated"), "success");
         renderProfile(profile);
         pollStoreLs();
       });
     }).catch(function (err) {
       avatarDropzone.classList.remove("busy-zone");
-      showToast(err.message || String(err));
+      showToast(err.message || String(err), "error");
       renderProfile(state.identity);
     });
   }
@@ -2633,14 +4206,14 @@
 
   avatarRemoveBtn.addEventListener("click", function (e) {
     runAction(e.currentTarget, "profile.set", { field: "avatar_cid", value: "" }, function (profile) {
-      showToast(t("profile.avatarRemoved"));
+      showToast(t("profile.avatarRemoved"), "success");
       renderProfile(profile);
     });
   });
 
   function pollProfile() {
     return api("profile.show", {}).then(renderProfile, function (err) {
-      showToast("profile.show: " + err.message);
+      showToast("profile.show: " + err.message, "error");
     });
   }
 
@@ -2653,7 +4226,7 @@
     var value = profileDisplayNameInput.value.trim();
     var btn = document.getElementById("btn-profile-save");
     runAction(btn, "profile.set", { field: "display_name", value: value }, function (data) {
-      showToast(t("profile.updated"));
+      showToast(t("profile.updated"), "success");
       renderProfile(data);
     });
   });
@@ -2663,34 +4236,34 @@
   var GIB = 1073741824;
 
   var SETTINGS_SCHEMA = [
-    { section: "identity", titleKey: "settings.section.identity", fields: [
+    { section: "identity", titleKey: "settings.section.identity", container: "settings-drawer-body-identity", fields: [
       { key: "display_name", labelKey: "settings.field.identity.display_name.label", descKey: "settings.field.identity.display_name.desc", type: "text" }
     ] },
-    { section: "storage", titleKey: "settings.section.storage", fields: [
+    { section: "storage", titleKey: "settings.section.storage", container: "settings-drawer-body-storage", fields: [
       { key: "capacity_bytes", labelKey: "settings.field.storage.capacity_bytes.label", descKey: "settings.field.storage.capacity_bytes.desc", type: "gib" }
     ] },
-    { section: "stream", titleKey: "settings.section.stream", fields: [
+    { section: "stream", titleKey: "settings.section.stream", container: "settings-drawer-body-stream", fields: [
       { key: "rtsp_url", labelKey: "settings.field.stream.rtsp_url.label", descKey: "settings.field.stream.rtsp_url.desc", type: "text" },
       { key: "frame_rate", labelKey: "settings.field.stream.frame_rate.label", descKey: "settings.field.stream.frame_rate.desc", type: "number" },
-      { key: "capture_backend", labelKey: "settings.field.stream.capture_backend.label", descKey: "settings.field.stream.capture_backend.desc", type: "select", options: [["", "settings.optionDefault", true], ["native", "native"], ["ffmpeg", "ffmpeg"]] },
-      { key: "max_width", labelKey: "settings.field.stream.max_width.label", descKey: "settings.field.stream.max_width.desc", type: "number" },
+      { key: "capture_backend", labelKey: "settings.field.stream.capture_backend.label", descKey: "settings.field.stream.capture_backend.desc", type: "select", options: [["", "settings.optionDefault", true], ["native", "native"], ["ffmpeg", "ffmpeg"]], advanced: true },
+      { key: "max_width", labelKey: "settings.field.stream.max_width.label", descKey: "settings.field.stream.max_width.desc", type: "number", advanced: true },
       { key: "relay_room", labelKey: "settings.field.stream.relay_room.label", descKey: "settings.field.stream.relay_room.desc", type: "text" },
-      { key: "audio_codec", labelKey: "settings.field.stream.audio_codec.label", descKey: "settings.field.stream.audio_codec.desc", type: "select", options: [["", "settings.optionDefault", true], ["aac", "aac"], ["opus", "opus"]] }
+      { key: "audio_codec", labelKey: "settings.field.stream.audio_codec.label", descKey: "settings.field.stream.audio_codec.desc", type: "select", options: [["", "settings.optionDefault", true], ["aac", "aac"], ["opus", "opus"]], advanced: true }
     ] },
-    { section: "mailbox", titleKey: "settings.section.mailbox", fields: [
+    { section: "mailbox", titleKey: "settings.section.mailbox", container: "settings-drawer-body-mailbox", fields: [
       { key: "room_id", labelKey: "settings.field.mailbox.room_id.label", descKey: "settings.field.mailbox.room_id.desc", type: "text" },
       { key: "serve_as_bot", labelKey: "settings.field.mailbox.serve_as_bot.label", descKey: "settings.field.mailbox.serve_as_bot.desc", type: "toggle" }
     ] },
-    { section: "ai", titleKey: "settings.section.ai", fields: [
-      { key: "room_id", labelKey: "settings.field.ai.room_id.label", descKey: "settings.field.ai.room_id.desc", type: "text" },
+    { section: "ai", titleKey: "settings.section.ai", container: "settings-drawer-body-ai", fields: [
+      { key: "room_id", labelKey: "settings.field.ai.room_id.label", descKey: "settings.field.ai.room_id.desc", type: "text", advanced: true },
       { key: "upstream_url", labelKey: "settings.field.ai.upstream_url.label", descKey: "settings.field.ai.upstream_url.desc", type: "text" },
       { key: "upstream_api_key", labelKey: "settings.field.ai.upstream_api_key.label", descKey: "settings.field.ai.upstream_api_key.desc", type: "password" },
       { key: "default_model", labelKey: "settings.field.ai.default_model.label", descKey: "settings.field.ai.default_model.desc", type: "text" },
-      { key: "temperature", labelKey: "settings.field.ai.temperature.label", descKey: "settings.field.ai.temperature.desc", type: "number" },
-      { key: "request_timeout_secs", labelKey: "settings.field.ai.request_timeout_secs.label", descKey: "settings.field.ai.request_timeout_secs.desc", type: "number" },
-      { key: "api_listen", labelKey: "settings.field.ai.api_listen.label", descKey: "settings.field.ai.api_listen.desc", type: "text" }
+      { key: "temperature", labelKey: "settings.field.ai.temperature.label", descKey: "settings.field.ai.temperature.desc", type: "number", advanced: true },
+      { key: "request_timeout_secs", labelKey: "settings.field.ai.request_timeout_secs.label", descKey: "settings.field.ai.request_timeout_secs.desc", type: "number", advanced: true },
+      { key: "api_listen", labelKey: "settings.field.ai.api_listen.label", descKey: "settings.field.ai.api_listen.desc", type: "text", advanced: true }
     ] },
-    { section: "ui", titleKey: "settings.section.ui", fields: [
+    { section: "ui", titleKey: "settings.section.ui", container: "settings-body", fields: [
       { key: "listen", labelKey: "settings.field.ui.listen.label", descKey: "settings.field.ui.listen.desc", type: "text" },
       { key: "enabled", labelKey: "settings.field.ui.enabled.label", descKey: "settings.field.ui.enabled.desc", type: "toggle" }
     ] }
@@ -2700,10 +4273,29 @@
     return "settings-" + section + "-" + key;
   }
 
+  var SETTINGS_SECTION_PANEL = {
+    stream: "panel-stream",
+    ai: "panel-ai",
+    mailbox: "panel-mailbox",
+    storage: "panel-store",
+    identity: "panel-profile",
+    ui: "panel-settings"
+  };
+
   function focusSettingsField(id) {
     var input = document.getElementById(id);
-    navigateTo("panel-settings");
-    if (input) setTimeout(function () { input.focus(); }, 300);
+    var section = id.replace(/^settings-/, "").split("-")[0];
+    navigateTo(SETTINGS_SECTION_PANEL[section] || "panel-settings");
+    var drawer = document.getElementById("settings-drawer-" + section);
+    if (drawer) drawer.open = true;
+    if (input) {
+      var details = input.closest ? input.closest("details") : null;
+      while (details) {
+        details.open = true;
+        details = details.parentElement ? details.parentElement.closest("details") : null;
+      }
+      setTimeout(function () { input.focus(); }, 300);
+    }
   }
 
   function saveSetting(path, value, sectionCfg, key, badge) {
@@ -2711,10 +4303,10 @@
       if (sectionCfg) sectionCfg[key] = value;
       var applies = data && data.applies === "daemon restart";
       badge.style.display = applies ? "inline-block" : "none";
-      showToast(applies ? t("settings.savedRestart") : t("settings.savedNextStart"));
+      showToast(applies ? t("settings.savedRestart") : t("settings.savedNextStart"), "success");
       refreshAiHints();
     }, function (err) {
-      showToast("config.set " + path + ": " + (err.message || err));
+      showToast("config.set " + path + ": " + (err.message || err), "error");
     });
   }
 
@@ -2731,9 +4323,13 @@
     var row = el("div", { class: "settings-row" });
     var current = sectionCfg ? sectionCfg[f.key] : null;
     var path = section + "." + f.key;
-    var badge = el("span", { class: "badge restart" });
+    var badge = el("button", { type: "button", class: "badge restart" });
     badge.textContent = t("settings.restartBadge");
+    badge.title = t("settings.restartBadgeTitle");
     badge.style.display = "none";
+    badge.addEventListener("click", function () {
+      restartDaemon(badge);
+    });
     var input;
 
     if (f.type === "toggle") {
@@ -2764,7 +4360,7 @@
         var v = input.value.trim();
         if (v === "") { saveSetting(path, null, sectionCfg, f.key, badge); return; }
         var num = Number(v);
-        if (!isFinite(num)) { showToast(t("settings.enterGib", { label: fieldLabel })); return; }
+        if (!isFinite(num)) { showToast(t("settings.enterGib", { label: fieldLabel }), "error"); return; }
         saveSetting(path, Math.round(num * GIB), sectionCfg, f.key, badge);
       });
       row.appendChild(input);
@@ -2776,7 +4372,7 @@
         var v = input.value.trim();
         if (v === "") { saveSetting(path, null, sectionCfg, f.key, badge); return; }
         var num = Number(v);
-        if (!isFinite(num)) { showToast(t("settings.enterNumber", { label: fieldLabel })); return; }
+        if (!isFinite(num)) { showToast(t("settings.enterNumber", { label: fieldLabel }), "error"); return; }
         saveSetting(path, num, sectionCfg, f.key, badge);
       });
       row.appendChild(input);
@@ -2818,25 +4414,43 @@
 
   function renderSettings(cfg) {
     state.config = cfg;
-    var body = document.getElementById("settings-body");
-    body.innerHTML = "";
     SETTINGS_SCHEMA.forEach(function (grp) {
+      var container = document.getElementById(grp.container);
+      if (!container) return;
+      var prevAdvanced = container.querySelector(".settings-advanced");
+      var advancedWasOpen = !!(prevAdvanced && prevAdvanced.open);
+      container.innerHTML = "";
       var sec = el("div", { class: "settings-section" });
-      var h3 = el("h3", {});
-      h3.textContent = t(grp.titleKey);
-      sec.appendChild(h3);
+      if (grp.section === "ui") {
+        var h3 = el("h3", {});
+        h3.textContent = t(grp.titleKey);
+        sec.appendChild(h3);
+      }
       var sectionCfg = cfg ? cfg[grp.section] : null;
+      var advancedFields = [];
       grp.fields.forEach(function (f) {
-        sec.appendChild(buildSettingsField(grp.section, f, sectionCfg));
+        if (f.advanced) advancedFields.push(f);
+        else sec.appendChild(buildSettingsField(grp.section, f, sectionCfg));
       });
-      body.appendChild(sec);
+      if (advancedFields.length) {
+        var adv = el("details", { class: "settings-advanced" });
+        var advSummary = el("summary", {});
+        advSummary.textContent = t("settings.advanced");
+        adv.appendChild(advSummary);
+        advancedFields.forEach(function (f) {
+          adv.appendChild(buildSettingsField(grp.section, f, sectionCfg));
+        });
+        adv.open = advancedWasOpen;
+        sec.appendChild(adv);
+      }
+      container.appendChild(sec);
     });
     refreshAiHints();
   }
 
   function pollConfig() {
     return api("config.show", {}).then(renderSettings, function (err) {
-      showToast("config.show: " + err.message);
+      showToast("config.show: " + err.message, "error");
     });
   }
 
@@ -2850,9 +4464,249 @@
   var POLL_INTERVAL_MS = 5000;
   var tickTimer = null;
 
+  /* ---------- updates / install ---------- */
+
+  var updateKv = document.getElementById("update-kv");
+  var updateAvailHint = document.getElementById("update-available-hint");
+  var btnUpdateApply = document.getElementById("btn-update-apply");
+  var btnInstall = document.getElementById("btn-install");
+  var chkAutostart = document.getElementById("chk-autostart");
+
+  function mergeUpdate(data) {
+    var u = state.update || {};
+    for (var k in data) {
+      if (Object.prototype.hasOwnProperty.call(data, k)) u[k] = data[k];
+    }
+    state.update = u;
+  }
+
+  function onOff(v) { return v ? t("update.on") : t("update.off"); }
+
+  function renderUpdate() {
+    if (!updateKv) return;
+    updateKv.innerHTML = "";
+    var u = state.update;
+    if (!u) {
+      addKv(updateKv, t("update.current"), "…");
+      return;
+    }
+    addKv(updateKv, t("update.current"), "v" + u.current, true);
+    if (u.latest) addKv(updateKv, t("update.latest"), "v" + u.latest, true);
+    addKv(updateKv, t("update.target"), u.target, true);
+    addKv(updateKv, t("update.autoUpdate"), onOff(u.auto_apply));
+    addKv(updateKv, t("update.installed"), u.installed ? t("update.yes") : t("update.no"));
+    addKv(updateKv, t("update.autostart"), onOff(u.autostart_enabled));
+
+    var avail = u.update_available === true;
+    if (updateAvailHint) {
+      updateAvailHint.hidden = !avail;
+      if (avail) {
+        updateAvailHint.textContent = u.asset_available === false
+          ? t("update.availNoAsset", { version: u.latest })
+          : t("update.availMsg", { version: u.latest });
+      }
+    }
+    if (btnUpdateApply) btnUpdateApply.hidden = !(avail && u.asset_available !== false);
+    if (chkAutostart) chkAutostart.checked = !!u.autostart_enabled;
+    if (btnInstall) btnInstall.textContent = u.installed ? t("update.reinstallBtn") : t("update.installBtn");
+  }
+
+  function pollUpdate() {
+    return api("update.status", {}).then(function (data) {
+      mergeUpdate(data);
+      renderUpdate();
+    }, function () { /* daemon may be down; leave last-known state */ });
+  }
+
+  var updateRefreshBtn = document.querySelector('[data-target="update"]');
+  if (updateRefreshBtn) {
+    updateRefreshBtn.addEventListener("click", function (e) {
+      withBusy(e.currentTarget, function () { return pollUpdate(); });
+    });
+  }
+
+  if (document.getElementById("btn-update-check")) {
+    document.getElementById("btn-update-check").addEventListener("click", function (e) {
+      runAction(e.currentTarget, "update.check", {}, function (data) {
+        mergeUpdate(data);
+        renderUpdate();
+        showToast(data.update_available ? t("update.availMsg", { version: data.latest }) : t("update.upToDate"));
+      });
+    });
+  }
+
+  if (btnUpdateApply) {
+    btnUpdateApply.addEventListener("click", function (e) {
+      if (!confirm(t("update.applyConfirm"))) return;
+      runAction(e.currentTarget, "update.apply", { restart: false }, function () {
+        showToast(t("update.staged"), "success");
+        pollUpdate();
+      });
+    });
+  }
+
+  if (btnInstall) {
+    btnInstall.addEventListener("click", function (e) {
+      var autostart = chkAutostart ? chkAutostart.checked : true;
+      runAction(e.currentTarget, "install.install", { autostart: autostart }, function () {
+        showToast(t("update.installedToast"), "success");
+        pollUpdate();
+      });
+    });
+  }
+
+  if (chkAutostart) {
+    chkAutostart.addEventListener("change", function () {
+      var cmd = chkAutostart.checked ? "autostart.enable" : "autostart.disable";
+      runAction(null, cmd, {}, function () { pollUpdate(); });
+    });
+  }
+
+  /* ---------- developer console (logs.tail / logs.clear) ---------- */
+
+  var DEV_MODE_KEY = "mistl-dev-mode";
+  var DEV_LOG_LEVELS = ["TRACE", "DEBUG", "INFO", "WARN", "ERROR"];
+  var devConsoleEl = document.getElementById("dev-console");
+  var devConsoleBody = document.getElementById("dev-console-body");
+  var devConsoleCount = document.getElementById("dev-console-count");
+  var devConsoleLevels = document.getElementById("dev-console-levels");
+  var devConsoleSearch = document.getElementById("dev-console-search");
+  var chkDevMode = document.getElementById("chk-dev-mode");
+
+  var devLog = { entries: [], sinceId: 0, activeLevels: {}, timer: null, pinnedToBottom: true };
+  DEV_LOG_LEVELS.forEach(function (lvl) { devLog.activeLevels[lvl] = true; });
+
+  DEV_LOG_LEVELS.forEach(function (lvl) {
+    var btn = el("button", { type: "button", class: "dev-console-level active", "data-level": lvl, text: lvl });
+    btn.addEventListener("click", function () {
+      devLog.activeLevels[lvl] = !devLog.activeLevels[lvl];
+      btn.classList.toggle("active", devLog.activeLevels[lvl]);
+      renderDevLog();
+    });
+    devConsoleLevels.appendChild(btn);
+  });
+
+  function devLogFiltered() {
+    var q = (devConsoleSearch.value || "").trim().toLowerCase();
+    return devLog.entries.filter(function (e) {
+      if (!devLog.activeLevels[e.level]) return false;
+      if (q && e.message.toLowerCase().indexOf(q) < 0 && e.target.toLowerCase().indexOf(q) < 0) return false;
+      return true;
+    });
+  }
+
+  function fmtLogTime(tsMs) {
+    var d = new Date(tsMs);
+    function pad(n, w) { w = w || 2; var s = String(n); while (s.length < w) s = "0" + s; return s; }
+    return pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds()) + "." + pad(d.getMilliseconds(), 3);
+  }
+
+  function renderDevLog() {
+    var filtered = devLogFiltered();
+    devConsoleCount.textContent = String(filtered.length);
+    var wasAtBottom = devLog.pinnedToBottom;
+    devConsoleBody.innerHTML = "";
+    if (filtered.length === 0) {
+      devConsoleBody.appendChild(el("div", { class: "dev-console-empty", text: t("devlog.empty") }));
+    } else {
+      filtered.forEach(function (e) {
+        var line = el("div", { class: "dev-console-line", "data-level": e.level });
+        line.appendChild(el("span", { class: "dev-console-line-time", text: fmtLogTime(e.ts_ms) }));
+        line.appendChild(el("span", { class: "dev-console-line-level", text: e.level }));
+        line.appendChild(el("span", { class: "dev-console-line-text", text: e.target + ": " + e.message }));
+        devConsoleBody.appendChild(line);
+      });
+    }
+    if (wasAtBottom) devConsoleBody.scrollTop = devConsoleBody.scrollHeight;
+  }
+
+  devConsoleBody.addEventListener("scroll", function () {
+    devLog.pinnedToBottom = devConsoleBody.scrollHeight - devConsoleBody.scrollTop - devConsoleBody.clientHeight < 24;
+  });
+
+  devConsoleSearch.addEventListener("input", renderDevLog);
+
+  function pollDevLog() {
+    return api("logs.tail", { since: devLog.sinceId }).then(function (data) {
+      var entries = (data && data.entries) || [];
+      if (entries.length) {
+        devLog.entries = devLog.entries.concat(entries).slice(-1000);
+        devLog.sinceId = entries[entries.length - 1].id + 1;
+        renderDevLog();
+      }
+    }, function () { /* daemon may be down; keep last-known lines */ });
+  }
+
+  document.getElementById("dev-console-clear").addEventListener("click", function (e) {
+    runAction(e.currentTarget, "logs.clear", {}, function () {
+      devLog.entries = [];
+      renderDevLog();
+    });
+  });
+
+  document.getElementById("dev-console-copy").addEventListener("click", function () {
+    var text = devLogFiltered().map(function (e) {
+      return "[" + fmtLogTime(e.ts_ms) + "] " + e.level + " " + e.target + ": " + e.message;
+    }).join("\n");
+    copyToClipboard(text);
+  });
+
+  var devConsoleCollapseBtn = document.getElementById("dev-console-collapse");
+  devConsoleCollapseBtn.addEventListener("click", function () {
+    var collapsed = devConsoleEl.classList.toggle("collapsed");
+    var label = t(collapsed ? "devlog.expand" : "devlog.collapse");
+    devConsoleCollapseBtn.setAttribute("aria-label", label);
+    devConsoleCollapseBtn.title = label;
+  });
+
+  // The console is a fixed overlay docked to the bottom of the viewport; this
+  // reserves matching space at the bottom of the scrollable content so it
+  // never permanently covers whatever panel is behind it -- users can still
+  // scroll the page clear of it. Re-measured on show/hide, collapse/expand,
+  // and manual drag-resize (ResizeObserver), so it always matches the
+  // console's actual rendered height.
+  var mainEl = document.getElementById("main");
+  function updateMainReservedSpace() {
+    if (!mainEl) return;
+    mainEl.style.paddingBottom = devConsoleEl.hidden
+      ? ""
+      : (devConsoleEl.getBoundingClientRect().height + 24) + "px";
+  }
+  if (typeof ResizeObserver !== "undefined") {
+    new ResizeObserver(updateMainReservedSpace).observe(devConsoleEl);
+  }
+
+  function setDevMode(enabled) {
+    try { localStorage.setItem(DEV_MODE_KEY, enabled ? "1" : "0"); } catch (e) { /* ignore */ }
+    if (chkDevMode) chkDevMode.checked = enabled;
+    devConsoleEl.hidden = !enabled;
+    updateMainReservedSpace();
+    if (enabled) {
+      devLog.entries = [];
+      devLog.sinceId = 0;
+      pollDevLog();
+      if (!devLog.timer) devLog.timer = setInterval(pollDevLog, 1000);
+    } else if (devLog.timer) {
+      clearInterval(devLog.timer);
+      devLog.timer = null;
+    }
+  }
+
+  if (chkDevMode) {
+    chkDevMode.addEventListener("change", function () { setDevMode(chkDevMode.checked); });
+  }
+  document.getElementById("dev-console-close").addEventListener("click", function () { setDevMode(false); });
+
+  function initDevMode() {
+    var stored = false;
+    try { stored = localStorage.getItem(DEV_MODE_KEY) === "1"; } catch (e) { /* ignore */ }
+    setDevMode(stored);
+  }
+
   function pollAll() {
     pollDaemonStatus();
     pollStreamStatus();
+    pollTopology();
     pollAiStatus();
   }
 
@@ -2892,7 +4746,7 @@
 
   var PANEL_IDS = [
     "panel-overview", "panel-stream", "panel-ai",
-    "panel-mailbox", "panel-store", "panel-profile", "panel-settings"
+    "panel-mailbox", "panel-store", "panel-profile", "panel-update", "panel-settings"
   ];
   var sideLinks = Array.prototype.slice.call(document.querySelectorAll("#sidenav a"));
 
@@ -2901,7 +4755,51 @@
     return PANEL_IDS.indexOf(id) >= 0 ? id : "panel-overview";
   }
 
+  /* The topology card exists exactly once and is shown on five panels --
+     Overview and Stream (primary network views, fold open by default) plus
+     AI, Mailbox and Store (fold collapsed by default, expanded on demand
+     from their mini-strips). Rather than duplicating markup/renderers --
+     which would need duplicate element ids and double rendering -- the
+     single card is re-parented into the active panel's slot on navigation.
+     The SVG, including its marker defs, survives same-document moves
+     intact, and the shared 5s poll keeps rendering into it wherever it
+     sits. */
+  var topologyCardEl = document.getElementById("topology-card");
+  var topologySlots = {
+    "panel-overview": document.getElementById("topology-slot-overview"),
+    "panel-stream": document.getElementById("topology-slot-stream"),
+    "panel-ai": document.getElementById("topology-slot-ai"),
+    "panel-mailbox": document.getElementById("topology-slot-mailbox"),
+    "panel-store": document.getElementById("topology-slot-store")
+  };
+  var topologyFoldEl = document.getElementById("topology-fold");
+  var topologyDefaultOpen = { "panel-overview": true, "panel-stream": true, "panel-ai": false, "panel-mailbox": false, "panel-store": false };
+  var topologyUserToggled = {};   /* panelId -> true once the user opens/closes the fold there */
+  var topologyHostPanel = null;
+
+  function placeTopologyCard(activeId) {
+    var slot = topologySlots[activeId];
+    if (slot && topologyCardEl.parentNode !== slot) slot.appendChild(topologyCardEl);
+    if (slot) {
+      topologyHostPanel = activeId;
+      if (topologyFoldEl && !topologyUserToggled[activeId]) {
+        topologyFoldEl.open = topologyDefaultOpen[activeId] !== false;
+      }
+      renderTopologyContext();
+    }
+  }
+
+  if (topologyFoldEl) {
+    var topologyFoldSummary = topologyFoldEl.querySelector("summary");
+    if (topologyFoldSummary) {
+      topologyFoldSummary.addEventListener("click", function () {
+        topologyUserToggled[topologyHostPanel] = true;
+      });
+    }
+  }
+
   function showPanel(id) {
+    placeTopologyCard(id);
     PANEL_IDS.forEach(function (pid) {
       var p = document.getElementById(pid);
       if (!p) return;
@@ -2934,6 +4832,18 @@
     e.preventDefault();
     navigateTo(id);
   });
+  /* the strips' "view topology" link no longer navigates away -- it opens
+     (if collapsed) and scrolls to the in-panel card, which is always in the
+     active panel now that every strip-bearing panel has a slot */
+  document.addEventListener("click", function (e) {
+    var a = e.target.closest ? e.target.closest('a[href="#topology-card"]') : null;
+    if (!a) return;
+    e.preventDefault();
+    topologyUserToggled[topologyHostPanel] = true;
+    if (topologyFoldEl) topologyFoldEl.open = true;
+    var card = document.getElementById("topology-card");
+    if (card) card.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
 
   /* ---------- init ---------- */
 
@@ -2949,6 +4859,8 @@
   pollMailboxLs();
   pollStoreLs();
   pollConfig();
+  pollUpdate();
+  initDevMode();
 })();
 </script>
 </body>
