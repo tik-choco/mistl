@@ -675,6 +675,54 @@
   #cascade-peers-details summary { cursor: pointer; font-size: 12px; color: var(--text-dim); padding: 2px 0; }
   #cascade-peers-details summary:hover { color: var(--accent); }
 
+  /* ---- topology panel: node-link graph (topology.status) ---- */
+  .topology-graph-wrap {
+    overflow-x: auto;
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    background: var(--bg-alt);
+    padding: 4px;
+  }
+  .topology-svg { display: block; min-width: 620px; width: 100%; height: auto; }
+  .topology-node-box {
+    fill: var(--panel);
+    stroke: var(--panel-border);
+    stroke-width: 1.4;
+    transition: stroke var(--dur-fast) var(--ease-out);
+  }
+  .topology-node-box.kind-self { stroke: var(--accent); fill: var(--accent-dim); }
+  .topology-node-box.kind-leader { stroke: var(--warn); }
+  .topology-node-box.kind-publisher { stroke: var(--ok); }
+  .topology-node-box.kind-follower { stroke: var(--accent); }
+  .topology-node-box.kind-viewers { stroke-dasharray: 3 2; }
+  .topology-node-label { fill: var(--text); font: 600 11.5px var(--sans); }
+  .topology-node-sub { fill: var(--text-faint); font: 700 9.5px var(--mono); }
+  .topology-edge { stroke: var(--text-faint); stroke-width: 1.3; fill: none; }
+  .topology-edge.dashed { stroke-dasharray: 4 3; }
+  .topology-edge-arrowhead { fill: var(--text-faint); }
+  .topology-edge-label {
+    fill: var(--text-dim);
+    font: 600 9.5px var(--sans);
+    paint-order: stroke;
+    stroke: var(--bg-alt);
+    stroke-width: 4px;
+  }
+  .topology-dot { stroke: var(--panel); stroke-width: 1px; }
+  .topology-dot.state-connected { fill: var(--ok); }
+  .topology-dot.state-connecting { fill: var(--warn); }
+  .topology-dot.state-down { fill: var(--err); }
+  .topology-empty { padding: 20px; text-align: center; color: var(--text-faint); font-size: 12.5px; }
+  .topology-legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 11px; color: var(--text-dim); margin: 8px 0 0; }
+  .topology-legend-item { display: inline-flex; align-items: center; gap: 5px; }
+  .topology-legend-dot { width: 9px; height: 9px; border-radius: 3px; display: inline-block; border: 1.4px solid var(--panel-border); flex: none; }
+  .topology-legend-dot.kind-self { border-color: var(--accent); background: var(--accent-dim); }
+  .topology-legend-dot.kind-leader { border-color: var(--warn); background: var(--panel); }
+  .topology-legend-dot.kind-publisher { border-color: var(--ok); background: var(--panel); }
+  .topology-legend-dot.kind-follower { border-color: var(--accent); background: var(--panel); }
+  .topology-legend-dot.kind-viewers { border-color: var(--text-faint); background: var(--panel); border-style: dashed; }
+  .topology-rooms { font-size: 12px; color: var(--text-dim); margin-top: 8px; }
+  .topology-rooms .mono { color: var(--text); }
+
   .info-hint {
     display: flex;
     align-items: center;
@@ -895,6 +943,7 @@
   <nav class="sidenav" id="sidenav" aria-label="Sections">
     <a href="#panel-overview"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9.5 12 3l9 6.5"/><path d="M5 9.5V21h14V9.5"/></svg><span data-i18n="nav.overview">Overview</span></a>
     <a href="#panel-stream"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg><span data-i18n="nav.stream">Stream</span></a>
+    <a href="#panel-topology"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="2.4"/><circle cx="5" cy="19" r="2.4"/><circle cx="19" cy="19" r="2.4"/><path d="M12 7.4V13M12 13 6.6 17M12 13l5.4 4"/></svg><span data-i18n="nav.topology">Topology</span></a>
     <a href="#panel-ai"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3"/></svg><span data-i18n="nav.ai">AI</span></a>
     <a href="#panel-mailbox"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.5 5h13l3.5 7v7a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-7z"/></svg><span data-i18n="nav.mailbox">Mailbox</span></a>
     <a href="#panel-store"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.7 4 3 9 3s9-1.3 9-3V5"/><path d="M3 12c0 1.7 4 3 9 3s9-1.3 9-3"/></svg><span data-i18n="nav.store">Store</span></a>
@@ -974,6 +1023,19 @@
     <div class="row">
       <button id="btn-stream-stop" class="danger" data-i18n="stream.stopBtn">Stop</button>
     </div>
+  </section>
+
+  <section class="panel panel-span2" id="panel-topology">
+    <h2><span data-i18n="topology.title">Topology</span> <span class="spacer"></span>
+      <button data-role="refresh" data-target="topology" data-i18n="common.refresh">Refresh</button>
+    </h2>
+    <p class="muted" style="font-size: 12.5px; margin: 0 0 8px;" data-i18n="topology.desc">Who this node is connected to and how, from what mistlib and the relay/cascade control plane can actually observe.</p>
+    <div class="topology-graph-wrap">
+      <svg id="topology-svg" class="topology-svg" role="img" viewBox="0 0 640 200"></svg>
+    </div>
+    <div class="topology-legend" id="topology-legend"></div>
+    <dl class="kv" id="topology-kv"></dl>
+    <div class="topology-rooms" id="topology-rooms"></div>
   </section>
 
   <section class="panel panel-span2" id="panel-ai">
@@ -1190,6 +1252,7 @@
       "daemon.unreachable": "daemon unreachable",
       "nav.overview": "Overview",
       "nav.stream": "Stream",
+      "nav.topology": "Topology",
       "nav.ai": "AI",
       "nav.mailbox": "Mailbox",
       "nav.store": "Store",
@@ -1297,6 +1360,41 @@
       "stream.cascade.peersToggle": "{count} relay peers",
       "stream.cascade.topologyAria": "{role}, relaying through {count} peers to VRChat",
       "stream.cascade.offNote": "Cascade off ([stream] cascade = false)",
+      "topology.title": "Topology",
+      "topology.desc": "Who this node is connected to and how, from what mistlib and the relay/cascade control plane can actually observe.",
+      "topology.node.self": "this node",
+      "topology.node.viewers": "RTSP viewers",
+      "topology.role.leader": "leader",
+      "topology.role.follower": "follower",
+      "topology.role.sibling": "cascade peer",
+      "topology.role.sharer": "sharer",
+      "topology.role.electing": "electing…",
+      "topology.state.connected": "connected",
+      "topology.state.connecting": "connecting",
+      "topology.state.reconnecting": "reconnecting",
+      "topology.state.failed": "failed",
+      "topology.state.disconnected": "disconnected",
+      "topology.state.unknown": "unknown",
+      "topology.edge.publishing": "publishing",
+      "topology.edge.leaderToYou": "cascade: leader",
+      "topology.edge.youToFollower": "cascade: follower",
+      "topology.edge.sibling": "cascade peer",
+      "topology.edge.viewers": "RTSP",
+      "topology.edge.peer": "connected",
+      "topology.legend.self": "This node",
+      "topology.legend.publisher": "Publisher / sharer",
+      "topology.legend.leader": "Cascade leader",
+      "topology.legend.follower": "Cascade follower",
+      "topology.legend.viewers": "RTSP viewers (count only)",
+      "topology.kv.status": "status",
+      "topology.kv.unknown": "unavailable (daemon unreachable)",
+      "topology.kv.peers": "connected peers",
+      "topology.kv.rooms": "joined rooms",
+      "topology.kv.cascade": "cascade",
+      "topology.kv.cascadeOff": "off",
+      "topology.rooms": "Joined rooms",
+      "topology.noRooms": "No rooms joined yet.",
+      "topology.aria": "Topology: {peers} connected peers across {rooms} joined rooms",
       "ai.title": "AI",
       "ai.upstreamHint": "Set an OpenAI-compatible upstream in Settings to provide inference.",
       "ai.openSettings": "Open Settings",
@@ -1469,6 +1567,7 @@
       "daemon.unreachable": "デーモンに接続できません",
       "nav.overview": "概要",
       "nav.stream": "ストリーム",
+      "nav.topology": "トポロジー",
       "nav.ai": "AI",
       "nav.mailbox": "メールボックス",
       "nav.store": "ストア",
@@ -1576,6 +1675,41 @@
       "stream.cascade.peersToggle": "中継ピア {count} 件",
       "stream.cascade.topologyAria": "{role}・中継ピア {count} 件を経由してVRChatへ",
       "stream.cascade.offNote": "カスケードはオフです ([stream] cascade = false)",
+      "topology.title": "トポロジー",
+      "topology.desc": "このノードが誰と、どのようにつながっているか — mistlibと中継/カスケード制御プレーンから実際に観測できる範囲で表示します。",
+      "topology.node.self": "このノード",
+      "topology.node.viewers": "RTSP視聴者",
+      "topology.role.leader": "リーダー",
+      "topology.role.follower": "フォロワー",
+      "topology.role.sibling": "カスケードピア",
+      "topology.role.sharer": "共有元",
+      "topology.role.electing": "選出中…",
+      "topology.state.connected": "接続中",
+      "topology.state.connecting": "接続処理中",
+      "topology.state.reconnecting": "再接続中",
+      "topology.state.failed": "失敗",
+      "topology.state.disconnected": "切断",
+      "topology.state.unknown": "不明",
+      "topology.edge.publishing": "配信中",
+      "topology.edge.leaderToYou": "カスケード: リーダー",
+      "topology.edge.youToFollower": "カスケード: フォロワー",
+      "topology.edge.sibling": "カスケードピア",
+      "topology.edge.viewers": "RTSP",
+      "topology.edge.peer": "接続中",
+      "topology.legend.self": "このノード",
+      "topology.legend.publisher": "配信元 / 共有元",
+      "topology.legend.leader": "カスケードリーダー",
+      "topology.legend.follower": "カスケードフォロワー",
+      "topology.legend.viewers": "RTSP視聴者（件数のみ）",
+      "topology.kv.status": "状態",
+      "topology.kv.unknown": "取得不可（デーモンに接続できません）",
+      "topology.kv.peers": "接続中のピア数",
+      "topology.kv.rooms": "参加中のルーム数",
+      "topology.kv.cascade": "カスケード",
+      "topology.kv.cascadeOff": "オフ",
+      "topology.rooms": "参加中のルーム",
+      "topology.noRooms": "まだルームに参加していません。",
+      "topology.aria": "トポロジー: {rooms} ルームで {peers} 件のピアと接続中",
       "ai.title": "AI",
       "ai.upstreamHint": "推論を提供するには、設定でOpenAI互換のアップストリームを指定してください。",
       "ai.openSettings": "設定を開く",
@@ -1748,6 +1882,7 @@
       "daemon.unreachable": "无法连接到守护进程",
       "nav.overview": "概览",
       "nav.stream": "串流",
+      "nav.topology": "拓扑",
       "nav.ai": "AI",
       "nav.mailbox": "信箱",
       "nav.store": "存储",
@@ -1855,6 +1990,41 @@
       "stream.cascade.peersToggle": "{count} 个中继节点",
       "stream.cascade.topologyAria": "{role}，通过 {count} 个中继节点转发到 VRChat",
       "stream.cascade.offNote": "级联已关闭 ([stream] cascade = false)",
+      "topology.title": "拓扑",
+      "topology.desc": "本节点当前与谁相连、如何相连 —— 仅展示 mistlib 与中继/级联控制平面实际能观测到的信息。",
+      "topology.node.self": "本节点",
+      "topology.node.viewers": "RTSP 观看者",
+      "topology.role.leader": "主节点",
+      "topology.role.follower": "从节点",
+      "topology.role.sibling": "级联节点",
+      "topology.role.sharer": "共享源",
+      "topology.role.electing": "选举中…",
+      "topology.state.connected": "已连接",
+      "topology.state.connecting": "连接中",
+      "topology.state.reconnecting": "重连中",
+      "topology.state.failed": "失败",
+      "topology.state.disconnected": "已断开",
+      "topology.state.unknown": "未知",
+      "topology.edge.publishing": "推流中",
+      "topology.edge.leaderToYou": "级联：主节点",
+      "topology.edge.youToFollower": "级联：从节点",
+      "topology.edge.sibling": "级联节点",
+      "topology.edge.viewers": "RTSP",
+      "topology.edge.peer": "已连接",
+      "topology.legend.self": "本节点",
+      "topology.legend.publisher": "推流源 / 共享源",
+      "topology.legend.leader": "级联主节点",
+      "topology.legend.follower": "级联从节点",
+      "topology.legend.viewers": "RTSP 观看者（仅计数）",
+      "topology.kv.status": "状态",
+      "topology.kv.unknown": "不可用（无法连接守护进程）",
+      "topology.kv.peers": "已连接的节点数",
+      "topology.kv.rooms": "已加入的房间数",
+      "topology.kv.cascade": "级联",
+      "topology.kv.cascadeOff": "关闭",
+      "topology.rooms": "已加入的房间",
+      "topology.noRooms": "尚未加入任何房间。",
+      "topology.aria": "拓扑：在 {rooms} 个房间中与 {peers} 个节点相连",
       "ai.title": "AI",
       "ai.upstreamHint": "在设置中配置 OpenAI 兼容的上游服务以提供推理。",
       "ai.openSettings": "打开设置",
@@ -2256,6 +2426,7 @@
     identity: null,
     stream: null,
     consensus: null,
+    topology: null,
     ai: null,
     config: null,
     chatHistory: [],
@@ -2270,6 +2441,7 @@
     renderOverview();
     renderIdentitySummary();
     renderStream();
+    renderTopology();
     renderAi();
     renderChat();
     renderMailboxHeld(state.mailboxHeldItems);
@@ -2630,6 +2802,298 @@
 
   document.getElementById("relay-room-hint-link").addEventListener("click", function () {
     showRelayRoomHint(false);
+  });
+
+  /* ---------- topology panel (topology.status) ----------
+     Node-link graph, drawn with plain inline SVG (no library): this node
+     fixed at the vertical center, a publisher/sharer column to its left, a
+     peers column (cascade leader/follower/sibling, or a generic connected
+     peer from `net`) to its right, and an aggregate RTSP-viewers node
+     furthest right. Layout is a deterministic left-to-right column
+     assignment by role, not a physics simulation -- see the module doc in
+     `src/topology.rs` for exactly what's genuinely observable versus
+     inferred here (e.g. RTSP viewers are a count only, never per-viewer
+     identity). */
+
+  var SVG_NS = "http://www.w3.org/2000/svg";
+  var topologySvg = document.getElementById("topology-svg");
+  var topologyLegend = document.getElementById("topology-legend");
+  var topologyKv = document.getElementById("topology-kv");
+  var topologyRooms = document.getElementById("topology-rooms");
+
+  function svgEl(tag, attrs) {
+    var node = document.createElementNS(SVG_NS, tag);
+    if (attrs) {
+      Object.keys(attrs).forEach(function (k) { node.setAttribute(k, attrs[k]); });
+    }
+    return node;
+  }
+
+  var TOPO_NODE_W = 132;
+  var TOPO_NODE_H = 40;
+  var TOPO_ROW_H = 48;
+
+  function topologyStateClass(connState) {
+    if (connState === "connected") return "state-connected";
+    if (connState === "connecting" || connState === "reconnecting") return "state-connecting";
+    return "state-down"; // failed / disconnected / unknown
+  }
+
+  /* Pure: turns a `topology.status` payload into the node/edge lists the
+     renderer lays out and draws. Kept separate from the drawing code so the
+     categorization logic (who's a cascade leader/follower/sibling versus a
+     plain connected peer) is easy to read in isolation. */
+  function buildTopologyGraph(data) {
+    var selfInfo = (data && data.self) || {};
+    var netPeers = (data && Array.isArray(data.peers)) ? data.peers : [];
+    var stream = (data && data.stream) || { running: false };
+    var cascade = stream.running && stream.backend === "relay" ? stream.cascade : null;
+    var cascadeActive = !!(cascade && cascade.enabled);
+    var role = cascadeActive ? (cascade.role || "unknown") : null;
+    var leaderId = cascadeActive ? cascade.leader : null;
+    var relayPeers = cascadeActive && Array.isArray(cascade.relay_peers) ? cascade.relay_peers : [];
+    var publisherId = stream.running ? (stream.publisher || null) : null;
+
+    var shown = {};
+    if (selfInfo.node_id) shown[selfInfo.node_id] = true;
+
+    var leftNodes = [];
+    var rightNodes = [];
+    var viewerNode = null;
+
+    if (publisherId) {
+      var pubSub = cascadeActive && role !== "leader" ? t("topology.role.leader") : t("topology.role.sharer");
+      leftNodes.push({ id: publisherId, label: shortNodeId(publisherId), sub: pubSub, kind: "publisher", edge: "publishing" });
+      shown[publisherId] = true;
+    }
+
+    relayPeers.forEach(function (peerId) {
+      if (shown[peerId]) return;
+      shown[peerId] = true;
+      var isLeader = peerId === leaderId;
+      if (isLeader) {
+        rightNodes.push({ id: peerId, label: shortNodeId(peerId), sub: t("topology.role.leader"), kind: "leader", edge: "leaderToYou" });
+      } else if (role === "leader") {
+        rightNodes.push({ id: peerId, label: shortNodeId(peerId), sub: t("topology.role.follower"), kind: "follower", edge: "youToFollower" });
+      } else {
+        rightNodes.push({ id: peerId, label: shortNodeId(peerId), sub: t("topology.role.sibling"), kind: "sibling", edge: "sibling" });
+      }
+    });
+
+    netPeers.forEach(function (p) {
+      if (!p || !p.node_id || shown[p.node_id]) return;
+      shown[p.node_id] = true;
+      var stateKey = "topology.state." + p.state;
+      rightNodes.push({
+        id: p.node_id,
+        label: shortNodeId(p.node_id),
+        sub: t(stateKey) === stateKey ? p.state : t(stateKey),
+        kind: "peer",
+        state: p.state,
+        edge: "peer"
+      });
+    });
+
+    if (stream.running) {
+      var clients = stream.clients != null ? stream.clients : 0;
+      viewerNode = { label: t("topology.node.viewers"), sub: String(clients), kind: "viewers", edge: "viewers" };
+    }
+
+    var roomsCount = (data && Array.isArray(data.rooms)) ? data.rooms.length : 0;
+    return {
+      self: selfInfo, leftNodes: leftNodes, rightNodes: rightNodes, viewerNode: viewerNode,
+      cascadeActive: cascadeActive, role: role, roomsCount: roomsCount
+    };
+  }
+
+  function topologyNodeBox(parent, x, y, label, sub, kindClass) {
+    var g = svgEl("g", { transform: "translate(" + (x - TOPO_NODE_W / 2) + "," + (y - TOPO_NODE_H / 2) + ")" });
+    g.appendChild(svgEl("rect", {
+      class: "topology-node-box " + kindClass, x: 0, y: 0,
+      width: TOPO_NODE_W, height: TOPO_NODE_H, rx: 8
+    }));
+    var labelEl = svgEl("text", { class: "topology-node-label", x: TOPO_NODE_W / 2, y: sub ? 17 : TOPO_NODE_H / 2 + 4, "text-anchor": "middle" });
+    labelEl.textContent = label;
+    g.appendChild(labelEl);
+    if (sub) {
+      var subEl = svgEl("text", { class: "topology-node-sub", x: TOPO_NODE_W / 2, y: 30, "text-anchor": "middle" });
+      subEl.textContent = sub;
+      g.appendChild(subEl);
+    }
+    parent.appendChild(g);
+    return { x: x, y: y, w: TOPO_NODE_W, h: TOPO_NODE_H };
+  }
+
+  function topologyEdge(parent, from, to, label, opts) {
+    opts = opts || {};
+    /* Direction is encoded by the caller's (from, to) order -- e.g. a
+       cascade leader feeding this node is passed as (leaderBox, selfBox) --
+       so the arrowhead (always at the path's end, via marker-end) lands on
+       the right node without this function needing a separate "reverse"
+       flag. */
+    var x1 = from.x <= to.x ? from.x + from.w / 2 : from.x - from.w / 2;
+    var x2 = from.x <= to.x ? to.x - to.w / 2 : to.x + to.w / 2;
+    var path = svgEl("path", {
+      class: "topology-edge" + (opts.dashed ? " dashed" : ""),
+      d: "M" + x1 + " " + from.y + " C " + (x1 + (x2 - x1) / 2) + " " + from.y + ", " + (x1 + (x2 - x1) / 2) + " " + to.y + ", " + x2 + " " + to.y
+    });
+    if (!opts.noArrow) path.setAttribute("marker-end", "url(#topology-arrow)");
+    parent.appendChild(path);
+    if (label) {
+      var midX = (x1 + x2) / 2;
+      var midY = (from.y + to.y) / 2;
+      var labelEl = svgEl("text", { class: "topology-edge-label", x: midX, y: midY - 5, "text-anchor": "middle" });
+      labelEl.textContent = label;
+      parent.appendChild(labelEl);
+    }
+  }
+
+  function topologyArrowDefs() {
+    var defs = svgEl("defs");
+    var arrow = svgEl("marker", {
+      id: "topology-arrow", viewBox: "0 0 10 10", refX: 9, refY: 5,
+      markerWidth: 7, markerHeight: 7, orient: "auto-start-reverse"
+    });
+    var arrowPath = svgEl("path", { d: "M0 0 L10 5 L0 10 z", class: "topology-edge-arrowhead" });
+    arrow.appendChild(arrowPath);
+    defs.appendChild(arrow);
+    return defs;
+  }
+
+  function edgeLabelFor(kind) {
+    switch (kind) {
+      case "publishing": return t("topology.edge.publishing");
+      case "leaderToYou": return t("topology.edge.leaderToYou");
+      case "youToFollower": return t("topology.edge.youToFollower");
+      case "sibling": return t("topology.edge.sibling");
+      case "viewers": return t("topology.edge.viewers");
+      default: return t("topology.edge.peer");
+    }
+  }
+
+  function renderTopologyGraph(graph) {
+    topologySvg.innerHTML = "";
+    topologySvg.appendChild(topologyArrowDefs());
+
+    var rightCount = graph.rightNodes.length;
+    var rows = Math.max(rightCount, graph.leftNodes.length, 1);
+    var height = Math.max(rows * TOPO_ROW_H + 40, 160);
+    var centerY = height / 2;
+    topologySvg.setAttribute("viewBox", "0 0 640 " + height);
+
+    var xLeft = 90, xSelf = 250, xRight = 420, xViewers = 570;
+    if (!graph.viewerNode) xRight = 480;
+
+    var selfLabel = graph.self.display_name || shortNodeId(graph.self.node_id) || t("topology.node.self");
+    var selfSub = graph.cascadeActive
+      ? (graph.role === "leader" ? t("topology.role.leader") : graph.role === "follower" ? t("topology.role.follower") : t("topology.role.electing"))
+      : t("topology.node.self");
+    var selfBox = topologyNodeBox(topologySvg, xSelf, centerY, selfLabel, selfSub, "kind-self");
+
+    graph.leftNodes.forEach(function (n, i) {
+      var y = graph.leftNodes.length === 1 ? centerY : (i + 0.5) * (height / graph.leftNodes.length);
+      var box = topologyNodeBox(topologySvg, xLeft, y, n.label, n.sub, "kind-" + n.kind);
+      topologyEdge(topologySvg, box, selfBox, edgeLabelFor(n.edge));
+    });
+
+    graph.rightNodes.forEach(function (n, i) {
+      var y = rightCount === 1 ? centerY : (i + 0.5) * (height / rightCount);
+      var kindClass = n.kind === "peer" ? "kind-peer" : "kind-" + n.kind;
+      var box = topologyNodeBox(topologySvg, xRight, y, n.label, n.sub, kindClass);
+      if (n.kind === "peer") {
+        var dot = svgEl("circle", { class: "topology-dot " + topologyStateClass(n.state), cx: xRight - TOPO_NODE_W / 2 + 8, cy: y - TOPO_NODE_H / 2 + 8, r: 4 });
+        topologySvg.appendChild(dot);
+      }
+      var dashed = n.edge === "sibling";
+      var noArrow = n.edge === "peer" || n.edge === "sibling";
+      // A cascade leader feeds *this* node, so that edge is drawn
+      // leader-box -> self-box (arrowhead lands on self); every other edge
+      // in this column is drawn self -> peer.
+      if (n.edge === "leaderToYou") {
+        topologyEdge(topologySvg, box, selfBox, edgeLabelFor(n.edge));
+      } else {
+        topologyEdge(topologySvg, selfBox, box, edgeLabelFor(n.edge), { dashed: dashed, noArrow: noArrow });
+      }
+    });
+
+    if (graph.viewerNode) {
+      var viewerBox = topologyNodeBox(topologySvg, xViewers, centerY, graph.viewerNode.label, graph.viewerNode.sub, "kind-viewers");
+      topologyEdge(topologySvg, selfBox, viewerBox, edgeLabelFor("viewers"));
+    }
+
+    topologySvg.setAttribute("aria-label", t("topology.aria", {
+      peers: graph.rightNodes.length,
+      rooms: graph.roomsCount
+    }));
+  }
+
+  function renderTopologyLegend() {
+    topologyLegend.innerHTML = "";
+    var items = [
+      ["kind-self", "topology.legend.self"],
+      ["kind-publisher", "topology.legend.publisher"],
+      ["kind-leader", "topology.legend.leader"],
+      ["kind-follower", "topology.legend.follower"],
+      ["kind-viewers", "topology.legend.viewers"]
+    ];
+    items.forEach(function (item) {
+      var wrap = el("span", { class: "topology-legend-item" });
+      wrap.appendChild(el("span", { class: "topology-legend-dot " + item[0] }));
+      wrap.appendChild(el("span", { text: t(item[1]) }));
+      topologyLegend.appendChild(wrap);
+    });
+  }
+
+  function renderTopology() {
+    var data = state.topology;
+    topologyKv.innerHTML = "";
+    topologyRooms.innerHTML = "";
+    if (!data) {
+      topologySvg.innerHTML = "";
+      topologySvg.setAttribute("viewBox", "0 0 640 80");
+      var placeholder = svgEl("text", { x: "320", y: "44", "text-anchor": "middle", class: "topology-node-sub" });
+      placeholder.textContent = t("topology.kv.unknown");
+      topologySvg.appendChild(placeholder);
+      addKv(topologyKv, t("topology.kv.status"), t("topology.kv.unknown"));
+      renderTopologyLegend();
+      return;
+    }
+
+    var graph = buildTopologyGraph(data);
+    renderTopologyGraph(graph);
+    renderTopologyLegend();
+
+    addKv(topologyKv, t("topology.kv.peers"), (data.peers || []).length);
+    addKv(topologyKv, t("topology.kv.rooms"), (data.rooms || []).length);
+    var cascadeText = graph.cascadeActive
+      ? (graph.role === "leader" ? t("topology.role.leader") : graph.role === "follower" ? t("topology.role.follower") : t("topology.role.electing"))
+      : t("topology.kv.cascadeOff");
+    addKv(topologyKv, t("topology.kv.cascade"), cascadeText);
+
+    var rooms = data.rooms || [];
+    if (rooms.length) {
+      topologyRooms.appendChild(el("span", { text: t("topology.rooms") + ": " }));
+      rooms.forEach(function (room, i) {
+        if (i > 0) topologyRooms.appendChild(el("span", { text: ", " }));
+        topologyRooms.appendChild(el("span", { class: "mono", text: room }));
+      });
+    } else {
+      topologyRooms.appendChild(el("span", { text: t("topology.noRooms") }));
+    }
+  }
+
+  function pollTopology() {
+    return api("topology.status", {}).then(function (data) {
+      state.topology = data;
+      renderTopology();
+    }, function () {
+      state.topology = null;
+      renderTopology();
+    });
+  }
+
+  document.querySelector('[data-target="topology"]').addEventListener("click", function (e) {
+    withBusy(e.currentTarget, pollTopology);
   });
 
   /* ---------- ai panel ---------- */
@@ -3660,6 +4124,7 @@
   function pollAll() {
     pollDaemonStatus();
     pollStreamStatus();
+    pollTopology();
     pollAiStatus();
   }
 
@@ -3698,7 +4163,7 @@
   /* ---------- view router (single-view navigation) ---------- */
 
   var PANEL_IDS = [
-    "panel-overview", "panel-stream", "panel-ai",
+    "panel-overview", "panel-stream", "panel-topology", "panel-ai",
     "panel-mailbox", "panel-store", "panel-profile", "panel-update", "panel-settings"
   ];
   var sideLinks = Array.prototype.slice.call(document.querySelectorAll("#sidenav a"));
