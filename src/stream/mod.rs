@@ -406,13 +406,22 @@ async fn status() -> Result<Value> {
             // (dummy RTSP keepalives don't refresh these -- see
             // `RtspServer::flow_ages_ms`).
             let (video_age_ms, audio_age_ms) = pipeline.rtsp.flow_ages_ms().await;
+            // Delivery-aware siblings of the above: age since media was last
+            // actually dispatched to a *playing* RTSP session, not just
+            // received from the browser -- see `RtspServer::delivered_flow_ages_ms`.
+            let (video_delivered_age_ms, audio_delivered_age_ms) = pipeline.rtsp.delivered_flow_ages_ms().await;
             let mut value = json!({
                 "running": true,
                 "rtsp_url": pipeline.rtsp_url,
                 "clients": pipeline.rtsp.client_count().await,
                 "uptime_secs": pipeline.started_at.elapsed().as_secs(),
                 "backend": pipeline.backend_kind.as_str(),
-                "flow": { "video_age_ms": video_age_ms, "audio_age_ms": audio_age_ms },
+                "flow": {
+                    "video_age_ms": video_age_ms,
+                    "audio_age_ms": audio_age_ms,
+                    "video_delivered_age_ms": video_delivered_age_ms,
+                    "audio_delivered_age_ms": audio_delivered_age_ms,
+                },
             });
             if let Some(room) = &pipeline.room {
                 value["room"] = json!(room);
