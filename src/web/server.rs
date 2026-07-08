@@ -342,7 +342,14 @@ async fn write_json_response(stream: &mut TcpStream, status: u16, reason: &str, 
 }
 
 async fn write_html_response(stream: &mut TcpStream, status: u16, reason: &str, body: &str) -> io::Result<()> {
-    let head = response_head(status, reason, "text/html; charset=utf-8", body.len());
+    // The dashboard HTML is baked into the binary (`include_str!`), so a
+    // browser heuristically caching `/` (we send no validators) keeps
+    // showing a stale UI after the daemon is rebuilt. `no-cache` forces a
+    // fresh copy on every load.
+    let head = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
     stream.write_all(head.as_bytes()).await?;
     stream.write_all(body.as_bytes()).await?;
     stream.flush().await

@@ -12,6 +12,15 @@ license = "MPL-2.0"
 mistlib-core = { path = ".mistlib-src/mistlib-core" }
 mistlib-native = { path = ".mistlib-src/mistlib-native" }
 
+# mistlib-consensus workspace (path deps; same vendoring pattern as mistlib
+# above, driven by scripts/fetch-mistlib-consensus and
+# MISTLIB_CONSENSUS_REPO/MISTLIB_CONSENSUS_REF in .env). See `[patch]` below:
+# mistlib-consensus depends on mistlib-core as a git dependency, which must
+# be unified with our path dependency above so both crate graphs share one
+# `NodeId`/`AsyncRuntime` type.
+mistlib-consensus-core = { path = ".mistlib-consensus-src/mistlib-consensus-core" }
+mistlib-consensus-native = { path = ".mistlib-consensus-src/mistlib-consensus-native" }
+
 # CLI / runtime / config
 anyhow = "1"
 thiserror = "2"
@@ -51,9 +60,37 @@ openh264 = "0.9.3"
 opus = "0.3"
 fdk-aac = "0.8"
 
+# consensus (Raft control plane for stream relay leader election): bincode
+# is the wire format mistlib-consensus-core's RaftMessage is serialized
+# with, matching what our own transport envelope carries; async-trait
+# implements its RaftTransport trait (same version consensus-core itself
+# uses, so the attribute-generated futures agree).
+bincode = "1.3"
+async-trait = "0.1"
+
+# self-update (GitHub Releases): version compare + atomic replace of the
+# running executable (handles the Windows "can't delete a running exe" dance).
+semver = "1"
+# crates.io package is `self-replace`; keep the `self_replace` import name.
+self_replace = { package = "self-replace", version = "1" }
+
 [profile.release]
 lto = "thin"
 strip = true
 
 [target."cfg(windows)".dependencies]
 windows-capture = "2.0.0"
+# Per-user login autostart (HKCU\...\Run) for `mistl autostart`.
+winreg = "0.52"
+
+# mistlib-consensus's crates depend on mistlib-core as a git dependency
+# (pinned to a rev of the same tik-choco-lab/mistlib-dev repo mistl vendors
+# via .mistlib-src), while mistl itself uses a path dependency on that local
+# checkout. Without unifying them, the two dependency graphs would each
+# compile their own copy of mistlib-core, and consensus-core's public API
+# (mistlib_core::types::NodeId, mistlib_core::runtime::AsyncRuntime) would be
+# a *different* type than the one in scope here -- a hard type error at the
+# consensus/mistlib integration boundary. This patch redirects every git
+# dependency on that URL (regardless of `rev`) to the local path checkout.
+[patch."https://github.com/tik-choco-lab/mistlib-dev.git"]
+mistlib-core = { path = ".mistlib-src/mistlib-core" }

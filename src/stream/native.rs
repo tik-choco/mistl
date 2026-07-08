@@ -58,9 +58,20 @@ impl NativeCapture {
     /// Starts capturing the primary monitor at `frame_rate` fps (extra
     /// frames beyond that are dropped), downscaling to `max_width` when
     /// wider, encoding with OpenH264, and forwarding access units to `rtsp`.
-    pub async fn spawn(frame_rate: u32, max_width: u32, rtsp: Arc<RtspServer>) -> Result<Self> {
+    ///
+    /// `share` is an optional second consumer of every encoded access unit
+    /// (Annex-B bytes, same shape `rtsp` gets): `stream::share::ShareCapture`
+    /// passes one so it can RTP-packetize and publish the exact same capture
+    /// into a mistlib room alongside the local RTSP feed, without a second
+    /// capture/encode pipeline.
+    pub async fn spawn(
+        frame_rate: u32,
+        max_width: u32,
+        rtsp: Arc<RtspServer>,
+        share: Option<mpsc::UnboundedSender<Vec<u8>>>,
+    ) -> Result<Self> {
         let (tx, rx) = mpsc::unbounded_channel::<EncodedAu>();
-        let forward_task = tokio::spawn(forward_loop(rx, rtsp));
+        let forward_task = tokio::spawn(forward_loop(rx, rtsp, share));
 
         let flags = NativeFlags {
             frame_rate: frame_rate.max(1),
@@ -144,10 +155,22 @@ struct EncodedAu {
 }
 
 /// Receives encoded access units from the capture/encode thread and forwards
-/// them to the RTSP server, doing the `.await`-requiring work the capture
-/// callback (a plain synchronous fn on a non-tokio thread) can't do itself.
-async fn forward_loop(mut rx: mpsc::UnboundedReceiver<EncodedAu>, rtsp: Arc<RtspServer>) {
+/// them to the RTSP server (and, if `share` is set, to the share publisher
+/// too -- one clone of the Annex-B bytes per extra consumer, cheap next to
+/// the encode work already done), doing the `.await`-requiring work the
+/// capture callback (a plain synchronous fn on a non-tokio thread) can't do
+/// itself.
+async fn forward_loop(
+    mut rx: mpsc::UnboundedReceiver<EncodedAu>,
+    rtsp: Arc<RtspServer>,
+    share: Option<mpsc::UnboundedSender<Vec<u8>>>,
+) {
     while let Some(unit) = rx.recv().await {
+        if let Some(share_tx) = &share {
+            // Best-effort: a closed receiver (share stopped, capture still
+            // draining its last few frames) just means nobody's listening.
+            let _ = share_tx.send(unit.au.clone());
+        }
         if let Some(sps) = unit.sps {
             rtsp.update_sps(sps).await;
         }

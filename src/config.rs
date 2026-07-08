@@ -17,6 +17,37 @@ pub struct Config {
     pub ai: AiConfig,
     #[serde(default)]
     pub ui: UiConfig,
+    #[serde(default)]
+    pub update: UpdateConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UpdateConfig {
+    /// Periodically check GitHub Releases for a newer version.
+    pub auto_check: bool,
+    /// When a newer version is found, download + verify it and swap the
+    /// on-disk binary in place (takes effect on the next daemon start). This
+    /// never force-restarts a running daemon -- the update is staged.
+    pub auto_apply: bool,
+    /// Hours between background update checks.
+    pub check_interval_hours: u64,
+    /// GitHub repository (owner/name) releases are published to.
+    pub repo: String,
+    /// Include pre-releases when checking for updates.
+    pub prerelease: bool,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self {
+            auto_check: true,
+            auto_apply: true,
+            check_interval_hours: 6,
+            repo: "tik-choco/mistl".into(),
+            prerelease: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,9 +112,22 @@ pub struct StreamConfig {
     /// transport supports multiple simultaneous rooms per process, so this
     /// can name its own room, or reuse one of theirs.
     pub relay_room: Option<String>,
+    /// Room joined by `stream share` to publish this machine's own screen
+    /// capture into (see `stream::share`'s module doc). Independent of
+    /// `relay_room`/`[mailbox] room_id`/`[ai] room_id` for the same reason --
+    /// this can name its own room or reuse one of theirs.
+    pub share_room: Option<String>,
     /// Audio codec served over RTSP for relayed shares: "aac" (transcoded
     /// from Opus; what AVPro reliably plays) or "opus" (passthrough).
     pub audio_codec: String,
+    /// Cascade distribution for `stream relay`: relay nodes in the room run
+    /// a Raft control plane (`crate::consensus`) to elect a leader, which
+    /// re-publishes the sharer's tracks into the room so followers relay
+    /// from it instead of the sharer directly. When `false` -- or when the
+    /// control plane fails to start -- falls back to the pre-cascade
+    /// behavior of locking onto the first video track from anyone, with a
+    /// WARN log.
+    pub cascade: bool,
 }
 
 impl Default for StreamConfig {
@@ -95,7 +139,9 @@ impl Default for StreamConfig {
             capture_backend: "native".into(),
             max_width: 1920,
             relay_room: None,
+            share_room: None,
             audio_codec: "aac".into(),
+            cascade: true,
         }
     }
 }
@@ -219,7 +265,10 @@ pub fn set_by_path(config: &Config, path: &str, value: serde_json::Value) -> Res
 pub fn applies_when(path: &str) -> &'static str {
     match path {
         "ui.enabled" | "ui.listen" => "daemon restart",
-        "mailbox.room_id" | "ai.room_id" | "stream.relay_room" => {
+        // The background updater re-reads config each tick, but its cadence
+        // and enabled state are simplest to reason about across a restart.
+        "update.auto_check" | "update.check_interval_hours" => "daemon restart",
+        "mailbox.room_id" | "ai.room_id" | "stream.relay_room" | "stream.share_room" => {
             // The room only pins once the p2p engine has joined; before any
             // p2p service ran it applies on next start. "daemon restart" is
             // the safe universal answer.

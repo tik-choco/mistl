@@ -92,6 +92,7 @@ $ mistl store get <cid> --output .\file.bin
 # Screen share (VRChat)
 $ mistl stream start          # local screen -> rtsp://<LAN IP>:8554/stream
 $ mistl stream relay --room my-room   # tc-chat share (video+audio) -> same URL
+$ mistl stream selftest --audio aac   # synthetic video+audio feed for local testing
 $ mistl stream status
 $ mistl stream stop
 
@@ -143,6 +144,33 @@ Note: the p2p transport supports multiple simultaneous rooms per process, so
 `stream.relay_room` can name its own room independent of `mailbox.room_id` and
 `ai.room_id` -- or reuse one of them if you'd rather keep everything in one room.
 
+**Any number of viewers (mesh + cascade):** VRChat's AVPro can only play a URL,
+not join the p2p swarm, so the scalable and lowest-latency arrangement is for
+*each* viewer to run `mistl stream relay --room X` on their own machine and
+point their VRChat at their own `rtsp://127.0.0.1:8554/stream`. Everyone talks
+to their own loopback (no public IP or port-forwarding).
+
+With `[stream] cascade = true` (the default), every relay node in the room
+runs a small Raft control plane to elect a **leader** among themselves (this
+is relay-node-only leader election — separate from, and invisible to, the
+tc-chat browser peers sharing the screen). The leader is the one that locks
+onto the sharer directly and re-publishes what it receives back into the
+room as its own tracks (raw passthrough, no re-encoding); every other relay
+node (**follower**) locks onto the leader's re-published tracks instead of
+the sharer. This means the sharer's browser only ever uplinks to one peer
+(the leader) no matter how many relays are watching, and it also reaches
+relays that have no direct p2p connection to the sharer, since mistlib's
+overlay is a selective mesh rather than a full one. If the leader goes away,
+the remaining relays elect a new one automatically and re-lock — no manual
+intervention. Set `cascade = false` to opt a node out and fall back to the
+original "lock onto the sharer directly" behavior.
+
+See [VERIFY.md](VERIFY.md) for the full topology, the log lines that confirm
+each stage (including cascade role/leader changes), and `mistl stream
+selftest` — a synthetic video+audio feed that exercises the exact two-track
+RTSP output VRChat consumes, so you can confirm the playback path locally
+(ffprobe/ffplay) without a live p2p share.
+
 `mailbox send` returns one of three `status` values:
 
 | status | meaning |
@@ -175,6 +203,7 @@ capture_backend = "native"                   # "native" (built-in) or "ffmpeg"
 max_width = 1920                             # native backend: downscale wider screens
 # relay_room = "my-room"                     # tc-chat room for `stream relay`
 audio_codec = "aac"                          # relay audio track: "aac" (AVPro) or "opus"
+cascade = true                               # cascade distribution across relay nodes (see below)
 
 [mailbox]
 # room_id = "my-private-room"               # default: "mistl-mailbox-v1"
@@ -277,6 +306,13 @@ mistl <subcommand>  --(JSON over loopback TCP)-->  mistl daemon run
 - `stream` local capture is video-only (audio_capture is ignored); relayed shares carry
   audio. Inbound NACK is not implemented (loss shows until the next keyframe; the relay
   requests one every 5s)
+- Cascade (`[stream] cascade`) v1: a follower's own PLI targets the leader's
+  re-published track, which isn't forwarded back to the original sharer -- only the
+  leader's PLI actually reaches it, so a late-joining follower's keyframe wait is
+  bounded by the leader's ~5s PLI cadence rather than its own. A relay that's already
+  locked onto the sharer when a new leader is elected doesn't re-request the sharer's
+  tracks either; it relies on either already being connected to the new leader's
+  re-publish or receiving a fresh negotiation
 - No bot capability advertisement (every connected peer is treated as a bot candidate)
 - `ai` implements the LLM part of the mistai protocol; voice (tts/stt) messages are
   decoded but not served, and `raft_message` scheduling is passed through untouched

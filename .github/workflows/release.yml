@@ -35,6 +35,8 @@ concurrency:
 env:
   MISTLIB_REPO: tik-choco-lab/mistlib-dev
   MISTLIB_REF: develop
+  MISTLIB_CONSENSUS_REPO: tik-choco-lab/mistlib-consensus
+  MISTLIB_CONSENSUS_REF: main
   # Runner cmake is 4.x; vendored libopus still declares an ancient minimum.
   CMAKE_POLICY_VERSION_MINIMUM: "3.5"
 
@@ -101,6 +103,15 @@ jobs:
           token: ${{ secrets.MISTLIB_DEV_TOKEN }}
           path: .mistlib-src
 
+      # Path dependency `.mistlib-consensus-src/` (same location the local
+      # scripts/fetch-mistlib-consensus puts it).
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MISTLIB_CONSENSUS_REPO }}
+          ref: ${{ env.MISTLIB_CONSENSUS_REF }}
+          token: ${{ secrets.MISTLIB_DEV_TOKEN }}
+          path: .mistlib-consensus-src
+
       - name: Install Linux build deps
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y cmake nasm pkg-config libssl-dev
@@ -121,6 +132,10 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Package
+        # Ship BOTH an archive (for humans) and the raw binary named per
+        # target. The self-updater (`mistl update`) downloads the raw binary
+        # and verifies it against SHA256SUMS.txt, so it never has to unpack an
+        # archive to replace the running exe.
         run: |
           name="mistl-v${{ needs.plan.outputs.version }}-${{ matrix.target }}"
           mkdir -p dist
@@ -128,10 +143,12 @@ jobs:
             *windows*)
               cp "target/${{ matrix.target }}/release/mistl.exe" .
               7z a "dist/$name.zip" mistl.exe README.md
+              cp mistl.exe "dist/$name.exe"
               ;;
             *)
               cp "target/${{ matrix.target }}/release/mistl" .
               tar czf "dist/$name.tar.gz" mistl README.md
+              cp mistl "dist/$name"
               ;;
           esac
 
