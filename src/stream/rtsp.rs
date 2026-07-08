@@ -121,10 +121,20 @@ struct Inner {
     /// next real IDR. Sending this on `PLAY` adds no latency to the live
     /// path -- it's an extra unicast send to the joining session only.
     last_idr_au: Option<Vec<u8>>,
+    /// The single video sequence-number/timestamp space for the video SSRC.
+    /// *Everything* sent on [`rtp_out::VIDEO_SSRC`] -- real access units,
+    /// the join keyframe, and the dummy keepalive (see
+    /// [`Inner::next_keepalive_packet`]) -- allocates from these two
+    /// counters. They used to be split into separate `real_*`/`dummy_*`
+    /// pairs, which meant every hand-off between the keepalive and the real
+    /// stream (a >1s stall from a static screen, a gap-drop waiting for an
+    /// IDR, a screen switch's PLI round trip) produced two abrupt, unrelated
+    /// jumps in the same SSRC's sequence/timestamp space -- a classic way to
+    /// wedge a player's RTP jitter buffer until a manual Resync. One shared
+    /// space keeps seq monotonic (+1 per packet) and ts monotonic
+    /// (nominal-stepped through idle periods) across those seams instead.
     real_seq: u16,
     real_ts: u32,
-    dummy_seq: u16,
-    dummy_ts: u32,
     payloader: rtp_out::H264Rtp,
     /// Rebase state for [`RtspServer::send_video_access_unit_at`]: the last
     /// source (publisher) RTP timestamp seen, used to compute deltas.
@@ -136,6 +146,41 @@ struct Inner {
     last_source_audio_ts: Option<u32>,
     video_stats: MediaStats,
     audio_stats: MediaStats,
+}
+
+impl Inner {
+    /// Builds the next dummy-keepalive RTP packet *in the same
+    /// sequence/timestamp space as the real video stream*: it consumes the
+    /// next `real_seq` and advances `real_ts` by the nominal
+    /// [`rtp_out::DUMMY_TIMESTAMP_INCREMENT`] step (100ms at the 90 kHz
+    /// clock -- the keepalive's own idle cadence), exactly the way
+    /// [`rebase_timestamp`] substitutes a nominal step for the real path
+    /// when a source timestamp can't be trusted. The keepalive/real-data
+    /// hand-off is therefore seamless in both directions: the keepalive
+    /// picks up one seq past the last real packet, and when real data
+    /// resumes it picks up one seq past the last keepalive packet with a
+    /// timestamp that kept advancing through the idle period, so a player's
+    /// jitter buffer never sees the sequence/timestamp cliff that the old
+    /// separate `dummy_seq`/`dummy_ts` counters produced at every seam.
+    fn next_keepalive_packet(&mut self) -> Vec<u8> {
+        let seq = self.real_seq;
+        self.real_seq = self.real_seq.wrapping_add(1);
+        let ts = self.real_ts;
+        self.real_ts = self.real_ts.wrapping_add(rtp_out::DUMMY_TIMESTAMP_INCREMENT);
+
+        let bytes = rtp_out::serialize_rtp_packet(
+            rtp_out::PAYLOAD_TYPE_H264,
+            rtp_out::VIDEO_SSRC,
+            RtpHeaderFields {
+                sequence_number: seq,
+                timestamp: ts,
+                marker: true,
+            },
+            DUMMY_NALU,
+        );
+        record_stats(&mut self.video_stats, ts, DUMMY_NALU.len());
+        bytes
+    }
 }
 
 /// The RTSP server: one TCP listener plus one shared UDP socket used to
@@ -165,8 +210,6 @@ impl RtspServer {
                 last_idr_au: None,
                 real_seq: rand::random(),
                 real_ts: rand::random(),
-                dummy_seq: 0,
-                dummy_ts: 0,
                 payloader: rtp_out::H264Rtp::new(),
                 last_source_video_ts: None,
                 audio_seq: rand::random(),
@@ -756,7 +799,8 @@ fn rebase_timestamp(
 /// time out. Cadence backs off once a client is actually connected (500ms)
 /// versus idle (100ms), matching the Go reference exactly. Video-only --
 /// mistlink has no audio keepalive, so audio transports never see this
-/// traffic.
+/// traffic. The packet itself comes from [`Inner::next_keepalive_packet`],
+/// which shares the real stream's seq/ts counters -- see its doc for why.
 async fn dummy_keepalive_loop(server: Arc<RtspServer>) {
     let mut current_interval = Duration::from_millis(100);
     let mut ticker = tokio::time::interval(current_interval);
@@ -786,22 +830,7 @@ async fn dummy_keepalive_loop(server: Arc<RtspServer>) {
             continue;
         }
 
-        let seq = inner.dummy_seq;
-        inner.dummy_seq = inner.dummy_seq.wrapping_add(1);
-        let ts = inner.dummy_ts;
-        inner.dummy_ts = inner.dummy_ts.wrapping_add(rtp_out::DUMMY_TIMESTAMP_INCREMENT);
-
-        let bytes = rtp_out::serialize_rtp_packet(
-            rtp_out::PAYLOAD_TYPE_H264,
-            rtp_out::VIDEO_SSRC,
-            RtpHeaderFields {
-                sequence_number: seq,
-                timestamp: ts,
-                marker: true,
-            },
-            DUMMY_NALU,
-        );
-        record_stats(&mut inner.video_stats, ts, DUMMY_NALU.len());
+        let bytes = inner.next_keepalive_packet();
         RtspServer::dispatch(&mut inner.sessions, &server.rtp_socket, Media::Video, &bytes).await;
     }
 }
@@ -1662,5 +1691,100 @@ mod tests {
         assert_eq!(rtp_out::DUMMY_SPS, &[0x67, 0x42, 0x00, 0x0a, 0xf8, 0x41, 0xa2]);
         assert_eq!(rtp_out::DUMMY_PPS, &[0x68, 0xce, 0x3c, 0x80]);
         assert_eq!(rtp_out::DUMMY_NALU, &[0x0c, 0xff, 0xff, 0xff]);
+    }
+
+    // --- keepalive/real-data shared seq/ts space -----------------------------
+
+    /// Parse `(seq, ts)` back out of a serialized RTP packet's header.
+    fn rtp_seq_ts(bytes: &[u8]) -> (u16, u32) {
+        (
+            u16::from_be_bytes([bytes[2], bytes[3]]),
+            u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+        )
+    }
+
+    /// A minimal one-NAL Annex-B access unit the payloader turns into
+    /// exactly one RTP packet.
+    fn tiny_au() -> Vec<u8> {
+        vec![0, 0, 0, 1, 0x65, 0x01, 0x02, 0x03]
+    }
+
+    #[tokio::test]
+    async fn keepalive_packet_continues_the_real_video_seq_ts_space() {
+        let server = test_server().await;
+
+        // A real access unit consumes one seq and steps the shared ts.
+        server.send_video_access_unit(&tiny_au()).await;
+
+        let mut inner = server.inner.lock().await;
+        let (seq_after_real, ts_after_real) = (inner.real_seq, inner.real_ts);
+
+        // The keepalive packet must pick up exactly where the real stream
+        // left off -- same counters, no separate dummy seq/ts space.
+        let packet = inner.next_keepalive_packet();
+        let (seq, ts) = rtp_seq_ts(&packet);
+        assert_eq!(seq, seq_after_real, "keepalive must consume the next real seq");
+        assert_eq!(ts, ts_after_real, "keepalive must send at the current real ts");
+        assert_eq!(inner.real_seq, seq_after_real.wrapping_add(1));
+        assert_eq!(
+            inner.real_ts,
+            ts_after_real.wrapping_add(rtp_out::DUMMY_TIMESTAMP_INCREMENT),
+            "keepalive advances the shared ts by its nominal step"
+        );
+    }
+
+    #[tokio::test]
+    async fn consecutive_keepalive_packets_step_seq_by_one_and_ts_by_nominal() {
+        let server = test_server().await;
+        let mut inner = server.inner.lock().await;
+
+        let (seq_a, ts_a) = rtp_seq_ts(&inner.next_keepalive_packet());
+        let (seq_b, ts_b) = rtp_seq_ts(&inner.next_keepalive_packet());
+        let (seq_c, ts_c) = rtp_seq_ts(&inner.next_keepalive_packet());
+
+        assert_eq!(seq_b, seq_a.wrapping_add(1));
+        assert_eq!(seq_c, seq_b.wrapping_add(1));
+        assert_eq!(ts_b.wrapping_sub(ts_a), rtp_out::DUMMY_TIMESTAMP_INCREMENT);
+        assert_eq!(ts_c.wrapping_sub(ts_b), rtp_out::DUMMY_TIMESTAMP_INCREMENT);
+    }
+
+    #[tokio::test]
+    async fn real_data_resuming_after_keepalive_continues_the_shared_space() {
+        let server = test_server().await;
+
+        // Real stream runs (relay path, source-timestamped)...
+        server.send_video_access_unit_at(&tiny_au(), 10_000).await;
+
+        // ...stalls, so the keepalive takes over for a few packets...
+        let (seq_after_keepalive, ts_after_keepalive) = {
+            let mut inner = server.inner.lock().await;
+            inner.next_keepalive_packet();
+            inner.next_keepalive_packet();
+            (inner.real_seq, inner.real_ts)
+        };
+
+        // ...and real data resumes with a source-ts jump far beyond the
+        // rebase clamp (a >1s stall). rebase_timestamp substitutes the
+        // nominal step, and the packet must continue from the counters the
+        // keepalive advanced -- one continuous seq/ts space, not a cliff
+        // back to a parallel "real" space.
+        server.send_video_access_unit_at(&tiny_au(), 10_000 + 900_000).await;
+
+        let inner = server.inner.lock().await;
+        assert_eq!(
+            inner.real_seq,
+            seq_after_keepalive.wrapping_add(1),
+            "the resumed real packet consumes the seq right after the keepalive's"
+        );
+        let nominal_step = rtp_out::CLOCK_RATE / 30; // test server frame rate
+        assert_eq!(
+            inner.real_ts,
+            ts_after_keepalive.wrapping_add(nominal_step),
+            "the resumed real packet's ts continues from the keepalive-advanced counter"
+        );
+        assert_eq!(
+            inner.video_stats.last_ts, inner.real_ts,
+            "the packet itself went out at the keepalive-advanced (nominal-stepped) ts"
+        );
     }
 }

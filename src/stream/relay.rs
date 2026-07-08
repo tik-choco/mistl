@@ -18,7 +18,10 @@
 //!    `read_rtp` (see `video_task`'s handling of `awaiting_keyframe`); every
 //!    RTP packet is checked for a sequence-number gap and any access unit
 //!    that might be corrupt as a result is dropped until the next IDR rather
-//!    than forwarded to `rtsp`.
+//!    than forwarded to `rtsp`; the gap (or a depacketizer reset) also fires
+//!    an *immediate*, [`IMMEDIATE_PLI_DEBOUNCE`]-debounced PLI so the
+//!    recovery keyframe is requested right away instead of waiting out the
+//!    periodic cadence.
 //! 3. Audio track (Opus): `read_rtp` loop -> per `AudioCodec` either decode
 //!    Opus + encode AAC-LC (48 kHz stereo, 1024-sample frames, mistlink's
 //!    scheme) or pass Opus packets through ->
@@ -36,6 +39,31 @@
 //! peer are ignored while locked. [`decide_video`]/[`decide_audio`] are pure
 //! functions capturing that policy so it's testable without real network
 //! types.
+//!
+//! ## Screen switches (same peer, new track)
+//!
+//! When the locked publisher changes *which* screen/window it's sharing,
+//! tc-chat unpublishes its old `tc-chat-screen:<uuid>`/`tc-chat-screen-audio:
+//! <uuid>` tracks and publishes fresh ones (new uuids) -- but mistlib's WebRTC
+//! stack has no "track removed" signal: renegotiation just marks the old
+//! m-line inactive, so the old `TrackRemote::read_rtp` loop keeps blocking
+//! rather than erroring out. Relying on that error to clear the lock (as a
+//! plain "first video wins" policy would) leaves `locked` pointing at a dead
+//! track forever, so the arriving replacement video/audio tracks -- same
+//! peer, different track -- would be silently ignored and VRChat would stay
+//! frozen on the switch's last frame. [`decide_video`]/[`decide_audio`] treat
+//! a new track from the *already-locked* peer as [`VideoDecision::Switch`]/
+//! [`AudioDecision::Replace`] rather than `Ignore`: `control_loop` aborts just
+//! the superseded video/PLI (or audio) task and spawns fresh ones for the new
+//! track, via [`replace_task`], leaving the lock, any cascade re-broadcast,
+//! and the other media type's task untouched. The new video task starts
+//! `awaiting_keyframe`, and its PLI task requests one immediately on spawn, so
+//! output resumes as soon as the browser answers that PLI -- typically well
+//! under the PLI round trip plus one encoder keyframe, not the old
+//! [`PLI_INTERVAL`] cadence. A genuine "video track ended" notification for a
+//! track a switch has already superseded is recognized and ignored by ssrc
+//! (see `control_loop`'s `ended_rx` arm) rather than misread as the *new*
+//! track ending.
 //!
 //! # Cascade distribution (consensus-driven)
 //!
@@ -81,7 +109,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use mistlib::MediaTrackEvent;
@@ -120,6 +148,18 @@ const NAL_TYPE_IDR: u8 = 5;
 /// viewer get an IDR within one interval (mistlink does the same).
 const PLI_INTERVAL: Duration = Duration::from_secs(5);
 
+/// Minimum spacing between the *immediate* loss-triggered PLIs `video_task`
+/// sends when it detects an RTP sequence gap (or has to reset a desynced
+/// depacketizer). Without the immediate send, a loss event would sit in the
+/// dropping-until-IDR state for up to a full [`PLI_INTERVAL`] waiting for
+/// `pli_task`'s next scheduled tick -- long enough to trip the RTSP dummy
+/// keepalive (1s) and, on lossy links, to make VRChat viewers reach for the
+/// manual Resync. The debounce keeps a burst of back-to-back gaps (one lossy
+/// spike is many gapped packets) from turning into a PLI storm at the
+/// browser: one immediate PLI per window, with the periodic `pli_task` still
+/// running as the fallback.
+const IMMEDIATE_PLI_DEBOUNCE: Duration = Duration::from_secs(1);
+
 /// Cadence of the periodic INFO throughput summary (`summary_task`): frequent
 /// enough that a viewer watching the log can tell within a few seconds that
 /// the pipeline is alive, without approaching debug-level chatter.
@@ -145,6 +185,53 @@ struct RelayCounters {
     audio_frames: AtomicU64,
 }
 
+/// Identifies one of the forwarding tasks kept in [`RelayCapture::active_tasks`]
+/// (now keyed rather than a flat list) so a screen switch can replace just the
+/// video/PLI (or just the audio) task for the current publisher without
+/// disturbing the others -- in particular without aborting [`TaskRole::Summary`],
+/// which must survive across lock/unlock cycles for the entire lifetime of the
+/// relay, not just one publisher's lock. See [`replace_task`]/[`abort_role`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum TaskRole {
+    /// The periodic throughput/idle log line (`summary_task`) -- lives for the
+    /// whole `RelayCapture`, spawned once in `RelayCapture::spawn`.
+    Summary,
+    /// The current publisher's video-forwarding task (`video_task`).
+    Video,
+    /// The current publisher's PLI-request task (`pli_task`).
+    Pli,
+    /// The current publisher's audio-forwarding task (`audio_task`).
+    Audio,
+}
+
+/// Installs `handle` under `role`, aborting whatever task was previously
+/// registered there (if any) -- e.g. a screen switch replacing the old
+/// video/PLI task with a fresh one for the new track. Dropping a `JoinHandle`
+/// does *not* abort the task it refers to, so the previous handle must be
+/// aborted explicitly or its task would keep running detached forever.
+fn replace_task(active_tasks: &Arc<StdMutex<HashMap<TaskRole, JoinHandle<()>>>>, role: TaskRole, handle: JoinHandle<()>) {
+    let previous = active_tasks
+        .lock()
+        .expect("relay active tasks lock poisoned")
+        .insert(role, handle);
+    if let Some(previous) = previous {
+        previous.abort();
+    }
+}
+
+/// Aborts and removes the task registered under `role`, if any -- used to
+/// tear down one specific role (e.g. just video/PLI/audio on unlock) without
+/// touching the others, unlike the full drain-everything abort `stop()` does.
+fn abort_role(active_tasks: &Arc<StdMutex<HashMap<TaskRole, JoinHandle<()>>>>, role: TaskRole) {
+    if let Some(handle) = active_tasks
+        .lock()
+        .expect("relay active tasks lock poisoned")
+        .remove(&role)
+    {
+        handle.abort();
+    }
+}
+
 /// This relay's cascade wiring: either genuinely disabled (`[stream]
 /// cascade = false`, or a consensus start failure) or a live control-plane
 /// handle. Cheap to clone (an `Arc` clone at most), so both [`RelayCapture`]
@@ -160,7 +247,7 @@ enum Cascade {
 /// state other code (`stream.status`, `stop`) needs to reach into.
 pub struct RelayCapture {
     publisher: Arc<StdMutex<Option<String>>>,
-    active_tasks: Arc<StdMutex<Vec<JoinHandle<()>>>>,
+    active_tasks: Arc<StdMutex<HashMap<TaskRole, JoinHandle<()>>>>,
     control_task: JoinHandle<()>,
     cascade: Cascade,
     /// This node's mistlib node id -- needed for the `cascade.self` status
@@ -221,7 +308,7 @@ impl RelayCapture {
         crate::net::set_media_consumer(Some(tx));
 
         let publisher = Arc::new(StdMutex::new(None));
-        let active_tasks = Arc::new(StdMutex::new(Vec::new()));
+        let active_tasks: Arc<StdMutex<HashMap<TaskRole, JoinHandle<()>>>> = Arc::new(StdMutex::new(HashMap::new()));
         let counters = Arc::new(RelayCounters::default());
         let republish: Arc<StdMutex<Option<RepublishTracks>>> = Arc::new(StdMutex::new(None));
 
@@ -241,7 +328,7 @@ impl RelayCapture {
         active_tasks
             .lock()
             .expect("relay active tasks lock poisoned")
-            .push(summary_handle);
+            .insert(TaskRole::Summary, summary_handle);
 
         Ok(Self {
             publisher,
@@ -291,11 +378,11 @@ impl RelayCapture {
     /// down the consensus control plane, and unsubscribe from media events.
     pub async fn stop(self) {
         self.control_task.abort();
-        for task in self
+        for (_, task) in self
             .active_tasks
             .lock()
             .expect("relay active tasks lock poisoned")
-            .drain(..)
+            .drain()
         {
             task.abort();
         }
@@ -362,6 +449,14 @@ fn cascade_status_json(
 enum AudioDecision {
     /// Peer is already locked and this is its (not-yet-attached) audio track.
     Attach,
+    /// Peer is already locked *and already has an attached audio task*, but
+    /// this is a new (different) audio track from that same peer -- e.g. tc-chat
+    /// re-sharing with a fresh `getDisplayMedia` capture, which publishes a
+    /// brand-new audio track uuid alongside the new video track. Since mistlib
+    /// never signals "track ended" on the old one (see [`VideoDecision::Switch`]'s
+    /// doc), this is the only way the relay learns the old audio track is
+    /// superseded: replace the old audio task with a new one for this track.
+    Replace,
     /// No publisher locked yet; hold this audio track in case its sibling
     /// video track locks the same peer shortly.
     Buffer,
@@ -405,9 +500,38 @@ fn accepts_remote(remote_id: &str, policy: &CascadePolicy) -> bool {
     }
 }
 
-/// Whether an incoming *video* track locks its peer as the publisher.
-fn decide_video(locked: Option<&str>, remote_id: &str, policy: &CascadePolicy) -> bool {
-    locked.is_none() && accepts_remote(remote_id, policy)
+/// Decision for an incoming *video* track, given the current lock state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VideoDecision {
+    /// No publisher locked yet, and this one is accepted: lock onto it.
+    Lock,
+    /// This is a new video track from the *already-locked* peer -- a screen
+    /// switch (tc-chat unpublishes the old `tc-chat-screen:<uuid>` track and
+    /// publishes a new one with a fresh uuid when the user picks a different
+    /// window/screen). mistlib's WebRTC stack never signals "track ended" for
+    /// the old sender -- renegotiation just marks its m-line inactive, so the
+    /// old `TrackRemote::read_rtp` loop keeps blocking rather than erroring
+    /// out -- so without this arm the lock-in policy's `locked.is_none()`
+    /// check would stay false forever and silently ignore every video track
+    /// the peer ever publishes again after the first. Resuming on the new
+    /// track (aborting and replacing just the video/PLI forwarding tasks, see
+    /// `control_loop`) is what makes a screen switch resume output instead of
+    /// leaving VRChat frozen on the last frame from the old share.
+    Switch,
+    /// Not relevant right now (unlocked but not accepted, or locked to a
+    /// different peer).
+    Ignore,
+}
+
+/// Whether an incoming *video* track locks its peer as the publisher, or
+/// (already locked to this same peer) supersedes its current video track.
+fn decide_video(locked: Option<&str>, remote_id: &str, policy: &CascadePolicy) -> VideoDecision {
+    match locked {
+        None if accepts_remote(remote_id, policy) => VideoDecision::Lock,
+        None => VideoDecision::Ignore,
+        Some(id) if id == remote_id => VideoDecision::Switch,
+        Some(_) => VideoDecision::Ignore,
+    }
 }
 
 /// Decision for an incoming *audio* track.
@@ -419,6 +543,7 @@ fn decide_audio(
 ) -> AudioDecision {
     match locked {
         Some(id) if id == remote_id && !audio_attached => AudioDecision::Attach,
+        Some(id) if id == remote_id => AudioDecision::Replace,
         Some(_) => AudioDecision::Ignore,
         None if accepts_remote(remote_id, policy) => AudioDecision::Buffer,
         None => AudioDecision::Ignore,
@@ -522,16 +647,15 @@ async fn create_and_publish_republish_tracks(room: &str) -> Result<RepublishTrac
 async fn unlock(
     room: &str,
     publisher: &Arc<StdMutex<Option<String>>>,
-    active_tasks: &Arc<StdMutex<Vec<JoinHandle<()>>>>,
+    active_tasks: &Arc<StdMutex<HashMap<TaskRole, JoinHandle<()>>>>,
     republish: &Arc<StdMutex<Option<RepublishTracks>>>,
 ) {
     *publisher.lock().expect("relay publisher lock poisoned") = None;
-    for task in active_tasks
-        .lock()
-        .expect("relay active tasks lock poisoned")
-        .drain(..)
-    {
-        task.abort();
+    // Only the per-publisher roles -- `TaskRole::Summary` outlives any single
+    // lock/unlock cycle (it logs "waiting for a screen share" while unlocked)
+    // and must not be aborted here.
+    for role in [TaskRole::Video, TaskRole::Pli, TaskRole::Audio] {
+        abort_role(active_tasks, role);
     }
 
     let tracks = republish
@@ -559,14 +683,26 @@ async fn control_loop(
     rtsp: Arc<RtspServer>,
     audio_codec: AudioCodec,
     publisher: Arc<StdMutex<Option<String>>>,
-    active_tasks: Arc<StdMutex<Vec<JoinHandle<()>>>>,
+    active_tasks: Arc<StdMutex<HashMap<TaskRole, JoinHandle<()>>>>,
     counters: Arc<RelayCounters>,
     cascade: Cascade,
     room: String,
     republish: Arc<StdMutex<Option<RepublishTracks>>>,
 ) {
-    let (ended_tx, mut ended_rx) = mpsc::unbounded_channel::<String>();
+    // Carries (remote_id, video ssrc) rather than just remote_id: a screen
+    // switch replaces the video task for the same peer (see `VideoDecision::Switch`
+    // below) without going through a full unlock, so a *stale* end notification
+    // from the superseded track (if the old `read_rtp` loop ever does error out
+    // once the old track is fully torn down) must not be mistaken for the
+    // *current* track ending and unlock a perfectly healthy new one. Only an
+    // end notification whose ssrc matches `current_video_ssrc` triggers unlock.
+    let (ended_tx, mut ended_rx) = mpsc::unbounded_channel::<(String, u32)>();
     let mut locked: Option<String> = None;
+    // The ssrc of the video task currently forwarding, so a stale "ended"
+    // notification from a track a screen-switch already superseded (see the
+    // `ended_tx` doc above) can be told apart from the current track actually
+    // ending.
+    let mut current_video_ssrc: Option<u32> = None;
     let mut audio_attached = false;
     let mut pending_audio: HashMap<String, MediaTrackEvent> = HashMap::new();
     // The leader's own copy of the audio re-broadcast track, kept alongside
@@ -598,71 +734,96 @@ async fn control_loop(
                 let kind = event.track.kind();
 
                 match kind {
-                    RTPCodecType::Video => {
-                        if !decide_video(locked.as_deref(), &remote_id, &policy) {
+                    RTPCodecType::Video => match decide_video(locked.as_deref(), &remote_id, &policy) {
+                        VideoDecision::Ignore => {
                             debug!(%remote_id, "relay: ignoring video track (publisher already locked, or not accepted by cascade policy)");
-                            continue;
                         }
+                        VideoDecision::Lock => {
+                            info!(%remote_id, "relay: locking onto publisher");
+                            *publisher.lock().expect("relay publisher lock poisoned") = Some(remote_id.clone());
+                            locked = Some(remote_id.clone());
+                            current_video_ssrc = Some(event.track.ssrc());
+                            audio_attached = false;
 
-                        info!(%remote_id, "relay: locking onto publisher");
-                        *publisher.lock().expect("relay publisher lock poisoned") = Some(remote_id.clone());
-                        locked = Some(remote_id.clone());
-                        audio_attached = false;
-
-                        let is_leader = matches!(&policy, CascadePolicy::Active { role: ConsensusRole::Leader, .. });
-                        let is_follower = matches!(&policy, CascadePolicy::Active { role: ConsensusRole::Follower, .. });
-                        let (video_republish, new_audio_republish) = if is_leader {
-                            match create_and_publish_republish_tracks(&room).await {
-                                Ok((video, audio)) => {
-                                    *republish.lock().expect("relay republish lock poisoned") =
-                                        Some((video.clone(), audio.clone()));
-                                    info!("cascade: re-publishing share into room");
-                                    (Some(video), Some(audio))
+                            let is_leader = matches!(&policy, CascadePolicy::Active { role: ConsensusRole::Leader, .. });
+                            let is_follower = matches!(&policy, CascadePolicy::Active { role: ConsensusRole::Follower, .. });
+                            let (video_republish, new_audio_republish) = if is_leader {
+                                match create_and_publish_republish_tracks(&room).await {
+                                    Ok((video, audio)) => {
+                                        *republish.lock().expect("relay republish lock poisoned") =
+                                            Some((video.clone(), audio.clone()));
+                                        info!("cascade: re-publishing share into room");
+                                        (Some(video), Some(audio))
+                                    }
+                                    Err(error) => {
+                                        warn!(%error, "cascade: failed to publish re-broadcast tracks; continuing as direct relay only");
+                                        (None, None)
+                                    }
                                 }
-                                Err(error) => {
-                                    warn!(%error, "cascade: failed to publish re-broadcast tracks; continuing as direct relay only");
-                                    (None, None)
+                            } else {
+                                if is_follower {
+                                    info!("cascade: following leader {remote_id}");
                                 }
-                            }
-                        } else {
-                            if is_follower {
-                                info!("cascade: following leader {remote_id}");
-                            }
-                            (None, None)
-                        };
-                        audio_republish = new_audio_republish;
+                                (None, None)
+                            };
+                            audio_republish = new_audio_republish;
 
-                        let video_handle = tokio::spawn(video_task(
-                            event.track.clone(),
-                            rtsp.clone(),
-                            remote_id.clone(),
-                            ended_tx.clone(),
-                            counters.clone(),
-                            video_republish,
-                        ));
-                        let pli_handle = tokio::spawn(pli_task(event.pc.clone(), event.track.ssrc()));
-                        active_tasks
-                            .lock()
-                            .expect("relay active tasks lock poisoned")
-                            .extend([video_handle, pli_handle]);
-
-                        if let Some(audio_event) = pending_audio.remove(&remote_id) {
-                            info!(%remote_id, codec = audio_codec.as_str(), "relay: audio track attached");
-                            let audio_handle = tokio::spawn(audio_task(
-                                audio_event.track,
+                            let video_handle = tokio::spawn(video_task(
+                                event.track.clone(),
+                                event.pc.clone(),
                                 rtsp.clone(),
-                                audio_codec,
                                 remote_id.clone(),
+                                ended_tx.clone(),
                                 counters.clone(),
-                                audio_republish.clone(),
+                                video_republish,
                             ));
-                            active_tasks
-                                .lock()
-                                .expect("relay active tasks lock poisoned")
-                                .push(audio_handle);
-                            audio_attached = true;
+                            let pli_handle = tokio::spawn(pli_task(event.pc.clone(), event.track.ssrc()));
+                            replace_task(&active_tasks, TaskRole::Video, video_handle);
+                            replace_task(&active_tasks, TaskRole::Pli, pli_handle);
+
+                            if let Some(audio_event) = pending_audio.remove(&remote_id) {
+                                info!(%remote_id, codec = audio_codec.as_str(), "relay: audio track attached");
+                                let audio_handle = tokio::spawn(audio_task(
+                                    audio_event.track,
+                                    rtsp.clone(),
+                                    audio_codec,
+                                    remote_id.clone(),
+                                    counters.clone(),
+                                    audio_republish.clone(),
+                                ));
+                                replace_task(&active_tasks, TaskRole::Audio, audio_handle);
+                                audio_attached = true;
+                            }
                         }
-                    }
+                        VideoDecision::Switch => {
+                            info!(%remote_id, "relay: publisher republished video (screen switch); resuming on new track");
+                            current_video_ssrc = Some(event.track.ssrc());
+
+                            // The leader's re-broadcast tracks (if any) are the
+                            // same live `mistlib::publish_local_track`-registered
+                            // tracks for this whole lock's lifetime -- only the
+                            // *source* track changed, so reuse what's already
+                            // published rather than recreating it.
+                            let video_republish = republish
+                                .lock()
+                                .expect("relay republish lock poisoned")
+                                .as_ref()
+                                .map(|(video, _)| video.clone());
+
+                            let video_handle = tokio::spawn(video_task(
+                                event.track.clone(),
+                                event.pc.clone(),
+                                rtsp.clone(),
+                                remote_id.clone(),
+                                ended_tx.clone(),
+                                counters.clone(),
+                                video_republish,
+                            ));
+                            let pli_handle = tokio::spawn(pli_task(event.pc.clone(), event.track.ssrc()));
+                            replace_task(&active_tasks, TaskRole::Video, video_handle);
+                            replace_task(&active_tasks, TaskRole::Pli, pli_handle);
+                        }
+                    },
                     RTPCodecType::Audio => match decide_audio(locked.as_deref(), &remote_id, audio_attached, &policy) {
                         AudioDecision::Attach => {
                             info!(%remote_id, codec = audio_codec.as_str(), "relay: audio track attached");
@@ -674,11 +835,20 @@ async fn control_loop(
                                 counters.clone(),
                                 audio_republish.clone(),
                             ));
-                            active_tasks
-                                .lock()
-                                .expect("relay active tasks lock poisoned")
-                                .push(audio_handle);
+                            replace_task(&active_tasks, TaskRole::Audio, audio_handle);
                             audio_attached = true;
+                        }
+                        AudioDecision::Replace => {
+                            info!(%remote_id, codec = audio_codec.as_str(), "relay: publisher republished audio (screen switch); resuming on new track");
+                            let audio_handle = tokio::spawn(audio_task(
+                                event.track,
+                                rtsp.clone(),
+                                audio_codec,
+                                remote_id.clone(),
+                                counters.clone(),
+                                audio_republish.clone(),
+                            ));
+                            replace_task(&active_tasks, TaskRole::Audio, audio_handle);
                         }
                         AudioDecision::Buffer => {
                             pending_audio.insert(remote_id, event);
@@ -690,14 +860,17 @@ async fn control_loop(
                     }
                 }
             }
-            Some(ended_id) = ended_rx.recv() => {
-                if locked.as_deref() == Some(ended_id.as_str()) {
+            Some((ended_id, ended_ssrc)) = ended_rx.recv() => {
+                if locked.as_deref() == Some(ended_id.as_str()) && current_video_ssrc == Some(ended_ssrc) {
                     info!(remote_id = %ended_id, "relay: publisher's video track ended; unlocking");
                     unlock(&room, &publisher, &active_tasks, &republish).await;
                     locked = None;
+                    current_video_ssrc = None;
                     audio_attached = false;
                     audio_republish = None;
                     pending_audio.remove(&ended_id);
+                } else {
+                    debug!(remote_id = %ended_id, ssrc = ended_ssrc, "relay: ignoring stale end notification for a superseded video track");
                 }
             }
             changed = watch_changed(&mut view_rx) => {
@@ -723,6 +896,7 @@ async fn control_loop(
                                 info!("cascade: leader changed -> re-locking");
                                 unlock(&room, &publisher, &active_tasks, &republish).await;
                                 locked = None;
+                                current_video_ssrc = None;
                                 audio_attached = false;
                                 audio_republish = None;
                                 pending_audio.clear();
@@ -746,16 +920,24 @@ async fn control_loop(
 /// When `republish` is `Some` (leader, cascade active), the raw RTP packet
 /// is also written straight through to it -- before depacketization, so
 /// followers receive the exact same H264 bitstream the sharer sent, no
-/// transcode. Notifies `ended_tx` with `remote_id` when the track ends (read
-/// error/EOF) so the control task can clear the lock.
+/// transcode. Notifies `ended_tx` with `(remote_id, ssrc)` when the track
+/// ends (read error/EOF) so the control task can clear the lock -- `ssrc`
+/// lets `control_loop` tell this track's end apart from a screen-switch
+/// having already superseded it with a new one from the same peer (see
+/// `VideoDecision::Switch`), which in practice is the common case: mistlib's
+/// WebRTC stack never signals "track ended" on renegotiation, so this arm
+/// rarely fires for a live switch at all -- it exists for genuine
+/// disconnects/EOF.
 async fn video_task(
     track: Arc<TrackRemote>,
+    pc: Arc<RTCPeerConnection>,
     rtsp: Arc<RtspServer>,
     remote_id: String,
-    ended_tx: mpsc::UnboundedSender<String>,
+    ended_tx: mpsc::UnboundedSender<(String, u32)>,
     counters: Arc<RelayCounters>,
     republish: Option<Arc<TrackLocalStaticRTP>>,
 ) {
+    let ssrc = track.ssrc();
     let mut depacketizer = H264Packet::default();
     let mut assembler = AuAssembler::new();
     let mut seen_first_keyframe = false;
@@ -764,6 +946,9 @@ async fn video_task(
     // `awaiting_keyframe`'s doc below.
     let mut awaiting_keyframe = true;
     let mut last_seq: Option<u16> = None;
+    // Debounce state for the immediate loss-triggered PLI (see
+    // [`IMMEDIATE_PLI_DEBOUNCE`]); `pli_task` remains the periodic fallback.
+    let mut last_immediate_pli: Option<Instant> = None;
 
     loop {
         let (packet, _attrs) = match track.read_rtp().await {
@@ -805,8 +990,9 @@ async fn video_task(
         // registry, no reorder buffer to plug into), the mitigation lives
         // here: detect the discontinuity from the RTP sequence numbers we
         // already have, discard whatever NAL/AU was in flight, and drop
-        // every subsequent access unit until a fresh IDR arrives -- exactly
-        // what the periodic PLI in `pli_task` is there to solicit.
+        // every subsequent access unit until a fresh IDR arrives -- solicited
+        // by an *immediate* (debounced) PLI right below, with `pli_task`'s
+        // periodic cadence as the fallback.
         let seq = packet.header.sequence_number;
         let gap = last_seq.is_some_and(|last| seq != last.wrapping_add(1));
         last_seq = Some(seq);
@@ -822,6 +1008,14 @@ async fn video_task(
             depacketizer = H264Packet::default();
             assembler = AuAssembler::new();
             awaiting_keyframe = true;
+            // Ask for the recovery keyframe *now* instead of waiting up to a
+            // full PLI_INTERVAL for pli_task's next tick -- debounced so a
+            // burst of gapped packets from one loss spike sends one PLI, not
+            // dozens.
+            if immediate_pli_due(&mut last_immediate_pli, Instant::now(), IMMEDIATE_PLI_DEBOUNCE) {
+                debug!(%remote_id, "relay: sending immediate PLI after sequence gap");
+                send_pli(&pc, ssrc).await;
+            }
         }
 
         if packet.payload.len() <= 2 {
@@ -846,10 +1040,15 @@ async fn video_task(
                 // out of sync too (e.g. this packet was a stray FU-A
                 // continuation with no matching start) -- treat it the same
                 // as a sequence gap rather than risk stitching a later
-                // fragment onto whatever's left in `fua_buffer`.
+                // fragment onto whatever's left in `fua_buffer`, including
+                // the same immediate (debounced) recovery PLI.
                 depacketizer = H264Packet::default();
                 assembler = AuAssembler::new();
                 awaiting_keyframe = true;
+                if immediate_pli_due(&mut last_immediate_pli, Instant::now(), IMMEDIATE_PLI_DEBOUNCE) {
+                    debug!(%remote_id, "relay: sending immediate PLI after depacketizer reset");
+                    send_pli(&pc, ssrc).await;
+                }
                 continue;
             }
         };
@@ -886,7 +1085,7 @@ async fn video_task(
         }
     }
 
-    let _ = ended_tx.send(remote_id);
+    let _ = ended_tx.send((remote_id, ssrc));
 }
 
 /// Sends a PictureLossIndication immediately and every [`PLI_INTERVAL`]
@@ -898,6 +1097,21 @@ async fn pli_task(pc: Arc<RTCPeerConnection>, media_ssrc: u32) {
     loop {
         interval.tick().await;
         send_pli(&pc, media_ssrc).await;
+    }
+}
+
+/// Whether an immediate loss-triggered PLI may be sent right now, given the
+/// time the last one went out. Updates `last` when it says yes, so callers
+/// just gate `send_pli` on the return value. Pure (time injected) so the
+/// debounce window is unit-testable without a live `RTCPeerConnection` or
+/// tokio time control.
+fn immediate_pli_due(last: &mut Option<Instant>, now: Instant, debounce: Duration) -> bool {
+    match last {
+        Some(at) if now.duration_since(*at) < debounce => false,
+        _ => {
+            *last = Some(now);
+            true
+        }
     }
 }
 
@@ -1206,12 +1420,26 @@ mod tests {
 
     #[test]
     fn decide_video_locks_when_unlocked() {
-        assert!(decide_video(None, "peer-a", &CascadePolicy::Disabled));
+        assert_eq!(decide_video(None, "peer-a", &CascadePolicy::Disabled), VideoDecision::Lock);
     }
 
     #[test]
-    fn decide_video_ignores_when_already_locked() {
-        assert!(!decide_video(Some("peer-a"), "peer-b", &CascadePolicy::Disabled));
+    fn decide_video_ignores_when_already_locked_to_someone_else() {
+        assert_eq!(
+            decide_video(Some("peer-a"), "peer-b", &CascadePolicy::Disabled),
+            VideoDecision::Ignore
+        );
+    }
+
+    #[test]
+    fn decide_video_switches_when_the_locked_peer_republishes_a_new_track() {
+        // Same peer, second video track (e.g. a screen switch: tc-chat
+        // unpublishes the old `tc-chat-screen:<uuid>` and publishes a new one)
+        // -- must resume on the new track rather than being ignored forever.
+        assert_eq!(
+            decide_video(Some("peer-a"), "peer-a", &CascadePolicy::Disabled),
+            VideoDecision::Switch
+        );
     }
 
     #[test]
@@ -1231,10 +1459,13 @@ mod tests {
     }
 
     #[test]
-    fn decide_audio_ignores_second_audio_track_from_locked_peer() {
+    fn decide_audio_replaces_a_second_audio_track_from_the_locked_peer() {
+        // Same peer, already has an attached audio task, and a *new* audio
+        // track shows up (the screen switch's fresh `tc-chat-screen-audio:
+        // <uuid>`) -- replace the stale audio task instead of ignoring it.
         assert_eq!(
             decide_audio(Some("peer-a"), "peer-a", true, &CascadePolicy::Disabled),
-            AudioDecision::Ignore
+            AudioDecision::Replace
         );
     }
 
@@ -1244,6 +1475,69 @@ mod tests {
             decide_audio(Some("peer-a"), "peer-b", false, &CascadePolicy::Disabled),
             AudioDecision::Ignore
         );
+    }
+
+    // --- immediate loss-triggered PLI debounce ------------------------------
+
+    #[test]
+    fn immediate_pli_due_allows_the_first_send_and_debounces_the_burst() {
+        let debounce = Duration::from_secs(1);
+        let t0 = Instant::now();
+        let mut last: Option<Instant> = None;
+
+        // First loss event: send immediately.
+        assert!(immediate_pli_due(&mut last, t0, debounce));
+        // Back-to-back gaps within the window (one lossy spike is many
+        // gapped packets): no PLI storm.
+        assert!(!immediate_pli_due(&mut last, t0 + Duration::from_millis(10), debounce));
+        assert!(!immediate_pli_due(&mut last, t0 + Duration::from_millis(999), debounce));
+        // Window elapsed: the next loss event may send again.
+        assert!(immediate_pli_due(&mut last, t0 + Duration::from_millis(1000), debounce));
+        // ...and that send re-arms the debounce from its own time.
+        assert!(!immediate_pli_due(&mut last, t0 + Duration::from_millis(1500), debounce));
+        assert!(immediate_pli_due(&mut last, t0 + Duration::from_millis(2000), debounce));
+    }
+
+    // --- task role bookkeeping (screen-switch task replacement) ------------
+
+    #[tokio::test]
+    async fn replace_task_aborts_the_previous_handle_for_the_same_role() {
+        let active_tasks: Arc<StdMutex<HashMap<TaskRole, JoinHandle<()>>>> = Arc::new(StdMutex::new(HashMap::new()));
+
+        let first = tokio::spawn(std::future::pending::<()>());
+        replace_task(&active_tasks, TaskRole::Video, first);
+        // Let the runtime schedule the spawned task before we replace it.
+        tokio::task::yield_now().await;
+
+        let second = tokio::spawn(std::future::pending::<()>());
+        let second_id = second.id();
+        replace_task(&active_tasks, TaskRole::Video, second);
+
+        let guard = active_tasks.lock().expect("lock poisoned");
+        assert_eq!(guard.len(), 1, "replacing the same role must not accumulate handles");
+        assert_eq!(guard.get(&TaskRole::Video).map(|h| h.id()), Some(second_id));
+    }
+
+    #[tokio::test]
+    async fn abort_role_only_touches_its_own_role() {
+        let active_tasks: Arc<StdMutex<HashMap<TaskRole, JoinHandle<()>>>> = Arc::new(StdMutex::new(HashMap::new()));
+
+        replace_task(&active_tasks, TaskRole::Video, tokio::spawn(std::future::pending::<()>()));
+        replace_task(&active_tasks, TaskRole::Pli, tokio::spawn(std::future::pending::<()>()));
+        replace_task(&active_tasks, TaskRole::Audio, tokio::spawn(std::future::pending::<()>()));
+        replace_task(&active_tasks, TaskRole::Summary, tokio::spawn(std::future::pending::<()>()));
+
+        abort_role(&active_tasks, TaskRole::Video);
+        abort_role(&active_tasks, TaskRole::Pli);
+        abort_role(&active_tasks, TaskRole::Audio);
+
+        let guard = active_tasks.lock().expect("lock poisoned");
+        assert_eq!(
+            guard.len(),
+            1,
+            "only the Summary task (outliving any single lock/unlock cycle) should remain"
+        );
+        assert!(guard.contains_key(&TaskRole::Summary));
     }
 
     // --- cascade policy matrix ----------------------------------------------
@@ -1259,20 +1553,20 @@ mod tests {
     #[test]
     fn decide_video_leader_accepts_a_non_relay_peer_as_the_sharer() {
         let policy = active_policy(ConsensusRole::Leader, Some("self-id"), &["self-id", "relay-2"]);
-        assert!(decide_video(None, "browser-sharer", &policy));
+        assert_eq!(decide_video(None, "browser-sharer", &policy), VideoDecision::Lock);
     }
 
     #[test]
     fn decide_video_leader_ignores_tracks_from_other_relay_peers() {
         let policy = active_policy(ConsensusRole::Leader, Some("self-id"), &["self-id", "relay-2"]);
-        assert!(!decide_video(None, "relay-2", &policy));
+        assert_eq!(decide_video(None, "relay-2", &policy), VideoDecision::Ignore);
     }
 
     #[test]
     fn decide_video_follower_accepts_only_the_leader_and_ignores_the_sharer() {
         let policy = active_policy(ConsensusRole::Follower, Some("relay-1"), &["self-id", "relay-1"]);
-        assert!(decide_video(None, "relay-1", &policy));
-        assert!(!decide_video(None, "browser-sharer", &policy));
+        assert_eq!(decide_video(None, "relay-1", &policy), VideoDecision::Lock);
+        assert_eq!(decide_video(None, "browser-sharer", &policy), VideoDecision::Ignore);
     }
 
     #[test]
@@ -1282,7 +1576,11 @@ mod tests {
             active_policy(ConsensusRole::Candidate, None, &["self-id"]),
             active_policy(ConsensusRole::Follower, None, &["self-id"]),
         ] {
-            assert!(!decide_video(None, "anyone", &policy), "{policy:?} should not lock yet");
+            assert_eq!(
+                decide_video(None, "anyone", &policy),
+                VideoDecision::Ignore,
+                "{policy:?} should not lock yet"
+            );
         }
     }
 
@@ -1294,7 +1592,7 @@ mod tests {
             Some("relay-1"),
             &["self-id", "relay-1", "relay-2"],
         );
-        assert!(decide_video(None, "relay-1", &following_old_leader));
+        assert_eq!(decide_video(None, "relay-1", &following_old_leader), VideoDecision::Lock);
 
         // ...after a leader change (control_loop unlocks first), the same
         // node now follows the new leader instead, and no longer the old one.
@@ -1303,17 +1601,32 @@ mod tests {
             Some("relay-2"),
             &["self-id", "relay-1", "relay-2"],
         );
-        assert!(decide_video(None, "relay-2", &following_new_leader));
-        assert!(!decide_video(None, "relay-1", &following_new_leader));
+        assert_eq!(decide_video(None, "relay-2", &following_new_leader), VideoDecision::Lock);
+        assert_eq!(decide_video(None, "relay-1", &following_new_leader), VideoDecision::Ignore);
     }
 
     #[test]
     fn decide_video_role_transition_from_follower_to_leader_accepts_the_sharer() {
         let as_follower = active_policy(ConsensusRole::Follower, Some("relay-1"), &["self-id", "relay-1"]);
-        assert!(!decide_video(None, "browser-sharer", &as_follower));
+        assert_eq!(decide_video(None, "browser-sharer", &as_follower), VideoDecision::Ignore);
 
         let as_leader = active_policy(ConsensusRole::Leader, Some("self-id"), &["self-id", "relay-1"]);
-        assert!(decide_video(None, "browser-sharer", &as_leader));
+        assert_eq!(decide_video(None, "browser-sharer", &as_leader), VideoDecision::Lock);
+    }
+
+    #[test]
+    fn decide_video_switches_when_the_locked_peer_republishes_under_an_active_cascade_policy() {
+        // The screen-switch "same peer, new track" arm must win regardless of
+        // cascade role -- a follower re-locked onto the leader, or a leader
+        // re-locked onto the sharer, both just resume on the replacement track.
+        let follower = active_policy(ConsensusRole::Follower, Some("relay-1"), &["self-id", "relay-1"]);
+        assert_eq!(decide_video(Some("relay-1"), "relay-1", &follower), VideoDecision::Switch);
+
+        let leader = active_policy(ConsensusRole::Leader, Some("self-id"), &["self-id", "relay-2"]);
+        assert_eq!(
+            decide_video(Some("browser-sharer"), "browser-sharer", &leader),
+            VideoDecision::Switch
+        );
     }
 
     #[test]
