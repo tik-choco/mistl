@@ -297,6 +297,23 @@ impl RtspServer {
             .count()
     }
 
+    /// Milliseconds since *real* media last flowed through this server:
+    /// `(video_ms, audio_ms)`, each `None` if that media has never carried a
+    /// frame. Video is driven by `last_real_au` (stamped only by the real
+    /// access-unit paths -- the dummy keepalive deliberately does not count),
+    /// audio by `audio_stats.last_ts_at` (audio has no keepalive path at
+    /// all). Backs `stream.status`'s `flow` field, which the web dashboard
+    /// uses to animate topology edges only while data is actually moving.
+    pub async fn flow_ages_ms(&self) -> (Option<u64>, Option<u64>) {
+        let inner = self.inner.lock().await;
+        let video = inner.last_real_au.map(|at| at.elapsed().as_millis() as u64);
+        let audio = inner
+            .audio_stats
+            .last_ts_at
+            .map(|at| at.elapsed().as_millis() as u64);
+        (video, audio)
+    }
+
     /// Cache the latest SPS NAL (used for SDP `sprop-parameter-sets`).
     pub async fn update_sps(&self, sps: Vec<u8>) {
         self.inner.lock().await.sps = Some(sps);

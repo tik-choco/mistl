@@ -610,7 +610,12 @@
   .flow-card h3 { margin: 0; font-size: 13px; }
   .flow-card p { margin: 0; color: var(--text-dim); font-size: 12.5px; }
 
-  /* ---- cascade card (Stream panel: leader-election relay topology) ---- */
+  /* ---- native screen share (Stream panel): state line under the buttons ---- */
+  .share-status { font-size: 12px; color: var(--text-dim); font-family: var(--mono); }
+  .share-status.on { color: var(--ok); }
+
+  /* ---- topology card (Stream panel): node-link graph (topology.status),
+     with the cascade role badge / source line merged into its header ---- */
   .cascade-card {
     border: 1px solid var(--panel-border);
     border-radius: 10px;
@@ -622,60 +627,7 @@
   }
   .cascade-card-head { display: flex; align-items: center; gap: 10px; }
   .cascade-card-head h3 { margin: 0; font-size: 13.5px; flex: 1; }
-  .cascade-topology {
-    display: flex;
-    align-items: stretch;
-    gap: 4px;
-    flex-wrap: nowrap;
-    overflow-x: auto;
-    padding: 2px 2px 6px;
-  }
-  .cascade-node {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 2px;
-    min-width: 84px;
-    flex: none;
-    padding: 8px 10px;
-    border-radius: 8px;
-    border: 1px solid var(--panel-border);
-    background: var(--bg-alt);
-    color: var(--text-dim);
-    font-size: 11.5px;
-    font-weight: 600;
-    text-align: center;
-    white-space: nowrap;
-    transition: border-color var(--dur-fast) var(--ease-out),
-                background var(--dur-fast) var(--ease-out),
-                color var(--dur-fast) var(--ease-out);
-  }
-  .cascade-node-sub { font-size: 10.5px; font-weight: 700; color: var(--text-faint); font-family: var(--mono); }
-  .cascade-node.is-you {
-    border-color: var(--accent);
-    background: var(--accent-dim);
-    color: var(--accent);
-    box-shadow: 0 0 0 3px var(--accent-dim);
-  }
-  .cascade-node.is-you .cascade-node-sub { color: var(--accent); }
-  .cascade-arrow { display: flex; align-items: center; color: var(--text-faint); flex: none; }
-  .cascade-arrow svg { width: 18px; height: 14px; }
   .cascade-source { font-size: 12.5px; color: var(--text-dim); }
-  .cascade-peers-list { list-style: none; margin: 4px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
-  .cascade-peer-pill {
-    background: var(--bg-alt);
-    border: 1px solid var(--panel-border);
-    border-radius: 999px;
-    padding: 2px 8px;
-    font-size: 11px;
-    color: var(--text-dim);
-    font-family: var(--mono);
-  }
-  #cascade-peers-details summary { cursor: pointer; font-size: 12px; color: var(--text-dim); padding: 2px 0; }
-  #cascade-peers-details summary:hover { color: var(--accent); }
-
-  /* ---- topology panel: node-link graph (topology.status) ---- */
   .topology-graph-wrap {
     overflow-x: auto;
     border: 1px solid var(--panel-border);
@@ -699,6 +651,17 @@
   .topology-node-sub { fill: var(--text-faint); font: 700 9.5px var(--mono); }
   .topology-edge { stroke: var(--text-faint); stroke-width: 1.3; fill: none; }
   .topology-edge.dashed { stroke-dasharray: 4 3; }
+  /* An edge that is actually carrying media right now (per stream.status's
+     flow ages, not mere connectivity): green "marching ants". The color
+     shift alone keeps flowing distinguishable from idle when the animation
+     is disabled by prefers-reduced-motion. */
+  .topology-edge.flowing {
+    stroke: var(--ok);
+    stroke-width: 1.6;
+    stroke-dasharray: 6 4;
+    animation: topology-flow 0.8s linear infinite;
+  }
+  @keyframes topology-flow { to { stroke-dashoffset: -10; } }
   .topology-edge-arrowhead { fill: var(--text-faint); }
   .topology-edge-label {
     fill: var(--text-dim);
@@ -720,6 +683,19 @@
   .topology-legend-dot.kind-publisher { border-color: var(--ok); background: var(--panel); }
   .topology-legend-dot.kind-follower { border-color: var(--accent); background: var(--panel); }
   .topology-legend-dot.kind-viewers { border-color: var(--text-faint); background: var(--panel); border-style: dashed; }
+  /* Legend swatches for edge states: a short line sample, dashed+animated
+     for "media flowing", plain for "idle". */
+  .topology-legend-line { width: 20px; height: 0; border-top: 2px solid var(--text-faint); display: inline-block; flex: none; }
+  .topology-legend-line.flowing {
+    border-top: none;
+    height: 2px;
+    background: repeating-linear-gradient(90deg, var(--ok) 0 6px, transparent 6px 10px);
+    animation: topology-flow-legend 0.8s linear infinite;
+  }
+  @keyframes topology-flow-legend { to { background-position: 10px 0; } }
+  @media (prefers-reduced-motion: reduce) {
+    .topology-edge.flowing, .topology-legend-line.flowing { animation: none; }
+  }
   .topology-rooms { font-size: 12px; color: var(--text-dim); margin-top: 8px; }
   .topology-rooms .mono { color: var(--text); }
 
@@ -996,6 +972,16 @@
         </div>
         <p class="muted" style="font-size: 11.5px; margin: 0;" data-i18n="stream.relayCascadeHint">Multiple viewers? Each runs mistl stream relay in the same room &mdash; a leader is elected automatically and the sharer only uploads once.</p>
       </div>
+      <div class="flow-card">
+        <h3 data-i18n="stream.share.title">Share screen to the room</h3>
+        <p data-i18n="stream.share.desc">The daemon captures this PC&#39;s screen and publishes it into the room through mistlib &mdash; no tc-chat client needed.</p>
+        <p class="muted" style="font-size: 11.5px; margin: 0;" data-i18n="stream.share.monitorNote">Captures the primary monitor (monitor selection may come later); audio is not shared yet.</p>
+        <div class="row">
+          <button id="btn-share-start" class="primary" data-i18n="stream.share.startBtn">Start sharing</button>
+          <button id="btn-share-stop" class="danger" data-i18n="stream.share.stopBtn" hidden>Stop sharing</button>
+        </div>
+        <div class="share-status" id="share-status"></div>
+      </div>
     </div>
     <div class="url-callout" id="stream-url-callout" hidden data-i18n-title="common.clickToCopy" title="Click to copy">
       <span class="url-callout-label" data-i18n="stream.urlLabel">Paste into the VRChat video player</span>
@@ -1003,30 +989,19 @@
     </div>
     <div class="info-hint" id="stream-vrchat-hint" hidden></div>
     <dl class="kv" id="stream-kv"></dl>
-    <div class="cascade-card" id="cascade-card" hidden>
-      <div class="cascade-card-head">
-        <h3 data-i18n="stream.cascade.title">Cascade relay</h3>
-        <span class="badge cascade-role-badge" id="cascade-role-badge"></span>
-      </div>
-      <div class="cascade-topology" id="cascade-topology" role="img"></div>
-      <div class="cascade-source" id="cascade-source"></div>
-      <dl class="kv" id="cascade-kv"></dl>
-      <details id="cascade-peers-details" hidden>
-        <summary id="cascade-peers-summary"></summary>
-        <ul class="cascade-peers-list" id="cascade-peers-list"></ul>
-      </details>
-    </div>
     <div class="info-hint neutral" id="cascade-off-note" hidden>
       <span data-i18n="stream.cascade.offNote">Cascade off ([stream] cascade = false)</span>
     </div>
     <div class="cascade-card" id="topology-card">
       <div class="cascade-card-head">
         <h3 data-i18n="topology.title">Topology</h3>
+        <span class="badge cascade-role-badge" id="cascade-role-badge" hidden></span>
       </div>
       <p class="muted" style="font-size: 12.5px; margin: 0;" data-i18n="topology.desc">Who this node is connected to and how, from what mistlib and the relay/cascade control plane can actually observe.</p>
       <div class="topology-graph-wrap">
         <svg id="topology-svg" class="topology-svg" role="img" viewBox="0 0 640 200"></svg>
       </div>
+      <div class="cascade-source" id="cascade-source" hidden></div>
       <div class="topology-legend" id="topology-legend"></div>
       <dl class="kv" id="topology-kv"></dl>
       <div class="topology-rooms" id="topology-rooms"></div>
@@ -1338,15 +1313,18 @@
       "stream.vrchatHint.link": "Set the RTSP address to 0.0.0.0 in Settings",
       "stream.vrchatHint.suffix": " and restart the stream.",
       "stream.relayCascadeHint": "Multiple viewers? Each runs mistl stream relay in the same room — a leader is elected automatically and the sharer only uploads once.",
-      "stream.cascade.title": "Cascade relay",
+      "stream.share.title": "Share screen to the room",
+      "stream.share.desc": "The daemon captures this PC's screen and publishes it into the room through mistlib — no tc-chat client needed.",
+      "stream.share.monitorNote": "Captures the primary monitor (monitor selection may come later); audio is not shared yet.",
+      "stream.share.startBtn": "Start sharing",
+      "stream.share.stopBtn": "Stop sharing",
+      "stream.share.stateSharing": "sharing",
+      "stream.share.stateIdle": "idle",
+      "stream.share.started": "Screen share started.",
+      "stream.share.stopped": "Screen share stopped.",
       "stream.cascade.role.leader": "LEADER",
       "stream.cascade.role.follower": "FOLLOWER",
       "stream.cascade.role.electing": "ELECTING…",
-      "stream.cascade.node.sharer": "tc-chat sharer",
-      "stream.cascade.node.leader": "Leader",
-      "stream.cascade.node.relays": "{count} relays",
-      "stream.cascade.node.vrchat": "VRChat",
-      "stream.cascade.node.you": "you",
       "stream.cascade.source.sharer": "Receiving from: sharer (you are the leader)",
       "stream.cascade.source.leader": "Receiving from: leader {leader}",
       "stream.cascade.source.waiting": "Waiting for a share…",
@@ -1354,13 +1332,11 @@
       "stream.cascade.self": "this node",
       "stream.cascade.relayPeers": "relay peers",
       "stream.cascade.consensusPeers": "raft peers",
-      "stream.cascade.peersToggle": "{count} relay peers",
-      "stream.cascade.topologyAria": "{role}, relaying through {count} peers to VRChat",
       "stream.cascade.offNote": "Cascade off ([stream] cascade = false)",
       "topology.title": "Topology",
       "topology.desc": "Who this node is connected to and how, from what mistlib and the relay/cascade control plane can actually observe.",
       "topology.node.self": "this node",
-      "topology.node.viewers": "RTSP viewers",
+      "topology.node.viewers": "VRChat viewers",
       "topology.role.leader": "leader",
       "topology.role.follower": "follower",
       "topology.role.sibling": "cascade peer",
@@ -1382,7 +1358,13 @@
       "topology.legend.publisher": "Publisher / sharer",
       "topology.legend.leader": "Cascade leader",
       "topology.legend.follower": "Cascade follower",
-      "topology.legend.viewers": "RTSP viewers (count only)",
+      "topology.legend.viewers": "VRChat viewers over RTSP (count only)",
+      "topology.legend.flowing": "media flowing",
+      "topology.legend.idle": "idle (connected, no media)",
+      "topology.flow.flowing": "flowing",
+      "topology.flow.idle": "idle",
+      "topology.kv.videoFlow": "video",
+      "topology.kv.audioFlow": "audio",
       "topology.kv.status": "status",
       "topology.kv.unknown": "unavailable (daemon unreachable)",
       "topology.kv.peers": "connected peers",
@@ -1652,15 +1634,18 @@
       "stream.vrchatHint.link": "設定でRTSPアドレスを0.0.0.0に変更",
       "stream.vrchatHint.suffix": "し、ストリームを再起動してください。",
       "stream.relayCascadeHint": "視聴者が複数いる場合は、同じルームで各自が mistl stream relay を実行してください。リーダーが自動的に選出され、共有元は一度のアップロードで済みます。",
-      "stream.cascade.title": "カスケード中継",
+      "stream.share.title": "画面をルームへ共有",
+      "stream.share.desc": "デーモンがこのPCの画面をキャプチャし、mistlib 経由でルームに配信します — tc-chat クライアントは不要です。",
+      "stream.share.monitorNote": "プライマリモニターをキャプチャします（モニター選択は今後対応予定）。音声の共有はまだ対応していません。",
+      "stream.share.startBtn": "共有を開始",
+      "stream.share.stopBtn": "共有を停止",
+      "stream.share.stateSharing": "共有中",
+      "stream.share.stateIdle": "待機中",
+      "stream.share.started": "画面共有を開始しました。",
+      "stream.share.stopped": "画面共有を停止しました。",
       "stream.cascade.role.leader": "リーダー",
       "stream.cascade.role.follower": "フォロワー",
       "stream.cascade.role.electing": "選出中…",
-      "stream.cascade.node.sharer": "tc-chat 共有元",
-      "stream.cascade.node.leader": "リーダー",
-      "stream.cascade.node.relays": "中継 {count} 件",
-      "stream.cascade.node.vrchat": "VRChat",
-      "stream.cascade.node.you": "あなた",
       "stream.cascade.source.sharer": "受信元: 共有元 (あなたがリーダーです)",
       "stream.cascade.source.leader": "受信元: リーダー {leader}",
       "stream.cascade.source.waiting": "共有を待っています…",
@@ -1668,13 +1653,11 @@
       "stream.cascade.self": "このノード",
       "stream.cascade.relayPeers": "中継ピア数",
       "stream.cascade.consensusPeers": "Raftピア数",
-      "stream.cascade.peersToggle": "中継ピア {count} 件",
-      "stream.cascade.topologyAria": "{role}・中継ピア {count} 件を経由してVRChatへ",
       "stream.cascade.offNote": "カスケードはオフです ([stream] cascade = false)",
       "topology.title": "トポロジー",
       "topology.desc": "このノードが誰と、どのようにつながっているか — mistlibと中継/カスケード制御プレーンから実際に観測できる範囲で表示します。",
       "topology.node.self": "このノード",
-      "topology.node.viewers": "RTSP視聴者",
+      "topology.node.viewers": "VRChat視聴者",
       "topology.role.leader": "リーダー",
       "topology.role.follower": "フォロワー",
       "topology.role.sibling": "カスケードピア",
@@ -1696,7 +1679,13 @@
       "topology.legend.publisher": "配信元 / 共有元",
       "topology.legend.leader": "カスケードリーダー",
       "topology.legend.follower": "カスケードフォロワー",
-      "topology.legend.viewers": "RTSP視聴者（件数のみ）",
+      "topology.legend.viewers": "VRChat視聴者・RTSP経由（件数のみ）",
+      "topology.legend.flowing": "メディア転送中",
+      "topology.legend.idle": "アイドル（接続中・メディアなし）",
+      "topology.flow.flowing": "転送中",
+      "topology.flow.idle": "アイドル",
+      "topology.kv.videoFlow": "映像",
+      "topology.kv.audioFlow": "音声",
       "topology.kv.status": "状態",
       "topology.kv.unknown": "取得不可（デーモンに接続できません）",
       "topology.kv.peers": "接続中のピア数",
@@ -1966,15 +1955,18 @@
       "stream.vrchatHint.link": "在设置中将 RTSP 地址设为 0.0.0.0",
       "stream.vrchatHint.suffix": "，然后重新启动串流。",
       "stream.relayCascadeHint": "有多个观众？在同一房间中，每个人运行 mistl stream relay，系统会自动选举主节点，共享源只需上传一次。",
-      "stream.cascade.title": "级联中继",
+      "stream.share.title": "将屏幕共享到房间",
+      "stream.share.desc": "守护进程捕获本机屏幕，并通过 mistlib 发布到房间 — 无需 tc-chat 客户端。",
+      "stream.share.monitorNote": "捕获主显示器（显示器选择功能后续提供）；暂不支持共享音频。",
+      "stream.share.startBtn": "开始共享",
+      "stream.share.stopBtn": "停止共享",
+      "stream.share.stateSharing": "共享中",
+      "stream.share.stateIdle": "空闲",
+      "stream.share.started": "已开始屏幕共享。",
+      "stream.share.stopped": "已停止屏幕共享。",
       "stream.cascade.role.leader": "主节点",
       "stream.cascade.role.follower": "从节点",
       "stream.cascade.role.electing": "选举中…",
-      "stream.cascade.node.sharer": "tc-chat 共享源",
-      "stream.cascade.node.leader": "主节点",
-      "stream.cascade.node.relays": "{count} 个中继",
-      "stream.cascade.node.vrchat": "VRChat",
-      "stream.cascade.node.you": "你",
       "stream.cascade.source.sharer": "接收自：共享源（你是主节点）",
       "stream.cascade.source.leader": "接收自：主节点 {leader}",
       "stream.cascade.source.waiting": "正在等待共享…",
@@ -1982,13 +1974,11 @@
       "stream.cascade.self": "本节点",
       "stream.cascade.relayPeers": "中继节点数",
       "stream.cascade.consensusPeers": "Raft 节点数",
-      "stream.cascade.peersToggle": "{count} 个中继节点",
-      "stream.cascade.topologyAria": "{role}，通过 {count} 个中继节点转发到 VRChat",
       "stream.cascade.offNote": "级联已关闭 ([stream] cascade = false)",
       "topology.title": "拓扑",
       "topology.desc": "本节点当前与谁相连、如何相连 —— 仅展示 mistlib 与中继/级联控制平面实际能观测到的信息。",
       "topology.node.self": "本节点",
-      "topology.node.viewers": "RTSP 观看者",
+      "topology.node.viewers": "VRChat 观看者",
       "topology.role.leader": "主节点",
       "topology.role.follower": "从节点",
       "topology.role.sibling": "级联节点",
@@ -2010,7 +2000,13 @@
       "topology.legend.publisher": "推流源 / 共享源",
       "topology.legend.leader": "级联主节点",
       "topology.legend.follower": "级联从节点",
-      "topology.legend.viewers": "RTSP 观看者（仅计数）",
+      "topology.legend.viewers": "VRChat 观看者，经 RTSP（仅计数）",
+      "topology.legend.flowing": "媒体传输中",
+      "topology.legend.idle": "空闲（已连接，无媒体）",
+      "topology.flow.flowing": "传输中",
+      "topology.flow.idle": "空闲",
+      "topology.kv.videoFlow": "视频",
+      "topology.kv.audioFlow": "音频",
       "topology.kv.status": "状态",
       "topology.kv.unknown": "不可用（无法连接守护进程）",
       "topology.kv.peers": "已连接的节点数",
@@ -2420,7 +2416,6 @@
     daemonUptimeAt: 0,
     identity: null,
     stream: null,
-    consensus: null,
     topology: null,
     ai: null,
     config: null,
@@ -2567,15 +2562,9 @@
   var streamUrlText = document.getElementById("stream-url-text");
   var relayRoomHint = document.getElementById("relay-room-hint");
   var streamVrchatHint = document.getElementById("stream-vrchat-hint");
-  var cascadeCard = document.getElementById("cascade-card");
   var cascadeRoleBadge = document.getElementById("cascade-role-badge");
-  var cascadeTopology = document.getElementById("cascade-topology");
   var cascadeSource = document.getElementById("cascade-source");
-  var cascadeKv = document.getElementById("cascade-kv");
   var cascadeOffNote = document.getElementById("cascade-off-note");
-  var cascadePeersDetails = document.getElementById("cascade-peers-details");
-  var cascadePeersSummary = document.getElementById("cascade-peers-summary");
-  var cascadePeersList = document.getElementById("cascade-peers-list");
 
   streamUrlCallout.addEventListener("click", function () {
     if (streamUrlText.textContent) copyToClipboard(streamUrlText.textContent);
@@ -2618,7 +2607,7 @@
       addKv(streamKv, t("stream.status"), t("stream.statusUnknown"));
       streamUrlCallout.hidden = true;
       renderVrchatHint(null);
-      renderCascade();
+      renderShareCard();
       return;
     }
     if (s.running) {
@@ -2637,12 +2626,8 @@
       addKv(streamKv, t("stream.status"), t("stream.statusStopped"));
     }
     renderVrchatHint(s);
-    renderCascade();
+    renderShareCard();
   }
-
-  /* ---- cascade card: leader-elected relay topology (see stream.status.cascade
-     and consensus.status). Old daemons omit `cascade` entirely -- treat that
-     the same as "not relaying with cascade" and just hide the card. ---- */
 
   function shortNodeId(id) {
     if (!id) return "";
@@ -2661,111 +2646,29 @@
     container.appendChild(dd);
   }
 
-  function cascadeNode(labelText, subText, isYou, fullTitle) {
-    var node = el("div", { class: "cascade-node" + (isYou ? " is-you" : "") });
-    if (fullTitle) node.title = fullTitle;
-    node.appendChild(el("span", { class: "cascade-node-label", text: labelText }));
-    if (subText) node.appendChild(el("span", { class: "cascade-node-sub", text: subText }));
-    return node;
-  }
-
-  function cascadeArrow() {
-    var span = el("span", { class: "cascade-arrow", "aria-hidden": "true" });
-    span.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M4 12h14M13 6l6 6-6 6"/></svg>';
-    return span;
-  }
-
-  function renderCascade() {
-    var s = state.stream;
-    var c = s && s.running && s.backend === "relay" ? s.cascade : null;
-    cascadeCard.hidden = true;
-    cascadeOffNote.hidden = true;
-    if (!c) return;
-    if (!c.enabled) {
-      cascadeOffNote.hidden = false;
-      return;
-    }
-    cascadeCard.hidden = false;
-
-    var role = c.role || "unknown";
-    var badgeKey, badgeClass;
-    if (role === "leader") { badgeKey = "stream.cascade.role.leader"; badgeClass = "badge cascade-role-badge leader"; }
-    else if (role === "follower") { badgeKey = "stream.cascade.role.follower"; badgeClass = "badge cascade-role-badge follower"; }
-    else { badgeKey = "stream.cascade.role.electing"; badgeClass = "badge cascade-role-badge electing"; }
-    cascadeRoleBadge.className = badgeClass;
-    cascadeRoleBadge.textContent = t(badgeKey);
-
-    var relayPeers = Array.isArray(c.relay_peers) ? c.relay_peers : [];
-    var isLeader = role === "leader";
-    var isFollower = role === "follower";
-
-    cascadeTopology.innerHTML = "";
-    cascadeTopology.appendChild(cascadeNode(t("stream.cascade.node.sharer"), null, false));
-    cascadeTopology.appendChild(cascadeArrow());
-    cascadeTopology.appendChild(cascadeNode(
-      t("stream.cascade.node.leader"),
-      isLeader ? t("stream.cascade.node.you") : shortNodeId(c.leader),
-      isLeader,
-      c.leader || null
-    ));
-    cascadeTopology.appendChild(cascadeArrow());
-    cascadeTopology.appendChild(cascadeNode(
-      t("stream.cascade.node.relays", { count: relayPeers.length }),
-      isFollower ? t("stream.cascade.node.you") : null,
-      isFollower
-    ));
-    cascadeTopology.appendChild(cascadeArrow());
-    cascadeTopology.appendChild(cascadeNode(t("stream.cascade.node.vrchat"), null, false));
-    cascadeTopology.setAttribute("aria-label", t("stream.cascade.topologyAria", { role: t(badgeKey), count: relayPeers.length }));
-
-    var sourceText;
-    if (c.source === "sharer") sourceText = t("stream.cascade.source.sharer");
-    else if (c.source === "leader") sourceText = t("stream.cascade.source.leader", { leader: c.leader ? shortNodeId(c.leader) : "?" });
-    else sourceText = t("stream.cascade.source.waiting");
-    cascadeSource.textContent = sourceText;
-
-    cascadeKv.innerHTML = "";
-    addKvId(cascadeKv, t("stream.cascade.leader"), c.leader);
-    addKvId(cascadeKv, t("stream.cascade.self"), c.self);
-    addKv(cascadeKv, t("stream.cascade.relayPeers"), relayPeers.length);
-    if (state.consensus && state.consensus.active && Array.isArray(state.consensus.peers)) {
-      addKv(cascadeKv, t("stream.cascade.consensusPeers"), state.consensus.peers.length);
-    }
-
-    cascadePeersList.innerHTML = "";
-    if (relayPeers.length) {
-      cascadePeersDetails.hidden = false;
-      cascadePeersSummary.textContent = t("stream.cascade.peersToggle", { count: relayPeers.length });
-      relayPeers.forEach(function (peerId) {
-        cascadePeersList.appendChild(el("li", { class: "cascade-peer-pill", title: peerId, text: shortNodeId(peerId) }));
-      });
-    } else {
-      cascadePeersDetails.hidden = true;
-    }
-  }
-
   function pollStreamStatus() {
-    var streamP = api("stream.status", {}).then(function (data) {
+    return api("stream.status", {}).then(function (data) {
       state.stream = data;
     }, function () {
       state.stream = null;
-    });
-    var consensusP = api("consensus.status", {}).then(function (data) {
-      state.consensus = data;
-    }, function () {
-      state.consensus = null;
-    });
-    return Promise.all([streamP, consensusP]).then(renderStream);
+    }).then(renderStream);
+  }
+
+  /* One refresh path for everything the Stream panel shows: its kv/URL
+     summary (stream.status) and the topology card (topology.status, which
+     embeds the same stream + consensus state the graph draws from). */
+  function pollStreamViews() {
+    return Promise.all([pollStreamStatus(), pollTopology()]);
   }
 
   document.querySelector('[data-target="stream"]').addEventListener("click", function (e) {
-    withBusy(e.currentTarget, function () { return Promise.all([pollStreamStatus(), pollTopology()]); });
+    withBusy(e.currentTarget, pollStreamViews);
   });
 
   document.getElementById("btn-stream-start").addEventListener("click", function (e) {
     runAction(e.currentTarget, "stream.start", {}, function () {
       showToast(t("stream.started"));
-      pollStreamStatus();
+      pollStreamViews();
     });
   });
 
@@ -2773,7 +2676,7 @@
     if (!confirm(t("stream.stopConfirm"))) return;
     runAction(e.currentTarget, "stream.stop", {}, function () {
       showToast(t("stream.stopped"));
-      pollStreamStatus();
+      pollStreamViews();
     });
   });
 
@@ -2791,7 +2694,7 @@
     var btn = e.target.querySelector("button[type=submit]");
     runAction(btn, "stream.relay.start", room ? { room: room } : {}, function (data) {
       showToast(data.room ? t("stream.relayStarted", { room: data.room }) : t("stream.relayStartedNoRoom"));
-      pollStreamStatus();
+      pollStreamViews();
     });
   });
 
@@ -2799,19 +2702,89 @@
     showRelayRoomHint(false);
   });
 
+  /* ---------- native screen share (stream.share.*) ----------
+     The daemon captures the primary monitor itself (the existing native
+     capture + OpenH264 pipeline) and publishes it into the room via
+     mistlib's publish_local_track -- the browser never touches media, this
+     card just drives daemon commands through the normal /api/call path:
+       stream.share.start {}   stream.share.stop {}
+     Share state comes from stream.status when it carries share fields (a
+     `share` object with a running/active flag is honored if the daemon
+     grows one); until then it's tracked optimistically from the command
+     responses, and any server-side error text is surfaced verbatim via the
+     usual runAction toast. */
+
+  var btnShareStart = document.getElementById("btn-share-start");
+  var btnShareStop = document.getElementById("btn-share-stop");
+  var shareStatusLine = document.getElementById("share-status");
+  var shareOptimistic = false;
+
+  function shareActive() {
+    var s = state.stream;
+    /* Prefer whatever stream.status reports once the backend exposes share
+       state; the exact field name isn't fixed yet, so accept the obvious
+       shapes and fall back to our optimistic local flag. */
+    if (s && typeof s.share === "object" && s.share !== null) {
+      return !!(s.share.running || s.share.active);
+    }
+    if (s && typeof s.sharing === "boolean") return s.sharing;
+    return shareOptimistic;
+  }
+
+  function renderShareCard() {
+    var active = shareActive();
+    btnShareStart.hidden = active;
+    btnShareStop.hidden = !active;
+    shareStatusLine.textContent = t(active ? "stream.share.stateSharing" : "stream.share.stateIdle");
+    shareStatusLine.className = "share-status" + (active ? " on" : "");
+  }
+
+  btnShareStart.addEventListener("click", function (e) {
+    runAction(e.currentTarget, "stream.share.start", {}, function () {
+      shareOptimistic = true;
+      showToast(t("stream.share.started"));
+      renderShareCard();
+      pollStreamViews();
+    });
+  });
+
+  btnShareStop.addEventListener("click", function (e) {
+    runAction(e.currentTarget, "stream.share.stop", {}, function () {
+      shareOptimistic = false;
+      showToast(t("stream.share.stopped"));
+      renderShareCard();
+      pollStreamViews();
+    });
+  });
+
   /* ---------- topology card (topology.status), embedded in the Stream
-     panel right below the cascade card it complements ----------
+     panel ----------
      Node-link graph, drawn with plain inline SVG (no library): this node
      fixed at the vertical center, a publisher/sharer column to its left, a
      peers column (cascade leader/follower/sibling, or a generic connected
-     peer from `net`) to its right, and an aggregate RTSP-viewers node
-     furthest right. Layout is a deterministic left-to-right column
-     assignment by role, not a physics simulation -- see the module doc in
+     peer from `net`) to its right, and an aggregate viewers node furthest
+     right. Layout is a deterministic left-to-right column assignment by
+     role, not a physics simulation -- see the module doc in
      `src/topology.rs` for exactly what's genuinely observable versus
      inferred here (e.g. RTSP viewers are a count only, never per-viewer
-     identity). There used to be a separate "Topology" nav tab/panel for
-     this; it was folded into Stream so the graph lives next to the cascade
-     status it explains instead of duplicating it in a second place. */
+     identity).
+
+     This card is the *single* stream visualization: it absorbed both the
+     old standalone "Topology" nav tab and the old linear cascade
+     mini-diagram (sharer -> leader -> relays -> VRChat) that used to sit
+     beside it. What those conveyed lives on here as: the cascade role
+     badge + "receiving from" source line in the card header, hop order
+     (leader pinned to the top of the cascade column), full node ids as
+     hover tooltips, and the cascade leader/self/peer-count rows merged
+     into this card's kv list.
+
+     Edges that are actually carrying media *right now* animate ("marching
+     ants") and turn green. "Now" comes from stream.status's `flow` ages --
+     milliseconds since the last real video access unit / audio frame went
+     through the RTSP server -- compared against FLOW_STALL_MS at render
+     time. RTSP dummy keepalives deliberately don't refresh those ages, so
+     a keepalive-only stall (static screen, publisher gone quiet) renders
+     as idle even though the connection is up. */
 
   var SVG_NS = "http://www.w3.org/2000/svg";
   var topologySvg = document.getElementById("topology-svg");
@@ -2830,6 +2803,11 @@
   var TOPO_NODE_W = 132;
   var TOPO_NODE_H = 40;
   var TOPO_ROW_H = 48;
+  /* Media older than this (ms since the last real frame, per
+     stream.status.flow) is considered stalled: edges stop animating. Real
+     video ticks every few dozen ms, so 3s cleanly separates "flowing" from
+     "keepalive only" without flickering on jitter. */
+  var FLOW_STALL_MS = 3000;
 
   function topologyStateClass(connState) {
     if (connState === "connected") return "state-connected";
@@ -2852,6 +2830,15 @@
     var relayPeers = cascadeActive && Array.isArray(cascade.relay_peers) ? cascade.relay_peers : [];
     var publisherId = stream.running ? (stream.publisher || null) : null;
 
+    /* Is media *actually* moving right now? `flow` ages are ms since the
+       last real video AU / audio frame went through the RTSP server (null =
+       never); keepalives don't refresh them, so keepalive-only correctly
+       reads as idle here. */
+    var flow = stream.running && stream.flow ? stream.flow : null;
+    var videoFlowing = !!(flow && flow.video_age_ms != null && flow.video_age_ms < FLOW_STALL_MS);
+    var audioFlowing = !!(flow && flow.audio_age_ms != null && flow.audio_age_ms < FLOW_STALL_MS);
+    var mediaFlowing = videoFlowing || audioFlowing;
+
     var shown = {};
     if (selfInfo.node_id) shown[selfInfo.node_id] = true;
 
@@ -2861,7 +2848,9 @@
 
     if (publisherId) {
       var pubSub = cascadeActive && role !== "leader" ? t("topology.role.leader") : t("topology.role.sharer");
-      leftNodes.push({ id: publisherId, label: shortNodeId(publisherId), sub: pubSub, kind: "publisher", edge: "publishing" });
+      /* Everything this node forwards came in on this edge, so it flows
+         exactly when the stream as a whole does. */
+      leftNodes.push({ id: publisherId, label: shortNodeId(publisherId), sub: pubSub, kind: "publisher", edge: "publishing", flowing: mediaFlowing });
       shown[publisherId] = true;
     }
 
@@ -2872,10 +2861,20 @@
       if (isLeader) {
         rightNodes.push({ id: peerId, label: shortNodeId(peerId), sub: t("topology.role.leader"), kind: "leader", edge: "leaderToYou" });
       } else if (role === "leader") {
-        rightNodes.push({ id: peerId, label: shortNodeId(peerId), sub: t("topology.role.follower"), kind: "follower", edge: "youToFollower" });
+        /* As leader we re-publish what we forward, so follower edges carry
+           media whenever the stream flows. */
+        rightNodes.push({ id: peerId, label: shortNodeId(peerId), sub: t("topology.role.follower"), kind: "follower", edge: "youToFollower", flowing: mediaFlowing });
       } else {
         rightNodes.push({ id: peerId, label: shortNodeId(peerId), sub: t("topology.role.sibling"), kind: "sibling", edge: "sibling" });
       }
+    });
+
+    /* The old linear cascade diagram always showed the chain in hop order
+       (sharer -> leader -> relays); preserve that by pinning the leader to
+       the top of the cascade column. Only cascade nodes are in rightNodes
+       at this point, and Array#sort is stable, so follower order is kept. */
+    rightNodes.sort(function (a, b) {
+      return (a.kind === "leader" ? 0 : 1) - (b.kind === "leader" ? 0 : 1);
     });
 
     netPeers.forEach(function (p) {
@@ -2894,18 +2893,30 @@
 
     if (stream.running) {
       var clients = stream.clients != null ? stream.clients : 0;
-      viewerNode = { label: t("topology.node.viewers"), sub: String(clients), kind: "viewers", edge: "viewers" };
+      /* RTSP fans out to playing sessions only: no viewers, no media on
+         this edge no matter how fresh the input is. */
+      viewerNode = { label: t("topology.node.viewers"), sub: String(clients), kind: "viewers", edge: "viewers", flowing: mediaFlowing && clients > 0 };
     }
 
     var roomsCount = (data && Array.isArray(data.rooms)) ? data.rooms.length : 0;
     return {
       self: selfInfo, leftNodes: leftNodes, rightNodes: rightNodes, viewerNode: viewerNode,
-      cascadeActive: cascadeActive, role: role, roomsCount: roomsCount
+      cascadeActive: cascadeActive, role: role, roomsCount: roomsCount,
+      stream: stream, cascade: cascadeActive ? cascade : null, relayPeersCount: relayPeers.length,
+      videoFlowing: videoFlowing, audioFlowing: audioFlowing
     };
   }
 
-  function topologyNodeBox(parent, x, y, label, sub, kindClass) {
+  function topologyNodeBox(parent, x, y, label, sub, kindClass, fullTitle) {
     var g = svgEl("g", { transform: "translate(" + (x - TOPO_NODE_W / 2) + "," + (y - TOPO_NODE_H / 2) + ")" });
+    if (fullTitle) {
+      /* Hover tooltip with the untruncated node id (SVG <title>) -- the
+         merged-away cascade peer-pill list used to be where full ids
+         lived. */
+      var titleEl = svgEl("title");
+      titleEl.textContent = fullTitle;
+      g.appendChild(titleEl);
+    }
     g.appendChild(svgEl("rect", {
       class: "topology-node-box " + kindClass, x: 0, y: 0,
       width: TOPO_NODE_W, height: TOPO_NODE_H, rx: 8
@@ -2932,7 +2943,7 @@
     var x1 = from.x <= to.x ? from.x + from.w / 2 : from.x - from.w / 2;
     var x2 = from.x <= to.x ? to.x - to.w / 2 : to.x + to.w / 2;
     var path = svgEl("path", {
-      class: "topology-edge" + (opts.dashed ? " dashed" : ""),
+      class: "topology-edge" + (opts.dashed ? " dashed" : "") + (opts.flowing ? " flowing" : ""),
       d: "M" + x1 + " " + from.y + " C " + (x1 + (x2 - x1) / 2) + " " + from.y + ", " + (x1 + (x2 - x1) / 2) + " " + to.y + ", " + x2 + " " + to.y
     });
     if (!opts.noArrow) path.setAttribute("marker-end", "url(#topology-arrow)");
@@ -2986,18 +2997,18 @@
     var selfSub = graph.cascadeActive
       ? (graph.role === "leader" ? t("topology.role.leader") : graph.role === "follower" ? t("topology.role.follower") : t("topology.role.electing"))
       : t("topology.node.self");
-    var selfBox = topologyNodeBox(topologySvg, xSelf, centerY, selfLabel, selfSub, "kind-self");
+    var selfBox = topologyNodeBox(topologySvg, xSelf, centerY, selfLabel, selfSub, "kind-self", graph.self.node_id || null);
 
     graph.leftNodes.forEach(function (n, i) {
       var y = graph.leftNodes.length === 1 ? centerY : (i + 0.5) * (height / graph.leftNodes.length);
-      var box = topologyNodeBox(topologySvg, xLeft, y, n.label, n.sub, "kind-" + n.kind);
-      topologyEdge(topologySvg, box, selfBox, edgeLabelFor(n.edge));
+      var box = topologyNodeBox(topologySvg, xLeft, y, n.label, n.sub, "kind-" + n.kind, n.id || null);
+      topologyEdge(topologySvg, box, selfBox, edgeLabelFor(n.edge), { flowing: !!n.flowing });
     });
 
     graph.rightNodes.forEach(function (n, i) {
       var y = rightCount === 1 ? centerY : (i + 0.5) * (height / rightCount);
       var kindClass = n.kind === "peer" ? "kind-peer" : "kind-" + n.kind;
-      var box = topologyNodeBox(topologySvg, xRight, y, n.label, n.sub, kindClass);
+      var box = topologyNodeBox(topologySvg, xRight, y, n.label, n.sub, kindClass, n.id || null);
       if (n.kind === "peer") {
         var dot = svgEl("circle", { class: "topology-dot " + topologyStateClass(n.state), cx: xRight - TOPO_NODE_W / 2 + 8, cy: y - TOPO_NODE_H / 2 + 8, r: 4 });
         topologySvg.appendChild(dot);
@@ -3008,15 +3019,15 @@
       // leader-box -> self-box (arrowhead lands on self); every other edge
       // in this column is drawn self -> peer.
       if (n.edge === "leaderToYou") {
-        topologyEdge(topologySvg, box, selfBox, edgeLabelFor(n.edge));
+        topologyEdge(topologySvg, box, selfBox, edgeLabelFor(n.edge), { flowing: !!n.flowing });
       } else {
-        topologyEdge(topologySvg, selfBox, box, edgeLabelFor(n.edge), { dashed: dashed, noArrow: noArrow });
+        topologyEdge(topologySvg, selfBox, box, edgeLabelFor(n.edge), { dashed: dashed, noArrow: noArrow, flowing: !!n.flowing });
       }
     });
 
     if (graph.viewerNode) {
       var viewerBox = topologyNodeBox(topologySvg, xViewers, centerY, graph.viewerNode.label, graph.viewerNode.sub, "kind-viewers");
-      topologyEdge(topologySvg, selfBox, viewerBox, edgeLabelFor("viewers"));
+      topologyEdge(topologySvg, selfBox, viewerBox, edgeLabelFor("viewers"), { flowing: !!graph.viewerNode.flowing });
     }
 
     topologySvg.setAttribute("aria-label", t("topology.aria", {
@@ -3040,6 +3051,43 @@
       wrap.appendChild(el("span", { text: t(item[1]) }));
       topologyLegend.appendChild(wrap);
     });
+    /* Edge-state swatches: media flowing (animated) vs idle. */
+    [["flowing", "topology.legend.flowing"], ["", "topology.legend.idle"]].forEach(function (item) {
+      var wrap = el("span", { class: "topology-legend-item" });
+      wrap.appendChild(el("span", { class: "topology-legend-line" + (item[0] ? " " + item[0] : "") }));
+      wrap.appendChild(el("span", { text: t(item[1]) }));
+      topologyLegend.appendChild(wrap);
+    });
+  }
+
+  /* Card-header chrome absorbed from the old cascade card: the LEADER /
+     FOLLOWER / ELECTING role badge and the "Receiving from: …" source
+     line, plus the "cascade off" config note below the card. */
+  function renderCascadeChrome(graph) {
+    var c = graph && graph.cascade;
+    var stream = graph && graph.stream;
+    cascadeOffNote.hidden = !(stream && stream.running && stream.backend === "relay" && stream.cascade && !stream.cascade.enabled);
+    if (!c) {
+      cascadeRoleBadge.hidden = true;
+      cascadeSource.hidden = true;
+      return;
+    }
+
+    var role = c.role || "unknown";
+    var badgeKey, badgeClass;
+    if (role === "leader") { badgeKey = "stream.cascade.role.leader"; badgeClass = "badge cascade-role-badge leader"; }
+    else if (role === "follower") { badgeKey = "stream.cascade.role.follower"; badgeClass = "badge cascade-role-badge follower"; }
+    else { badgeKey = "stream.cascade.role.electing"; badgeClass = "badge cascade-role-badge electing"; }
+    cascadeRoleBadge.className = badgeClass;
+    cascadeRoleBadge.textContent = t(badgeKey);
+    cascadeRoleBadge.hidden = false;
+
+    var sourceText;
+    if (c.source === "sharer") sourceText = t("stream.cascade.source.sharer");
+    else if (c.source === "leader") sourceText = t("stream.cascade.source.leader", { leader: c.leader ? shortNodeId(c.leader) : "?" });
+    else sourceText = t("stream.cascade.source.waiting");
+    cascadeSource.textContent = sourceText;
+    cascadeSource.hidden = false;
   }
 
   function renderTopology() {
@@ -3054,12 +3102,14 @@
       topologySvg.appendChild(placeholder);
       addKv(topologyKv, t("topology.kv.status"), t("topology.kv.unknown"));
       renderTopologyLegend();
+      renderCascadeChrome(null);
       return;
     }
 
     var graph = buildTopologyGraph(data);
     renderTopologyGraph(graph);
     renderTopologyLegend();
+    renderCascadeChrome(graph);
 
     addKv(topologyKv, t("topology.kv.peers"), (data.peers || []).length);
     addKv(topologyKv, t("topology.kv.rooms"), (data.rooms || []).length);
@@ -3067,6 +3117,18 @@
       ? (graph.role === "leader" ? t("topology.role.leader") : graph.role === "follower" ? t("topology.role.follower") : t("topology.role.electing"))
       : t("topology.kv.cascadeOff");
     addKv(topologyKv, t("topology.kv.cascade"), cascadeText);
+    if (graph.cascade) {
+      addKvId(topologyKv, t("stream.cascade.leader"), graph.cascade.leader);
+      addKvId(topologyKv, t("stream.cascade.self"), graph.cascade.self);
+      addKv(topologyKv, t("stream.cascade.relayPeers"), graph.relayPeersCount);
+      if (data.consensus && data.consensus.active && Array.isArray(data.consensus.peers)) {
+        addKv(topologyKv, t("stream.cascade.consensusPeers"), data.consensus.peers.length);
+      }
+    }
+    if (graph.stream.running) {
+      addKv(topologyKv, t("topology.kv.videoFlow"), t(graph.videoFlowing ? "topology.flow.flowing" : "topology.flow.idle"));
+      addKv(topologyKv, t("topology.kv.audioFlow"), t(graph.audioFlowing ? "topology.flow.flowing" : "topology.flow.idle"));
+    }
 
     var rooms = data.rooms || [];
     if (rooms.length) {

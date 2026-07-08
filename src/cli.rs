@@ -203,6 +203,16 @@ pub enum StreamAction {
         #[arg(short, long)]
         seconds: Option<u64>,
     },
+    /// Publish this machine's own screen capture into a mistlib room (p2p),
+    /// so any consensus-elected relay in that room -- or a direct viewer --
+    /// picks it up like a tc-chat share. Also feeds the local RTSP server
+    /// directly, so this node's own VRChat output works even alone in the
+    /// room. Windows only; audio is not shared yet.
+    Share {
+        /// mistlib room id to publish into (default: stream.share_room)
+        #[arg(short, long)]
+        room: Option<String>,
+    },
     /// Stop the RTSP server
     Stop,
     /// Show stream status and URL
@@ -328,6 +338,18 @@ pub fn dispatch(cli: Cli) -> Result<()> {
                     println!("      ffplay  -rtsp_transport tcp {url}");
                     println!();
                     println!("  (open two ffplay windows to confirm multi-viewer fan-out)");
+                    println!();
+                }
+                Ok(())
+            }
+            StreamAction::Share { room } => {
+                let response = request("stream.share.start", json!({ "room": room }))?;
+                println!("{}", serde_json::to_string_pretty(&response)?);
+                if let Some(url) = response.get("rtsp_url").and_then(Value::as_str) {
+                    println!();
+                    println!("  Sharing into the room. Your own VRChat video player URL:");
+                    println!();
+                    println!("      {url}");
                     println!();
                 }
                 Ok(())

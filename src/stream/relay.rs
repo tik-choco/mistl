@@ -105,9 +105,29 @@
 //! cadence rather than the follower's own PLI having any effect; acceptable
 //! for v1 since it's the same order of magnitude as the pre-cascade
 //! single-relay keyframe wait.
+//!
+//! ## Audio observability
+//!
+//! "No sound in VRChat" is otherwise invisible from the outside: the server
+//! plumbing (this module, plus `rtp_out`/`rtsp`) has no bug in the common
+//! case -- the far more frequent cause is the browser sharer never ticking
+//! "share audio" in the `getDisplayMedia` picker, which tc-chat's
+//! `useScreenShare` now surfaces client-side. To make the rest of the
+//! pipeline diagnosable from the relay side too, [`RelayCounters`] tracks,
+//! cumulatively, how many audio RTP packets/bytes were received from the
+//! locked publisher's track, how many frames (post-transcode, if
+//! [`AudioCodec::Aac`]) were actually forwarded to `rtsp`, and how many
+//! Opus-decode/AAC-encode calls failed. [`RelayCapture::audio_status`]
+//! exposes these plus whether an audio track is currently attached, under
+//! `stream.status`'s `audio` field. `summary_task` also logs a throttled
+//! (once per [`SUMMARY_INTERVAL`]) WARN whenever video is visibly flowing
+//! but no audio frame was forwarded that interval -- the two possible
+//! causes (no track attached at all, vs. an attached track producing
+//! nothing) get distinct messages so the log alone usually points at the
+//! right stage.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
@@ -183,6 +203,22 @@ const MAX_OPUS_DECODE_SAMPLES: usize = 48_000 / 1000 * 120 * AAC_CHANNELS;
 struct RelayCounters {
     video_au: AtomicU64,
     audio_frames: AtomicU64,
+    /// Cumulative (never reset) audio observability counters, exposed via
+    /// `stream.status`'s `audio` field (see [`RelayCapture::audio_status`])
+    /// so someone debugging "no sound in VRChat" can tell apart, from the
+    /// outside, which stage of the pipeline actually stalled:
+    /// `rtp_packets`/`rtp_bytes` stuck at zero means no audio RTP was ever
+    /// received from the publisher's track (most likely: they never ticked
+    /// "share audio" in the browser's picker -- see tc-chat's
+    /// `useScreenShare`); `rtp_packets` climbing but `frames_sent` flat means
+    /// the Opus->AAC transcode is failing (check `transcode_errors`);
+    /// `frames_sent` climbing steadily means audio is reaching `rtsp` fine
+    /// and the problem is downstream (AVPro/VRChat, or the RTSP session
+    /// itself -- cross-check `RtspServer::flow_ages_ms`'s `audio` age).
+    audio_rtp_packets_total: AtomicU64,
+    audio_rtp_bytes_total: AtomicU64,
+    audio_frames_sent_total: AtomicU64,
+    audio_transcode_errors_total: AtomicU64,
 }
 
 /// Identifies one of the forwarding tasks kept in [`RelayCapture::active_tasks`]
@@ -250,6 +286,13 @@ pub struct RelayCapture {
     active_tasks: Arc<StdMutex<HashMap<TaskRole, JoinHandle<()>>>>,
     control_task: JoinHandle<()>,
     cascade: Cascade,
+    /// Whether the locked publisher's audio track is currently attached to a
+    /// forwarding task (mirrors `control_loop`'s local `audio_attached`, see
+    /// [`Self::audio_status`]).
+    audio_attached: Arc<AtomicBool>,
+    /// Cumulative audio observability counters, shared with the
+    /// audio-forwarding tasks (see [`RelayCounters`]'s doc).
+    counters: Arc<RelayCounters>,
     /// This node's mistlib node id -- needed for the `cascade.self` status
     /// field independent of whether consensus is active.
     node_id: String,
@@ -311,6 +354,7 @@ impl RelayCapture {
         let active_tasks: Arc<StdMutex<HashMap<TaskRole, JoinHandle<()>>>> = Arc::new(StdMutex::new(HashMap::new()));
         let counters = Arc::new(RelayCounters::default());
         let republish: Arc<StdMutex<Option<RepublishTracks>>> = Arc::new(StdMutex::new(None));
+        let audio_attached = Arc::new(AtomicBool::new(false));
 
         let control_task = tokio::spawn(control_loop(
             rx,
@@ -322,9 +366,15 @@ impl RelayCapture {
             cascade.clone(),
             room.clone(),
             republish.clone(),
+            audio_attached.clone(),
         ));
 
-        let summary_handle = tokio::spawn(summary_task(rtsp, publisher.clone(), counters));
+        let summary_handle = tokio::spawn(summary_task(
+            rtsp,
+            publisher.clone(),
+            counters.clone(),
+            audio_attached.clone(),
+        ));
         active_tasks
             .lock()
             .expect("relay active tasks lock poisoned")
@@ -338,6 +388,8 @@ impl RelayCapture {
             node_id,
             room,
             republish,
+            audio_attached,
+            counters,
         })
     }
 
@@ -349,6 +401,24 @@ impl RelayCapture {
             .lock()
             .expect("relay publisher lock poisoned")
             .clone()
+    }
+
+    /// `stream.status`'s `audio` field: whether the locked publisher's audio
+    /// track is currently attached, plus the cumulative observability
+    /// counters from [`RelayCounters`] -- see that type's doc for how to read
+    /// them (in short: `rtp_packets` stuck at zero means the publisher never
+    /// sent audio RTP at all, most likely a "share audio" checkbox never
+    /// ticked in the browser's picker; `rtp_packets` growing but
+    /// `frames_sent` flat points at the transcode; `frames_sent` growing
+    /// points downstream of `rtsp`).
+    pub fn audio_status(&self) -> Value {
+        audio_status_json(
+            self.audio_attached.load(Ordering::Relaxed),
+            self.counters.audio_rtp_packets_total.load(Ordering::Relaxed),
+            self.counters.audio_rtp_bytes_total.load(Ordering::Relaxed),
+            self.counters.audio_frames_sent_total.load(Ordering::Relaxed),
+            self.counters.audio_transcode_errors_total.load(Ordering::Relaxed),
+        )
     }
 
     /// `stream.status`'s `cascade` field -- see the module doc's "Cascade
@@ -439,6 +509,18 @@ fn cascade_status_json(
         "self": self_id,
         "relay_peers": relay_peers,
         "source": source,
+    })
+}
+
+/// Pure JSON builder for the `audio` field of `stream.status` (see
+/// [`RelayCapture::audio_status`]'s doc for how to read the shape).
+fn audio_status_json(attached: bool, rtp_packets: u64, rtp_bytes: u64, frames_sent: u64, transcode_errors: u64) -> Value {
+    json!({
+        "attached": attached,
+        "rtp_packets": rtp_packets,
+        "rtp_bytes": rtp_bytes,
+        "frames_sent": frames_sent,
+        "transcode_errors": transcode_errors,
     })
 }
 
@@ -688,6 +770,7 @@ async fn control_loop(
     cascade: Cascade,
     room: String,
     republish: Arc<StdMutex<Option<RepublishTracks>>>,
+    audio_attached_shared: Arc<AtomicBool>,
 ) {
     // Carries (remote_id, video ssrc) rather than just remote_id: a screen
     // switch replaces the video task for the same peer (see `VideoDecision::Switch`
@@ -744,6 +827,7 @@ async fn control_loop(
                             locked = Some(remote_id.clone());
                             current_video_ssrc = Some(event.track.ssrc());
                             audio_attached = false;
+                            audio_attached_shared.store(false, Ordering::Relaxed);
 
                             let is_leader = matches!(&policy, CascadePolicy::Active { role: ConsensusRole::Leader, .. });
                             let is_follower = matches!(&policy, CascadePolicy::Active { role: ConsensusRole::Follower, .. });
@@ -793,6 +877,7 @@ async fn control_loop(
                                 ));
                                 replace_task(&active_tasks, TaskRole::Audio, audio_handle);
                                 audio_attached = true;
+                                audio_attached_shared.store(true, Ordering::Relaxed);
                             }
                         }
                         VideoDecision::Switch => {
@@ -837,6 +922,7 @@ async fn control_loop(
                             ));
                             replace_task(&active_tasks, TaskRole::Audio, audio_handle);
                             audio_attached = true;
+                            audio_attached_shared.store(true, Ordering::Relaxed);
                         }
                         AudioDecision::Replace => {
                             info!(%remote_id, codec = audio_codec.as_str(), "relay: publisher republished audio (screen switch); resuming on new track");
@@ -867,6 +953,7 @@ async fn control_loop(
                     locked = None;
                     current_video_ssrc = None;
                     audio_attached = false;
+                    audio_attached_shared.store(false, Ordering::Relaxed);
                     audio_republish = None;
                     pending_audio.remove(&ended_id);
                 } else {
@@ -898,6 +985,7 @@ async fn control_loop(
                                 locked = None;
                                 current_video_ssrc = None;
                                 audio_attached = false;
+                                audio_attached_shared.store(false, Ordering::Relaxed);
                                 audio_republish = None;
                                 pending_audio.clear();
                             }
@@ -1156,6 +1244,8 @@ async fn audio_task_opus(
     loop {
         match track.read_rtp().await {
             Ok((packet, _attrs)) => {
+                counters.audio_rtp_packets_total.fetch_add(1, Ordering::Relaxed);
+                counters.audio_rtp_bytes_total.fetch_add(packet.payload.len() as u64, Ordering::Relaxed);
                 if let Some(republish) = &republish {
                     if let Err(error) = republish.write_rtp(&packet).await {
                         debug!(%remote_id, %error, "cascade: republishing audio RTP packet failed");
@@ -1163,6 +1253,7 @@ async fn audio_task_opus(
                 }
                 rtsp.send_audio_frame(&packet.payload, packet.header.timestamp).await;
                 counters.audio_frames.fetch_add(1, Ordering::Relaxed);
+                counters.audio_frames_sent_total.fetch_add(1, Ordering::Relaxed);
             }
             Err(error) => {
                 debug!(%remote_id, %error, "relay: audio track ended");
@@ -1179,7 +1270,7 @@ async fn audio_task_aac(
     counters: Arc<RelayCounters>,
     republish: Option<Arc<TrackLocalStaticRTP>>,
 ) {
-    let mut transcoder = match OpusToAac::new() {
+    let mut transcoder = match OpusToAac::new(counters.clone()) {
         Ok(t) => t,
         Err(error) => {
             warn!(%remote_id, %error, "relay: failed to set up Opus->AAC transcoder; audio disabled for this share");
@@ -1190,6 +1281,8 @@ async fn audio_task_aac(
     loop {
         match track.read_rtp().await {
             Ok((packet, _attrs)) => {
+                counters.audio_rtp_packets_total.fetch_add(1, Ordering::Relaxed);
+                counters.audio_rtp_bytes_total.fetch_add(packet.payload.len() as u64, Ordering::Relaxed);
                 if let Some(republish) = &republish {
                     if let Err(error) = republish.write_rtp(&packet).await {
                         debug!(%remote_id, %error, "cascade: republishing audio RTP packet failed");
@@ -1198,6 +1291,7 @@ async fn audio_task_aac(
                 for (frame, ts) in transcoder.push(&packet.payload, packet.header.timestamp) {
                     rtsp.send_audio_frame(&frame, ts).await;
                     counters.audio_frames.fetch_add(1, Ordering::Relaxed);
+                    counters.audio_frames_sent_total.fetch_add(1, Ordering::Relaxed);
                 }
             }
             Err(error) => {
@@ -1215,7 +1309,12 @@ async fn audio_task_aac(
 /// local VRChat/RTSP viewers are attached. Reads and resets `counters` each
 /// tick to derive a per-second rate; when no publisher is locked it logs a
 /// single quieter line instead of a zeroed-out throughput line.
-async fn summary_task(rtsp: Arc<RtspServer>, publisher: Arc<StdMutex<Option<String>>>, counters: Arc<RelayCounters>) {
+async fn summary_task(
+    rtsp: Arc<RtspServer>,
+    publisher: Arc<StdMutex<Option<String>>>,
+    counters: Arc<RelayCounters>,
+    audio_attached: Arc<AtomicBool>,
+) {
     let mut interval = tokio::time::interval(SUMMARY_INTERVAL);
     interval.tick().await; // first tick fires immediately; nothing forwarded yet
 
@@ -1243,6 +1342,33 @@ async fn summary_task(rtsp: Arc<RtspServer>, publisher: Arc<StdMutex<Option<Stri
                     viewers,
                     "relay: throughput"
                 );
+
+                // "User thinks audio is broken" signature: video is visibly
+                // flowing but no audio frame reached `rtsp` this interval.
+                // Naturally throttled to once per `SUMMARY_INTERVAL` since
+                // this whole function only wakes up that often. Two distinct
+                // causes get two distinct messages: no audio track was ever
+                // attached for this publisher (most likely they didn't tick
+                // "share audio" in the browser's picker), versus a track *is*
+                // attached but is producing no output (decode/transcode
+                // stalled -- check `audio.transcode_errors` in
+                // `stream.status`).
+                if video_au > 0 && audio_frames == 0 {
+                    if audio_attached.load(Ordering::Relaxed) {
+                        warn!(
+                            publisher = %publisher,
+                            transcode_errors = counters.audio_transcode_errors_total.load(Ordering::Relaxed),
+                            "relay: video is flowing but no audio frames were forwarded this interval \
+                             (audio track attached but producing nothing -- check for transcode errors)"
+                        );
+                    } else {
+                        warn!(
+                            publisher = %publisher,
+                            "relay: video is flowing but no audio track has been received from the \
+                             publisher (did they tick \"share audio\" in the browser's screen-share picker?)"
+                        );
+                    }
+                }
             }
             None => info!("relay: waiting for a screen share in the room"),
         }
@@ -1352,10 +1478,14 @@ struct OpusToAac {
     encoder: fdk_aac::enc::Encoder,
     ring: VecDeque<i16>,
     next_ts: Option<u32>,
+    /// Shared with `audio_task_aac`'s counters so a decode/encode failure
+    /// here shows up in `stream.status`'s `audio.transcode_errors` -- see
+    /// [`RelayCounters`]'s doc for why that field exists.
+    counters: Arc<RelayCounters>,
 }
 
 impl OpusToAac {
-    fn new() -> Result<Self> {
+    fn new(counters: Arc<RelayCounters>) -> Result<Self> {
         let decoder = opus::Decoder::new(rtp_out::AUDIO_CLOCK_RATE, opus::Channels::Stereo)
             .map_err(|error| anyhow!("creating Opus decoder: {error}"))
             .context("relay audio setup")?;
@@ -1374,6 +1504,7 @@ impl OpusToAac {
             encoder,
             ring: VecDeque::new(),
             next_ts: None,
+            counters,
         })
     }
 
@@ -1387,6 +1518,7 @@ impl OpusToAac {
             Ok(n) => n,
             Err(error) => {
                 warn!(%error, "relay: Opus decode failed, dropping packet");
+                self.counters.audio_transcode_errors_total.fetch_add(1, Ordering::Relaxed);
                 return Vec::new();
             }
         };
@@ -1404,7 +1536,10 @@ impl OpusToAac {
                     out.push((output_buf[..info.output_size].to_vec(), out_ts));
                 }
                 Ok(_) => {} // encoder priming: no output yet for this frame
-                Err(error) => warn!(%error, "relay: AAC encode failed, dropping frame"),
+                Err(error) => {
+                    warn!(%error, "relay: AAC encode failed, dropping frame");
+                    self.counters.audio_transcode_errors_total.fetch_add(1, Ordering::Relaxed);
+                }
             }
         }
         out
@@ -1707,6 +1842,26 @@ mod tests {
         assert_eq!(value["source"], Value::Null);
     }
 
+    // --- audio status JSON shape --------------------------------------------
+
+    #[test]
+    fn audio_status_json_reports_all_counters_and_attached_flag() {
+        let value = audio_status_json(true, 100, 12_000, 40, 2);
+        assert_eq!(value["attached"], json!(true));
+        assert_eq!(value["rtp_packets"], json!(100));
+        assert_eq!(value["rtp_bytes"], json!(12_000));
+        assert_eq!(value["frames_sent"], json!(40));
+        assert_eq!(value["transcode_errors"], json!(2));
+    }
+
+    #[test]
+    fn audio_status_json_not_attached_before_any_audio_track_arrives() {
+        let value = audio_status_json(false, 0, 0, 0, 0);
+        assert_eq!(value["attached"], json!(false));
+        assert_eq!(value["rtp_packets"], json!(0));
+        assert_eq!(value["frames_sent"], json!(0));
+    }
+
     // --- H264 RTP -> Annex-B AU regrouping ---------------------------------
 
     fn rtp_packet(payload: Vec<u8>, timestamp: u32, marker: bool, seq: u16) -> RtpPacket {
@@ -1844,7 +1999,8 @@ mod tests {
         let mut opus_encoder = opus::Encoder::new(sample_rate, opus::Channels::Stereo, opus::Application::Audio)
             .expect("creating Opus encoder");
 
-        let mut transcoder = OpusToAac::new().expect("creating Opus->AAC transcoder");
+        let mut transcoder =
+            OpusToAac::new(Arc::new(RelayCounters::default())).expect("creating Opus->AAC transcoder");
 
         let start_ts: u32 = 12_345;
         let mut ts = start_ts;
@@ -1890,5 +2046,21 @@ mod tests {
         for (size, _) in &emitted {
             assert!(*size > 0 && *size < 1024, "AAC-LC frame at 128kbps/1024 samples should be well under 1KB, got {size}");
         }
+    }
+
+    #[test]
+    fn opus_to_aac_counts_a_decode_failure_as_a_transcode_error() {
+        let counters = Arc::new(RelayCounters::default());
+        let mut transcoder = OpusToAac::new(counters.clone()).expect("creating Opus->AAC transcoder");
+
+        // Not a valid Opus payload -- the decoder must reject it, and `push`
+        // should record that in the shared counters (surfaced via
+        // `stream.status`'s `audio.transcode_errors`) rather than silently
+        // dropping it.
+        let garbage = vec![0xFFu8; 8];
+        let out = transcoder.push(&garbage, 0);
+
+        assert!(out.is_empty(), "a failed decode should emit no frames");
+        assert_eq!(counters.audio_transcode_errors_total.load(Ordering::Relaxed), 1);
     }
 }

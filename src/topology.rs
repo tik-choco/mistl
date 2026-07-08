@@ -46,7 +46,7 @@ pub async fn handle(cmd: &str, _args: Value, state: &Arc<AppState>) -> Result<Va
 /// - `consensus`: verbatim `consensus.status` shape (cascade leader
 ///   election: `{active, room?, role?, leader?, peers?}`)
 /// - `stream`: verbatim `stream.status` shape (`{running, rtsp_url?,
-///   clients?, backend?, room?, publisher?, cascade?}`)
+///   clients?, backend?, flow?, room?, publisher?, cascade?}`)
 async fn status(state: &Arc<AppState>) -> Result<Value> {
     let identity = crate::identity::current(state).await?;
     let profile = crate::identity::handle("profile.show", json!({}), state).await?;
