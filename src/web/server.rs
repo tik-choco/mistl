@@ -14,17 +14,26 @@
 //! - `GET /api/store/download?cid=...` -> `store.get`'s the cid to a temp
 //!   file and streams it back with a `Content-Disposition: attachment`
 //!   header, or 404 JSON error if the cid is unknown.
+//! - `POST /api/store/sandbox-upload` -> identical protocol to
+//!   `/api/store/upload`, but the file lands in the path-jailed content
+//!   sandbox via `store.sandbox.import` instead of the content store via
+//!   `store.put`.
+//! - `GET /api/store/sandbox-download?path=...` -> `store.sandbox.export`'s
+//!   the (percent-encoded, sandbox-relative) path to a temp file and streams
+//!   it back the same way `/api/store/download` does, or 404 JSON error if
+//!   the path is unknown/outside the sandbox.
 //! - anything else -> 404 JSON error
 //!
 //! Security (no auth token; loopback bind):
-//! - `POST /api/call` and `POST /api/store/upload` require the request
-//!   header `x-mistl-ui: 1`. Browsers cannot attach custom headers
-//!   cross-origin without a CORS preflight, and this server never sends
-//!   CORS headers (OPTIONS -> 403), so web pages from other origins can't
-//!   drive the daemon (CSRF protection).
-//! - `GET /api/store/download` deliberately skips the `x-mistl-ui` check;
-//!   see the doc comment on `handle_store_download` for why that's still
-//!   safe.
+//! - `POST /api/call`, `POST /api/store/upload`, and
+//!   `POST /api/store/sandbox-upload` require the request header
+//!   `x-mistl-ui: 1`. Browsers cannot attach custom headers cross-origin
+//!   without a CORS preflight, and this server never sends CORS headers
+//!   (OPTIONS -> 403), so web pages from other origins can't drive the
+//!   daemon (CSRF protection).
+//! - `GET /api/store/download` and `GET /api/store/sandbox-download`
+//!   deliberately skip the `x-mistl-ui` check; see the doc comment on
+//!   `handle_store_download` for why that's still safe.
 //! - The `Host` header must be `127.0.0.1[:port]` or `localhost[:port]`
 //!   (DNS-rebinding protection).
 //!
@@ -418,6 +427,10 @@ async fn handle_connection_inner(stream: &mut TcpStream, state: Arc<AppState>) -
         ("POST", "/api/call") => handle_api_call(stream, &head, leftover, state).await,
         ("POST", "/api/store/upload") => handle_store_upload(stream, &head, leftover, state).await,
         ("GET", "/api/store/download") => handle_store_download(stream, &head, state).await,
+        ("POST", "/api/store/sandbox-upload") => {
+            handle_store_sandbox_upload(stream, &head, leftover, state).await
+        }
+        ("GET", "/api/store/sandbox-download") => handle_store_sandbox_download(stream, &head, state).await,
         // Never send CORS headers/allow preflights: any OPTIONS is refused.
         ("OPTIONS", _) => write_error(stream, 403, "Forbidden", "forbidden").await,
         _ => write_error(stream, 404, "Not Found", "not found").await,
@@ -606,6 +619,182 @@ async fn handle_store_download_inner(
     let data = match crate::daemon::dispatch(
         "store.get",
         json!({"id": cid, "output": output_path.to_string_lossy()}),
+        state,
+    )
+    .await
+    {
+        Ok(data) => data,
+        Err(error) => return write_error(stream, 404, "Not Found", &format!("{error:#}")).await,
+    };
+    let name = data.get("name").and_then(Value::as_str).unwrap_or("download");
+
+    let mut file = match File::open(output_path).await {
+        Ok(f) => f,
+        Err(error) => {
+            warn!(%error, path = %output_path.display(), "opening downloaded file failed");
+            return write_error(stream, 500, "Internal Server Error", "failed to read downloaded file").await;
+        }
+    };
+    let content_length = match file.metadata().await {
+        Ok(m) => m.len(),
+        Err(error) => {
+            warn!(%error, path = %output_path.display(), "stat of downloaded file failed");
+            return write_error(stream, 500, "Internal Server Error", "failed to stat downloaded file").await;
+        }
+    };
+
+    let head = download_response_head(content_length, name);
+    stream.write_all(head.as_bytes()).await?;
+    let mut chunk = [0u8; STREAM_CHUNK_BYTES];
+    loop {
+        let n = file.read(&mut chunk).await?;
+        if n == 0 {
+            break;
+        }
+        stream.write_all(&chunk[..n]).await?;
+    }
+    stream.flush().await
+}
+
+/// `POST /api/store/sandbox-upload`: identical protocol to
+/// `/api/store/upload` (body is the raw file bytes, name carried in the
+/// `x-file-name` header, same size cap, same streamed-to-temp-file
+/// approach), except the file lands in the path-jailed content sandbox via
+/// `store.sandbox.import` instead of the content store via `store.put`.
+async fn handle_store_sandbox_upload(
+    stream: &mut TcpStream,
+    head: &RequestHead,
+    leftover: Vec<u8>,
+    state: Arc<AppState>,
+) -> io::Result<()> {
+    // Same guards as /api/call: CSRF (custom header) + DNS-rebinding (Host).
+    if head.header("x-mistl-ui").is_none() {
+        return write_error(stream, 403, "Forbidden", "forbidden").await;
+    }
+    if !host_is_allowed(head.header("host").unwrap_or("")) {
+        return write_error(stream, 403, "Forbidden", "forbidden").await;
+    }
+
+    let Some(raw_name) = head.header("x-file-name") else {
+        return write_error(stream, 400, "Bad Request", "x-file-name header required").await;
+    };
+    let Some(file_name) = percent_decode(raw_name) else {
+        return write_error(stream, 400, "Bad Request", "x-file-name is not validly percent-encoded UTF-8").await;
+    };
+    if let Err(reason) = validate_upload_filename(&file_name) {
+        return write_error(stream, 400, "Bad Request", reason).await;
+    }
+
+    let content_length: u64 = match head.header("content-length") {
+        Some(v) => match v.trim().parse() {
+            Ok(n) => n,
+            Err(_) => return write_error(stream, 400, "Bad Request", "invalid Content-Length").await,
+        },
+        None => return write_error(stream, 411, "Length Required", "Content-Length required").await,
+    };
+    if content_length > MAX_UPLOAD_BYTES {
+        return write_error(stream, 413, "Payload Too Large", "upload too large").await;
+    }
+
+    let dir = std::env::temp_dir().join(format!("mistl-sandbox-upload-{:016x}", rand::random::<u64>()));
+    if let Err(error) = tokio::fs::create_dir_all(&dir).await {
+        warn!(%error, dir = %dir.display(), "creating upload temp dir failed");
+        return write_error(stream, 500, "Internal Server Error", "failed to create temp directory").await;
+    }
+    // `store.sandbox.import` names the imported sandbox entry after this
+    // path's basename, so the temp file's basename must be the (sanitized)
+    // client-supplied name, not a random temp name.
+    let file_path = dir.join(&file_name);
+
+    let result = handle_store_sandbox_upload_body(stream, leftover, content_length, &file_path, &state).await;
+
+    // Best-effort cleanup: the sandbox already copied the bytes it needs,
+    // the temp copy is not useful afterward either way.
+    if let Err(error) = tokio::fs::remove_dir_all(&dir).await {
+        debug!(%error, dir = %dir.display(), "removing upload temp dir failed");
+    }
+    result
+}
+
+async fn handle_store_sandbox_upload_body(
+    stream: &mut TcpStream,
+    leftover: Vec<u8>,
+    content_length: u64,
+    file_path: &Path,
+    state: &Arc<AppState>,
+) -> io::Result<()> {
+    let mut file = match File::create(file_path).await {
+        Ok(f) => f,
+        Err(error) => {
+            warn!(%error, path = %file_path.display(), "creating upload file failed");
+            return write_error(stream, 500, "Internal Server Error", "failed to create upload file").await;
+        }
+    };
+    if let Err(error) = read_body_to_file(stream, leftover, content_length, &mut file).await {
+        debug!(%error, "reading upload body failed");
+        return write_error(stream, 400, "Bad Request", "incomplete request body").await;
+    }
+    drop(file);
+
+    match crate::daemon::dispatch("store.sandbox.import", json!({"path": file_path.to_string_lossy()}), state).await
+    {
+        Ok(data) => write_json_response(stream, 200, "OK", &json!({"ok": true, "data": data})).await,
+        Err(error) => {
+            write_json_response(stream, 200, "OK", &json!({"ok": false, "error": format!("{error:#}")})).await
+        }
+    }
+}
+
+/// `GET /api/store/sandbox-download?path=<percent-encoded sandbox-relative path>`.
+///
+/// Mirrors `/api/store/download`: deliberately skips the `x-mistl-ui`
+/// check. The same reasoning applies — a plain navigation (`<a download>`,
+/// `location.href = ...`) can't attach a custom header so requiring one
+/// would make the download button itself unusable; a GET here has no side
+/// effect beyond reading a file that already exists in the sandbox; and
+/// this server never sends `Access-Control-Allow-Origin`, so a hostile
+/// cross-origin page that triggers the navigation still cannot read the
+/// response bytes back into its own JavaScript. Sandbox files are
+/// equivalent in sensitivity to store contents, so the same argument holds.
+/// Only the Host allowlist (DNS-rebinding guard) applies here.
+async fn handle_store_sandbox_download(
+    stream: &mut TcpStream,
+    head: &RequestHead,
+    state: Arc<AppState>,
+) -> io::Result<()> {
+    if !host_is_allowed(head.header("host").unwrap_or("")) {
+        return write_error(stream, 403, "Forbidden", "forbidden").await;
+    }
+
+    let query = head.path.split_once('?').map(|(_, q)| q).unwrap_or("");
+    let path = match parse_query_param(query, "path") {
+        Some(path) if !path.is_empty() => path,
+        _ => return write_error(stream, 400, "Bad Request", "path query parameter required").await,
+    };
+
+    let dir = std::env::temp_dir().join(format!("mistl-sandbox-download-{:016x}", rand::random::<u64>()));
+    if let Err(error) = tokio::fs::create_dir_all(&dir).await {
+        warn!(%error, dir = %dir.display(), "creating download temp dir failed");
+        return write_error(stream, 500, "Internal Server Error", "failed to create temp directory").await;
+    }
+    let output_path = dir.join("payload");
+
+    let result = handle_store_sandbox_download_inner(stream, &path, &output_path, &state).await;
+    if let Err(error) = tokio::fs::remove_dir_all(&dir).await {
+        debug!(%error, dir = %dir.display(), "removing download temp dir failed");
+    }
+    result
+}
+
+async fn handle_store_sandbox_download_inner(
+    stream: &mut TcpStream,
+    path: &str,
+    output_path: &Path,
+    state: &Arc<AppState>,
+) -> io::Result<()> {
+    let data = match crate::daemon::dispatch(
+        "store.sandbox.export",
+        json!({"path": path, "output": output_path.to_string_lossy()}),
         state,
     )
     .await

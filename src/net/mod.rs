@@ -6,10 +6,18 @@
 //! opens a new session alongside any others already joined). This module
 //! reflects that split: it initializes the engine, registers the single
 //! `register_raw_handler` callback, and wires up media-track delivery
-//! exactly once per process, while tracking the *set* of rooms joined so
-//! far and joining a room only the first time it's requested. That lets
-//! independent daemon services (mailbox, ai, stream relay) each live in
-//! their own room concurrently, or share one -- caller's choice.
+//! exactly once per process, while refcounting the rooms joined so far and
+//! only actually joining/leaving mistlib's engine when a room's count
+//! crosses 0. That lets independent daemon services (mailbox, ai, stream
+//! relay) each live in their own room concurrently, or share one, without
+//! one service's [`leave_room`] call kicking another out of a room they
+//! both happen to use.
+//!
+//! Most callers (mailbox, ai, stream relay) join once at service start and
+//! hold their room for the process lifetime, never calling [`leave_room`].
+//! Storage is the exception: it re-resolves its configured room on every
+//! command and calls [`leave_room`]/[`ensure_started`] to hop rooms live,
+//! so `storage.room_id` can change without a daemon restart.
 //!
 //! Modules coexist on the wire by shape: each handler parses inbound bytes
 //! against its own schema and silently ignores what it can't parse
@@ -17,7 +25,7 @@
 //! with `v: 1` + `type`). This is unchanged by multi-room support, since
 //! the raw handler fan-out is still global across every joined room.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, RwLock};
 use std::time::Duration;
 
@@ -66,10 +74,12 @@ pub struct Transport {
 }
 
 static ENGINE: OnceCell<Arc<Engine>> = OnceCell::const_new();
-/// Rooms joined so far this process. Guarded by an async mutex (rather
-/// than `std::sync::RwLock`) because the check-then-join-then-insert
-/// sequence in [`ensure_started`] spans an `.await`.
-static ROOMS: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+/// Rooms joined so far this process, refcounted by number of callers
+/// holding them (so [`leave_room`] only actually leaves once the last
+/// holder releases it). Guarded by an async mutex (rather than
+/// `std::sync::RwLock`) because the check-then-join/leave-then-update
+/// sequences in [`ensure_started`]/[`leave_room`] span an `.await`.
+static ROOMS: LazyLock<Mutex<HashMap<String, usize>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 static HANDLERS: RwLock<Vec<EventHandler>> = RwLock::new(Vec::new());
 
 /// Optional consumer of remote WebRTC media tracks (the stream relay).
@@ -103,13 +113,14 @@ pub async fn ensure_started(state: &Arc<AppState>, room: String) -> Result<Arc<T
 
     {
         let mut rooms = ROOMS.lock().await;
-        if !rooms.contains(&room) {
+        let count = rooms.entry(room.clone()).or_insert(0);
+        if *count == 0 {
             let to_join = room.clone();
             tokio::task::spawn_blocking(move || mistlib::app::join_room(to_join))
                 .await
                 .context("net: joining room")?;
-            rooms.insert(room.clone());
         }
+        *count += 1;
     }
 
     Ok(Arc::new(Transport {
@@ -118,11 +129,85 @@ pub async fn ensure_started(state: &Arc<AppState>, room: String) -> Result<Arc<T
     }))
 }
 
+/// Release this process's interest in `room`, taken out by an earlier
+/// [`ensure_started`] call. Only actually leaves the room (via
+/// `mistlib::app::leave_room_id`) once every holder has released it --
+/// refcounted so independent services sharing a room (e.g. mailbox and ai
+/// both defaulting to [`DEFAULT_ROOM`]) don't kick each other out. A no-op
+/// if this process never joined `room`, or already fully released it.
+pub async fn leave_room(room: &str) -> Result<()> {
+    let mut rooms = ROOMS.lock().await;
+    let Some(&count) = rooms.get(room) else {
+        return Ok(());
+    };
+    if count > 1 {
+        rooms.insert(room.to_string(), count - 1);
+        return Ok(());
+    }
+    // Last holder: actually leave before dropping our bookkeeping, so a
+    // failed leave (e.g. the blocking task panics) leaves `room` still
+    // marked held rather than silently forgotten.
+    let to_leave = room.to_string();
+    tokio::task::spawn_blocking(move || mistlib::app::leave_room_id(to_leave))
+        .await
+        .context("net: leaving room")?;
+    rooms.remove(room);
+    Ok(())
+}
+
 /// Register a module's event handler. May be called before or after
 /// [`ensure_started`]; handlers receive every engine event -- from every
 /// joined room -- from registration onward, and never get unregistered.
 pub fn register_handler(handler: impl Fn(u32, &str, &[u8]) + Send + Sync + 'static) {
     HANDLERS.write().expect("net handler registry poisoned").push(Box::new(handler));
+}
+
+/// A per-module event handler that also knows which room the event came
+/// from: `(event_type, room_id, from_node_id, payload)`. See
+/// [`register_room_handler`].
+pub type RoomEventHandler = Box<dyn Fn(u32, &str, &str, &[u8]) + Send + Sync>;
+
+static ROOM_HANDLERS: RwLock<Vec<RoomEventHandler>> = RwLock::new(Vec::new());
+
+/// Register a room-aware handler: like [`register_handler`], but additionally
+/// told which room each event arrived from. Needed by callers that join more
+/// than one room and must tell them apart -- e.g. the tc-chat relay
+/// (`crate::mailbox::chat_relay`), which may join several tc-chat rooms and
+/// must route an inbound wire to the right room's on-disk log.
+/// [`register_handler`]'s existing event stream is a fan-out across every
+/// joined room with no origin tag, so this is a second, independent
+/// registration (both fire for every event) rather than a change to that
+/// one's signature.
+pub fn register_room_handler(handler: impl Fn(u32, &str, &str, &[u8]) + Send + Sync + 'static) {
+    ROOM_HANDLERS.write().expect("net room handler registry poisoned").push(Box::new(handler));
+}
+
+/// `mistlib::app::register_event_callback_v2`'s callback: same events as the
+/// plain raw handler, tagged with the room_id they occurred in. A free
+/// function (not a closure) because `EventCallbackV2` is a bare
+/// `extern "C" fn` pointer with no captured state -- state lives in the
+/// static [`ROOM_HANDLERS`] instead, the same pattern [`HANDLERS`] uses for
+/// [`register_handler`].
+///
+/// # Safety
+/// Called only by mistlib's own event dispatch thread, which guarantees each
+/// `(ptr, len)` pair is valid for `len` bytes for the duration of this call.
+unsafe extern "C" fn dispatch_room_event(
+    event_type: u32,
+    room_ptr: *const u8,
+    room_len: usize,
+    from_ptr: *const u8,
+    from_len: usize,
+    data_ptr: *const u8,
+    data_len: usize,
+) {
+    let room = String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(room_ptr, room_len) });
+    let from = String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(from_ptr, from_len) });
+    let data = unsafe { std::slice::from_raw_parts(data_ptr, data_len) };
+    let handlers = ROOM_HANDLERS.read().expect("net room handler registry poisoned");
+    for handler in handlers.iter() {
+        handler(event_type, &room, &from, data);
+    }
 }
 
 /// One-time process-wide setup: identity load, engine init, media-track
@@ -188,6 +273,13 @@ async fn start_engine(state: &Arc<AppState>) -> Result<Arc<Engine>> {
         }
     });
 
+    // Room-tagged sibling of the raw handler above, for callers that need to
+    // know which joined room an event arrived from -- see
+    // `register_room_handler`'s doc comment. Both this and the plain raw
+    // handler fire for every event; registering this one doesn't change the
+    // other's behavior.
+    mistlib::app::register_event_callback_v2(dispatch_room_event);
+
     Ok(Arc::new(Engine { node_id }))
 }
 
@@ -203,13 +295,17 @@ pub async fn connected_nodes() -> Vec<String> {
     }
 }
 
-/// Rooms this process has joined so far (via any module's [`ensure_started`]
-/// call, first or not), sorted for a deterministic result. Read for
-/// `topology.status`'s dashboard view -- e.g. mailbox/ai/stream relay each
-/// sitting in their own room, or sharing one.
+/// Rooms this process currently holds (refcount > 0), sorted for a
+/// deterministic result. Read for `topology.status`'s dashboard view --
+/// e.g. mailbox/ai/stream relay each sitting in their own room, or sharing
+/// one.
 pub async fn joined_rooms() -> Vec<String> {
     let rooms = ROOMS.lock().await;
-    let mut list: Vec<String> = rooms.iter().cloned().collect();
+    let mut list: Vec<String> = rooms
+        .iter()
+        .filter(|&(_, &count)| count > 0)
+        .map(|(room, _)| room.clone())
+        .collect();
     list.sort();
     list
 }
@@ -246,4 +342,18 @@ pub async fn send_direct(room: &str, to_node: &str, bytes: Vec<u8>) -> Result<()
         mistlib::app::DELIVERY_RELIABLE,
     )
     .map_err(|err| anyhow::anyhow!("net: send in room {room:?} failed: {err}"))
+}
+
+/// Reliable room-wide broadcast (every peer in `room`), scoped the same way
+/// [`send_direct`] is. An empty target node id is mistlib-core's broadcast
+/// sentinel -- the same convention tc-chat's own web client uses
+/// (`node.sendMessage(null, ...)`).
+pub async fn send_broadcast(room: &str, bytes: Vec<u8>) -> Result<()> {
+    mistlib::app::try_send_message_in_room(
+        room.to_string(),
+        String::new(),
+        &bytes,
+        mistlib::app::DELIVERY_RELIABLE,
+    )
+    .map_err(|err| anyhow::anyhow!("net: broadcast in room {room:?} failed: {err}"))
 }

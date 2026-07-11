@@ -43,7 +43,16 @@ bs58 = "0.5"
 aes-gcm = "0.10"
 pbkdf2 = "0.12"
 sha2 = "0.10"
+hmac = "0.12"
 base64 = "0.22"
+
+# storage::folder_share (tc-storage folder-share access-grant crypto): ECDH
+# P-256 where the shared secret's raw X coordinate is used directly as an
+# AES-256 key (matches tc-storage's `internal/protocol/accessgrant.go` and
+# the web app's `src/crypto/accessGrantCrypto.ts`). Already resolved
+# transitively via webrtc-dtls (part of mistlib's WebRTC stack); declared
+# directly here so `storage::folder_share` can use it.
+p256 = { version = "0.13", features = ["ecdh"] }
 
 # ai (p2p LLM network, mistai wire-compatible; upstream OpenAI-compatible client)
 reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls"] }

@@ -56,9 +56,26 @@ _ensure-mistlib-consensus:
 
 # --- release ---------------------------------------------------------------
 
-# Optimized release build (lto=thin, stripped — see Cargo.toml)
+# Optimized release build (lto=thin, stripped — see Cargo.toml), then
+# (re)start the daemon from the freshly built exe.
+# On Windows, first free the exe if a running daemon is holding it (the
+# release link fails on a locked target). `Stop-Process -ErrorAction
+# SilentlyContinue` hides the "process not found" message but still leaves
+# $? = false, and `powershell -Command` returns that as exit code 1 — which
+# just treats as a failed recipe. `; exit 0` forces a clean exit whether or
+# not a mistl process was running. The final `daemon start` gets the same
+# treatment: a build that succeeded shouldn't fail the recipe just because
+# the daemon was, say, already started some other way in the meantime.
+[windows]
+release: _ensure-mistlib _ensure-mistlib-consensus
+    Stop-Process -Name "{{bin}}" -Force -ErrorAction SilentlyContinue; exit 0
+    cargo build --release
+    .\target\release\{{bin}}.exe daemon start; exit 0
+
+[unix]
 release: _ensure-mistlib _ensure-mistlib-consensus
     cargo build --release
+    ./target/release/{{bin}} daemon start || true
 
 # Full release: format check, lint (deny warnings), test, then build
 dist: fmt-check lint test release

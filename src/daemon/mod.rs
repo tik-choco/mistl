@@ -91,6 +91,18 @@ async fn daemon_main() -> Result<()> {
     // enabled, stage a newer binary (applied on the next daemon start).
     crate::update::spawn_auto_update(state.clone());
 
+    // tc-chat room relay/bot: starts only if `[mailbox] chat_relay` and
+    // `chat_rooms` are configured (a no-op otherwise). Spawned eagerly here
+    // -- rather than lazily on first `mailbox.chat.*` IPC call, like
+    // mailbox/ai/stream's own services -- because the whole point is
+    // receiving tc-chat traffic while nobody is asking.
+    crate::mailbox::chat_relay::spawn_background(state.clone());
+
+    // tc-storage folder-share sync (requester side) and owner
+    // responder/announcer: both no-ops unless syncs/shares are persisted.
+    crate::storage::folder_sync::spawn_background(state.clone());
+    crate::storage::folder_owner::spawn_background(state.clone());
+
     tokio::select! {
         _ = tokio::signal::ctrl_c() => info!("interrupted, shutting down"),
         _ = shutdown_rx.wait_for(|&stop| stop) => info!("stop requested, shutting down"),
@@ -249,13 +261,25 @@ pub async fn dispatch(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<V
             if value["ai"]["upstream_api_key"].is_string() {
                 value["ai"]["upstream_api_key"] = json!("***");
             }
+            // Same masking for the provider/preset shape's per-provider
+            // api_key -- an empty string is left as-is so the dashboard can
+            // show "not set" vs. "set", and set_by_path substitutes the
+            // real value back in when a masked array round-trips.
+            if let Some(providers) = value["ai"]["providers"].as_array_mut() {
+                for provider in providers {
+                    let is_set = matches!(provider["api_key"].as_str(), Some(k) if !k.is_empty());
+                    if is_set {
+                        provider["api_key"] = json!("***");
+                    }
+                }
+            }
             Ok(value)
         }
         "config.set" => {
             let path = args
                 .get("path")
                 .and_then(Value::as_str)
-                .context("config.set needs a string `path` (e.g. \"ai.upstream_url\")")?;
+                .context("config.set needs a string `path` (e.g. \"ai.default_preset_id\")")?;
             let value = args.get("value").cloned().unwrap_or(Value::Null);
             let updated = config::set_by_path(&state.config(), path, value)?;
             updated.save()?;

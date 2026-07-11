@@ -127,8 +127,16 @@
     gap: 10px;
     font-size: 12px;
     color: var(--text-dim);
+    min-width: 0;   /* let .name actually shrink/ellipsize instead of forcing header overflow */
   }
-  .identity .name { color: var(--text); font-weight: 600; }
+  .identity .name {
+    color: var(--text);
+    font-weight: 600;
+    max-width: 40vw;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .copyable {
     cursor: pointer;
     border: none;
@@ -343,6 +351,10 @@
     background: var(--bg-alt);
     color: var(--text);
     min-width: 0;
+    /* Declared on the base rule (not just :focus) so blur animates back out
+       too -- a transition only declared inside :focus has nothing to animate
+       with once the element returns to its un-focused rule. */
+    transition: box-shadow var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
   }
   input[type=text]:focus, input[type=password]:focus, input[type=number]:focus, textarea:focus, select:focus {
     outline: none;
@@ -567,25 +579,35 @@
     max-width: 360px;
   }
   .toast {
+    position: relative;
     background: var(--panel);
     color: var(--text);
     border: 1px solid var(--panel-border);
-    border-left: 3px solid var(--accent);
     border-radius: 8px;
-    padding: 10px 12px;
+    padding: 10px 12px 10px 18px;
     font-size: 13px;
     display: flex;
     gap: 10px;
     align-items: flex-start;
     box-shadow: var(--shadow);
   }
-  .toast.success { border-left-color: var(--ok); }
+  .toast::before {
+    content: "";
+    position: absolute;
+    left: 7px;
+    top: 9px;
+    bottom: 9px;
+    width: 3px;
+    border-radius: 3px;
+    background: var(--accent);
+  }
+  .toast.success::before { background: var(--ok); }
   .toast.error {
     background: var(--err-dim);
     border-color: var(--err-dim);
-    border-left-color: var(--err);
     color: var(--err);
   }
+  .toast.error::before { background: var(--err); }
   .toast button {
     background: none;
     border: none;
@@ -665,10 +687,17 @@
   .topology-node-box.kind-publisher { stroke: var(--ok); }
   .topology-node-box.kind-follower { stroke: var(--accent); }
   .topology-node-box.kind-viewers { stroke-dasharray: 3 2; }
+  /* A clickable node (has a full id to copy) gets a pointer cursor; the
+     inert viewers-count box (no id) keeps the default cursor. */
+  .topology-node-clickable { cursor: pointer; }
   .topology-node-label { fill: var(--text); font: 600 11.5px var(--sans); }
   .topology-node-sub { fill: var(--text-faint); font: 700 9.5px var(--mono); }
-  .topology-edge { stroke: var(--text-faint); stroke-width: 1.3; fill: none; }
+  .topology-edge { stroke: var(--text-faint); stroke-width: 1.3; fill: none; transition: opacity var(--dur-fast) var(--ease-out); }
   .topology-edge.dashed { stroke-dasharray: 4 3; }
+  /* Hovering a node dims every edge that doesn't touch it, so a busy graph's
+     relevant path stands out. Declared with lower specificity than .flowing
+     so a flowing edge stays visibly green even while dimmed. */
+  .topology-edge.dimmed { opacity: 0.25; }
   /* An edge that is actually carrying media right now (per stream.status's
      flow ages, not mere connectivity): green "marching ants". The color
      shift alone keeps flowing distinguishable from idle when the animation
@@ -700,6 +729,8 @@
   .topology-legend-dot.kind-leader { border-color: var(--warn); background: var(--panel); }
   .topology-legend-dot.kind-publisher { border-color: var(--ok); background: var(--panel); }
   .topology-legend-dot.kind-follower { border-color: var(--accent); background: var(--panel); }
+  .topology-legend-dot.kind-sibling { border-color: var(--text-dim); background: var(--panel); border-style: dashed; }
+  .topology-legend-dot.kind-peer { border-color: var(--text-dim); background: var(--panel); }
   .topology-legend-dot.kind-viewers { border-color: var(--text-faint); background: var(--panel); border-style: dashed; }
   /* Legend swatches for edge states: a short line sample, dashed+animated
      for "media flowing", plain for "idle". */
@@ -716,6 +747,9 @@
   }
   .topology-rooms { font-size: 12px; color: var(--text-dim); margin-top: 8px; }
   .topology-rooms .mono { color: var(--text); }
+  /* Room ids as small click-to-copy chips, styled off the existing .badge. */
+  .topology-room-chip { cursor: pointer; margin: 2px 4px 2px 0; }
+  .topology-room-chip:hover { background: var(--accent-dim); color: var(--accent); }
 
   /* ---- per-module topology mini-strips (Mailbox / AI / Store) ----
      One compact row: the module's room id, connection-state dots for the
@@ -783,6 +817,13 @@
     flex: 1;
     min-width: 160px;
   }
+
+  /* ---- ai providers/presets editor (custom settings subsection, see
+     buildAiProvidersPresetsField) -- one .settings-row per provider/preset,
+     inputs styled the same as everywhere else in the settings drawers. ---- */
+  .ai-provider-list, .ai-preset-list { display: flex; flex-direction: column; gap: 8px; }
+  .ai-provider-row, .ai-preset-row { padding-bottom: 8px; border-bottom: 1px solid var(--panel-border); }
+  .ai-provider-row:last-child, .ai-preset-row:last-child { border-bottom: none; padding-bottom: 0; }
 
   /* ---- in-panel settings drawer (relocated settings sections) ---------- */
   .settings-drawer {
@@ -897,8 +938,49 @@
     margin-right: 10px;
   }
   .download-link:hover { text-decoration: underline; }
+  .store-save-details summary {
+    cursor: pointer;
+    font-size: 12.5px;
+    color: var(--text-dim);
+    padding: 4px 0;
+  }
+  .store-save-details summary:hover { color: var(--accent); }
   .store-save-form { margin: 6px 0 0; }
   .store-save-form input { width: 140px; }
+  #panel-store p.muted { margin: 6px 0 10px; }
+  .store-sync-row { margin: 6px 0; font-size: 12.5px; }
+  .store-sync-row .muted { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .store-sync-row .badge { flex: none; }
+  .store-sync-err { flex-basis: 100%; color: var(--err); }
+  .badge.status-synced { background: var(--ok-dim); color: var(--ok); }
+  .badge.status-error { background: var(--err-dim); color: var(--err); }
+  .badge.status-connecting { background: var(--warn-dim); color: var(--warn); animation: badge-pulse 1.4s ease-in-out infinite; }
+  @keyframes badge-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
+  @media (prefers-reduced-motion: reduce) {
+    .badge.status-connecting { animation: none; }
+  }
+  .store-export-dir-row { margin: 8px 0 12px; }
+  .store-export-dir-row label { font-size: 12.5px; color: var(--text-dim); flex: none; }
+  .store-export-dir-row input { flex: 1; min-width: 160px; }
+  .store-sync-entry { margin: 6px 0; }
+  .store-sync-entry .store-sync-row { margin: 0; }
+  .store-sync-toggle {
+    flex: none;
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--text-faint);
+    font-size: 10px;
+    line-height: 1;
+    padding: 4px;
+    transition: transform var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+  }
+  .store-sync-toggle::after { content: "\25be"; }
+  .store-sync-toggle:hover { color: var(--accent); }
+  .store-sync-toggle.open { transform: rotate(-180deg); }
+  .store-sync-files { display: flex; flex-direction: column; gap: 2px; margin: 4px 0 4px 24px; }
+  .store-sync-file-row { font-size: 12px; gap: 8px; }
+  .store-sync-file-row .mono { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 
   /* ---- identity avatar (topbar) + profile avatar editor --------------- */
   .identity-avatar {
@@ -942,9 +1024,8 @@
   /* ---- refined focus ring (keyboard-friendly, non-jarring) ------------- */
   input[type=text]:focus, input[type=password]:focus, input[type=number]:focus, textarea:focus, select:focus {
     box-shadow: 0 0 0 3px var(--accent-dim);
-    transition: box-shadow var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
   }
-  a:focus-visible, button:focus-visible, .sidenav a:focus-visible {
+  a:focus-visible, button:focus-visible, .sidenav a:focus-visible, .url-callout:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 2px;
   }
@@ -972,6 +1053,7 @@
       width: 100%;
       max-height: none;
       overflow-x: auto;
+      scrollbar-width: thin;   /* visual hint that the top rail scrolls */
       gap: 4px;
       padding: 8px 12px;
       background: var(--bg-alt);
@@ -1104,7 +1186,7 @@
         <div class="share-status" id="share-status"></div>
       </div>
     </div>
-    <div class="url-callout" id="stream-url-callout" hidden data-i18n-title="common.clickToCopy" title="Click to copy">
+    <div class="url-callout" id="stream-url-callout" role="button" tabindex="0" hidden data-i18n-title="common.clickToCopy" title="Click to copy">
       <span class="url-callout-label" data-i18n="stream.urlLabel">Paste into the VRChat video player</span>
       <span class="url-callout-url mono" id="stream-url-text"></span>
     </div>
@@ -1240,6 +1322,27 @@
       </div>
       <button type="submit" class="primary" id="btn-mailbox-send" data-i18n="mailbox.send">Send</button>
     </form>
+    <hr class="sep">
+    <h3 style="margin: 0 0 8px;"><span data-i18n="mailbox.chatLog.title">tc-chat relay log</span></h3>
+    <div class="inline" style="align-items: flex-end;">
+      <div class="field" style="flex: 1; min-width: 160px;">
+        <label for="mailbox-chat-room" data-i18n="mailbox.chatLog.roomLabel">tc-chat room</label>
+        <select id="mailbox-chat-room"></select>
+      </div>
+      <button type="button" id="btn-mailbox-chat-refresh" data-i18n="mailbox.chatLog.refresh">Refresh</button>
+    </div>
+    <div class="table-wrap">
+      <table id="mailbox-chat-log-table">
+        <thead><tr>
+          <th data-i18n="mailbox.chatLog.col.time">Time</th>
+          <th data-i18n="mailbox.chatLog.col.from">From</th>
+          <th data-i18n="mailbox.chatLog.col.kind">Kind</th>
+          <th data-i18n="mailbox.chatLog.col.content">Content</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="empty-note" id="mailbox-chat-log-empty" data-i18n="mailbox.chatLog.empty">No relayed tc-chat messages yet for this room.</div>
+    </div>
     <div class="topology-slot" id="topology-slot-mailbox"></div>
     <details class="settings-drawer" id="settings-drawer-mailbox">
       <summary>
@@ -1290,6 +1393,64 @@
         <button type="submit" class="primary" id="btn-store-put" data-i18n="store.addBtn">Add</button>
       </form>
     </details>
+    <hr class="sep">
+    <div class="row" style="justify-content: space-between;">
+      <h3 style="margin: 0;"><span data-i18n="store.sandbox.title">Sandbox</span></h3>
+      <button type="button" id="btn-store-sandbox-refresh" data-i18n="common.refresh">Refresh</button>
+    </div>
+    <p class="muted" style="font-size: 12px;" data-i18n="store.sandbox.hint">A scratch folder on this node for one-shot imports, downloads and encryption &mdash; like the storage-cli sandbox.</p>
+    <div class="table-wrap">
+      <table id="store-sandbox-table">
+        <thead><tr>
+          <th data-i18n="store.sandbox.col.path">Path</th>
+          <th data-i18n="store.sandbox.col.actions">Actions</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="empty-note" id="store-sandbox-empty" data-i18n="store.sandbox.empty">Sandbox is empty.</div>
+    </div>
+    <div class="store-dropzone" id="store-sandbox-dropzone" tabindex="0" role="button">
+      <span data-i18n="store.sandbox.dropzoneText">Drag files here, or click to browse</span>
+      <span class="muted" style="font-size: 11.5px;" data-i18n="store.sandbox.dropzoneHint">Imports into this node&#39;s sandbox (not yet stored or encrypted).</span>
+      <input type="file" id="store-sandbox-file-input" multiple hidden>
+    </div>
+    <div id="store-sandbox-upload-status"></div>
+    <hr class="sep">
+    <details id="store-getfile-details">
+      <summary data-i18n="store.getfile.summary">Decrypt a stored CID into the sandbox</summary>
+      <form class="inline" id="store-getfile-form">
+        <div class="field" style="flex: 2;">
+          <label for="store-getfile-cid" data-i18n="store.getfile.cidLabel">CID</label>
+          <input type="text" id="store-getfile-cid" autocomplete="off">
+        </div>
+        <div class="field" style="flex: 1;">
+          <label for="store-getfile-pass" data-i18n="store.getfile.passLabel">Passphrase</label>
+          <input type="password" id="store-getfile-pass" autocomplete="current-password">
+        </div>
+        <button type="submit" class="primary" id="btn-store-getfile" data-i18n="store.getfile.startBtn">Decrypt to sandbox</button>
+      </form>
+      <div id="store-getfile-result"></div>
+    </details>
+    <hr class="sep">
+    <div class="row" style="justify-content: space-between;">
+      <h3 style="margin: 0;" data-i18n="store.sync.summary">Folder sync (tc-storage share links)</h3>
+      <button type="button" id="btn-store-sync-refresh" data-i18n="common.refresh">Refresh</button>
+    </div>
+    <p class="muted" style="font-size: 12px;" data-i18n="store.sync.hint">Paste a folder share link below. The folder appears in the list right away with a &ldquo;connecting&rdquo; status while this node joins the room and fetches it into a managed sandbox in the background &mdash; the owner must be online for that to complete, and the daemon keeps retrying automatically every 30 seconds until it succeeds. Files stay in the sandbox until you press Extract on one to save a copy to your configured extract destination.</p>
+    <div class="row store-export-dir-row">
+      <label for="store-export-dir" data-i18n="store.sync.exportDirLabel">Extract to</label>
+      <input type="text" id="store-export-dir" data-i18n-placeholder="store.sync.exportDirPlaceholder" placeholder="Defaults to your downloads folder" autocomplete="off">
+      <button type="button" id="btn-store-export-dir-save" data-i18n="common.save">Save</button>
+    </div>
+    <form class="inline" id="store-sync-form">
+      <div class="field" style="flex: 2;">
+        <label for="store-sync-url" data-i18n="store.sync.urlLabel">Share link</label>
+        <input type="text" id="store-sync-url" data-i18n-placeholder="store.sync.urlPlaceholder" placeholder="#tc-share=… or full URL" autocomplete="off">
+      </div>
+      <button type="submit" class="primary" id="btn-store-sync" data-i18n="store.sync.startBtn">Start sync</button>
+    </form>
+    <div id="store-sync-list"></div>
+    <hr class="sep">
     <div class="topology-slot" id="topology-slot-store"></div>
     <details class="settings-drawer" id="settings-drawer-storage">
       <summary>
@@ -1394,7 +1555,7 @@
   <div class="dev-console-body" id="dev-console-body"></div>
 </div>
 
-<div class="toast-stack" id="toast-stack"></div>
+<div class="toast-stack" id="toast-stack" role="status" aria-live="polite"></div>
 
 <script>
 (function () {
@@ -1416,7 +1577,7 @@
       "nav.overview": "Overview",
       "nav.stream": "Stream",
       "nav.ai": "AI",
-      "nav.mailbox": "Mailbox",
+      "nav.mailbox": "Relay",
       "nav.store": "Store",
       "nav.profile": "Profile",
       "nav.settings": "Settings",
@@ -1548,6 +1709,8 @@
       "topology.legend.publisher": "Publisher / sharer",
       "topology.legend.leader": "Cascade leader",
       "topology.legend.follower": "Cascade follower",
+      "topology.legend.sibling": "Cascade peer",
+      "topology.legend.peer": "Connected peer",
       "topology.legend.viewers": "VRChat viewers over RTSP (count only)",
       "topology.legend.flowing": "media flowing",
       "topology.legend.idle": "idle (connected, no media)",
@@ -1564,6 +1727,7 @@
       "topology.kv.cascadeOff": "off",
       "topology.rooms": "Joined rooms",
       "topology.noRooms": "No rooms joined yet.",
+      "topology.emptyHint": "No peers connected yet — peers appear here as rooms are joined.",
       "topology.aria": "Topology: {peers} connected peers across {rooms} joined rooms",
       "topology.contextRoom": "This tab's room",
       "topology.contextNotJoined": "(not joined yet)",
@@ -1609,7 +1773,7 @@
       "chat.error": "error",
       "chat.assistant": "assistant",
       "chat.noProviderError": "No provider reachable — start providing locally or wait for a p2p provider.",
-      "mailbox.title": "Mailbox",
+      "mailbox.title": "Relay",
       "mailbox.fetchBtn": "Fetch my messages",
       "mailbox.refreshHeld": "Refresh held",
       "mailbox.heldCol.id": "ID",
@@ -1629,6 +1793,17 @@
       "mailbox.send": "Send",
       "mailbox.needBoth": "Recipient and message are both required.",
       "mailbox.sentStatus": "Message {status} (id {id}).",
+      "mailbox.chatLog.title": "tc-chat relay log",
+      "mailbox.chatLog.roomLabel": "tc-chat room",
+      "mailbox.chatLog.refresh": "Refresh",
+      "mailbox.chatLog.col.time": "Time",
+      "mailbox.chatLog.col.from": "From",
+      "mailbox.chatLog.col.kind": "Kind",
+      "mailbox.chatLog.col.content": "Content",
+      "mailbox.chatLog.empty": "No relayed tc-chat messages yet for this room.",
+      "mailbox.chatLog.disabled": "tc-chat relay is off. Set rooms and enable it below (requires a daemon restart).",
+      "mailbox.chatLog.noRooms": "No tc-chat rooms configured yet.",
+      "mailbox.chatLog.notJoined": "not joined",
       "store.title": "Store",
       "store.col.cid": "CID",
       "store.col.name": "Name",
@@ -1650,6 +1825,57 @@
       "store.pathPlaceholder": "C:\\path\\to\\file or /path/to/file",
       "store.addBtn": "Add",
       "store.stored": "Stored {name} ({size}).",
+      "store.sandbox.title": "Sandbox",
+      "store.sandbox.hint": "A scratch folder on this node for one-shot imports, downloads and encryption — like the storage-cli sandbox.",
+      "store.sandbox.col.path": "Path",
+      "store.sandbox.col.actions": "Actions",
+      "store.sandbox.empty": "Sandbox is empty.",
+      "store.sandbox.dropzoneText": "Drag files here, or click to browse",
+      "store.sandbox.dropzoneHint": "Imports into this node's sandbox (not yet stored or encrypted).",
+      "store.sandbox.download": "Download",
+      "store.sandbox.encryptSummary": "Encrypt & store",
+      "store.sandbox.passPlaceholder": "Passphrase",
+      "store.sandbox.encryptBtn": "Encrypt & store",
+      "store.sandbox.encrypted": "Encrypted and stored as {name} ({cid}).",
+      "store.sandbox.delete": "Delete",
+      "store.sandbox.deleteConfirm": "Delete {path} from the sandbox?",
+      "store.sandbox.deleted": "Deleted {path}.",
+      "store.sandbox.importing": "Importing {name}… {pct}%",
+      "store.sandbox.imported": "Imported to sandbox: {name}.",
+      "store.sandbox.importFailed": "Failed to import {name}: {error}",
+      "store.getfile.summary": "Decrypt a stored CID into the sandbox",
+      "store.getfile.cidLabel": "CID",
+      "store.getfile.passLabel": "Passphrase",
+      "store.getfile.startBtn": "Decrypt to sandbox",
+      "store.getfile.landedLabel": "Landed at",
+      "store.getfile.done": "Decrypted into sandbox: {path}",
+      "store.sync.summary": "Folder sync (tc-storage share links)",
+      "store.sync.hint": "Paste a folder share link below. The folder appears in the list right away with a “connecting” status while this node joins the room and fetches it into a managed sandbox in the background — the owner must be online for that to complete, and the daemon keeps retrying automatically every 30 seconds until it succeeds. Files stay in the sandbox until you press Extract on one to save a copy to your configured extract destination.",
+      "store.sync.urlLabel": "Share link",
+      "store.sync.urlPlaceholder": "#tc-share=… or full URL",
+      "store.sync.startBtn": "Start sync",
+      "store.sync.started": "Syncing {name}.",
+      "store.sync.none": "No active folder syncs.",
+      "store.sync.stop": "Stop",
+      "store.sync.stopped": "Sync stopped.",
+      "store.sync.lastSync": "last sync {time}",
+      "store.sync.never": "not yet synced",
+      "store.sync.error": "error: {error}",
+      "store.sync.status.connecting": "Connecting…",
+      "store.sync.status.synced": "Synced",
+      "store.sync.status.error": "Error",
+      "store.sync.counts": "{folders} folders · {files} files",
+      "store.sync.justNow": "just now",
+      "store.sync.minutesAgo": "{n}m ago",
+      "store.sync.hoursAgo": "{n}h ago",
+      "store.sync.daysAgo": "{n}d ago",
+      "store.sync.exportDirLabel": "Extract to",
+      "store.sync.exportDirPlaceholder": "Defaults to your downloads folder",
+      "store.sync.exportDirSaved": "Extract destination saved.",
+      "store.sync.filesToggle": "Files",
+      "store.sync.filesEmpty": "No files yet.",
+      "store.sync.extractBtn": "Extract",
+      "store.sync.extracted": "Extracted to {output}",
       "profile.title": "Profile",
       "profile.did": "did",
       "profile.displayName": "display name",
@@ -1690,21 +1916,23 @@
       "settings.optionDefault": "(default)",
       "settings.drawer.stream": "Stream settings",
       "settings.drawer.ai": "AI settings",
-      "settings.drawer.mailbox": "Mailbox settings",
+      "settings.drawer.mailbox": "Relay settings",
       "settings.drawer.storage": "Storage settings",
       "settings.drawer.identity": "Identity settings",
       "settings.advanced": "Advanced",
-      "settings.movedNote": "Stream, AI, Mailbox, Storage and Identity settings now live inside their own tabs.",
+      "settings.movedNote": "Stream, AI, Relay, Storage and Identity settings now live inside their own tabs.",
       "settings.section.identity": "Identity",
       "settings.section.storage": "Storage",
       "settings.section.stream": "Stream",
-      "settings.section.mailbox": "Mailbox",
+      "settings.section.mailbox": "Relay",
       "settings.section.ai": "AI",
       "settings.section.ui": "Web dashboard",
       "settings.field.identity.display_name.label": "Display name",
       "settings.field.identity.display_name.desc": "Default display name written to config (applies at next start; use the Profile panel above to change it live).",
       "settings.field.storage.capacity_bytes.label": "Storage capacity",
       "settings.field.storage.capacity_bytes.desc": "Maximum size of the local block store.",
+      "settings.field.storage.room_id.label": "Room id",
+      "settings.field.storage.room_id.desc": "tc-chat room the store joins for peer block exchange. Leave blank to stay local-only.",
       "settings.field.stream.rtsp_url.label": "RTSP URL",
       "settings.field.stream.rtsp_url.desc": "RTSP endpoint used when streaming. Leave blank to use the default.",
       "settings.field.stream.frame_rate.label": "Frame rate",
@@ -1721,20 +1949,33 @@
       "settings.field.mailbox.room_id.desc": "tc-chat room used for mailbox delivery.",
       "settings.field.mailbox.serve_as_bot.label": "Serve as bot",
       "settings.field.mailbox.serve_as_bot.desc": "Answer mailbox room presence as an automated bot.",
+      "settings.field.mailbox.chat_rooms.label": "tc-chat rooms",
+      "settings.field.mailbox.chat_rooms.desc": "Comma-separated tc-chat room ids to relay. Persists and replays their signed chat traffic so messages keep arriving even without a tc-chat tab open. Requires a daemon restart.",
+      "settings.field.mailbox.chat_relay.label": "Enable tc-chat relay",
+      "settings.field.mailbox.chat_relay.desc": "Join the rooms above and act as a standing relay/bot for tc-chat messages. Requires a daemon restart.",
       "settings.field.ai.room_id.label": "Room id",
       "settings.field.ai.room_id.desc": "tc-chat room used to discover AI providers and consumers.",
-      "settings.field.ai.upstream_url.label": "Upstream URL",
-      "settings.field.ai.upstream_url.desc": "OpenAI-compatible endpoint this daemon forwards inference to when providing.",
-      "settings.field.ai.upstream_api_key.label": "Upstream API key",
-      "settings.field.ai.upstream_api_key.desc": "API key sent to the upstream endpoint. Stored on this machine only.",
-      "settings.field.ai.default_model.label": "Default model",
-      "settings.field.ai.default_model.desc": "Model name used when a request does not specify one.",
-      "settings.field.ai.temperature.label": "Temperature",
-      "settings.field.ai.temperature.desc": "Default sampling temperature.",
       "settings.field.ai.request_timeout_secs.label": "Request timeout (seconds)",
       "settings.field.ai.request_timeout_secs.desc": "How long to wait for an upstream response before giving up.",
       "settings.field.ai.api_listen.label": "API listen address",
       "settings.field.ai.api_listen.desc": "Address:port the local OpenAI-compatible API server binds to.",
+      "settings.ai.providers.title": "Providers",
+      "settings.ai.providers.desc": "OpenAI-compatible upstream endpoints this daemon can call. Presets below pick one by id.",
+      "settings.ai.providers.addBtn": "Add provider",
+      "settings.ai.providers.removeBtn": "Remove",
+      "settings.ai.providers.removeConfirm": "{count} preset(s) use this provider and will stop working. Remove it anyway?",
+      "settings.ai.providers.labelPlaceholder": "Label",
+      "settings.ai.providers.baseUrlPlaceholder": "Base URL (e.g. https://api.openai.com/v1)",
+      "settings.ai.presets.title": "Presets",
+      "settings.ai.presets.desc": "Named model configurations, each pointing at a provider above.",
+      "settings.ai.presets.addBtn": "Add preset",
+      "settings.ai.presets.removeBtn": "Remove",
+      "settings.ai.presets.needProvider": "Add a provider first",
+      "settings.ai.presets.labelPlaceholder": "Label",
+      "settings.ai.presets.modelPlaceholder": "Model name",
+      "settings.ai.presets.temperaturePlaceholder": "Temperature",
+      "settings.ai.defaultPreset.label": "Default preset",
+      "settings.ai.defaultPreset.desc": "Which preset \"ai provide\"/\"ai serve\" use when a request doesn't name one.",
       "settings.field.ui.listen.label": "Listen address",
       "settings.field.ui.listen.desc": "Address:port this dashboard binds to.",
       "settings.field.ui.enabled.label": "Enabled",
@@ -1753,7 +1994,7 @@
       "nav.overview": "概要",
       "nav.stream": "ストリーム",
       "nav.ai": "AI",
-      "nav.mailbox": "メールボックス",
+      "nav.mailbox": "リレー",
       "nav.store": "ストア",
       "nav.profile": "プロフィール",
       "nav.settings": "設定",
@@ -1885,6 +2126,8 @@
       "topology.legend.publisher": "配信元 / 共有元",
       "topology.legend.leader": "カスケードリーダー",
       "topology.legend.follower": "カスケードフォロワー",
+      "topology.legend.sibling": "カスケードピア",
+      "topology.legend.peer": "接続中のピア",
       "topology.legend.viewers": "VRChat視聴者・RTSP経由（件数のみ）",
       "topology.legend.flowing": "メディア転送中",
       "topology.legend.idle": "アイドル（接続中・メディアなし）",
@@ -1901,6 +2144,7 @@
       "topology.kv.cascadeOff": "オフ",
       "topology.rooms": "参加中のルーム",
       "topology.noRooms": "まだルームに参加していません。",
+      "topology.emptyHint": "まだ接続中のピアはいません。ルームに参加すると、ここに表示されます。",
       "topology.aria": "トポロジー: {rooms} ルームで {peers} 件のピアと接続中",
       "topology.contextRoom": "このタブのルーム",
       "topology.contextNotJoined": "（未参加）",
@@ -1946,7 +2190,7 @@
       "chat.error": "エラー",
       "chat.assistant": "アシスタント",
       "chat.noProviderError": "利用可能なプロバイダーがありません。ローカルで提供を開始するか、p2pプロバイダーが見つかるまでお待ちください。",
-      "mailbox.title": "メールボックス",
+      "mailbox.title": "リレー",
       "mailbox.fetchBtn": "メッセージを取得",
       "mailbox.refreshHeld": "保留中を更新",
       "mailbox.heldCol.id": "ID",
@@ -1966,6 +2210,17 @@
       "mailbox.send": "送信",
       "mailbox.needBoth": "宛先とメッセージの両方を入力してください。",
       "mailbox.sentStatus": "メッセージは{status} (id {id})。",
+      "mailbox.chatLog.title": "tc-chatリレーログ",
+      "mailbox.chatLog.roomLabel": "tc-chatルーム",
+      "mailbox.chatLog.refresh": "更新",
+      "mailbox.chatLog.col.time": "時刻",
+      "mailbox.chatLog.col.from": "差出人",
+      "mailbox.chatLog.col.kind": "種類",
+      "mailbox.chatLog.col.content": "内容",
+      "mailbox.chatLog.empty": "このルームで中継されたtc-chatメッセージはまだありません。",
+      "mailbox.chatLog.disabled": "tc-chatリレーはオフです。下でルームを設定して有効化してください(デーモンの再起動が必要です)。",
+      "mailbox.chatLog.noRooms": "tc-chatルームがまだ設定されていません。",
+      "mailbox.chatLog.notJoined": "未参加",
       "store.title": "ストア",
       "store.col.cid": "CID",
       "store.col.name": "名前",
@@ -1987,6 +2242,57 @@
       "store.pathPlaceholder": "C:\\path\\to\\file or /path/to/file",
       "store.addBtn": "追加",
       "store.stored": "{name} ({size}) を保存しました。",
+      "store.sandbox.title": "サンドボックス",
+      "store.sandbox.hint": "このノード上の使い捨て作業フォルダです。storage-cli のサンドボックスのように、インポート・ダウンロード・暗号化を一回限りの操作として行えます。",
+      "store.sandbox.col.path": "パス",
+      "store.sandbox.col.actions": "操作",
+      "store.sandbox.empty": "サンドボックスは空です。",
+      "store.sandbox.dropzoneText": "ここにファイルをドラッグ、またはクリックして選択",
+      "store.sandbox.dropzoneHint": "このノードのサンドボックスへ取り込みます (まだ保存・暗号化はされません)。",
+      "store.sandbox.download": "ダウンロード",
+      "store.sandbox.encryptSummary": "暗号化して保存",
+      "store.sandbox.passPlaceholder": "パスフレーズ",
+      "store.sandbox.encryptBtn": "暗号化して保存",
+      "store.sandbox.encrypted": "{name} ({cid}) として暗号化して保存しました。",
+      "store.sandbox.delete": "削除",
+      "store.sandbox.deleteConfirm": "サンドボックスから {path} を削除しますか?",
+      "store.sandbox.deleted": "{path} を削除しました。",
+      "store.sandbox.importing": "{name} を取り込み中… {pct}%",
+      "store.sandbox.imported": "サンドボックスに取り込みました: {name}",
+      "store.sandbox.importFailed": "{name} の取り込みに失敗しました: {error}",
+      "store.getfile.summary": "保存済みCIDをサンドボックスへ復号",
+      "store.getfile.cidLabel": "CID",
+      "store.getfile.passLabel": "パスフレーズ",
+      "store.getfile.startBtn": "サンドボックスへ復号",
+      "store.getfile.landedLabel": "格納先",
+      "store.getfile.done": "サンドボックスへ復号しました: {path}",
+      "store.sync.summary": "フォルダ同期 (tc-storage 共有リンク)",
+      "store.sync.hint": "フォルダ共有リンクを貼り付けると、フォルダはすぐに「接続中」ステータスでリストに表示され、このノードがバックグラウンドでルームに参加し、管理されたサンドボックスへ取得します。完了には所有者がオンラインである必要があり、成功するまでデーモンが30秒ごとに自動で再試行します。ファイルはサンドボックスに留まり、個々のファイルで「取り出す」を押すと設定した取り出し先へコピーが保存されます。",
+      "store.sync.status.connecting": "接続中…",
+      "store.sync.status.synced": "同期済み",
+      "store.sync.status.error": "エラー",
+      "store.sync.counts": "{folders} フォルダ · {files} ファイル",
+      "store.sync.justNow": "たった今",
+      "store.sync.minutesAgo": "{n}分前",
+      "store.sync.hoursAgo": "{n}時間前",
+      "store.sync.daysAgo": "{n}日前",
+      "store.sync.urlLabel": "共有リンク",
+      "store.sync.urlPlaceholder": "#tc-share=… または完全なURL",
+      "store.sync.startBtn": "同期を開始",
+      "store.sync.started": "{name} を同期しています。",
+      "store.sync.none": "アクティブなフォルダ同期はありません。",
+      "store.sync.stop": "停止",
+      "store.sync.stopped": "同期を停止しました。",
+      "store.sync.lastSync": "最終同期 {time}",
+      "store.sync.never": "未同期",
+      "store.sync.error": "エラー: {error}",
+      "store.sync.exportDirLabel": "取り出し先",
+      "store.sync.exportDirPlaceholder": "既定ではダウンロードフォルダになります",
+      "store.sync.exportDirSaved": "取り出し先を保存しました。",
+      "store.sync.filesToggle": "ファイル",
+      "store.sync.filesEmpty": "まだファイルがありません。",
+      "store.sync.extractBtn": "取り出す",
+      "store.sync.extracted": "{output} へ取り出しました",
       "profile.title": "プロフィール",
       "profile.did": "did",
       "profile.displayName": "表示名",
@@ -2027,21 +2333,23 @@
       "settings.optionDefault": "(デフォルト)",
       "settings.drawer.stream": "ストリーム設定",
       "settings.drawer.ai": "AI設定",
-      "settings.drawer.mailbox": "メールボックス設定",
+      "settings.drawer.mailbox": "リレー設定",
       "settings.drawer.storage": "ストレージ設定",
       "settings.drawer.identity": "アイデンティティ設定",
       "settings.advanced": "詳細設定",
-      "settings.movedNote": "ストリーム・AI・メールボックス・ストレージ・アイデンティティの設定は、各タブ内に移動しました。",
+      "settings.movedNote": "ストリーム・AI・リレー・ストレージ・アイデンティティの設定は、各タブ内に移動しました。",
       "settings.section.identity": "本人情報",
       "settings.section.storage": "ストレージ",
       "settings.section.stream": "ストリーム",
-      "settings.section.mailbox": "メールボックス",
+      "settings.section.mailbox": "リレー",
       "settings.section.ai": "AI",
       "settings.section.ui": "Webダッシュボード",
       "settings.field.identity.display_name.label": "表示名",
       "settings.field.identity.display_name.desc": "設定ファイルに書き込まれるデフォルトの表示名です (次回起動時に適用されます。今すぐ変更する場合は上のプロフィールパネルを使ってください)。",
       "settings.field.storage.capacity_bytes.label": "ストレージ容量",
       "settings.field.storage.capacity_bytes.desc": "ローカルブロックストアの最大サイズです。",
+      "settings.field.storage.room_id.label": "ルームID",
+      "settings.field.storage.room_id.desc": "ピア間のブロック交換に使うtc-chatルームです。空欄の場合はローカルのみで動作します。",
       "settings.field.stream.rtsp_url.label": "RTSP URL",
       "settings.field.stream.rtsp_url.desc": "配信に使用するRTSPエンドポイントです。空欄の場合はデフォルトを使用します。",
       "settings.field.stream.frame_rate.label": "フレームレート",
@@ -2058,20 +2366,33 @@
       "settings.field.mailbox.room_id.desc": "メールボックスの配送に使うtc-chatルームです。",
       "settings.field.mailbox.serve_as_bot.label": "ボットとして応答",
       "settings.field.mailbox.serve_as_bot.desc": "メールボックスのルームプレゼンスに自動応答ボットとして応答します。",
+      "settings.field.mailbox.chat_rooms.label": "tc-chatルーム",
+      "settings.field.mailbox.chat_rooms.desc": "中継するtc-chatルームIDをカンマ区切りで指定します。署名済みのチャットトラフィックを保存・再送信するため、tc-chatタブを開いていなくてもメッセージが届き続けます。デーモンの再起動が必要です。",
+      "settings.field.mailbox.chat_relay.label": "tc-chatリレーを有効化",
+      "settings.field.mailbox.chat_relay.desc": "上記のルームに参加し、tc-chatメッセージの常駐リレー/ボットとして動作します。デーモンの再起動が必要です。",
       "settings.field.ai.room_id.label": "ルームID",
       "settings.field.ai.room_id.desc": "AIプロバイダーと利用者を発見するために使うtc-chatルームです。",
-      "settings.field.ai.upstream_url.label": "アップストリームURL",
-      "settings.field.ai.upstream_url.desc": "提供時にこのデーモンが推論を転送するOpenAI互換エンドポイントです。",
-      "settings.field.ai.upstream_api_key.label": "アップストリームAPIキー",
-      "settings.field.ai.upstream_api_key.desc": "アップストリームエンドポイントに送信するAPIキーです。このPCにのみ保存されます。",
-      "settings.field.ai.default_model.label": "デフォルトモデル",
-      "settings.field.ai.default_model.desc": "リクエストでモデルが指定されなかった場合に使用されるモデル名です。",
-      "settings.field.ai.temperature.label": "Temperature",
-      "settings.field.ai.temperature.desc": "デフォルトのサンプリング温度 (temperature) です。",
       "settings.field.ai.request_timeout_secs.label": "リクエストタイムアウト (秒)",
       "settings.field.ai.request_timeout_secs.desc": "アップストリームからの応答を待つ最大時間です。",
       "settings.field.ai.api_listen.label": "API待ち受けアドレス",
       "settings.field.ai.api_listen.desc": "ローカルのOpenAI互換APIサーバーが待ち受けるアドレス:ポートです。",
+      "settings.ai.providers.title": "プロバイダー",
+      "settings.ai.providers.desc": "提供時にこのデーモンが呼び出せるOpenAI互換のアップストリームエンドポイントです。下のプリセットがIDで1つを参照します。",
+      "settings.ai.providers.addBtn": "プロバイダーを追加",
+      "settings.ai.providers.removeBtn": "削除",
+      "settings.ai.providers.removeConfirm": "{count}件のプリセットがこのプロバイダーを使用しています。削除すると動作しなくなります。それでも削除しますか？",
+      "settings.ai.providers.labelPlaceholder": "ラベル",
+      "settings.ai.providers.baseUrlPlaceholder": "ベースURL (例: https://api.openai.com/v1)",
+      "settings.ai.presets.title": "プリセット",
+      "settings.ai.presets.desc": "上のプロバイダーを参照する、名前付きのモデル設定です。",
+      "settings.ai.presets.addBtn": "プリセットを追加",
+      "settings.ai.presets.removeBtn": "削除",
+      "settings.ai.presets.needProvider": "先にプロバイダーを追加してください",
+      "settings.ai.presets.labelPlaceholder": "ラベル",
+      "settings.ai.presets.modelPlaceholder": "モデル名",
+      "settings.ai.presets.temperaturePlaceholder": "Temperature",
+      "settings.ai.defaultPreset.label": "デフォルトプリセット",
+      "settings.ai.defaultPreset.desc": "リクエストでプリセットが指定されなかった場合に「ai provide」「ai serve」が使用するプリセットです。",
       "settings.field.ui.listen.label": "待ち受けアドレス",
       "settings.field.ui.listen.desc": "このダッシュボードが待ち受けるアドレス:ポートです。",
       "settings.field.ui.enabled.label": "有効化",
@@ -2090,7 +2411,7 @@
       "nav.overview": "概览",
       "nav.stream": "串流",
       "nav.ai": "AI",
-      "nav.mailbox": "信箱",
+      "nav.mailbox": "中继",
       "nav.store": "存储",
       "nav.profile": "个人资料",
       "nav.settings": "设置",
@@ -2222,6 +2543,8 @@
       "topology.legend.publisher": "推流源 / 共享源",
       "topology.legend.leader": "级联主节点",
       "topology.legend.follower": "级联从节点",
+      "topology.legend.sibling": "级联同级节点",
+      "topology.legend.peer": "已连接的节点",
       "topology.legend.viewers": "VRChat 观看者，经 RTSP（仅计数）",
       "topology.legend.flowing": "媒体传输中",
       "topology.legend.idle": "空闲（已连接，无媒体）",
@@ -2238,6 +2561,7 @@
       "topology.kv.cascadeOff": "关闭",
       "topology.rooms": "已加入的房间",
       "topology.noRooms": "尚未加入任何房间。",
+      "topology.emptyHint": "尚无已连接的节点——加入房间后节点会显示在这里。",
       "topology.aria": "拓扑：在 {rooms} 个房间中与 {peers} 个节点相连",
       "topology.contextRoom": "此标签页的房间",
       "topology.contextNotJoined": "（尚未加入）",
@@ -2283,7 +2607,7 @@
       "chat.error": "错误",
       "chat.assistant": "助手",
       "chat.noProviderError": "没有可用的提供方 — 请在本地开始提供服务，或等待 p2p 提供方出现。",
-      "mailbox.title": "信箱",
+      "mailbox.title": "中继",
       "mailbox.fetchBtn": "获取我的消息",
       "mailbox.refreshHeld": "刷新暂存",
       "mailbox.heldCol.id": "ID",
@@ -2303,6 +2627,17 @@
       "mailbox.send": "发送",
       "mailbox.needBoth": "收件人和消息内容均为必填。",
       "mailbox.sentStatus": "消息{status} (id {id})。",
+      "mailbox.chatLog.title": "tc-chat 中继日志",
+      "mailbox.chatLog.roomLabel": "tc-chat 房间",
+      "mailbox.chatLog.refresh": "刷新",
+      "mailbox.chatLog.col.time": "时间",
+      "mailbox.chatLog.col.from": "发件人",
+      "mailbox.chatLog.col.kind": "类型",
+      "mailbox.chatLog.col.content": "内容",
+      "mailbox.chatLog.empty": "该房间尚无中继的 tc-chat 消息。",
+      "mailbox.chatLog.disabled": "tc-chat 中继已关闭。请在下方设置房间并启用(需要重启守护进程)。",
+      "mailbox.chatLog.noRooms": "尚未配置 tc-chat 房间。",
+      "mailbox.chatLog.notJoined": "未加入",
       "store.title": "存储",
       "store.col.cid": "CID",
       "store.col.name": "名称",
@@ -2324,6 +2659,57 @@
       "store.pathPlaceholder": "C:\\path\\to\\file or /path/to/file",
       "store.addBtn": "添加",
       "store.stored": "已存储 {name} ({size})。",
+      "store.sandbox.title": "沙盒",
+      "store.sandbox.hint": "此节点上的临时工作目录，用于一次性导入、下载和加密 — 类似 storage-cli 的沙盒。",
+      "store.sandbox.col.path": "路径",
+      "store.sandbox.col.actions": "操作",
+      "store.sandbox.empty": "沙盒为空。",
+      "store.sandbox.dropzoneText": "将文件拖到此处，或点击浏览",
+      "store.sandbox.dropzoneHint": "导入到此节点的沙盒 (尚未存储或加密)。",
+      "store.sandbox.download": "下载",
+      "store.sandbox.encryptSummary": "加密并存储",
+      "store.sandbox.passPlaceholder": "口令",
+      "store.sandbox.encryptBtn": "加密并存储",
+      "store.sandbox.encrypted": "已加密并存储为 {name} ({cid})。",
+      "store.sandbox.delete": "删除",
+      "store.sandbox.deleteConfirm": "确定要从沙盒中删除 {path} 吗？",
+      "store.sandbox.deleted": "已删除 {path}。",
+      "store.sandbox.importing": "正在导入 {name}… {pct}%",
+      "store.sandbox.imported": "已导入沙盒: {name}",
+      "store.sandbox.importFailed": "{name} 导入失败: {error}",
+      "store.getfile.summary": "将已存储的 CID 解密到沙盒",
+      "store.getfile.cidLabel": "CID",
+      "store.getfile.passLabel": "口令",
+      "store.getfile.startBtn": "解密到沙盒",
+      "store.getfile.landedLabel": "存放位置",
+      "store.getfile.done": "已解密到沙盒: {path}",
+      "store.sync.summary": "文件夹同步 (tc-storage 分享链接)",
+      "store.sync.hint": "粘贴文件夹分享链接后，该文件夹会立即以“连接中”状态出现在列表里，本节点在后台加入房间并将内容获取到受管理的沙盒中。完成需要所有者在线，守护进程会每 30 秒自动重试直到成功。文件会保留在沙盒中，对某个文件点击“提取”即可将副本保存到你配置的提取目录。",
+      "store.sync.status.connecting": "连接中…",
+      "store.sync.status.synced": "已同步",
+      "store.sync.status.error": "错误",
+      "store.sync.counts": "{folders} 个文件夹 · {files} 个文件",
+      "store.sync.justNow": "刚刚",
+      "store.sync.minutesAgo": "{n} 分钟前",
+      "store.sync.hoursAgo": "{n} 小时前",
+      "store.sync.daysAgo": "{n} 天前",
+      "store.sync.urlLabel": "分享链接",
+      "store.sync.urlPlaceholder": "#tc-share=… 或完整 URL",
+      "store.sync.startBtn": "开始同步",
+      "store.sync.started": "正在同步 {name}。",
+      "store.sync.none": "没有正在同步的文件夹。",
+      "store.sync.stop": "停止",
+      "store.sync.stopped": "已停止同步。",
+      "store.sync.lastSync": "上次同步 {time}",
+      "store.sync.never": "尚未同步",
+      "store.sync.error": "错误: {error}",
+      "store.sync.exportDirLabel": "提取到",
+      "store.sync.exportDirPlaceholder": "默认使用下载文件夹",
+      "store.sync.exportDirSaved": "已保存提取目录。",
+      "store.sync.filesToggle": "文件",
+      "store.sync.filesEmpty": "暂无文件。",
+      "store.sync.extractBtn": "提取",
+      "store.sync.extracted": "已提取到 {output}",
       "profile.title": "个人资料",
       "profile.did": "did",
       "profile.displayName": "显示名称",
@@ -2364,21 +2750,23 @@
       "settings.optionDefault": "(默认)",
       "settings.drawer.stream": "串流设置",
       "settings.drawer.ai": "AI 设置",
-      "settings.drawer.mailbox": "邮箱设置",
+      "settings.drawer.mailbox": "中继设置",
       "settings.drawer.storage": "存储设置",
       "settings.drawer.identity": "身份设置",
       "settings.advanced": "高级",
-      "settings.movedNote": "串流、AI、邮箱、存储和身份设置现在位于各自的标签页中。",
+      "settings.movedNote": "串流、AI、中继、存储和身份设置现在位于各自的标签页中。",
       "settings.section.identity": "身份",
       "settings.section.storage": "存储",
       "settings.section.stream": "串流",
-      "settings.section.mailbox": "信箱",
+      "settings.section.mailbox": "中继",
       "settings.section.ai": "AI",
       "settings.section.ui": "Web 仪表盘",
       "settings.field.identity.display_name.label": "显示名称",
       "settings.field.identity.display_name.desc": "写入配置文件的默认显示名称 (下次启动时生效；如需立即修改，请使用上方的个人资料面板)。",
       "settings.field.storage.capacity_bytes.label": "存储容量",
       "settings.field.storage.capacity_bytes.desc": "本地区块存储的最大容量。",
+      "settings.field.storage.room_id.label": "房间 ID",
+      "settings.field.storage.room_id.desc": "用于对等区块交换的 tc-chat 房间。留空则仅在本地运行。",
       "settings.field.stream.rtsp_url.label": "RTSP URL",
       "settings.field.stream.rtsp_url.desc": "串流时使用的 RTSP 端点。留空则使用默认值。",
       "settings.field.stream.frame_rate.label": "帧率",
@@ -2395,20 +2783,33 @@
       "settings.field.mailbox.room_id.desc": "信箱投递所使用的 tc-chat 房间。",
       "settings.field.mailbox.serve_as_bot.label": "以机器人身份响应",
       "settings.field.mailbox.serve_as_bot.desc": "以自动机器人身份响应信箱房间的在线状态。",
+      "settings.field.mailbox.chat_rooms.label": "tc-chat 房间",
+      "settings.field.mailbox.chat_rooms.desc": "要中继的 tc-chat 房间 ID，以逗号分隔。会保存并重放已签名的聊天流量，即使未打开 tc-chat 标签页，消息也会持续送达。需要重启守护进程。",
+      "settings.field.mailbox.chat_relay.label": "启用 tc-chat 中继",
+      "settings.field.mailbox.chat_relay.desc": "加入上方房间，并作为 tc-chat 消息的常驻中继/机器人。需要重启守护进程。",
       "settings.field.ai.room_id.label": "房间 ID",
       "settings.field.ai.room_id.desc": "用于发现 AI 提供方与使用方的 tc-chat 房间。",
-      "settings.field.ai.upstream_url.label": "上游 URL",
-      "settings.field.ai.upstream_url.desc": "提供服务时，此守护进程转发推理请求的 OpenAI 兼容端点。",
-      "settings.field.ai.upstream_api_key.label": "上游 API 密钥",
-      "settings.field.ai.upstream_api_key.desc": "发送给上游端点的 API 密钥，仅存储在此电脑上。",
-      "settings.field.ai.default_model.label": "默认模型",
-      "settings.field.ai.default_model.desc": "请求未指定模型时使用的模型名称。",
-      "settings.field.ai.temperature.label": "Temperature",
-      "settings.field.ai.temperature.desc": "默认的采样温度 (temperature)。",
       "settings.field.ai.request_timeout_secs.label": "请求超时 (秒)",
       "settings.field.ai.request_timeout_secs.desc": "等待上游响应的最长时间，超过则放弃。",
       "settings.field.ai.api_listen.label": "API 监听地址",
       "settings.field.ai.api_listen.desc": "本地 OpenAI 兼容 API 服务器绑定的地址:端口。",
+      "settings.ai.providers.title": "提供方",
+      "settings.ai.providers.desc": "此守护进程提供服务时可调用的 OpenAI 兼容上游端点。下面的预设按 ID 选择其中一个。",
+      "settings.ai.providers.addBtn": "添加提供方",
+      "settings.ai.providers.removeBtn": "删除",
+      "settings.ai.providers.removeConfirm": "有 {count} 个预设正在使用此提供方，删除后它们将无法使用。仍要删除吗？",
+      "settings.ai.providers.labelPlaceholder": "标签",
+      "settings.ai.providers.baseUrlPlaceholder": "Base URL（例如 https://api.openai.com/v1）",
+      "settings.ai.presets.title": "预设",
+      "settings.ai.presets.desc": "命名的模型配置，每个都指向上面的一个提供方。",
+      "settings.ai.presets.addBtn": "添加预设",
+      "settings.ai.presets.removeBtn": "删除",
+      "settings.ai.presets.needProvider": "请先添加一个提供方",
+      "settings.ai.presets.labelPlaceholder": "标签",
+      "settings.ai.presets.modelPlaceholder": "模型名称",
+      "settings.ai.presets.temperaturePlaceholder": "Temperature",
+      "settings.ai.defaultPreset.label": "默认预设",
+      "settings.ai.defaultPreset.desc": "当请求未指定预设时，“ai provide”/“ai serve” 使用的预设。",
       "settings.field.ui.listen.label": "监听地址",
       "settings.field.ui.listen.desc": "此仪表盘绑定的地址:端口。",
       "settings.field.ui.enabled.label": "启用",
@@ -2461,6 +2862,9 @@
     if (enBtn) enBtn.classList.toggle("active", currentLang === "en");
     if (zhBtn) zhBtn.classList.toggle("active", currentLang === "zh");
     if (jaBtn) jaBtn.classList.toggle("active", currentLang === "ja");
+    if (enBtn) enBtn.setAttribute("aria-pressed", currentLang === "en" ? "true" : "false");
+    if (zhBtn) zhBtn.setAttribute("aria-pressed", currentLang === "zh" ? "true" : "false");
+    if (jaBtn) jaBtn.setAttribute("aria-pressed", currentLang === "ja" ? "true" : "false");
   }
 
   function setLang(lang) {
@@ -2588,9 +2992,21 @@
   var toastStack = document.getElementById("toast-stack");
   var toastSeq = 0;
 
+  /* live toasts keyed by message text, so an identical message can reset its
+     own timer instead of stacking a duplicate; each entry keeps the toast id
+     and the pending auto-dismiss timeout handle so it can be cleared/restarted */
+  var liveToasts = {};
+
   /* kind: "success" (green bar) | "error" (red, lingers longer) | anything
      else / omitted = neutral info (accent bar) */
   function showToast(message, kind) {
+    var delay = kind === "error" ? 8000 : 6000;
+    var existing = liveToasts[message];
+    if (existing) {
+      clearTimeout(existing.timer);
+      existing.timer = setTimeout(function () { dismissToast(existing.id); }, delay);
+      return;
+    }
     var id = "toast-" + (++toastSeq);
     var cls = "toast" + (kind === "error" ? " error" : kind === "success" ? " success" : "");
     var toast = el("div", { class: cls, id: id });
@@ -2600,12 +3016,20 @@
     closeBtn.addEventListener("click", function () { dismissToast(id); });
     toast.appendChild(closeBtn);
     toastStack.appendChild(toast);
-    setTimeout(function () { dismissToast(id); }, kind === "error" ? 8000 : 6000);
+    var entry = { id: id, timer: null };
+    entry.timer = setTimeout(function () { dismissToast(id); }, delay);
+    liveToasts[message] = entry;
   }
 
   function dismissToast(id) {
     var node = document.getElementById(id);
     if (node && node.parentNode) node.parentNode.removeChild(node);
+    for (var msg in liveToasts) {
+      if (Object.prototype.hasOwnProperty.call(liveToasts, msg) && liveToasts[msg].id === id) {
+        delete liveToasts[msg];
+        break;
+      }
+    }
   }
 
   /* ---------- api ---------- */
@@ -2661,7 +3085,11 @@
     chatHistory: [],
     mailboxHeldItems: [],
     mailboxFetchItems: [],
+    mailboxChatRooms: null,
+    mailboxChatLogRoom: null,
+    mailboxChatLogItems: [],
     storeItems: [],
+    sandboxItems: [],
     update: null
   };
 
@@ -2675,7 +3103,9 @@
     renderChat();
     renderMailboxHeld(state.mailboxHeldItems);
     renderMailboxFetch(state.mailboxFetchItems);
+    renderMailboxChatRooms(state.mailboxChatRooms);
     renderStore(state.storeItems);
+    renderSandbox(state.sandboxItems);
     renderProfile(state.identity);
     renderSettings(state.config);
     renderUpdate();
@@ -2752,6 +3182,12 @@
     container.appendChild(dd);
   }
 
+  /* tracks the previous poll's reachability so the error toast only fires on the
+     reachable -> unreachable transition; null = unknown (first poll), which also
+     toasts. The header pill already shows the continuous "unreachable" state, so
+     repeating the toast every 5s while the daemon stays down would spam the stack */
+  var daemonWasReachable = null;
+
   function pollDaemonStatus() {
     return api("daemon.status", {}).then(function (data) {
       state.daemon = data;
@@ -2759,11 +3195,15 @@
       state.daemonUptimeAt = Date.now();
       renderDaemonPill();
       renderOverview();
+      daemonWasReachable = true;
     }, function (err) {
       state.daemon = null;
       renderDaemonPill();
       renderOverview();
-      showToast("daemon.status: " + err.message, "error");
+      if (daemonWasReachable !== false) {
+        showToast("daemon.status: " + err.message, "error");
+      }
+      daemonWasReachable = false;
     });
   }
 
@@ -2807,6 +3247,11 @@
   var cascadeOffNote = document.getElementById("cascade-off-note");
 
   streamUrlCallout.addEventListener("click", function () {
+    if (streamUrlText.textContent) copyToClipboard(streamUrlText.textContent);
+  });
+  streamUrlCallout.addEventListener("keydown", function (e) {
+    if (e.key !== "Enter" && e.key !== " " && e.key !== "Spacebar") return;
+    if (e.key !== "Enter") e.preventDefault();   /* keep Space from scrolling the page */
     if (streamUrlText.textContent) copyToClipboard(streamUrlText.textContent);
   });
 
@@ -2870,9 +3315,19 @@
     renderShareCard();
   }
 
+  /* Short display form of a node/transport id. Historically a plain 8-char
+     prefix, which works fine for the 16-hex ids most transports use but is
+     useless for DID-based ids (e.g. "did:key:z6Mkt...") -- every such id
+     shares the same "did:key:" scheme prefix, so an 8-char slice renders the
+     literal string "did:key:" for every peer. Strip a leading "did:<method>:"
+     scheme before shortening, then middle-elide (head+tail with "...") so
+     the still-distinguishing tail of the id survives truncation too, not
+     just the (often shared) head. Short ids pass through unchanged. */
   function shortNodeId(id) {
     if (!id) return "";
-    return id.length > 8 ? id.slice(0, 8) : id;
+    var didPrefix = /^did:[^:]+:/.exec(id);
+    var s = didPrefix ? id.slice(didPrefix[0].length) : id;
+    return truncateMiddle(s, 6, 4);
   }
 
   function addKvId(container, label, fullId) {
@@ -3045,13 +3500,28 @@
     return node;
   }
 
-  var TOPO_NODE_W = 132;
+  /* Node box width now auto-fits its label/sub text instead of being fixed,
+     so a box is only as wide as it needs to be to stay readable -- clamped
+     to a sane range. TOPO_NODE_W_MIN doubles as the old fixed width for the
+     narrow-content case. */
+  var TOPO_NODE_W_MIN = 112;
+  var TOPO_NODE_W_MAX = 220;
   var TOPO_NODE_H = 40;
   var TOPO_ROW_H = 48;
   /* Auto-layout: once a side's node count exceeds this, it wraps into a new
      sub-column instead of growing one very tall column. */
   var TOPO_MAX_ROWS_PER_COL = 5;
-  var TOPO_COL_W = TOPO_NODE_W + 28;
+  /* Horizontal clearances used when stacking columns outward from the self
+     box -- see topologyStackColumnsOutward. TOPO_COL_GAP is the edge-to-edge
+     gap between two same-side sub-columns; TOPO_SELF_GAP is the (larger)
+     gap between the self box and the nearest column on either side, which
+     also has to leave room for that edge's label; TOPO_VIEWER_GAP is the gap
+     between the last right-side column and the viewers box. TOPO_MARGIN is
+     the minimum clearance from any box edge to the SVG's own edge. */
+  var TOPO_COL_GAP = 28;
+  var TOPO_SELF_GAP = 44;
+  var TOPO_VIEWER_GAP = 56;
+  var TOPO_MARGIN = 24;
   /* Minimum vertical pitch between rows in the same column -- keep
      TOPO_ROW_H too, in case it's ever tuned larger than node height + gap. */
   var TOPO_ROW_PITCH = Math.max(TOPO_NODE_H + 16, TOPO_ROW_H);
@@ -3118,6 +3588,13 @@
     var shown = {};
     if (selfInfo.node_id) shown[selfInfo.node_id] = true;
 
+    /* mistlib's connection state for every peer it currently sees, keyed by
+       node id -- used below to give cascade nodes (leader/follower/sibling)
+       the same state dot generic peers already get, whenever that peer also
+       shows up in `net`'s connected-nodes list. */
+    var peerStateById = {};
+    netPeers.forEach(function (p) { if (p && p.node_id) peerStateById[p.node_id] = p.state; });
+
     var leftNodes = [];
     var rightNodes = [];
     var viewerNode = null;
@@ -3134,14 +3611,15 @@
       if (shown[peerId]) return;
       shown[peerId] = true;
       var isLeader = peerId === leaderId;
+      var knownState = peerStateById[peerId] || null;
       if (isLeader) {
-        rightNodes.push({ id: peerId, label: shortNodeId(peerId), sub: t("topology.role.leader"), kind: "leader", edge: "leaderToYou" });
+        rightNodes.push({ id: peerId, label: shortNodeId(peerId), sub: t("topology.role.leader"), kind: "leader", edge: "leaderToYou", state: knownState });
       } else if (role === "leader") {
         /* As leader we re-publish what we forward, so follower edges carry
            media whenever the stream flows. */
-        rightNodes.push({ id: peerId, label: shortNodeId(peerId), sub: t("topology.role.follower"), kind: "follower", edge: "youToFollower", flowing: mediaFlowing });
+        rightNodes.push({ id: peerId, label: shortNodeId(peerId), sub: t("topology.role.follower"), kind: "follower", edge: "youToFollower", flowing: mediaFlowing, state: knownState });
       } else {
-        rightNodes.push({ id: peerId, label: shortNodeId(peerId), sub: t("topology.role.sibling"), kind: "sibling", edge: "sibling" });
+        rightNodes.push({ id: peerId, label: shortNodeId(peerId), sub: t("topology.role.sibling"), kind: "sibling", edge: "sibling", state: knownState });
       }
     });
 
@@ -3184,30 +3662,128 @@
     };
   }
 
-  function topologyNodeBox(parent, x, y, label, sub, kindClass, fullTitle) {
-    var g = svgEl("g", { transform: "translate(" + (x - TOPO_NODE_W / 2) + "," + (y - TOPO_NODE_H / 2) + ")" });
-    if (fullTitle) {
+  /* Estimates a label's rendered width in the topology SVG without an
+     actual text-measurement round trip (canvas measureText / getBBox would
+     require the text to already be in the DOM). Counts characters, weighting
+     CJK/full-width glyphs -- roughly twice as wide as Latin ones at the same
+     font-size -- as 2 "units". Exact kerning doesn't matter here, only "wide
+     enough that the label never clips". */
+  function topologyCharUnits(ch) {
+    var code = ch.codePointAt(0);
+    if ((code >= 0x3000 && code <= 0x30FF) ||  // CJK punctuation, Hiragana, Katakana
+        (code >= 0x3400 && code <= 0x9FFF) ||  // CJK Unified Ideographs (+ Ext A)
+        (code >= 0xAC00 && code <= 0xD7A3) ||  // Hangul syllables
+        (code >= 0xF900 && code <= 0xFAFF) ||  // CJK compatibility ideographs
+        (code >= 0xFF00 && code <= 0xFFEF)) {  // full-width forms
+      return 2;
+    }
+    return 1;
+  }
+
+  function topologyTextUnits(str) {
+    var units = 0;
+    for (var i = 0; i < str.length; i++) units += topologyCharUnits(str[i]);
+    return units;
+  }
+
+  /* Node box width, auto-fit to whichever of the label (11.5px sans, 600
+     weight) or sub-label (9.5px mono, 700 weight) is wider, clamped to a
+     readable-but-not-huge range. Per-unit px figures are tuned by eye
+     against the two font rules in the stylesheet, not measured exactly --
+     see topologyCharUnits for why an exact measurement isn't used. */
+  function topologyNodeWidth(label, sub) {
+    var labelW = topologyTextUnits(label || "") * 6.8;
+    var subW = topologyTextUnits(sub || "") * 5.6;
+    var w = Math.max(labelW, subW) + 20;
+    return Math.max(TOPO_NODE_W_MIN, Math.min(TOPO_NODE_W_MAX, w));
+  }
+
+  /* Largest label width (in topologyTextUnits, same weighting topologyNodeWidth
+     uses for its label side) that fits inside a TOPO_NODE_W_MAX-wide box
+     without truncation -- the exact inverse of topologyNodeWidth's label
+     term, so a label right at this budget is exactly the one that would have
+     started clamping the box width. */
+  var TOPO_LABEL_MAX_UNITS = Math.floor((TOPO_NODE_W_MAX - 20) / 6.8);
+
+  /* Node labels (namely self's display_name, free text with no server-side
+     length limit) can be far wider than TOPO_NODE_W_MAX, which
+     topologyNodeWidth clamps to -- without this, the label overflows the box
+     it's centered in. Truncates the string itself (head+tail with an
+     ellipsis, CJK-aware via topologyTextUnits/topologyCharUnits so a
+     double-width glyph string doesn't sneak past the budget) once its unit
+     width would exceed TOPO_LABEL_MAX_UNITS; short labels pass through
+     unchanged. Pure function of the string, so render-signature gating
+     (topologyRenderSnapshot) stays deterministic poll-to-poll. */
+  function topologyTruncateLabel(label) {
+    if (!label || topologyTextUnits(label) <= TOPO_LABEL_MAX_UNITS) return label;
+    var budget = Math.max(TOPO_LABEL_MAX_UNITS - 1, 2); // reserve 1 unit for the ellipsis glyph
+    var headUnits = Math.ceil(budget * 0.6);
+    var tailUnits = budget - headUnits;
+    function takeUnits(str, units, fromEnd) {
+      var out = "";
+      var used = 0;
+      if (!fromEnd) {
+        for (var i = 0; i < str.length && used < units; i++) {
+          var u = topologyCharUnits(str[i]);
+          if (used + u > units) break;
+          out += str[i];
+          used += u;
+        }
+      } else {
+        for (var j = str.length - 1; j >= 0 && used < units; j--) {
+          var u2 = topologyCharUnits(str[j]);
+          if (used + u2 > units) break;
+          out = str[j] + out;
+          used += u2;
+        }
+      }
+      return out;
+    }
+    return takeUnits(label, headUnits, false) + "…" + takeUnits(label, tailUnits, true);
+  }
+
+  /* `id` (when present) is both the click-to-copy payload and what the
+     tooltip shows in full; `stateLabel` is an already-localized connection
+     state (e.g. "connected") appended as a second tooltip line when known.
+     The viewers-count box has no id, so it gets neither the pointer cursor
+     nor the click handler -- there's nothing to copy. */
+  function topologyNodeBox(parent, x, y, w, label, sub, kindClass, id, stateLabel) {
+    var g = svgEl("g", { transform: "translate(" + (x - w / 2) + "," + (y - TOPO_NODE_H / 2) + ")" });
+    if (id) {
+      g.classList.add("topology-node-clickable");
+      g.addEventListener("click", function () { copyToClipboard(id); });
+    }
+    var displayLabel = topologyTruncateLabel(label);
+    var labelTruncated = displayLabel !== label;
+    if (id || labelTruncated) {
       /* Hover tooltip with the untruncated node id (SVG <title>) -- the
          merged-away cascade peer-pill list used to be where full ids
-         lived. */
+         lived -- plus, when the *label* itself (e.g. a free-text
+         display_name) had to be truncated to fit the box, the full label
+         text too, so nothing is ever only available in clipped form. */
+      var titleLines = [];
+      if (id) titleLines.push(id);
+      if (labelTruncated) titleLines.push(label);
+      if (stateLabel) titleLines.push(stateLabel);
+      if (id) titleLines.push(t("common.clickToCopy"));
       var titleEl = svgEl("title");
-      titleEl.textContent = fullTitle;
+      titleEl.textContent = titleLines.join("\n");
       g.appendChild(titleEl);
     }
     g.appendChild(svgEl("rect", {
       class: "topology-node-box " + kindClass, x: 0, y: 0,
-      width: TOPO_NODE_W, height: TOPO_NODE_H, rx: 8
+      width: w, height: TOPO_NODE_H, rx: 8
     }));
-    var labelEl = svgEl("text", { class: "topology-node-label", x: TOPO_NODE_W / 2, y: sub ? 17 : TOPO_NODE_H / 2 + 4, "text-anchor": "middle" });
-    labelEl.textContent = label;
+    var labelEl = svgEl("text", { class: "topology-node-label", x: w / 2, y: sub ? 17 : TOPO_NODE_H / 2 + 4, "text-anchor": "middle" });
+    labelEl.textContent = displayLabel;
     g.appendChild(labelEl);
     if (sub) {
-      var subEl = svgEl("text", { class: "topology-node-sub", x: TOPO_NODE_W / 2, y: 30, "text-anchor": "middle" });
+      var subEl = svgEl("text", { class: "topology-node-sub", x: w / 2, y: 30, "text-anchor": "middle" });
       subEl.textContent = sub;
       g.appendChild(subEl);
     }
     parent.appendChild(g);
-    return { x: x, y: y, w: TOPO_NODE_W, h: TOPO_NODE_H };
+    return { x: x, y: y, w: w, h: TOPO_NODE_H, el: g };
   }
 
   /* ---- auto-layout helpers (column wrapping + label collision avoidance) ----
@@ -3225,6 +3801,42 @@
     var numCols = count > 0 ? Math.ceil(count / TOPO_MAX_ROWS_PER_COL) : 0;
     var maxRows = count > 0 ? Math.min(count, TOPO_MAX_ROWS_PER_COL) : 0;
     return { numCols: numCols, maxRows: maxRows, extraCols: Math.max(numCols - 1, 0) };
+  }
+
+  /* Per-column max node width for one side, given each node's own auto-fit
+     width and how many columns that side wrapped into (topologyColStats).
+     Needed because a column can no longer assume a fixed node width -- it
+     has to be at least as wide as its widest member. */
+  function topologyColumnWidths(nodeWidths, numCols) {
+    var widths = [];
+    for (var c = 0; c < numCols; c++) widths.push(TOPO_NODE_W_MIN);
+    nodeWidths.forEach(function (w, i) {
+      var c = Math.floor(i / TOPO_MAX_ROWS_PER_COL);
+      if (w > widths[c]) widths[c] = w;
+    });
+    return widths;
+  }
+
+  /* Lays out `colWidths.length` sub-columns end-to-end starting from
+     `anchorEdge` (the self box's edge facing that side) and growing outward
+     in `direction` (-1 = leftward/decreasing x, +1 = rightward/increasing
+     x). The nearest column gets `firstGap` clearance from the anchor (extra
+     room for that edge's label); every column after that gets `colGap` from
+     the previous one. Returns each column's center x plus `outerEdge`, the
+     outermost column's far edge -- the extreme point of that whole side,
+     used both to know how much to shift the diagram to keep it in bounds
+     and to know where the next thing further out (e.g. the viewers box) can
+     start. */
+  function topologyStackColumnsOutward(anchorEdge, colWidths, firstGap, colGap, direction) {
+    var centers = [];
+    var edge = anchorEdge;
+    for (var c = 0; c < colWidths.length; c++) {
+      edge += direction * (c === 0 ? firstGap : colGap);
+      var center = edge + direction * colWidths[c] / 2;
+      centers.push(center);
+      edge = center + direction * colWidths[c] / 2;
+    }
+    return { centers: centers, outerEdge: edge };
   }
 
   /* y for row `rowInCol` of `rowsInCol` total rows in one sub-column, with
@@ -3248,6 +3860,39 @@
     return n;
   }
 
+  /* Point on a cubic bezier at parameter t in [0,1] -- used to sample an
+     edge path when checking whether it passes through a node box. */
+  function topologyCubicPoint(x1, y1, cx1, cy1, cx2, cy2, x2, y2, t) {
+    var mt = 1 - t;
+    return {
+      x: mt * mt * mt * x1 + 3 * mt * mt * t * cx1 + 3 * mt * t * t * cx2 + t * t * t * x2,
+      y: mt * mt * mt * y1 + 3 * mt * mt * t * cy1 + 3 * mt * t * t * cy2 + t * t * t * y2
+    };
+  }
+
+  function topologyPointInRect(pt, rect, pad) {
+    pad = pad || 0;
+    return pt.x >= rect.x - pad && pt.x <= rect.x + rect.w + pad &&
+      pt.y >= rect.y - pad && pt.y <= rect.y + rect.h + pad;
+  }
+
+  /* Samples ~20 interior points along a cubic bezier (skipping the
+     endpoints themselves, which legitimately touch their own boxes) and
+     counts how many land inside any of `rects`. Used both to test "does
+     this edge cross a node box" (hits > 0) and to pick the least-bad bend
+     when no bend avoids every box (fewest hits wins). */
+  function topologyPathHitCount(x1, y1, cx1, cy1, cx2, cy2, x2, y2, rects) {
+    var samples = 24;
+    var hits = 0;
+    for (var i = 1; i < samples; i++) {
+      var pt = topologyCubicPoint(x1, y1, cx1, cy1, cx2, cy2, x2, y2, i / samples);
+      for (var r = 0; r < rects.length; r++) {
+        if (topologyPointInRect(pt, rects[r], 2)) { hits++; break; }
+      }
+    }
+    return hits;
+  }
+
   /* Places one edge label clear of every rect placed so far (node boxes,
      then earlier labels -- draw order is deterministic so this never
      depends on anything but the graph itself). Candidates, in order: the
@@ -3260,7 +3905,12 @@
   function placeTopologyEdgeLabel(parent, placedRects, label, x1, y1, x2, y2) {
     var midX = (x1 + x2) / 2;
     var midY = (y1 + y2) / 2;
-    var w = label.length * 6.2 + 8;
+    /* CJK-aware width estimate (topologyTextUnits weights CJK/full-width
+       glyphs as 2 "units" vs 1 for Latin, same as topologyNodeWidth uses for
+       node boxes) -- a plain label.length here undersizes the dodge rect for
+       ja/zh labels, letting them land on node boxes they should have dodged
+       around. */
+    var w = topologyTextUnits(label) * 6.2 + 8;
     var h = 12;
     var candidates = [];
     [0, -10, 10, -20, 20, -30, 30].forEach(function (dy) {
@@ -3291,6 +3941,15 @@
     parent.appendChild(labelEl);
   }
 
+  /* Vertical offsets tried, in order, when an edge's default curve would
+     cross a node box it doesn't touch -- e.g. self <-> a node in a
+     second-or-later wrapped sub-column, whose default curve can pass
+     straight through an earlier sub-column's boxes. Both control points
+     move by the same offset, which bows the whole curve up or down without
+     moving its endpoints. Small offsets first so a bend is no bigger than
+     it needs to be. */
+  var TOPO_EDGE_BEND_OFFSETS = [0, -22, 22, -44, 44, -72, 72, -108, 108, -150, 150, -200, 200, -260, 260, -330, 330, -400, 400];
+
   function topologyEdge(parent, from, to, label, opts) {
     opts = opts || {};
     /* Direction is encoded by the caller's (from, to) order -- e.g. a
@@ -3300,31 +3959,52 @@
        flag. */
     var x1 = from.x <= to.x ? from.x + from.w / 2 : from.x - from.w / 2;
     var x2 = from.x <= to.x ? to.x - to.w / 2 : to.x + to.w / 2;
-    /* Wrapped-column edges (self <-> a node in a second-or-later
-       sub-column) may visually cross an earlier sub-column's boxes -- we
-       accept that rather than bending the curve's control points per row,
-       since at this stroke weight a crossing curve reads fine and the
-       actual reported problem is labels landing on boxes, which
-       placeTopologyEdgeLabel (below) solves directly. */
+    var cx = x1 + (x2 - x1) / 2;
+    var cy1 = from.y, cy2 = to.y;
+
+    /* If this edge's path would cross a node box it doesn't start/end at
+       (most commonly a wrapped-column edge passing over an earlier
+       sub-column -- see TOPO_EDGE_BEND_OFFSETS above), bow the curve
+       vertically until it clears every box, or -- if no offset in the list
+       clears all of them -- use whichever offset clears the most. */
+    if (opts.nodeRects && opts.nodeRects.length) {
+      var obstacles = opts.nodeRects.filter(function (r) { return r.box !== from && r.box !== to; });
+      if (obstacles.length) {
+        var bestDy = 0, bestHits = Infinity;
+        for (var i = 0; i < TOPO_EDGE_BEND_OFFSETS.length; i++) {
+          var dy = TOPO_EDGE_BEND_OFFSETS[i];
+          var hits = topologyPathHitCount(x1, from.y, cx, from.y + dy, cx, to.y + dy, x2, to.y, obstacles);
+          if (hits < bestHits) { bestHits = hits; bestDy = dy; }
+          if (hits === 0) break;
+        }
+        cy1 = from.y + bestDy;
+        cy2 = to.y + bestDy;
+      }
+    }
+
     var path = svgEl("path", {
       class: "topology-edge" + (opts.dashed ? " dashed" : "") + (opts.flowing ? " flowing" : ""),
-      d: "M" + x1 + " " + from.y + " C " + (x1 + (x2 - x1) / 2) + " " + from.y + ", " + (x1 + (x2 - x1) / 2) + " " + to.y + ", " + x2 + " " + to.y
+      d: "M" + x1 + " " + from.y + " C " + cx + " " + cy1 + ", " + cx + " " + cy2 + ", " + x2 + " " + to.y
     });
     if (!opts.noArrow) path.setAttribute("marker-end", "url(#topology-arrow)");
     parent.appendChild(path);
     if (label) {
       if (opts.placedRects) {
-        placeTopologyEdgeLabel(parent, opts.placedRects, label, x1, from.y, x2, to.y);
+        /* Dodge candidates are built from the *final* (possibly bent)
+           control-point y's, not the straight-line endpoint y's, so the
+           label tracks the path actually drawn above rather than the path
+           as if it had never bent. */
+        placeTopologyEdgeLabel(parent, opts.placedRects, label, x1, cy1, x2, cy2);
       } else {
         /* No collision-tracking array passed -- fall back to the old plain
            midpoint placement so this signature stays usable standalone. */
-        var midX = (x1 + x2) / 2;
-        var midY = (from.y + to.y) / 2;
-        var labelEl = svgEl("text", { class: "topology-edge-label", x: midX, y: midY - 5, "text-anchor": "middle" });
+        var midPt = topologyCubicPoint(x1, from.y, cx, cy1, cx, cy2, x2, to.y, 0.5);
+        var labelEl = svgEl("text", { class: "topology-edge-label", x: midPt.x, y: midPt.y - 5, "text-anchor": "middle" });
         labelEl.textContent = label;
         parent.appendChild(labelEl);
       }
     }
+    return path;
   }
 
   function topologyArrowDefs() {
@@ -3366,39 +4046,101 @@
     var height = Math.max(rows * TOPO_ROW_PITCH + 40, 160);
     var centerY = height / 2;
 
-    /* Left sub-columns grow away from self (further left); to keep the
-       outermost one pinned at the original x=90 margin instead of running
-       off the left edge, the whole left-of-self side (self included) shifts
-       right by the extra columns' width. Right sub-columns grow away from
-       self too, but to the right, so they just extend the viewBox. */
-    var xLeft = 90, xSelf = 250;
-    var offsetX = leftStats.extraCols * TOPO_COL_W;
-    xSelf += offsetX;
-    var xRight = (graph.viewerNode ? 420 : 480) + offsetX;
-    var xViewers = xRight + rightStats.extraCols * TOPO_COL_W + 150;
-    var viewBoxW = 640 + offsetX + rightStats.extraCols * TOPO_COL_W;
-    topologySvg.setAttribute("viewBox", "0 0 " + viewBoxW + " " + height);
-
     var selfLabel = graph.self.display_name || shortNodeId(graph.self.node_id) || t("topology.node.self");
     var selfSub = graph.cascadeActive
       ? (graph.role === "leader" ? t("topology.role.leader") : graph.role === "follower" ? t("topology.role.follower") : t("topology.role.electing"))
       : t("topology.node.self");
-    var selfBox = topologyNodeBox(topologySvg, xSelf, centerY, selfLabel, selfSub, "kind-self", graph.self.node_id || null);
+    var selfW = topologyNodeWidth(selfLabel, selfSub);
+
+    /* Auto-fit width for every node, computed up front so column widths
+       (which have to fit their widest member) and column x positions (which
+       stack columns edge-to-edge) can both be derived from real box sizes
+       instead of the old fixed TOPO_NODE_W. */
+    var leftWidths = graph.leftNodes.map(function (n) { return topologyNodeWidth(n.label, n.sub); });
+    var rightWidths = graph.rightNodes.map(function (n) { return topologyNodeWidth(n.label, n.sub); });
+    var viewerW = graph.viewerNode ? topologyNodeWidth(graph.viewerNode.label, graph.viewerNode.sub) : 0;
+
+    var leftColWidths = topologyColumnWidths(leftWidths, leftStats.numCols);
+    var rightColWidths = topologyColumnWidths(rightWidths, rightStats.numCols);
+
+    /* Place the self box just far enough from the left margin to fit
+       whatever the left side actually needs -- 0 clearance (self hugs
+       TOPO_MARGIN) when there are no left-side columns at all, which is the
+       common case (no publisher/sharer). Measured by first stacking the left
+       columns in a frame where the self box's *left edge* is at 0 (purely to
+       find how far left they reach); neededLeftSpace is that distance, so
+       self's real left edge lands at TOPO_MARGIN + neededLeftSpace and the
+       columns themselves get shifted into world space alongside it. This
+       replaces the old fixed xSelfBase=250 anchor, which left a constant
+       ~194px dead zone on the left whenever leftNodes was empty (offsetX
+       could only ever shift the diagram right, never pull it left). The
+       right side is stacked directly from the real self position, since
+       nothing needs to shift it. */
+    var leftLayoutRel = topologyStackColumnsOutward(0, leftColWidths, TOPO_SELF_GAP, TOPO_COL_GAP, -1);
+    var neededLeftSpace = -leftLayoutRel.outerEdge;
+    var xSelf = TOPO_MARGIN + neededLeftSpace + selfW / 2;
+    var leftCenters = leftLayoutRel.centers.map(function (c) { return c + (xSelf - selfW / 2); });
+    var rightLayout = topologyStackColumnsOutward(xSelf + selfW / 2, rightColWidths, TOPO_SELF_GAP, TOPO_COL_GAP, 1);
+    var rightCenters = rightLayout.centers;
+
+    var viewerCenter = null;
+    var rightmost = rightLayout.outerEdge;
+    if (graph.viewerNode) {
+      viewerCenter = rightLayout.outerEdge + TOPO_VIEWER_GAP + viewerW / 2;
+      rightmost = viewerCenter + viewerW / 2;
+    }
+
+    var viewBoxW = rightmost + TOPO_MARGIN;
+    topologySvg.setAttribute("viewBox", "0 0 " + viewBoxW + " " + height);
+    /* Cap the on-screen scale: a tight viewBox with CSS width:100% blows a
+       2-node graph up to fill the card (giant boxes, detached-looking edge
+       labels). Render at ~1.25x natural size, shrink-to-fit when wider than
+       the card, and keep a scroll floor so big graphs stay legible on
+       phones (the wrap is overflow-x:auto). Deterministic per viewBox, so
+       the render-signature gate is unaffected. */
+    var naturalW = Math.round(viewBoxW * 1.25);
+    topologySvg.style.width = naturalW + "px";
+    topologySvg.style.maxWidth = "100%";
+    topologySvg.style.minWidth = Math.min(620, naturalW) + "px";
+    topologySvg.style.margin = "0 auto";
+
+    var selfBox = topologyNodeBox(topologySvg, xSelf, centerY, selfW, selfLabel, selfSub, "kind-self", graph.self.node_id || null);
 
     /* All node boxes are placed and drawn before any edge/label, so label
        collision-avoidance below can see every box up front -- including
        ones in sub-columns drawn later in source order but visually to the
-       right of an earlier edge's label. */
+       right of an earlier edge's label. `nodeRects` mirrors `placedRects`
+       but keeps a reference to each box's own object, so edge routing can
+       tell "the box this edge touches" apart from "a box this edge must
+       route around". */
     var placedRects = [{ x: selfBox.x - selfBox.w / 2, y: selfBox.y - selfBox.h / 2, w: selfBox.w, h: selfBox.h }];
+    var nodeRects = [{ x: selfBox.x - selfBox.w / 2, y: selfBox.y - selfBox.h / 2, w: selfBox.w, h: selfBox.h, box: selfBox }];
+
+    /* Hover-highlight registry: every node's box element keyed by the same
+       key its incident edges are recorded under (a real node id where one
+       exists, else a synthetic "self"/"viewers" key), so hovering a node can
+       dim every edge that doesn't mention its key. Rebuilt on every render
+       and thrown away with the old DOM subtree on the next one -- nothing
+       here needs explicit teardown. */
+    var hoverNodes = [{ key: "self", el: selfBox.el }];
+    var hoverEdges = [];
+
+    function stateLabelFor(state) {
+      if (!state) return null;
+      var stateKey = "topology.state." + state;
+      return t(stateKey) === stateKey ? state : t(stateKey);
+    }
 
     var leftBoxes = graph.leftNodes.map(function (n, i) {
       var colIndex = Math.floor(i / TOPO_MAX_ROWS_PER_COL);
       var rowIndex = i % TOPO_MAX_ROWS_PER_COL;
       var rowsInCol = Math.min(TOPO_MAX_ROWS_PER_COL, leftCount - colIndex * TOPO_MAX_ROWS_PER_COL);
-      var x = xLeft + offsetX - colIndex * TOPO_COL_W;
+      var x = leftCenters[colIndex];
       var y = topologyColRowY(rowIndex, rowsInCol, centerY);
-      var box = topologyNodeBox(topologySvg, x, y, n.label, n.sub, "kind-" + n.kind, n.id || null);
+      var box = topologyNodeBox(topologySvg, x, y, leftWidths[i], n.label, n.sub, "kind-" + n.kind, n.id || null, stateLabelFor(n.state));
       placedRects.push({ x: x - box.w / 2, y: y - box.h / 2, w: box.w, h: box.h });
+      nodeRects.push({ x: x - box.w / 2, y: y - box.h / 2, w: box.w, h: box.h, box: box });
+      hoverNodes.push({ key: n.id || ("left" + i), el: box.el });
       return box;
     });
 
@@ -3406,47 +4148,82 @@
       var colIndex = Math.floor(i / TOPO_MAX_ROWS_PER_COL);
       var rowIndex = i % TOPO_MAX_ROWS_PER_COL;
       var rowsInCol = Math.min(TOPO_MAX_ROWS_PER_COL, rightCount - colIndex * TOPO_MAX_ROWS_PER_COL);
-      var x = xRight + colIndex * TOPO_COL_W;
+      var x = rightCenters[colIndex];
       var y = topologyColRowY(rowIndex, rowsInCol, centerY);
       var kindClass = n.kind === "peer" ? "kind-peer" : "kind-" + n.kind;
-      var box = topologyNodeBox(topologySvg, x, y, n.label, n.sub, kindClass, n.id || null);
-      if (n.kind === "peer") {
-        var dot = svgEl("circle", { class: "topology-dot " + topologyStateClass(n.state), cx: x - TOPO_NODE_W / 2 + 8, cy: y - TOPO_NODE_H / 2 + 8, r: 4 });
+      var box = topologyNodeBox(topologySvg, x, y, rightWidths[i], n.label, n.sub, kindClass, n.id || null, stateLabelFor(n.state));
+      /* Any right-column node with a known connection state gets the same
+         dot generic peers do -- cascade nodes (leader/follower/sibling) get
+         one too whenever mistlib also reports them via `net`. */
+      if (n.state) {
+        var dot = svgEl("circle", { class: "topology-dot " + topologyStateClass(n.state), cx: x - box.w / 2 + 8, cy: y - TOPO_NODE_H / 2 + 8, r: 4 });
         topologySvg.appendChild(dot);
       }
       placedRects.push({ x: x - box.w / 2, y: y - box.h / 2, w: box.w, h: box.h });
+      nodeRects.push({ x: x - box.w / 2, y: y - box.h / 2, w: box.w, h: box.h, box: box });
+      hoverNodes.push({ key: n.id || ("right" + i), el: box.el });
       return box;
     });
 
     var viewerBox = null;
     if (graph.viewerNode) {
-      viewerBox = topologyNodeBox(topologySvg, xViewers, centerY, graph.viewerNode.label, graph.viewerNode.sub, "kind-viewers");
+      viewerBox = topologyNodeBox(topologySvg, viewerCenter, centerY, viewerW, graph.viewerNode.label, graph.viewerNode.sub, "kind-viewers");
       placedRects.push({ x: viewerBox.x - viewerBox.w / 2, y: viewerBox.y - viewerBox.h / 2, w: viewerBox.w, h: viewerBox.h });
+      nodeRects.push({ x: viewerBox.x - viewerBox.w / 2, y: viewerBox.y - viewerBox.h / 2, w: viewerBox.w, h: viewerBox.h, box: viewerBox });
+      hoverNodes.push({ key: "viewers", el: viewerBox.el });
     }
 
     /* Edges + labels, in the same draw order as before, now sharing
        placedRects so every label dodges every box (and every
-       already-placed label). */
+       already-placed label), sharing nodeRects so every edge's path bends
+       around any box it isn't attached to, and recording each edge's
+       endpoint keys for hover highlighting below. */
     graph.leftNodes.forEach(function (n, i) {
-      topologyEdge(topologySvg, leftBoxes[i], selfBox, edgeLabelFor(n.edge), { flowing: !!n.flowing, placedRects: placedRects });
+      var path = topologyEdge(topologySvg, leftBoxes[i], selfBox, edgeLabelFor(n.edge), { flowing: !!n.flowing, placedRects: placedRects, nodeRects: nodeRects });
+      hoverEdges.push({ el: path, from: n.id || ("left" + i), to: "self" });
     });
 
     graph.rightNodes.forEach(function (n, i) {
       var box = rightBoxes[i];
       var dashed = n.edge === "sibling";
       var noArrow = n.edge === "peer" || n.edge === "sibling";
+      var key = n.id || ("right" + i);
+      var path;
       // A cascade leader feeds *this* node, so that edge is drawn
       // leader-box -> self-box (arrowhead lands on self); every other edge
       // in this column is drawn self -> peer.
       if (n.edge === "leaderToYou") {
-        topologyEdge(topologySvg, box, selfBox, edgeLabelFor(n.edge), { flowing: !!n.flowing, placedRects: placedRects });
+        path = topologyEdge(topologySvg, box, selfBox, edgeLabelFor(n.edge), { flowing: !!n.flowing, placedRects: placedRects, nodeRects: nodeRects });
       } else {
-        topologyEdge(topologySvg, selfBox, box, edgeLabelFor(n.edge), { dashed: dashed, noArrow: noArrow, flowing: !!n.flowing, placedRects: placedRects });
+        path = topologyEdge(topologySvg, selfBox, box, edgeLabelFor(n.edge), { dashed: dashed, noArrow: noArrow, flowing: !!n.flowing, placedRects: placedRects, nodeRects: nodeRects });
       }
+      hoverEdges.push({ el: path, from: "self", to: key });
     });
 
     if (viewerBox) {
-      topologyEdge(topologySvg, selfBox, viewerBox, edgeLabelFor("viewers"), { flowing: !!graph.viewerNode.flowing, placedRects: placedRects });
+      var viewerPath = topologyEdge(topologySvg, selfBox, viewerBox, edgeLabelFor("viewers"), { flowing: !!graph.viewerNode.flowing, placedRects: placedRects, nodeRects: nodeRects });
+      hoverEdges.push({ el: viewerPath, from: "self", to: "viewers" });
+    }
+
+    hoverNodes.forEach(function (node) {
+      node.el.addEventListener("mouseenter", function () {
+        hoverEdges.forEach(function (edge) {
+          if (edge.from !== node.key && edge.to !== node.key) edge.el.classList.add("dimmed");
+        });
+      });
+      node.el.addEventListener("mouseleave", function () {
+        hoverEdges.forEach(function (edge) { edge.el.classList.remove("dimmed"); });
+      });
+    });
+
+    /* Nothing but self on the graph: say so instead of leaving a lone box
+       floating in an otherwise-blank card. */
+    if (leftCount === 0 && rightCount === 0 && !graph.viewerNode) {
+      var emptyHint = svgEl("text", {
+        x: xSelf, y: selfBox.y + selfBox.h / 2 + 26, "text-anchor": "middle", class: "topology-node-sub"
+      });
+      emptyHint.textContent = t("topology.emptyHint");
+      topologySvg.appendChild(emptyHint);
     }
 
     topologySvg.setAttribute("aria-label", t("topology.aria", {
@@ -3455,28 +4232,46 @@
     }));
   }
 
-  function renderTopologyLegend() {
+  /* `graph` may be null (daemon unreachable / no data yet). The legend only
+     lists kinds actually present in the current graph -- self is always
+     shown, everything else (including the two kinds that used to have no
+     legend entry at all: generic connected peers and cascade siblings)
+     appears only once a node of that kind exists, so an idle dashboard
+     doesn't advertise roles it isn't currently displaying. */
+  function renderTopologyLegend(graph) {
     topologyLegend.innerHTML = "";
-    var items = [
-      ["kind-self", "topology.legend.self"],
-      ["kind-publisher", "topology.legend.publisher"],
-      ["kind-leader", "topology.legend.leader"],
-      ["kind-follower", "topology.legend.follower"],
-      ["kind-viewers", "topology.legend.viewers"]
+    var present = { self: true };
+    if (graph) {
+      graph.leftNodes.forEach(function (n) { present[n.kind] = true; });
+      graph.rightNodes.forEach(function (n) { present[n.kind] = true; });
+      if (graph.viewerNode) present.viewers = true;
+    }
+    var allItems = [
+      ["kind-self", "topology.legend.self", "self"],
+      ["kind-publisher", "topology.legend.publisher", "publisher"],
+      ["kind-leader", "topology.legend.leader", "leader"],
+      ["kind-follower", "topology.legend.follower", "follower"],
+      ["kind-sibling", "topology.legend.sibling", "sibling"],
+      ["kind-peer", "topology.legend.peer", "peer"],
+      ["kind-viewers", "topology.legend.viewers", "viewers"]
     ];
-    items.forEach(function (item) {
+    allItems.filter(function (item) { return present[item[2]]; }).forEach(function (item) {
       var wrap = el("span", { class: "topology-legend-item" });
       wrap.appendChild(el("span", { class: "topology-legend-dot " + item[0] }));
       wrap.appendChild(el("span", { text: t(item[1]) }));
       topologyLegend.appendChild(wrap);
     });
-    /* Edge-state swatches: media flowing (animated) vs idle. */
-    [["flowing", "topology.legend.flowing"], ["", "topology.legend.idle"]].forEach(function (item) {
-      var wrap = el("span", { class: "topology-legend-item" });
-      wrap.appendChild(el("span", { class: "topology-legend-line" + (item[0] ? " " + item[0] : "") }));
-      wrap.appendChild(el("span", { text: t(item[1]) }));
-      topologyLegend.appendChild(wrap);
-    });
+    /* Edge-state swatches (media flowing vs idle) only mean something once
+       the graph actually has at least one edge to draw them for. */
+    var hasEdges = !!(graph && (graph.leftNodes.length || graph.rightNodes.length || graph.viewerNode));
+    if (hasEdges) {
+      [["flowing", "topology.legend.flowing"], ["", "topology.legend.idle"]].forEach(function (item) {
+        var wrap = el("span", { class: "topology-legend-item" });
+        wrap.appendChild(el("span", { class: "topology-legend-line" + (item[0] ? " " + item[0] : "") }));
+        wrap.appendChild(el("span", { text: t(item[1]) }));
+        topologyLegend.appendChild(wrap);
+      });
+    }
   }
 
   /* Card-header chrome absorbed from the old cascade card: the LEADER /
@@ -3569,11 +4364,53 @@
     topologyContextEl.hidden = false;
   }
 
+  /* Signature of everything the render below actually reads, so a poll that
+     changes nothing visible can skip the DOM rebuild entirely. That matters
+     because a full rebuild restarts the "marching ants" flowing-edge
+     animation, drops any open SVG <title> tooltip, and clears text
+     selection inside the card -- all on every 5s poll otherwise, even
+     between two identical snapshots. `flow` ages are already bucketed into
+     stable booleans by buildTopologyGraph, so the signature doesn't churn
+     while media keeps flowing. currentLang is included so a language switch
+     (which re-renders via rerenderAllDynamic without a new poll) still
+     rebuilds with the new strings, and topologyHostPanel is included so a
+     panel switch's module-context line stays correct. */
+  function topologyRenderSnapshot(data, graph) {
+    if (!data) return { lang: currentLang, data: null };
+    var module = TOPOLOGY_PANEL_MODULE[topologyHostPanel];
+    return {
+      lang: currentLang,
+      hostPanel: topologyHostPanel,
+      moduleInfo: module && data.modules ? data.modules[module] : null,
+      self: { id: graph.self.node_id, name: graph.self.display_name, cascadeActive: graph.cascadeActive, role: graph.role },
+      left: graph.leftNodes.map(function (n) { return [n.id, n.label, n.sub, n.kind, !!n.flowing]; }),
+      right: graph.rightNodes.map(function (n) { return [n.id, n.label, n.sub, n.kind, n.state || null, !!n.flowing]; }),
+      viewer: graph.viewerNode ? [graph.viewerNode.label, graph.viewerNode.sub, !!graph.viewerNode.flowing] : null,
+      peersCount: (data.peers || []).length,
+      rooms: data.rooms || [],
+      cascade: graph.cascade ? [graph.cascade.role, graph.cascade.leader, graph.cascade.self, graph.cascade.source, graph.relayPeersCount] : null,
+      consensusPeers: (data.consensus && data.consensus.active && Array.isArray(data.consensus.peers)) ? data.consensus.peers.length : null,
+      streamRunning: graph.stream.running,
+      cascadeOff: !!(graph.stream.running && graph.stream.backend === "relay" && graph.stream.cascade && !graph.stream.cascade.enabled),
+      videoFlow: graph.stream.running ? [graph.videoDelivered, graph.videoFlowing] : null,
+      audioFlow: graph.stream.running ? [graph.audioDelivered, graph.audioFlowing] : null
+    };
+  }
+
+  var topologyLastSig = null;
+
   function renderTopology() {
     var data = state.topology;
+    renderTopoStrips();   /* cheap, own DOM -- always kept current */
+
+    var graph = data ? buildTopologyGraph(data) : null;
+    var sig = JSON.stringify(topologyRenderSnapshot(data, graph));
+    if (sig === topologyLastSig) return;
+    topologyLastSig = sig;
+
     topologyKv.innerHTML = "";
     topologyRooms.innerHTML = "";
-    renderTopoStrips();
+
     if (!data) {
       topologySvg.innerHTML = "";
       topologySvg.setAttribute("viewBox", "0 0 640 80");
@@ -3581,15 +4418,14 @@
       placeholder.textContent = t("topology.kv.unknown");
       topologySvg.appendChild(placeholder);
       addKv(topologyKv, t("topology.kv.status"), t("topology.kv.unknown"));
-      renderTopologyLegend();
+      renderTopologyLegend(null);
       renderCascadeChrome(null);
       renderTopologyContext();
       return;
     }
 
-    var graph = buildTopologyGraph(data);
     renderTopologyGraph(graph);
-    renderTopologyLegend();
+    renderTopologyLegend(graph);
     renderCascadeChrome(graph);
 
     addKv(topologyKv, t("topology.kv.peers"), (data.peers || []).length);
@@ -3611,12 +4447,14 @@
       addKv(topologyKv, t("topology.kv.audioFlow"), t(flowStatusKey(graph.audioDelivered, graph.audioFlowing)));
     }
 
+    /* Room ids as small click-to-copy chips instead of a plain comma list. */
     var rooms = data.rooms || [];
     if (rooms.length) {
       topologyRooms.appendChild(el("span", { text: t("topology.rooms") + ": " }));
-      rooms.forEach(function (room, i) {
-        if (i > 0) topologyRooms.appendChild(el("span", { text: ", " }));
-        topologyRooms.appendChild(el("span", { class: "mono", text: room }));
+      rooms.forEach(function (room) {
+        var chip = el("span", { class: "badge mono topology-room-chip", text: room, title: t("common.clickToCopy") });
+        chip.addEventListener("click", function () { copyToClipboard(room); });
+        topologyRooms.appendChild(chip);
       });
     } else {
       topologyRooms.appendChild(el("span", { text: t("topology.noRooms") }));
@@ -3647,6 +4485,22 @@
   var aiModelsBox = document.getElementById("ai-models");
   var aiHintsBox = document.getElementById("ai-hints");
   var chatModelSelect = document.getElementById("chat-model");
+  /* signature (lang + model list) of the options currently in #chat-model,
+     so the 5s poll doesn't rebuild the select and close it under the user */
+  var lastChatModelsKey = null;
+
+  // Mirrors resolve_preset (config.rs): true once ai.default_preset_id
+  // names an existing preset whose provider_id names an existing provider
+  // -- i.e. `ai provide`/`ai serve` would actually have somewhere to send
+  // requests without the caller naming a preset explicitly.
+  function aiDefaultPresetResolves(aiCfg) {
+    var providers = Array.isArray(aiCfg.providers) ? aiCfg.providers : [];
+    var presets = Array.isArray(aiCfg.presets) ? aiCfg.presets : [];
+    if (!providers.length || !presets.length || !aiCfg.default_preset_id) return false;
+    var preset = presets.filter(function (p) { return p.id === aiCfg.default_preset_id; })[0];
+    if (!preset) return false;
+    return providers.some(function (p) { return p.id === preset.provider_id; });
+  }
 
   function refreshAiHints() {
     if (!aiHintsBox) return;
@@ -3655,11 +4509,11 @@
     var a = state.ai;
     if (!cfg) return;
     var aiCfg = cfg.ai || {};
-    if (!aiCfg.upstream_url) {
+    if (!aiDefaultPresetResolves(aiCfg)) {
       var hint = el("div", { class: "info-hint" });
       hint.appendChild(el("span", { text: t("ai.upstreamHint") }));
       var openBtn = el("button", { type: "button", text: t("ai.openSettings") });
-      openBtn.addEventListener("click", function () { focusSettingsField("settings-ai-upstream_url"); });
+      openBtn.addEventListener("click", function () { focusSettingsField("settings-ai-providers-add"); });
       hint.appendChild(openBtn);
       aiHintsBox.appendChild(hint);
     } else if (a && !a.providing) {
@@ -3707,14 +4561,23 @@
       });
     }
 
-    var prevSelected = chatModelSelect.value;
-    chatModelSelect.innerHTML = "";
-    chatModelSelect.appendChild(el("option", { value: "", text: t("common.default") }));
-    models.forEach(function (m) {
-      var opt = el("option", { value: m, text: m });
-      chatModelSelect.appendChild(opt);
-    });
-    if (models.indexOf(prevSelected) !== -1) chatModelSelect.value = prevSelected;
+    /* rebuilding the select closes it if the user has it open, so skip when
+       the rendered options are already current (the language is part of the
+       signature because the "Default" option text is localized) or while the
+       select has focus; a change skipped while focused is picked up on the
+       next poll once focus moves away */
+    var modelsKey = currentLang + "|" + models.join("\n");
+    if (modelsKey !== lastChatModelsKey && document.activeElement !== chatModelSelect) {
+      var prevSelected = chatModelSelect.value;
+      chatModelSelect.innerHTML = "";
+      chatModelSelect.appendChild(el("option", { value: "", text: t("common.default") }));
+      models.forEach(function (m) {
+        var opt = el("option", { value: m, text: m });
+        chatModelSelect.appendChild(opt);
+      });
+      if (models.indexOf(prevSelected) !== -1) chatModelSelect.value = prevSelected;
+      lastChatModelsKey = modelsKey;
+    }
 
     refreshAiHints();
   }
@@ -3834,14 +4697,14 @@
     mailboxHeldEmpty.style.display = items.length ? "none" : "block";
     items.forEach(function (item) {
       var tr = el("tr", {});
-      var idCell = el("td", { class: "mono" });
-      idCell.textContent = truncateMiddle(String(item.id), 10, 4);
+      var idCell = el("td", {});
+      idCell.appendChild(copyButton(String(item.id), truncateMiddle(String(item.id), 10, 4), "mono"));
       tr.appendChild(idCell);
-      var fromCell = el("td", { class: "mono" });
-      fromCell.textContent = truncateMiddle(String(item.from), 12, 6);
+      var fromCell = el("td", {});
+      fromCell.appendChild(copyButton(String(item.from), truncateMiddle(String(item.from), 12, 6), "mono"));
       tr.appendChild(fromCell);
-      var toCell = el("td", { class: "mono" });
-      toCell.textContent = truncateMiddle(String(item.to), 12, 6);
+      var toCell = el("td", {});
+      toCell.appendChild(copyButton(String(item.to), truncateMiddle(String(item.to), 12, 6), "mono"));
       tr.appendChild(toCell);
       tr.appendChild(el("td", { text: fmtBytes(item.size) }));
       tr.appendChild(el("td", { text: item.held_since || "-" }));
@@ -3856,11 +4719,11 @@
     mailboxFetchEmpty.style.display = items.length ? "none" : "block";
     items.forEach(function (item) {
       var tr = el("tr", {});
-      var idCell = el("td", { class: "mono" });
-      idCell.textContent = truncateMiddle(String(item.id), 10, 4);
+      var idCell = el("td", {});
+      idCell.appendChild(copyButton(String(item.id), truncateMiddle(String(item.id), 10, 4), "mono"));
       tr.appendChild(idCell);
-      var fromCell = el("td", { class: "mono" });
-      fromCell.textContent = truncateMiddle(String(item.from), 12, 6);
+      var fromCell = el("td", {});
+      fromCell.appendChild(copyButton(String(item.from), truncateMiddle(String(item.from), 12, 6), "mono"));
       tr.appendChild(fromCell);
       var contentCell = el("td", {});
       if (item.message !== undefined && item.message !== null) {
@@ -3907,6 +4770,113 @@
     });
   });
 
+  /* ---------- mailbox: tc-chat relay log ---------- */
+
+  var mailboxChatRoomSelect = document.getElementById("mailbox-chat-room");
+  var mailboxChatLogTbody = document.querySelector("#mailbox-chat-log-table tbody");
+  var mailboxChatLogEmpty = document.getElementById("mailbox-chat-log-empty");
+  /* signature (lang + room list) of the options currently in the room
+     select, so a poll doesn't rebuild it (and lose the user's selection)
+     unless something actually changed -- same idea as chatModelSelect above */
+  var lastMailboxChatRoomsKey = null;
+
+  function chatLogKindLabel(item) {
+    if (item.type === "tc-chat:post") return item.kind || "post";
+    if (item.type === "tc-chat:reaction") return "reaction";
+    if (item.type === "tc-chat:post-edit") return "edit";
+    if (item.type === "tc-chat:post-delete") return "delete";
+    return item.type || "-";
+  }
+
+  function chatLogContent(item) {
+    if (item.type === "tc-chat:post") {
+      if (item.text) return item.text;
+      if (item.kind === "media" || item.kind === "file") {
+        return (item.fileName || item.cid || "") + (item.fileSize ? " (" + fmtBytes(item.fileSize) + ")" : "");
+      }
+      return item.cid ? "cid " + truncateMiddle(item.cid, 8, 4) : "-";
+    }
+    if (item.type === "tc-chat:reaction") {
+      return (item.emoji || "") + " (" + (item.op || "") + ")";
+    }
+    if (item.type === "tc-chat:post-edit" || item.type === "tc-chat:post-delete") {
+      return "-> " + truncateMiddle(String(item.targetId || ""), 8, 4);
+    }
+    return "-";
+  }
+
+  function renderMailboxChatLog(items) {
+    items = items || [];
+    state.mailboxChatLogItems = items;
+    mailboxChatLogTbody.innerHTML = "";
+    mailboxChatLogEmpty.style.display = items.length ? "none" : "block";
+    if (items.length) mailboxChatLogEmpty.textContent = t("mailbox.chatLog.empty");
+    items.forEach(function (item) {
+      var tr = el("tr", {});
+      var timeCell = el("td", {});
+      var ts = typeof item.timestamp === "number" ? new Date(item.timestamp) : null;
+      timeCell.textContent = ts ? ts.toLocaleString() : "-";
+      tr.appendChild(timeCell);
+      var fromCell = el("td", {});
+      var fromLabel = item.fromName || truncateMiddle(String(item.fromId || ""), 12, 6);
+      fromCell.appendChild(copyButton(String(item.fromId || ""), fromLabel, "mono"));
+      tr.appendChild(fromCell);
+      tr.appendChild(el("td", { text: chatLogKindLabel(item) }));
+      tr.appendChild(el("td", { text: chatLogContent(item) }));
+      mailboxChatLogTbody.appendChild(tr);
+    });
+  }
+
+  function loadMailboxChatLog(room) {
+    if (!room) { renderMailboxChatLog([]); return Promise.resolve(); }
+    state.mailboxChatLogRoom = room;
+    return api("mailbox.chat.log", { room: room, limit: 100 }).then(renderMailboxChatLog, function (err) {
+      showToast("mailbox.chat.log: " + err.message, "error");
+    });
+  }
+
+  function renderMailboxChatRooms(status) {
+    state.mailboxChatRooms = status;
+    var rooms = (status && status.rooms) || [];
+    var roomsKey = currentLang + "|" + JSON.stringify(rooms) + "|" + (status && status.enabled);
+    if (roomsKey === lastMailboxChatRoomsKey) return;
+    lastMailboxChatRoomsKey = roomsKey;
+
+    var prevSelected = mailboxChatRoomSelect.value;
+    mailboxChatRoomSelect.innerHTML = "";
+    if (!status || !status.enabled || !rooms.length) {
+      mailboxChatLogTbody.innerHTML = "";
+      mailboxChatLogEmpty.style.display = "block";
+      mailboxChatLogEmpty.textContent = rooms.length ? t("mailbox.chatLog.disabled") : t("mailbox.chatLog.noRooms");
+      return;
+    }
+    rooms.forEach(function (r) {
+      var label = r.room + (r.joined ? "" : " (" + t("mailbox.chatLog.notJoined") + ")");
+      mailboxChatRoomSelect.appendChild(el("option", { value: r.room, text: label }));
+    });
+    var toSelect = rooms.some(function (r) { return r.room === prevSelected; }) ? prevSelected : rooms[0].room;
+    mailboxChatRoomSelect.value = toSelect;
+    loadMailboxChatLog(toSelect);
+  }
+
+  function pollMailboxChatRooms() {
+    return api("mailbox.chat.rooms", {}).then(renderMailboxChatRooms, function () {
+      renderMailboxChatRooms(null);
+    });
+  }
+
+  mailboxChatRoomSelect.addEventListener("change", function () {
+    loadMailboxChatLog(mailboxChatRoomSelect.value);
+  });
+
+  document.getElementById("btn-mailbox-chat-refresh").addEventListener("click", function (e) {
+    withBusy(e.currentTarget, function () {
+      return pollMailboxChatRooms().then(function () {
+        return loadMailboxChatLog(mailboxChatRoomSelect.value);
+      });
+    });
+  });
+
   /* ---------- store ---------- */
 
   var storeTbody = document.querySelector("#store-table tbody");
@@ -3935,6 +4905,10 @@
       dl.textContent = t("store.download");
       actionCell.appendChild(dl);
 
+      /* the save-to-path form is rarely used, so keep it behind a per-row
+         disclosure instead of bloating the Actions column with a full form */
+      var saveDetails = el("details", { class: "store-save-details" });
+      saveDetails.appendChild(el("summary", { text: t("store.saveToPath") }));
       var form = el("form", { class: "row store-save-form" });
       var input = el("input", { type: "text" });
       input.placeholder = t("store.savePathPlaceholder");
@@ -3951,7 +4925,8 @@
           showToast(t("store.saved", { output: data.output }), "success");
         });
       });
-      actionCell.appendChild(form);
+      saveDetails.appendChild(form);
+      actionCell.appendChild(saveDetails);
       tr.appendChild(actionCell);
 
       storeTbody.appendChild(tr);
@@ -4043,6 +5018,377 @@
     handleStoreFiles(storeFileInput.files);
     storeFileInput.value = "";
   });
+
+  /* ---------- store: sandbox browser (storage-cli style one-shot ops) ---------- */
+
+  var sandboxTbody = document.querySelector("#store-sandbox-table tbody");
+  var sandboxEmpty = document.getElementById("store-sandbox-empty");
+  var sandboxDropzone = document.getElementById("store-sandbox-dropzone");
+  var sandboxFileInput = document.getElementById("store-sandbox-file-input");
+  var sandboxUploadStatus = document.getElementById("store-sandbox-upload-status");
+
+  function sandboxBaseName(rel) {
+    var parts = String(rel || "").split(/[\\/]/);
+    return parts[parts.length - 1] || rel;
+  }
+
+  function renderSandbox(entries) {
+    entries = entries || [];
+    state.sandboxItems = entries;
+    sandboxTbody.innerHTML = "";
+    sandboxEmpty.style.display = entries.length ? "none" : "block";
+    entries.forEach(function (rel) {
+      var tr = el("tr", {});
+      tr.appendChild(el("td", { class: "mono", text: rel }));
+
+      var actionCell = el("td", {});
+
+      var dl = el("a", { href: "/api/store/sandbox-download?path=" + encodeURIComponent(rel), download: sandboxBaseName(rel), class: "download-link" });
+      dl.textContent = t("store.sandbox.download");
+      actionCell.appendChild(dl);
+
+      /* encrypt & store: a per-row disclosure with an inline passphrase form,
+         matching the existing "save to server path" per-row idiom above */
+      var encDetails = el("details", { class: "store-save-details" });
+      encDetails.appendChild(el("summary", { text: t("store.sandbox.encryptSummary") }));
+      var encForm = el("form", { class: "row store-save-form" });
+      var passField = el("input", { type: "password", autocomplete: "new-password" });
+      passField.placeholder = t("store.sandbox.passPlaceholder");
+      var encBtn = el("button", { type: "submit" });
+      encBtn.textContent = t("store.sandbox.encryptBtn");
+      encForm.appendChild(passField);
+      encForm.appendChild(encBtn);
+      encForm.addEventListener("submit", function (ev) {
+        ev.preventDefault();
+        var passphrase = passField.value;
+        if (!passphrase) return;
+        runAction(encBtn, "store.put-file", { sandbox: rel, passphrase: passphrase }, function (result) {
+          showToast(t("store.sandbox.encrypted", {
+            name: (result && result.name) || rel,
+            cid: truncateMiddle((result && result.cid) || "", 10, 6)
+          }), "success");
+          passField.value = "";
+          pollStoreLs();
+        });
+      });
+      encDetails.appendChild(encForm);
+      actionCell.appendChild(encDetails);
+
+      /* delete: reuses the same confirm() idiom as the other destructive
+         actions in this file (daemon stop, update apply) */
+      var delBtn = el("button", { type: "button", class: "danger" });
+      delBtn.textContent = t("store.sandbox.delete");
+      delBtn.addEventListener("click", function () {
+        if (!confirm(t("store.sandbox.deleteConfirm", { path: rel }))) return;
+        runAction(delBtn, "store.sandbox.rm", { path: rel }, function () {
+          showToast(t("store.sandbox.deleted", { path: rel }), "success");
+          pollSandboxLs();
+        });
+      });
+      actionCell.appendChild(delBtn);
+
+      tr.appendChild(actionCell);
+      sandboxTbody.appendChild(tr);
+    });
+  }
+
+  function pollSandboxLs() {
+    return api("store.sandbox.ls", {}).then(function (data) {
+      renderSandbox((data && data.entries) || []);
+    }, function (err) {
+      showToast("store.sandbox.ls: " + err.message, "error");
+    });
+  }
+
+  document.getElementById("btn-store-sandbox-refresh").addEventListener("click", function (e) {
+    runAction(e.currentTarget, "store.sandbox.ls", {}, function (data) {
+      renderSandbox((data && data.entries) || []);
+    });
+  });
+
+  function uploadOneSandboxFile(file) {
+    var rowId = "sandbox-upload-row-" + (++uploadSeq);
+    var row = el("div", { class: "upload-row", id: rowId });
+    var label = el("span", {});
+    label.textContent = t("store.sandbox.importing", { name: file.name, pct: 0 });
+    row.appendChild(label);
+    sandboxUploadStatus.appendChild(row);
+
+    return new Promise(function (resolve, reject) {
+      var xhr = new XMLHttpRequest();
+      xhr.open("POST", "/api/store/sandbox-upload");
+      xhr.setRequestHeader("x-mistl-ui", "1");
+      xhr.setRequestHeader("x-file-name", encodeURIComponent(file.name));
+      xhr.upload.addEventListener("progress", function (e) {
+        if (e.lengthComputable) {
+          var pct = Math.round((e.loaded / e.total) * 100);
+          label.textContent = t("store.sandbox.importing", { name: file.name, pct: pct });
+        }
+      });
+      xhr.onload = function () {
+        var json = null;
+        try { json = JSON.parse(xhr.responseText); } catch (parseErr) { json = null; }
+        if (json && json.ok === true) {
+          resolve(json.data);
+        } else {
+          reject(new Error((json && json.error) || ("upload failed (" + xhr.status + ")")));
+        }
+      };
+      xhr.onerror = function () { reject(new Error("daemon unreachable")); };
+      xhr.send(file);
+    }).then(function (data) {
+      if (row.parentNode) row.parentNode.removeChild(row);
+      showToast(t("store.sandbox.imported", { name: (data && data.imported) || file.name }), "success");
+      pollSandboxLs();
+      return data;
+    }, function (err) {
+      if (row.parentNode) row.parentNode.removeChild(row);
+      showToast(t("store.sandbox.importFailed", { name: file.name, error: err.message || String(err) }), "error");
+      throw err;
+    });
+  }
+
+  function handleSandboxFiles(fileList) {
+    var files = Array.prototype.slice.call(fileList || []);
+    files.forEach(function (file) { uploadOneSandboxFile(file); });
+  }
+
+  sandboxDropzone.addEventListener("click", function () { sandboxFileInput.click(); });
+  sandboxDropzone.addEventListener("keydown", function (e) {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); sandboxFileInput.click(); }
+  });
+  sandboxDropzone.addEventListener("dragover", function (e) { e.preventDefault(); sandboxDropzone.classList.add("dragover"); });
+  sandboxDropzone.addEventListener("dragleave", function () { sandboxDropzone.classList.remove("dragover"); });
+  sandboxDropzone.addEventListener("drop", function (e) {
+    e.preventDefault();
+    sandboxDropzone.classList.remove("dragover");
+    if (e.dataTransfer && e.dataTransfer.files) handleSandboxFiles(e.dataTransfer.files);
+  });
+  sandboxFileInput.addEventListener("change", function () {
+    handleSandboxFiles(sandboxFileInput.files);
+    sandboxFileInput.value = "";
+  });
+
+  /* ---------- store: decrypt a stored CID into the sandbox (get-file) ---------- */
+
+  var storeGetfileResult = document.getElementById("store-getfile-result");
+
+  document.getElementById("store-getfile-form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var cidInput = document.getElementById("store-getfile-cid");
+    var passInput = document.getElementById("store-getfile-pass");
+    var cid = cidInput.value.trim();
+    var passphrase = passInput.value;
+    if (!cid || !passphrase) return;
+    var btn = document.getElementById("btn-store-getfile");
+    runAction(btn, "store.get-file", { cid: cid, passphrase: passphrase, to_sandbox: true }, function (data) {
+      var sandboxPath = (data && data.sandbox) || "";
+      storeGetfileResult.innerHTML = "";
+      if (sandboxPath) {
+        var row = el("div", { class: "row" });
+        row.appendChild(el("span", { class: "muted", text: t("store.getfile.landedLabel") + ":" }));
+        row.appendChild(copyButton(sandboxPath, truncateMiddle(sandboxPath, 28, 10), "mono"));
+        storeGetfileResult.appendChild(row);
+      }
+      showToast(t("store.getfile.done", { path: sandboxPath }), "success");
+      cidInput.value = "";
+      passInput.value = "";
+      pollSandboxLs();
+    });
+  });
+
+  /* ---------- store: folder sync (tc-storage interop) ---------- */
+
+  var storeSyncList = document.getElementById("store-sync-list");
+  var storeExportDirInput = document.getElementById("store-export-dir");
+  var btnStoreExportDirSave = document.getElementById("btn-store-export-dir-save");
+
+  /* Which sync rows have their per-folder file list expanded, keyed by
+     folder_id. renderStoreSyncList fully rebuilds storeSyncList's innerHTML
+     on every poll (folder sync entries change in the background), so this
+     tracked outside the DOM is what lets an operator's open file list
+     survive the next 5s poll instead of silently re-collapsing. */
+  var storeSyncOpenFolders = {};
+
+  /* Relative-time label for a sync's RFC3339 last_synced_at timestamp; no
+     shared relative-time helper existed elsewhere in the dashboard (other
+     panels just print server-formatted strings as-is), so this is scoped
+     locally to the sync list. Returns null for missing/unparsable input so
+     callers can fall back to store.sync.never. */
+  function relTimeLabel(iso) {
+    if (!iso) return null;
+    var ms = Date.parse(iso);
+    if (isNaN(ms)) return null;
+    var diffSec = Math.max(0, Math.round((Date.now() - ms) / 1000));
+    if (diffSec < 45) return t("store.sync.justNow");
+    var diffMin = Math.round(diffSec / 60);
+    if (diffMin < 60) return t("store.sync.minutesAgo", { n: diffMin });
+    var diffHour = Math.round(diffMin / 60);
+    if (diffHour < 24) return t("store.sync.hoursAgo", { n: diffHour });
+    var diffDay = Math.round(diffHour / 24);
+    return t("store.sync.daysAgo", { n: diffDay });
+  }
+
+  /* SyncEntry.status is "connecting" | "synced" | "error"; treat anything
+     else (including a missing field, e.g. an older cached response) as
+     "synced" so the badge never renders blank or throws. */
+  function syncStatusClass(status) {
+    return status === "connecting" || status === "error" ? status : "synced";
+  }
+
+  /* Renders one sync's files[] (file_id, folder_id, rel_path, checksum) into
+     container, sorted by rel_path. sandbox_dir is "" for legacy entries
+     registered before this field existed -- in that case we can't compute a
+     sandbox-relative export path, so file names are shown without an
+     Extract button rather than sending a bogus path to store.sandbox.export. */
+  function renderSyncFiles(sync, container) {
+    container.innerHTML = "";
+    var files = (sync.files || []).slice().sort(function (a, b) {
+      return String(a.rel_path || "").localeCompare(String(b.rel_path || ""));
+    });
+    if (!files.length) {
+      container.appendChild(el("div", { class: "empty-note", text: t("store.sync.filesEmpty") }));
+      return;
+    }
+    var sandboxDir = sync.sandbox_dir || "";
+    files.forEach(function (file) {
+      var fileRow = el("div", { class: "row store-sync-file-row" });
+      fileRow.appendChild(el("span", { class: "mono muted", text: file.rel_path }));
+      if (sandboxDir) {
+        var extractBtn = el("button", { type: "button" });
+        extractBtn.textContent = t("store.sync.extractBtn");
+        extractBtn.addEventListener("click", function () {
+          var path = sandboxDir + "/" + file.rel_path;
+          runAction(extractBtn, "store.sandbox.export", { path: path }, function (data) {
+            showToast(t("store.sync.extracted", { output: (data && data.output) || "" }), "success");
+          });
+        });
+        fileRow.appendChild(extractBtn);
+      }
+      container.appendChild(fileRow);
+    });
+  }
+
+  function renderStoreSyncList(data) {
+    var syncs = (data && data.syncs) || [];
+    storeSyncList.innerHTML = "";
+    if (!syncs.length) {
+      storeSyncList.appendChild(el("div", { class: "empty-note", text: t("store.sync.none") }));
+      return;
+    }
+    syncs.forEach(function (sync) {
+      var status = syncStatusClass(sync.status);
+      var isOpen = !!storeSyncOpenFolders[sync.folder_id];
+
+      var entry = el("div", { class: "store-sync-entry" });
+      var row = el("div", { class: "row store-sync-row" });
+
+      var toggleBtn = el("button", {
+        type: "button",
+        class: "store-sync-toggle" + (isOpen ? " open" : ""),
+        "aria-expanded": isOpen ? "true" : "false",
+        "aria-label": t("store.sync.filesToggle")
+      });
+      row.appendChild(toggleBtn);
+
+      row.appendChild(copyButton(sync.folder_id, sync.folder_name || sync.folder_id, ""));
+      row.appendChild(el("span", { class: "badge status-" + status, text: t("store.sync.status." + status) }));
+
+      var relTime = relTimeLabel(sync.last_synced_at);
+      var counts = t("store.sync.counts", {
+        folders: (sync.folders || []).length,
+        files: (sync.files || []).length
+      });
+      var meta = [
+        counts,
+        relTime ? t("store.sync.lastSync", { time: relTime }) : t("store.sync.never")
+      ].filter(Boolean).join(" · ");
+      row.appendChild(el("span", { class: "muted", text: meta }));
+
+      if (status === "error" && sync.last_error) {
+        var errText = String(sync.last_error);
+        var errDisplay = errText.length > 70 ? errText.slice(0, 70) + "…" : errText;
+        row.appendChild(el("span", { class: "muted store-sync-err", title: errText, text: errDisplay }));
+      }
+
+      var stopBtn = el("button", { type: "button" });
+      stopBtn.textContent = t("store.sync.stop");
+      stopBtn.addEventListener("click", function () {
+        runAction(stopBtn, "store.folder-sync.stop", { folder_id: sync.folder_id }, function () {
+          showToast(t("store.sync.stopped"), "success");
+          delete storeSyncOpenFolders[sync.folder_id];
+          pollStoreSyncList();
+        });
+      });
+      row.appendChild(stopBtn);
+      entry.appendChild(row);
+
+      var filesBody = el("div", { class: "store-sync-files" });
+      filesBody.style.display = isOpen ? "flex" : "none";
+      renderSyncFiles(sync, filesBody);
+      entry.appendChild(filesBody);
+
+      toggleBtn.addEventListener("click", function () {
+        var nowOpen = !storeSyncOpenFolders[sync.folder_id];
+        storeSyncOpenFolders[sync.folder_id] = nowOpen;
+        filesBody.style.display = nowOpen ? "flex" : "none";
+        toggleBtn.classList.toggle("open", nowOpen);
+        toggleBtn.setAttribute("aria-expanded", nowOpen ? "true" : "false");
+      });
+
+      storeSyncList.appendChild(entry);
+    });
+  }
+
+  function pollStoreSyncList() {
+    return api("store.folder-sync.ls", {}).then(renderStoreSyncList, function () {});
+  }
+
+  document.getElementById("btn-store-sync-refresh").addEventListener("click", function (e) {
+    runAction(e.currentTarget, "store.folder-sync.ls", {}, renderStoreSyncList);
+  });
+
+  document.getElementById("store-sync-form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var urlInput = document.getElementById("store-sync-url");
+    var url = urlInput.value.trim();
+    if (!url) return;
+    var btn = document.getElementById("btn-store-sync");
+    /* returns immediately with the new entry (status "connecting"); the
+       daemon runs the grant handshake / initial fetch in the background and
+       retries automatically every 30s, so this just registers the sync and
+       re-polls the list right away -- no more multi-minute blocking call.
+       runAction still surfaces any registration error (e.g. duplicate) as a
+       toast, same as every other form on this page. */
+    runAction(btn, "store.folder-sync", { url: url }, function (data) {
+      var sync = (data && data.sync) || {};
+      showToast(t("store.sync.started", { name: sync.folder_name || "" }), "success");
+      urlInput.value = "";
+      pollStoreSyncList();
+    });
+  });
+
+  /* Compact extract-destination setting, separate from the generic
+     Settings-panel drawer (SETTINGS_SCHEMA has no storage.export_dir field --
+     this is the one place it's editable). applyExportDir is called from
+     renderSettings itself below so any config.show refresh (startup, the
+     Settings panel's own refresh button, or the save below) keeps this input
+     in sync instead of maintaining a second fetch path. */
+  function applyExportDir(cfg) {
+    if (!storeExportDirInput) return;
+    var dir = cfg && cfg.storage ? cfg.storage.export_dir : null;
+    storeExportDirInput.value = dir || "";
+  }
+
+  if (btnStoreExportDirSave) {
+    btnStoreExportDirSave.addEventListener("click", function () {
+      var value = storeExportDirInput.value.trim();
+      runAction(btnStoreExportDirSave, "config.set", { path: "storage.export_dir", value: value === "" ? null : value }, function () {
+        showToast(t("store.sync.exportDirSaved"), "success");
+        pollConfig();
+      });
+    });
+  }
 
   /* ---------- profile ---------- */
 
@@ -4240,7 +5586,8 @@
       { key: "display_name", labelKey: "settings.field.identity.display_name.label", descKey: "settings.field.identity.display_name.desc", type: "text" }
     ] },
     { section: "storage", titleKey: "settings.section.storage", container: "settings-drawer-body-storage", fields: [
-      { key: "capacity_bytes", labelKey: "settings.field.storage.capacity_bytes.label", descKey: "settings.field.storage.capacity_bytes.desc", type: "gib" }
+      { key: "capacity_bytes", labelKey: "settings.field.storage.capacity_bytes.label", descKey: "settings.field.storage.capacity_bytes.desc", type: "gib" },
+      { key: "room_id", labelKey: "settings.field.storage.room_id.label", descKey: "settings.field.storage.room_id.desc", type: "text" }
     ] },
     { section: "stream", titleKey: "settings.section.stream", container: "settings-drawer-body-stream", fields: [
       { key: "rtsp_url", labelKey: "settings.field.stream.rtsp_url.label", descKey: "settings.field.stream.rtsp_url.desc", type: "text" },
@@ -4252,14 +5599,12 @@
     ] },
     { section: "mailbox", titleKey: "settings.section.mailbox", container: "settings-drawer-body-mailbox", fields: [
       { key: "room_id", labelKey: "settings.field.mailbox.room_id.label", descKey: "settings.field.mailbox.room_id.desc", type: "text" },
-      { key: "serve_as_bot", labelKey: "settings.field.mailbox.serve_as_bot.label", descKey: "settings.field.mailbox.serve_as_bot.desc", type: "toggle" }
+      { key: "serve_as_bot", labelKey: "settings.field.mailbox.serve_as_bot.label", descKey: "settings.field.mailbox.serve_as_bot.desc", type: "toggle" },
+      { key: "chat_rooms", labelKey: "settings.field.mailbox.chat_rooms.label", descKey: "settings.field.mailbox.chat_rooms.desc", type: "list" },
+      { key: "chat_relay", labelKey: "settings.field.mailbox.chat_relay.label", descKey: "settings.field.mailbox.chat_relay.desc", type: "toggle" }
     ] },
     { section: "ai", titleKey: "settings.section.ai", container: "settings-drawer-body-ai", fields: [
       { key: "room_id", labelKey: "settings.field.ai.room_id.label", descKey: "settings.field.ai.room_id.desc", type: "text", advanced: true },
-      { key: "upstream_url", labelKey: "settings.field.ai.upstream_url.label", descKey: "settings.field.ai.upstream_url.desc", type: "text" },
-      { key: "upstream_api_key", labelKey: "settings.field.ai.upstream_api_key.label", descKey: "settings.field.ai.upstream_api_key.desc", type: "password" },
-      { key: "default_model", labelKey: "settings.field.ai.default_model.label", descKey: "settings.field.ai.default_model.desc", type: "text" },
-      { key: "temperature", labelKey: "settings.field.ai.temperature.label", descKey: "settings.field.ai.temperature.desc", type: "number", advanced: true },
       { key: "request_timeout_secs", labelKey: "settings.field.ai.request_timeout_secs.label", descKey: "settings.field.ai.request_timeout_secs.desc", type: "number", advanced: true },
       { key: "api_listen", labelKey: "settings.field.ai.api_listen.label", descKey: "settings.field.ai.api_listen.desc", type: "text", advanced: true }
     ] },
@@ -4397,6 +5742,17 @@
           });
         }
       });
+    } else if (f.type === "list") {
+      // Comma-separated text in the UI, a JSON string array on the wire
+      // (e.g. mailbox.chat_rooms: Vec<String>). Unlike "text", an empty
+      // input saves `[]`, not null -- the config field isn't optional.
+      input = el("input", { type: "text", id: id, autocomplete: "off" });
+      input.value = Array.isArray(current) ? current.join(", ") : "";
+      input.addEventListener("blur", function () {
+        var items = input.value.split(",").map(function (s) { return s.trim(); }).filter(function (s) { return s !== ""; });
+        saveSetting(path, items, sectionCfg, f.key, badge);
+      });
+      row.appendChild(input);
     } else {
       input = el("input", { type: "text", id: id, autocomplete: "off" });
       input.value = current === null || current === undefined ? "" : String(current);
@@ -4412,8 +5768,299 @@
     return wrap;
   }
 
+  /* ---------- ai providers/presets editor (custom settings subsection) ---
+     ai.providers/ai.presets/ai.default_preset_id (see config.rs
+     AiProviderConfig/AiPresetConfig) aren't flat scalars, so the
+     descriptor-driven buildSettingsField above can't render them; this
+     hand-builds the same visual language (.settings-field, .settings-row,
+     restart badges) the way the "list" field type hand-builds a chip
+     editor. Wired into renderSettings for the "ai" section only. config.set
+     always takes the *whole* providers/presets array, so every edit here
+     reads the current array via providers()/presets() (backed by
+     sectionCfg, kept in sync by saveSetting), patches the one entry that
+     changed, and writes the whole array back. */
+
+  function aiProviderRefCount(presets, providerId) {
+    return presets.filter(function (p) { return p.provider_id === providerId; }).length;
+  }
+
+  // Shallow-copies obj with one field overridden -- this file has no
+  // Object.assign/spread (ES5 style throughout), so array entries are
+  // patched by hand instead.
+  function withField(obj, key, value) {
+    var out = {};
+    for (var k in obj) {
+      if (Object.prototype.hasOwnProperty.call(obj, k)) out[k] = obj[k];
+    }
+    out[key] = value;
+    return out;
+  }
+
+  function genAiEntryId(prefix, existingIds) {
+    var id;
+    do {
+      id = prefix + "-" + Math.random().toString(36).slice(2, 8);
+    } while (existingIds.indexOf(id) !== -1);
+    return id;
+  }
+
+  function buildAiProvidersPresetsField(sectionCfg) {
+    var wrap = el("div", {});
+
+    function providers() { return Array.isArray(sectionCfg.providers) ? sectionCfg.providers : []; }
+    function presets() { return Array.isArray(sectionCfg.presets) ? sectionCfg.presets : []; }
+
+    /* ---- providers ---- */
+    var provField = el("div", { class: "settings-field" });
+    var provLabel = el("label", { class: "settings-label" });
+    provLabel.textContent = t("settings.ai.providers.title");
+    provField.appendChild(provLabel);
+    var provDesc = el("div", { class: "desc" });
+    provDesc.textContent = t("settings.ai.providers.desc");
+    provField.appendChild(provDesc);
+    var provList = el("div", { class: "ai-provider-list" });
+    provField.appendChild(provList);
+    var provAddRow = el("div", { class: "settings-row" });
+    var provAddBtn = el("button", { type: "button", id: "settings-ai-providers-add" });
+    provAddBtn.textContent = t("settings.ai.providers.addBtn");
+    var provBadge = el("button", { type: "button", class: "badge restart" });
+    provBadge.textContent = t("settings.restartBadge");
+    provBadge.title = t("settings.restartBadgeTitle");
+    provBadge.style.display = "none";
+    provBadge.addEventListener("click", function () { restartDaemon(provBadge); });
+    provAddRow.appendChild(provAddBtn);
+    provAddRow.appendChild(provBadge);
+    provField.appendChild(provAddRow);
+    wrap.appendChild(provField);
+
+    /* ---- presets ---- */
+    var presetField = el("div", { class: "settings-field" });
+    var presetLabel = el("label", { class: "settings-label" });
+    presetLabel.textContent = t("settings.ai.presets.title");
+    presetField.appendChild(presetLabel);
+    var presetDesc = el("div", { class: "desc" });
+    presetDesc.textContent = t("settings.ai.presets.desc");
+    presetField.appendChild(presetDesc);
+    var presetList = el("div", { class: "ai-preset-list" });
+    presetField.appendChild(presetList);
+    var presetAddRow = el("div", { class: "settings-row" });
+    var presetAddBtn = el("button", { type: "button", id: "settings-ai-presets-add" });
+    presetAddBtn.textContent = t("settings.ai.presets.addBtn");
+    var presetBadge = el("button", { type: "button", class: "badge restart" });
+    presetBadge.textContent = t("settings.restartBadge");
+    presetBadge.title = t("settings.restartBadgeTitle");
+    presetBadge.style.display = "none";
+    presetBadge.addEventListener("click", function () { restartDaemon(presetBadge); });
+    presetAddRow.appendChild(presetAddBtn);
+    presetAddRow.appendChild(presetBadge);
+    presetField.appendChild(presetAddRow);
+    wrap.appendChild(presetField);
+
+    /* ---- default preset ---- */
+    var defField = el("div", { class: "settings-field" });
+    var defLabel = el("label", { class: "settings-label", for: "settings-ai-default_preset_id" });
+    defLabel.textContent = t("settings.ai.defaultPreset.label");
+    defField.appendChild(defLabel);
+    var defDesc = el("div", { class: "desc" });
+    defDesc.textContent = t("settings.ai.defaultPreset.desc");
+    defField.appendChild(defDesc);
+    var defRow = el("div", { class: "settings-row" });
+    var defSelect = el("select", { id: "settings-ai-default_preset_id" });
+    var defBadge = el("button", { type: "button", class: "badge restart" });
+    defBadge.textContent = t("settings.restartBadge");
+    defBadge.title = t("settings.restartBadgeTitle");
+    defBadge.style.display = "none";
+    defBadge.addEventListener("click", function () { restartDaemon(defBadge); });
+    defSelect.addEventListener("change", function () {
+      saveSetting("ai.default_preset_id", defSelect.value, sectionCfg, "default_preset_id", defBadge);
+    });
+    defRow.appendChild(defSelect);
+    defRow.appendChild(defBadge);
+    defField.appendChild(defRow);
+    wrap.appendChild(defField);
+
+    /* ---- save + (re)render ---- */
+
+    function saveProviders(next) {
+      return saveSetting("ai.providers", next, sectionCfg, "providers", provBadge).then(renderAll);
+    }
+    function savePresets(next) {
+      return saveSetting("ai.presets", next, sectionCfg, "presets", presetBadge).then(renderAll);
+    }
+
+    function buildProviderRow(provider) {
+      var row = el("div", { class: "ai-provider-row settings-row" });
+
+      var labelInput = el("input", { type: "text", autocomplete: "off", placeholder: t("settings.ai.providers.labelPlaceholder") });
+      labelInput.value = provider.label || "";
+      labelInput.addEventListener("blur", function () {
+        if (labelInput.value === (provider.label || "")) return;
+        saveProviders(providers().map(function (p) {
+          return p.id === provider.id ? withField(p, "label", labelInput.value) : p;
+        }));
+      });
+      row.appendChild(labelInput);
+
+      var urlInput = el("input", { type: "text", autocomplete: "off", placeholder: t("settings.ai.providers.baseUrlPlaceholder") });
+      urlInput.value = provider.base_url || "";
+      urlInput.addEventListener("blur", function () {
+        if (urlInput.value === (provider.base_url || "")) return;
+        saveProviders(providers().map(function (p) {
+          return p.id === provider.id ? withField(p, "base_url", urlInput.value) : p;
+        }));
+      });
+      row.appendChild(urlInput);
+
+      // Same "***" placeholder pattern as the flat password field type
+      // above -- config.show masks a set api_key as "***", set_by_path
+      // substitutes it back server-side as long as this provider's id
+      // round-trips unchanged (see substitute_masked_provider_keys).
+      var keyInput = el("input", { type: "password", autocomplete: "off" });
+      keyInput.placeholder = provider.api_key === "***" ? t("settings.passwordSetPlaceholder") : t("settings.passwordNotSet");
+      row.appendChild(keyInput);
+      var keyClearBtn = el("button", { type: "button" });
+      keyClearBtn.textContent = t("settings.clear");
+      keyClearBtn.addEventListener("click", function () {
+        keyInput.value = "";
+        saveProviders(providers().map(function (p) {
+          return p.id === provider.id ? withField(p, "api_key", "") : p;
+        }));
+      });
+      row.appendChild(keyClearBtn);
+      keyInput.addEventListener("blur", function () {
+        if (keyInput.value === "") return;
+        saveProviders(providers().map(function (p) {
+          return p.id === provider.id ? withField(p, "api_key", keyInput.value) : p;
+        }));
+      });
+
+      // Removing a provider that presets still reference leaves those
+      // presets pointing at a nonexistent provider_id (resolve_preset then
+      // can't resolve them) -- warn via the same confirm() idiom already
+      // used for the other destructive actions in this file (daemon stop,
+      // update apply, sandbox delete) rather than silently breaking presets
+      // or forbidding removal outright.
+      var removeBtn = el("button", { type: "button", class: "danger" });
+      removeBtn.textContent = t("settings.ai.providers.removeBtn");
+      removeBtn.addEventListener("click", function () {
+        var refs = aiProviderRefCount(presets(), provider.id);
+        if (refs > 0 && !confirm(t("settings.ai.providers.removeConfirm", { count: refs }))) return;
+        saveProviders(providers().filter(function (p) { return p.id !== provider.id; }));
+      });
+      row.appendChild(removeBtn);
+
+      return row;
+    }
+
+    function buildPresetRow(preset) {
+      var row = el("div", { class: "ai-preset-row settings-row" });
+
+      var labelInput = el("input", { type: "text", autocomplete: "off", placeholder: t("settings.ai.presets.labelPlaceholder") });
+      labelInput.value = preset.label || "";
+      labelInput.addEventListener("blur", function () {
+        if (labelInput.value === (preset.label || "")) return;
+        savePresets(presets().map(function (p) {
+          return p.id === preset.id ? withField(p, "label", labelInput.value) : p;
+        }));
+      });
+      row.appendChild(labelInput);
+
+      var providerSelect = el("select", {});
+      providers().forEach(function (provider) {
+        providerSelect.appendChild(el("option", { value: provider.id, text: provider.label || provider.id }));
+      });
+      providerSelect.value = preset.provider_id || "";
+      providerSelect.addEventListener("change", function () {
+        savePresets(presets().map(function (p) {
+          return p.id === preset.id ? withField(p, "provider_id", providerSelect.value) : p;
+        }));
+      });
+      row.appendChild(providerSelect);
+
+      var modelInput = el("input", { type: "text", autocomplete: "off", placeholder: t("settings.ai.presets.modelPlaceholder") });
+      modelInput.value = preset.model || "";
+      modelInput.addEventListener("blur", function () {
+        if (modelInput.value === (preset.model || "")) return;
+        savePresets(presets().map(function (p) {
+          return p.id === preset.id ? withField(p, "model", modelInput.value) : p;
+        }));
+      });
+      row.appendChild(modelInput);
+
+      var tempInput = el("input", { type: "text", inputmode: "decimal", placeholder: t("settings.ai.presets.temperaturePlaceholder") });
+      tempInput.value = (preset.temperature === null || preset.temperature === undefined) ? "" : String(preset.temperature);
+      tempInput.addEventListener("blur", function () {
+        var v = tempInput.value.trim();
+        if (v === "") {
+          if (preset.temperature === null || preset.temperature === undefined) return;
+          savePresets(presets().map(function (p) { return p.id === preset.id ? withField(p, "temperature", null) : p; }));
+          return;
+        }
+        var num = Number(v);
+        if (!isFinite(num)) { showToast(t("settings.enterNumber", { label: t("settings.ai.presets.temperaturePlaceholder") }), "error"); return; }
+        if (num === preset.temperature) return;
+        savePresets(presets().map(function (p) { return p.id === preset.id ? withField(p, "temperature", num) : p; }));
+      });
+      row.appendChild(tempInput);
+
+      var effortSelect = el("select", {});
+      [["", "settings.optionDefault", true], ["minimal", "minimal"], ["low", "low"], ["medium", "medium"], ["high", "high"]].forEach(function (opt) {
+        effortSelect.appendChild(el("option", { value: opt[0], text: opt[2] ? t(opt[1]) : opt[1] }));
+      });
+      effortSelect.value = preset.reasoning_effort || "";
+      effortSelect.addEventListener("change", function () {
+        var v = effortSelect.value === "" ? null : effortSelect.value;
+        savePresets(presets().map(function (p) { return p.id === preset.id ? withField(p, "reasoning_effort", v) : p; }));
+      });
+      row.appendChild(effortSelect);
+
+      var removeBtn = el("button", { type: "button", class: "danger" });
+      removeBtn.textContent = t("settings.ai.presets.removeBtn");
+      removeBtn.addEventListener("click", function () {
+        savePresets(presets().filter(function (p) { return p.id !== preset.id; }));
+      });
+      row.appendChild(removeBtn);
+
+      return row;
+    }
+
+    function renderAll() {
+      provList.innerHTML = "";
+      providers().forEach(function (provider) { provList.appendChild(buildProviderRow(provider)); });
+
+      presetList.innerHTML = "";
+      presets().forEach(function (preset) { presetList.appendChild(buildPresetRow(preset)); });
+      presetAddBtn.disabled = providers().length === 0;
+      presetAddBtn.title = providers().length === 0 ? t("settings.ai.presets.needProvider") : "";
+
+      defSelect.innerHTML = "";
+      defSelect.appendChild(el("option", { value: "", text: t("settings.optionDefault") }));
+      presets().forEach(function (preset) {
+        defSelect.appendChild(el("option", { value: preset.id, text: preset.label || preset.id }));
+      });
+      var wantDefault = sectionCfg.default_preset_id || "";
+      defSelect.value = presets().some(function (p) { return p.id === wantDefault; }) ? wantDefault : "";
+    }
+
+    provAddBtn.addEventListener("click", function () {
+      var id = genAiEntryId("p", providers().map(function (p) { return p.id; }));
+      saveProviders(providers().concat([{ id: id, label: "", base_url: "", api_key: "" }]));
+    });
+    presetAddBtn.addEventListener("click", function () {
+      if (!providers().length) return;
+      var id = genAiEntryId("preset", presets().map(function (p) { return p.id; }));
+      savePresets(presets().concat([{
+        id: id, label: "", provider_id: providers()[0].id, model: "", temperature: null, reasoning_effort: null
+      }]));
+    });
+
+    renderAll();
+    return wrap;
+  }
+
   function renderSettings(cfg) {
     state.config = cfg;
+    applyExportDir(cfg);
     SETTINGS_SCHEMA.forEach(function (grp) {
       var container = document.getElementById(grp.container);
       if (!container) return;
@@ -4427,6 +6074,9 @@
         sec.appendChild(h3);
       }
       var sectionCfg = cfg ? cfg[grp.section] : null;
+      if (grp.section === "ai" && sectionCfg) {
+        sec.appendChild(buildAiProvidersPresetsField(sectionCfg));
+      }
       var advancedFields = [];
       grp.fields.forEach(function (f) {
         if (f.advanced) advancedFields.push(f);
@@ -4708,6 +6358,12 @@
     pollStreamStatus();
     pollTopology();
     pollAiStatus();
+    /* folder sync entries change in the background (daemon-side
+       connect/retry loop), so poll them on the same unconditional cycle as
+       everything else above rather than gating on panel visibility --
+       pollAll has no active-panel gating for any of its other calls, so
+       there is no existing gating pattern to mirror here either. */
+    pollStoreSyncList();
   }
 
   function startPolling() {
@@ -4810,7 +6466,10 @@
       p.classList.toggle("active", on);
     });
     sideLinks.forEach(function (a) {
-      a.classList.toggle("active", a.getAttribute("href") === "#" + id);
+      var on = a.getAttribute("href") === "#" + id;
+      a.classList.toggle("active", on);
+      if (on) a.setAttribute("aria-current", "page");
+      else a.removeAttribute("aria-current");
     });
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
@@ -4857,7 +6516,10 @@
   startTicker();
   pollProfile();
   pollMailboxLs();
+  pollMailboxChatRooms();
   pollStoreLs();
+  pollSandboxLs();
+  pollStoreSyncList();
   pollConfig();
   pollUpdate();
   initDevMode();

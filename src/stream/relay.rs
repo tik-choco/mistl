@@ -632,6 +632,19 @@ fn decide_audio(
     }
 }
 
+/// Whether a lock on `locked` should survive a consensus view change, given
+/// the *new* policy computed from the view that just arrived. This is the
+/// keep-lock predicate `control_loop`'s `watch_changed` arm applies before
+/// unlocking on a role/leader change: if the already-locked publisher is
+/// still someone `policy` would accept, unlocking would just force an
+/// unnecessary re-lock (interrupted output, a keyframe wait) onto the exact
+/// same source. Mirrors `decide_video`/`decide_audio` in being kept as pure
+/// logic so the cascade takeover matrix stays unit-testable without a real
+/// `control_loop`.
+fn lock_survives_view_change(locked: Option<&str>, policy: &CascadePolicy) -> bool {
+    locked.is_some_and(|id| accepts_remote(id, policy))
+}
+
 /// `role` rendered for the `cascade: role=... leader=... peers=...` log line
 /// (see the module doc's "Cascade distribution" section).
 fn role_str(role: ConsensusRole) -> &'static str {
@@ -754,6 +767,17 @@ async fn unlock(
     }
 }
 
+/// [`MediaTrackEvent`] isn't `Clone` upstream, but every field is an `Arc`
+/// (or a cheap id), so a field-wise clone shares the same live track.
+fn clone_event(event: &MediaTrackEvent) -> MediaTrackEvent {
+    MediaTrackEvent {
+        remote_id: event.remote_id.clone(),
+        track: event.track.clone(),
+        receiver: event.receiver.clone(),
+        pc: event.pc.clone(),
+    }
+}
+
 /// Consumes every [`MediaTrackEvent`] mistlib delivers, applying the
 /// lock-in policy above, until the channel closes (i.e. `stop()` dropped the
 /// sender via `set_media_consumer(None)` -- actually the channel itself is
@@ -792,6 +816,19 @@ async fn control_loop(
     // `locked` so a sibling audio track arriving after the video lock (the
     // common case; see `pending_audio`) still gets republished.
     let mut audio_republish: Option<Arc<TrackLocalStaticRTP>> = None;
+    // The newest video/audio `MediaTrackEvent` seen per peer, kept around so
+    // a cascade view change that newly *accepts* a peer whose track already
+    // arrived (and was ignored under the old policy) has something to
+    // re-decide against -- mistlib fires `on_track` exactly once per track,
+    // so without this cache a takeover whose sharer/leader track predates the
+    // view change would wait forever for an event that's never coming again.
+    let mut last_video: HashMap<String, MediaTrackEvent> = HashMap::new();
+    let mut last_audio: HashMap<String, MediaTrackEvent> = HashMap::new();
+    // Synthetic events re-fed through the same decision path as a live
+    // `media_rx` receive, populated from `last_video`/`last_audio` when a
+    // view change makes a previously-ignored cached track relevant again
+    // (see the `watch_changed` arm below).
+    let mut replay: VecDeque<MediaTrackEvent> = VecDeque::new();
 
     let mut view_rx = match &cascade {
         Cascade::Active(consensus) => Some(consensus.subscribe()),
@@ -810,213 +847,310 @@ async fn control_loop(
     loop {
         let policy = build_policy(&cascade, current_view.as_ref());
 
-        tokio::select! {
-            event = media_rx.recv() => {
-                let Some(event) = event else { break };
-                let remote_id = event.remote_id.0.clone();
-                let kind = event.track.kind();
-
-                match kind {
-                    RTPCodecType::Video => match decide_video(locked.as_deref(), &remote_id, &policy) {
-                        VideoDecision::Ignore => {
-                            debug!(%remote_id, "relay: ignoring video track (publisher already locked, or not accepted by cascade policy)");
-                        }
-                        VideoDecision::Lock => {
-                            info!(%remote_id, "relay: locking onto publisher");
-                            *publisher.lock().expect("relay publisher lock poisoned") = Some(remote_id.clone());
-                            locked = Some(remote_id.clone());
-                            current_video_ssrc = Some(event.track.ssrc());
-                            audio_attached = false;
-                            audio_attached_shared.store(false, Ordering::Relaxed);
-
-                            let is_leader = matches!(&policy, CascadePolicy::Active { role: ConsensusRole::Leader, .. });
-                            let is_follower = matches!(&policy, CascadePolicy::Active { role: ConsensusRole::Follower, .. });
-                            let (video_republish, new_audio_republish) = if is_leader {
-                                // Lock-in happens right when the sharer's own
-                                // renegotiation traffic peaks, so this publish's
-                                // offer is often rejected with "signaling is not
-                                // stable". That's transient: retry briefly
-                                // before degrading to direct relay for good.
-                                const REPUBLISH_ATTEMPTS: u32 = 3;
-                                let mut published = None;
-                                for attempt in 1..=REPUBLISH_ATTEMPTS {
-                                    match create_and_publish_republish_tracks(&room).await {
-                                        Ok(tracks) => {
-                                            published = Some(tracks);
-                                            break;
-                                        }
-                                        Err(error) if attempt < REPUBLISH_ATTEMPTS => {
-                                            warn!(%error, attempt, "cascade: publishing re-broadcast tracks failed; retrying");
-                                            tokio::time::sleep(Duration::from_secs(1)).await;
-                                        }
-                                        Err(error) => {
-                                            warn!(%error, "cascade: failed to publish re-broadcast tracks; continuing as direct relay only");
-                                        }
-                                    }
-                                }
-                                match published {
-                                    Some((video, audio)) => {
-                                        *republish.lock().expect("relay republish lock poisoned") =
-                                            Some((video.clone(), audio.clone()));
-                                        info!("cascade: re-publishing share into room");
-                                        (Some(video), Some(audio))
-                                    }
-                                    None => (None, None),
-                                }
-                            } else {
-                                if is_follower {
-                                    info!("cascade: following leader {remote_id}");
-                                }
-                                (None, None)
-                            };
-                            audio_republish = new_audio_republish;
-
-                            let video_handle = tokio::spawn(video_task(
-                                event.track.clone(),
-                                event.pc.clone(),
-                                rtsp.clone(),
-                                remote_id.clone(),
-                                ended_tx.clone(),
-                                counters.clone(),
-                                video_republish,
-                            ));
-                            let pli_handle = tokio::spawn(pli_task(event.pc.clone(), event.track.ssrc()));
-                            replace_task(&active_tasks, TaskRole::Video, video_handle);
-                            replace_task(&active_tasks, TaskRole::Pli, pli_handle);
-
-                            if let Some(audio_event) = pending_audio.remove(&remote_id) {
-                                info!(%remote_id, codec = audio_codec.as_str(), "relay: audio track attached");
-                                let audio_handle = tokio::spawn(audio_task(
-                                    audio_event.track,
-                                    rtsp.clone(),
-                                    audio_codec,
-                                    remote_id.clone(),
-                                    counters.clone(),
-                                    audio_republish.clone(),
-                                ));
-                                replace_task(&active_tasks, TaskRole::Audio, audio_handle);
-                                audio_attached = true;
-                                audio_attached_shared.store(true, Ordering::Relaxed);
-                            }
-                        }
-                        VideoDecision::Switch => {
-                            info!(%remote_id, "relay: publisher republished video (screen switch); resuming on new track");
-                            current_video_ssrc = Some(event.track.ssrc());
-
-                            // The leader's re-broadcast tracks (if any) are the
-                            // same live `mistlib::publish_local_track`-registered
-                            // tracks for this whole lock's lifetime -- only the
-                            // *source* track changed, so reuse what's already
-                            // published rather than recreating it.
-                            let video_republish = republish
-                                .lock()
-                                .expect("relay republish lock poisoned")
-                                .as_ref()
-                                .map(|(video, _)| video.clone());
-
-                            let video_handle = tokio::spawn(video_task(
-                                event.track.clone(),
-                                event.pc.clone(),
-                                rtsp.clone(),
-                                remote_id.clone(),
-                                ended_tx.clone(),
-                                counters.clone(),
-                                video_republish,
-                            ));
-                            let pli_handle = tokio::spawn(pli_task(event.pc.clone(), event.track.ssrc()));
-                            replace_task(&active_tasks, TaskRole::Video, video_handle);
-                            replace_task(&active_tasks, TaskRole::Pli, pli_handle);
-                        }
-                    },
-                    RTPCodecType::Audio => match decide_audio(locked.as_deref(), &remote_id, audio_attached, &policy) {
-                        AudioDecision::Attach => {
-                            info!(%remote_id, codec = audio_codec.as_str(), "relay: audio track attached");
-                            let audio_handle = tokio::spawn(audio_task(
-                                event.track,
-                                rtsp.clone(),
-                                audio_codec,
-                                remote_id.clone(),
-                                counters.clone(),
-                                audio_republish.clone(),
-                            ));
-                            replace_task(&active_tasks, TaskRole::Audio, audio_handle);
-                            audio_attached = true;
-                            audio_attached_shared.store(true, Ordering::Relaxed);
-                        }
-                        AudioDecision::Replace => {
-                            info!(%remote_id, codec = audio_codec.as_str(), "relay: publisher republished audio (screen switch); resuming on new track");
-                            let audio_handle = tokio::spawn(audio_task(
-                                event.track,
-                                rtsp.clone(),
-                                audio_codec,
-                                remote_id.clone(),
-                                counters.clone(),
-                                audio_republish.clone(),
-                            ));
-                            replace_task(&active_tasks, TaskRole::Audio, audio_handle);
-                        }
-                        AudioDecision::Buffer => {
-                            pending_audio.insert(remote_id, event);
-                        }
-                        AudioDecision::Ignore => {}
-                    },
-                    RTPCodecType::Unspecified => {
-                        debug!(%remote_id, "relay: ignoring track of unspecified kind");
+        // A replayed event (queued by the `watch_changed` arm below, from
+        // `last_video`/`last_audio`) is taken first and re-enters the exact
+        // same decision path as a live receive, evaluated against the
+        // `policy` just rebuilt above from the already-updated
+        // `current_view` -- that's what lets a cached track from before a
+        // takeover finally lock in, since mistlib never fires `on_track`
+        // twice for the same track.
+        let event = if let Some(event) = replay.pop_front() {
+            event
+        } else {
+            tokio::select! {
+                event = media_rx.recv() => {
+                    let Some(event) = event else { break };
+                    event
+                }
+                Some((ended_id, ended_ssrc)) = ended_rx.recv() => {
+                    // A dead track must never be replayed: if the ended
+                    // track is the one cached for this peer, drop the cache
+                    // entries too. If a stale one slips through anyway (e.g.
+                    // a race with a screen switch), the spawned `video_task`
+                    // for the replay just errors out immediately, fires
+                    // `ended_tx` again, and this arm cleans up on the next
+                    // pass -- self-healing, not a correctness risk.
+                    if last_video.get(&ended_id).is_some_and(|cached| cached.track.ssrc() == ended_ssrc) {
+                        last_video.remove(&ended_id);
+                        last_audio.remove(&ended_id);
                     }
+
+                    if locked.as_deref() == Some(ended_id.as_str()) && current_video_ssrc == Some(ended_ssrc) {
+                        info!(remote_id = %ended_id, "relay: publisher's video track ended; unlocking");
+                        unlock(&room, &publisher, &active_tasks, &republish).await;
+                        locked = None;
+                        current_video_ssrc = None;
+                        audio_attached = false;
+                        audio_attached_shared.store(false, Ordering::Relaxed);
+                        audio_republish = None;
+                        pending_audio.remove(&ended_id);
+                    } else {
+                        debug!(remote_id = %ended_id, ssrc = ended_ssrc, "relay: ignoring stale end notification for a superseded video track");
+                    }
+                    continue;
+                }
+                changed = watch_changed(&mut view_rx) => {
+                    match changed {
+                        Ok(()) => {
+                            let new_view = view_rx
+                                .as_ref()
+                                .expect("view_rx is Some after an Ok(()) change notification")
+                                .borrow()
+                                .clone();
+                            let role_changed = current_view.as_ref().map(|v| v.role) != Some(new_view.role);
+                            let leader_changed =
+                                current_view.as_ref().map(|v| v.leader.clone()) != Some(new_view.leader.clone());
+
+                            if role_changed || leader_changed {
+                                info!(
+                                    "cascade: role={} leader={} peers={}",
+                                    role_str(new_view.role),
+                                    leader_display(&new_view.leader),
+                                    new_view.peers.len()
+                                );
+                                let new_policy = build_policy(&cascade, Some(&new_view));
+
+                                if locked.is_some() {
+                                    if lock_survives_view_change(locked.as_deref(), &new_policy) {
+                                        // The locked publisher is still the
+                                        // right source under the new policy
+                                        // (e.g. we were following leader X and
+                                        // the view just re-confirmed X, or
+                                        // relabeled roles without actually
+                                        // changing who we should watch) --
+                                        // unlocking here would only force an
+                                        // avoidable re-lock (a keyframe wait)
+                                        // onto the exact peer already flowing.
+                                        // Known acceptable imperfection: if
+                                        // this lock was taken as leader and
+                                        // republished re-broadcast tracks,
+                                        // those stay alive across a demotion
+                                        // to follower here -- benign, since
+                                        // the real leader ignores tracks from
+                                        // relay peers and followers only
+                                        // accept the leader, and it heals on
+                                        // the next actual unlock.
+                                        info!("cascade: view changed but the locked publisher is still the right source; keeping lock");
+                                    } else {
+                                        info!("cascade: leader changed -> re-locking");
+                                        unlock(&room, &publisher, &active_tasks, &republish).await;
+                                        locked = None;
+                                        current_video_ssrc = None;
+                                        audio_attached = false;
+                                        audio_attached_shared.store(false, Ordering::Relaxed);
+                                        audio_republish = None;
+                                        pending_audio.clear();
+                                    }
+                                }
+
+                                if locked.is_none() {
+                                    // The correct publisher's track may have
+                                    // already arrived and been ignored under
+                                    // the old policy (e.g. a follower->leader
+                                    // takeover where the sharer's track
+                                    // predates this view change) -- mistlib
+                                    // never fires `on_track` again for it, so
+                                    // replay the cached event instead of
+                                    // waiting forever for one that isn't
+                                    // coming.
+                                    let found = last_video
+                                        .iter()
+                                        .find(|(id, _)| accepts_remote(id, &new_policy))
+                                        .map(|(id, event)| (id.clone(), clone_event(event)));
+                                    if let Some((id, video_event)) = found {
+                                        info!(remote_id = %id, "cascade: replaying cached track from the new publisher");
+                                        replay.push_back(video_event);
+                                        // Only replay the sibling audio track
+                                        // if the Lock arm won't already
+                                        // attach one via `pending_audio` --
+                                        // otherwise the replayed audio event
+                                        // would just churn a redundant
+                                        // `Replace` right after `Attach`.
+                                        if !pending_audio.contains_key(&id) {
+                                            if let Some(audio_event) = last_audio.get(&id) {
+                                                replay.push_back(clone_event(audio_event));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            current_view = Some(new_view);
+                        }
+                        Err(_) => {
+                            // The consensus control plane stopped (shutdown, or
+                            // the watch sender was dropped) -- stop polling it.
+                            view_rx = None;
+                        }
+                    }
+                    continue;
                 }
             }
-            Some((ended_id, ended_ssrc)) = ended_rx.recv() => {
-                if locked.as_deref() == Some(ended_id.as_str()) && current_video_ssrc == Some(ended_ssrc) {
-                    info!(remote_id = %ended_id, "relay: publisher's video track ended; unlocking");
-                    unlock(&room, &publisher, &active_tasks, &republish).await;
-                    locked = None;
-                    current_video_ssrc = None;
+        };
+
+        let remote_id = event.remote_id.0.clone();
+        let kind = event.track.kind();
+
+        // Cache the newest event per peer for every incoming media event --
+        // including replays, harmlessly overwriting the entry with an
+        // identical clone -- so a future view change can replay it (see
+        // above) even though mistlib will never fire `on_track` for this
+        // track again.
+        match kind {
+            RTPCodecType::Video => {
+                last_video.insert(remote_id.clone(), clone_event(&event));
+            }
+            RTPCodecType::Audio => {
+                last_audio.insert(remote_id.clone(), clone_event(&event));
+            }
+            RTPCodecType::Unspecified => {}
+        }
+
+        match kind {
+            RTPCodecType::Video => match decide_video(locked.as_deref(), &remote_id, &policy) {
+                VideoDecision::Ignore => {
+                    debug!(%remote_id, "relay: ignoring video track (publisher already locked, or not accepted by cascade policy)");
+                }
+                VideoDecision::Lock => {
+                    info!(%remote_id, "relay: locking onto publisher");
+                    *publisher.lock().expect("relay publisher lock poisoned") = Some(remote_id.clone());
+                    locked = Some(remote_id.clone());
+                    current_video_ssrc = Some(event.track.ssrc());
                     audio_attached = false;
                     audio_attached_shared.store(false, Ordering::Relaxed);
-                    audio_republish = None;
-                    pending_audio.remove(&ended_id);
-                } else {
-                    debug!(remote_id = %ended_id, ssrc = ended_ssrc, "relay: ignoring stale end notification for a superseded video track");
-                }
-            }
-            changed = watch_changed(&mut view_rx) => {
-                match changed {
-                    Ok(()) => {
-                        let new_view = view_rx
-                            .as_ref()
-                            .expect("view_rx is Some after an Ok(()) change notification")
-                            .borrow()
-                            .clone();
-                        let role_changed = current_view.as_ref().map(|v| v.role) != Some(new_view.role);
-                        let leader_changed =
-                            current_view.as_ref().map(|v| v.leader.clone()) != Some(new_view.leader.clone());
 
-                        if role_changed || leader_changed {
-                            info!(
-                                "cascade: role={} leader={} peers={}",
-                                role_str(new_view.role),
-                                leader_display(&new_view.leader),
-                                new_view.peers.len()
-                            );
-                            if locked.is_some() {
-                                info!("cascade: leader changed -> re-locking");
-                                unlock(&room, &publisher, &active_tasks, &republish).await;
-                                locked = None;
-                                current_video_ssrc = None;
-                                audio_attached = false;
-                                audio_attached_shared.store(false, Ordering::Relaxed);
-                                audio_republish = None;
-                                pending_audio.clear();
+                    let is_leader = matches!(&policy, CascadePolicy::Active { role: ConsensusRole::Leader, .. });
+                    let is_follower = matches!(&policy, CascadePolicy::Active { role: ConsensusRole::Follower, .. });
+                    let (video_republish, new_audio_republish) = if is_leader {
+                        // Lock-in happens right when the sharer's own
+                        // renegotiation traffic peaks, so this publish's
+                        // offer is often rejected with "signaling is not
+                        // stable". That's transient: retry briefly
+                        // before degrading to direct relay for good.
+                        const REPUBLISH_ATTEMPTS: u32 = 3;
+                        let mut published = None;
+                        for attempt in 1..=REPUBLISH_ATTEMPTS {
+                            match create_and_publish_republish_tracks(&room).await {
+                                Ok(tracks) => {
+                                    published = Some(tracks);
+                                    break;
+                                }
+                                Err(error) if attempt < REPUBLISH_ATTEMPTS => {
+                                    warn!(%error, attempt, "cascade: publishing re-broadcast tracks failed; retrying");
+                                    tokio::time::sleep(Duration::from_secs(1)).await;
+                                }
+                                Err(error) => {
+                                    warn!(%error, "cascade: failed to publish re-broadcast tracks; continuing as direct relay only");
+                                }
                             }
                         }
-                        current_view = Some(new_view);
-                    }
-                    Err(_) => {
-                        // The consensus control plane stopped (shutdown, or
-                        // the watch sender was dropped) -- stop polling it.
-                        view_rx = None;
+                        match published {
+                            Some((video, audio)) => {
+                                *republish.lock().expect("relay republish lock poisoned") =
+                                    Some((video.clone(), audio.clone()));
+                                info!("cascade: re-publishing share into room");
+                                (Some(video), Some(audio))
+                            }
+                            None => (None, None),
+                        }
+                    } else {
+                        if is_follower {
+                            info!("cascade: following leader {remote_id}");
+                        }
+                        (None, None)
+                    };
+                    audio_republish = new_audio_republish;
+
+                    let video_handle = tokio::spawn(video_task(
+                        event.track.clone(),
+                        event.pc.clone(),
+                        rtsp.clone(),
+                        remote_id.clone(),
+                        ended_tx.clone(),
+                        counters.clone(),
+                        video_republish,
+                    ));
+                    let pli_handle = tokio::spawn(pli_task(event.pc.clone(), event.track.ssrc()));
+                    replace_task(&active_tasks, TaskRole::Video, video_handle);
+                    replace_task(&active_tasks, TaskRole::Pli, pli_handle);
+
+                    if let Some(audio_event) = pending_audio.remove(&remote_id) {
+                        info!(%remote_id, codec = audio_codec.as_str(), "relay: audio track attached");
+                        let audio_handle = tokio::spawn(audio_task(
+                            audio_event.track,
+                            rtsp.clone(),
+                            audio_codec,
+                            remote_id.clone(),
+                            counters.clone(),
+                            audio_republish.clone(),
+                        ));
+                        replace_task(&active_tasks, TaskRole::Audio, audio_handle);
+                        audio_attached = true;
+                        audio_attached_shared.store(true, Ordering::Relaxed);
                     }
                 }
+                VideoDecision::Switch => {
+                    info!(%remote_id, "relay: publisher republished video (screen switch); resuming on new track");
+                    current_video_ssrc = Some(event.track.ssrc());
+
+                    // The leader's re-broadcast tracks (if any) are the
+                    // same live `mistlib::publish_local_track`-registered
+                    // tracks for this whole lock's lifetime -- only the
+                    // *source* track changed, so reuse what's already
+                    // published rather than recreating it.
+                    let video_republish = republish
+                        .lock()
+                        .expect("relay republish lock poisoned")
+                        .as_ref()
+                        .map(|(video, _)| video.clone());
+
+                    let video_handle = tokio::spawn(video_task(
+                        event.track.clone(),
+                        event.pc.clone(),
+                        rtsp.clone(),
+                        remote_id.clone(),
+                        ended_tx.clone(),
+                        counters.clone(),
+                        video_republish,
+                    ));
+                    let pli_handle = tokio::spawn(pli_task(event.pc.clone(), event.track.ssrc()));
+                    replace_task(&active_tasks, TaskRole::Video, video_handle);
+                    replace_task(&active_tasks, TaskRole::Pli, pli_handle);
+                }
+            },
+            RTPCodecType::Audio => match decide_audio(locked.as_deref(), &remote_id, audio_attached, &policy) {
+                AudioDecision::Attach => {
+                    info!(%remote_id, codec = audio_codec.as_str(), "relay: audio track attached");
+                    let audio_handle = tokio::spawn(audio_task(
+                        event.track,
+                        rtsp.clone(),
+                        audio_codec,
+                        remote_id.clone(),
+                        counters.clone(),
+                        audio_republish.clone(),
+                    ));
+                    replace_task(&active_tasks, TaskRole::Audio, audio_handle);
+                    audio_attached = true;
+                    audio_attached_shared.store(true, Ordering::Relaxed);
+                }
+                AudioDecision::Replace => {
+                    info!(%remote_id, codec = audio_codec.as_str(), "relay: publisher republished audio (screen switch); resuming on new track");
+                    let audio_handle = tokio::spawn(audio_task(
+                        event.track,
+                        rtsp.clone(),
+                        audio_codec,
+                        remote_id.clone(),
+                        counters.clone(),
+                        audio_republish.clone(),
+                    ));
+                    replace_task(&active_tasks, TaskRole::Audio, audio_handle);
+                }
+                AudioDecision::Buffer => {
+                    pending_audio.insert(remote_id, event);
+                }
+                AudioDecision::Ignore => {}
+            },
+            RTPCodecType::Unspecified => {
+                debug!(%remote_id, "relay: ignoring track of unspecified kind");
             }
         }
     }
@@ -1801,6 +1935,33 @@ mod tests {
             decide_audio(None, "browser-sharer", false, &policy),
             AudioDecision::Buffer
         );
+    }
+
+    // --- keep-lock-on-view-change predicate (cascade re-lock hang fix) ------
+
+    #[test]
+    fn lock_survives_view_change_when_the_new_policy_still_accepts_the_locked_peer() {
+        // The exact production scenario: locked onto a peer while we were
+        // (stale) leader, then the view updates to "we're actually a
+        // follower of that same peer" -- the locked publisher is still
+        // correct, so the lock must survive instead of unlocking into a
+        // no-new-`on_track`-ever-fires hang.
+        let now_following_the_locked_peer =
+            active_policy(ConsensusRole::Follower, Some("relay-1"), &["self-id", "relay-1"]);
+        assert!(lock_survives_view_change(Some("relay-1"), &now_following_the_locked_peer));
+    }
+
+    #[test]
+    fn lock_survives_view_change_is_false_when_the_new_policy_rejects_the_locked_peer() {
+        let now_following_someone_else =
+            active_policy(ConsensusRole::Follower, Some("relay-2"), &["self-id", "relay-1", "relay-2"]);
+        assert!(!lock_survives_view_change(Some("relay-1"), &now_following_someone_else));
+    }
+
+    #[test]
+    fn lock_survives_view_change_is_false_when_nothing_is_locked() {
+        let policy = active_policy(ConsensusRole::Follower, Some("relay-1"), &["self-id", "relay-1"]);
+        assert!(!lock_survives_view_change(None, &policy));
     }
 
     // --- cascade status JSON shape ------------------------------------------
