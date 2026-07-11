@@ -45,6 +45,10 @@ pub struct UpstreamConfig {
     pub model: Option<String>,
     /// Sampling temperature; omitted from the request when `None`.
     pub temperature: Option<f64>,
+    /// Reasoning effort hint ("minimal"|"low"|"medium"|"high", a free
+    /// string -- not validated here); omitted from the request when
+    /// `None`. Mirrors the web apps' @tik-choco/mistai client behavior.
+    pub reasoning_effort: Option<String>,
 }
 
 /// Builds a fresh client for one call. `no_proxy()` matters here: upstreams
@@ -92,6 +96,9 @@ pub async fn stream_chat_completion(
     });
     if let Some(temperature) = config.temperature {
         body["temperature"] = json!(temperature);
+    }
+    if let Some(reasoning_effort) = &config.reasoning_effort {
+        body["reasoning_effort"] = json!(reasoning_effort);
     }
 
     let client = build_client()?;
@@ -361,6 +368,7 @@ mod tests {
             api_key: "test-key-123".to_string(),
             model: model.map(String::from),
             temperature,
+            reasoning_effort: None,
         }
     }
 
@@ -515,6 +523,42 @@ mod tests {
         assert!(
             value.get("temperature").is_none(),
             "temperature should be omitted: {value}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_effort_included_when_configured() {
+        let body = r#"{"choices":[{"message":{"content":"ok"}}]}"#;
+        let (base_url, server) = mock_server(json_response(200, "OK", body), Duration::ZERO).await;
+
+        let mut config = cfg(base_url, Some("gpt-test"), None);
+        config.reasoning_effort = Some("high".to_string());
+        stream_chat_completion(&config, &one_message(), None, None)
+            .await
+            .expect("request should succeed");
+
+        let raw = server.await.unwrap();
+        let (_headers, req_body) = split_request(&raw);
+        let value: Value = serde_json::from_str(&req_body).expect("request body should be JSON");
+        assert_eq!(value["reasoning_effort"], json!("high"));
+    }
+
+    #[tokio::test]
+    async fn reasoning_effort_omitted_when_not_configured() {
+        let body = r#"{"choices":[{"message":{"content":"ok"}}]}"#;
+        let (base_url, server) = mock_server(json_response(200, "OK", body), Duration::ZERO).await;
+
+        let config = cfg(base_url, Some("gpt-test"), None);
+        stream_chat_completion(&config, &one_message(), None, None)
+            .await
+            .expect("request should succeed");
+
+        let raw = server.await.unwrap();
+        let (_headers, req_body) = split_request(&raw);
+        let value: Value = serde_json::from_str(&req_body).expect("request body should be JSON");
+        assert!(
+            value.get("reasoning_effort").is_none(),
+            "reasoning_effort should be omitted: {value}"
         );
     }
 

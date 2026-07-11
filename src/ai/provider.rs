@@ -1,5 +1,13 @@
 //! Provider side of the AI network, ported from mistai's `provider.ts`.
 //!
+//! This provider serves **LLM chat only**. Unlike mistai's reference
+//! implementation (which pairs `ProviderService` with a separate
+//! `VoiceProviderService` for `tts_request`/`stt_request`), this port never
+//! calls out to a TTS/STT upstream: voice requests are rejected immediately
+//! with `voice_error` (see below) rather than silently ignored, so a peer's
+//! `ConsumerClient.requestTts`/`requestStt` gets a clear, prompt error
+//! instead of hanging until its own client-side timeout.
+//!
 //! Handles inbound `llm_request`s by forwarding them to the injected
 //! upstream call ([`super::LlmCallFn`], normally
 //! `openai::stream_chat_completion`) and streaming the result back:
@@ -10,6 +18,8 @@
 //! - On success: `llm_response_done { id, content: Some(full) }`.
 //! - On failure: `llm_error { id, message }`.
 //! - `consumer_hello` -> reply [`Provider::hello`] directly to the sender.
+//! - `tts_request` / `stt_request` -> reply `voice_error { id, message }`
+//!   directly to the sender; this provider has no voice upstream.
 //!
 //! Keeps a ring buffer of request logs (default cap 50, oldest dropped;
 //! re-logging an id replaces the previous entry): status progresses
@@ -77,10 +87,10 @@ impl Provider {
         }
     }
 
-    /// Handle one decoded inbound message (`llm_request` /
-    /// `consumer_hello`; everything else ignored). Runs the upstream call
-    /// inline (callers spawn this future per message, so concurrent
-    /// requests don't block each other).
+    /// Handle one decoded inbound message (`llm_request` / `consumer_hello`
+    /// / `tts_request` / `stt_request`; everything else ignored). Runs the
+    /// upstream call inline (callers spawn this future per message, so
+    /// concurrent requests don't block each other).
     pub async fn handle_message(self: std::sync::Arc<Self>, from: String, msg: ProtocolMessage) {
         match msg {
             ProtocolMessage::ConsumerHello => {
@@ -89,8 +99,27 @@ impl Provider {
             ProtocolMessage::LlmRequest { id, messages, model } => {
                 self.handle_llm_request(from, id, messages, model).await;
             }
+            ProtocolMessage::TtsRequest { id, .. } | ProtocolMessage::SttRequest { id, .. } => {
+                self.reject_voice_request(&from, id);
+            }
             _ => {}
         }
+    }
+
+    /// This provider has no TTS/STT upstream, so voice requests are
+    /// answered with an immediate `voice_error` instead of being dropped
+    /// (which would otherwise leave the requester's `ConsumerClient` waiting
+    /// until its own client-side voice timeout, e.g. mistai's 120s default).
+    /// Sent through the same `send` fn (and thus the same ordered queue) as
+    /// every other reply.
+    fn reject_voice_request(&self, from: &str, id: String) {
+        (self.send)(
+            from,
+            ProtocolMessage::VoiceError {
+                id,
+                message: "this provider does not support voice (tts/stt)".to_string(),
+            },
+        );
     }
 
     async fn handle_llm_request(
@@ -514,6 +543,117 @@ mod tests {
 
         assert_eq!(provider.logs().len(), 1);
         assert_eq!(provider.logs()[0].status, "done");
+    }
+
+    #[tokio::test]
+    async fn tts_request_gets_voice_error_reply() {
+        let (send, sent) = fake_send();
+        let call = fake_call_success(vec![], "");
+        let provider = Provider::new(send, call, vec![]);
+
+        provider
+            .clone()
+            .handle_message(
+                "consumer1".into(),
+                ProtocolMessage::TtsRequest {
+                    id: "req1".into(),
+                    text: "hello there".into(),
+                    model: None,
+                    voice: None,
+                },
+            )
+            .await;
+
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.len(), 1, "expected exactly one reply, got: {sent:?}");
+        match &sent[0] {
+            (to, ProtocolMessage::VoiceError { id, message }) => {
+                assert_eq!(to, "consumer1");
+                assert_eq!(id, "req1");
+                assert!(!message.is_empty());
+            }
+            other => panic!("expected a voice_error reply, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn stt_request_gets_voice_error_reply() {
+        let (send, sent) = fake_send();
+        let call = fake_call_success(vec![], "");
+        let provider = Provider::new(send, call, vec![]);
+
+        provider
+            .clone()
+            .handle_message(
+                "consumer1".into(),
+                ProtocolMessage::SttRequest {
+                    id: "req2".into(),
+                    seq: 0,
+                    data: "AAAA".into(),
+                    last: true,
+                    mime: "audio/wav".into(),
+                    model: None,
+                    file_name: None,
+                },
+            )
+            .await;
+
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.len(), 1, "expected exactly one reply, got: {sent:?}");
+        match &sent[0] {
+            (to, ProtocolMessage::VoiceError { id, message }) => {
+                assert_eq!(to, "consumer1");
+                assert_eq!(id, "req2");
+                assert!(!message.is_empty());
+            }
+            other => panic!("expected a voice_error reply, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn voice_requests_do_not_affect_unrelated_llm_requests() {
+        // Guards against a shared-state regression: handling a tts_request
+        // must not touch the provider's llm_request logging/response path.
+        let (send, sent) = fake_send();
+        let call = fake_call_success(vec!["Hel", "lo"], "Hello");
+        let provider = Provider::new(send, call, vec![]);
+
+        provider
+            .clone()
+            .handle_message(
+                "consumer1".into(),
+                ProtocolMessage::TtsRequest {
+                    id: "voice-req".into(),
+                    text: "hi".into(),
+                    model: None,
+                    voice: None,
+                },
+            )
+            .await;
+        provider
+            .clone()
+            .handle_message(
+                "consumer1".into(),
+                ProtocolMessage::LlmRequest {
+                    id: "llm-req".into(),
+                    messages: messages(),
+                    model: None,
+                },
+            )
+            .await;
+
+        let sent = sent.lock().unwrap();
+        // 1 voice_error + 2 llm chunks + 1 done.
+        assert_eq!(sent.len(), 4);
+        assert!(matches!(&sent[0].1, ProtocolMessage::VoiceError { id, .. } if id == "voice-req"));
+        assert!(matches!(&sent[1].1, ProtocolMessage::LlmResponseChunk { id, .. } if id == "llm-req"));
+        assert!(matches!(&sent[2].1, ProtocolMessage::LlmResponseChunk { id, .. } if id == "llm-req"));
+        assert!(matches!(&sent[3].1, ProtocolMessage::LlmResponseDone { id, .. } if id == "llm-req"));
+
+        // The voice request left no log entry; only the llm_request did.
+        let logs = provider.logs();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].id, "llm-req");
     }
 
     #[tokio::test]

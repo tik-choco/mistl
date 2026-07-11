@@ -75,7 +75,7 @@ $ mistl daemon stop
 
 # Configuration (no config.toml editing needed)
 $ mistl config show           # secrets masked
-$ mistl config set ai.upstream_url http://127.0.0.1:11434/v1
+$ mistl config set ai.default_preset_id default
 $ mistl config set stream.relay_room my-room
 
 # Profile / DID keys
@@ -106,7 +106,7 @@ $ mistl mailbox ls            # deposits this node is holding as a bot
 $ mistl ui                    # starts the daemon if needed, opens the browser
 
 # AI network
-$ mistl ai provide start      # serve LLM inference to peers from [ai] upstream_url
+$ mistl ai provide start      # serve LLM inference to peers using the resolved default preset
 $ mistl ai serve start        # local OpenAI-compatible API -> http://127.0.0.1:6478/v1
 $ mistl ai chat "hello" --model mock-echo-1
 $ mistl ai models
@@ -194,6 +194,7 @@ restart):
 [storage]
 # blocks_dir = 'D:\mistl-blocks'
 capacity_bytes = 10737418240
+# room_id = "my-storage-room"                # tc-chat room for peer block exchange; default: local-only, no room joined
 
 [stream]
 rtsp_url = "rtsp://127.0.0.1:8554/stream"   # use 0.0.0.0 to expose on the LAN
@@ -211,23 +212,36 @@ serve_as_bot = true                          # hold deposits for other peers
 
 [ai]
 # room_id = "my-llm-room"                   # default: the mailbox room (see note)
-# upstream_url = "http://127.0.0.1:11434/v1" # OpenAI-compatible upstream (provide)
-# upstream_api_key = "sk-..."
-# default_model = "llama3"                  # default: first model from upstream
-# advertised_models = ["llama3"]            # default: fetched from upstream /models
-# temperature = 0.7
+# default_preset_id = "default"             # which [[ai.presets]] entry `ai provide`/`ai serve` use by default
+# advertised_models = ["llama3"]            # default: fetched from the resolved preset's provider /models
 api_listen = "127.0.0.1:6478"                # local OpenAI-compatible API (serve)
 request_timeout_secs = 120                   # p2p inactivity timeout (resets per chunk)
+
+# [[ai.providers]]                          # connection info ("where to connect")
+# id = "default"
+# label = "Default"
+# base_url = "http://127.0.0.1:11434/v1"    # OpenAI-compatible upstream, e.g. Ollama
+# api_key = ""
+
+# [[ai.presets]]                            # named model config ("how to call it")
+# id = "default"
+# label = "Default"
+# provider_id = "default"                   # references an [[ai.providers]] id
+# model = "llama3"
+# temperature = 0.7
+# reasoning_effort = "medium"               # optional: "minimal" | "low" | "medium" | "high"
 
 [ui]
 enabled = true                               # serve the dashboard from the daemon
 listen = "127.0.0.1:6480"                    # keep on loopback (no auth)
 ```
 
-Note: mailbox, ai, and stream relay can each join their **own** room -- the p2p
-transport supports multiple simultaneous rooms per process. `[ai] room_id`
+Note: storage, mailbox, ai, and stream relay can each join their **own** room --
+the p2p transport supports multiple simultaneous rooms per process. `[ai] room_id`
 defaults to the mailbox room for convenience when unset; set it explicitly to
-join a different room, e.g. an existing mistai app room.
+join a different room, e.g. an existing mistai app room. `[storage] room_id` has
+no such fallback -- leave it unset to keep the store purely local (no network
+join at all).
 
 Data lives in `%APPDATA%\tik-choco\mistl\data\` (keys, blocks, spools, logs).
 

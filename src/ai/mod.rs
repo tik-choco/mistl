@@ -5,8 +5,13 @@
 //! Two roles, both optional and combinable:
 //!
 //! - **provide** (`ai provide start`): announce `provider_hello` and
-//!   forward inbound `llm_request`s to the configured OpenAI-compatible
-//!   upstream (`[ai] upstream_url`), streaming deltas back as chunks.
+//!   forward inbound `llm_request`s to the resolved default preset's
+//!   upstream (`[ai] default_preset_id` -> `[[ai.presets]]` ->
+//!   `[[ai.providers]]`, see `crate::config::resolve_preset`), streaming
+//!   deltas back as chunks. This
+//!   provider is LLM chat only: it does not implement voice, so inbound
+//!   `tts_request`/`stt_request`s get an immediate `voice_error` reply
+//!   instead of silently going unanswered (see `provider.rs`).
 //! - **serve** (`ai serve start`): run a local OpenAI-compatible HTTP API
 //!   server; requests go to the local provider when one is running, else
 //!   to the first provider discovered on the network. Point any OpenAI
@@ -312,16 +317,17 @@ async fn provide_start(service: &Arc<AiService>, state: &Arc<AppState>) -> Resul
     }
 
     let cfg = state.config().ai;
-    let base_url = cfg.upstream_url.clone().context(
-        "ai: [ai] upstream_url is not configured; set it in the dashboard's \
-         Settings panel or with `mistl config set ai.upstream_url <url>` \
-         (e.g. \"http://127.0.0.1:11434/v1\" for Ollama)",
+    let resolved = crate::config::resolve_preset(&cfg, None).context(
+        "ai: no default LLM preset configured; set it up in the dashboard's \
+         Settings panel, or with `mistl config set ai.providers <json>`, \
+         `ai.presets <json>`, and `ai.default_preset_id <id>`",
     )?;
     let mut upstream = UpstreamConfig {
-        base_url,
-        api_key: cfg.upstream_api_key.clone().unwrap_or_default(),
-        model: cfg.default_model.clone(),
-        temperature: cfg.temperature,
+        base_url: resolved.base_url,
+        api_key: resolved.api_key,
+        model: (!resolved.model.is_empty()).then_some(resolved.model),
+        temperature: resolved.temperature,
+        reasoning_effort: resolved.reasoning_effort,
     };
 
     let models = if !cfg.advertised_models.is_empty() {

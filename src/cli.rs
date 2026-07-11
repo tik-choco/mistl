@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 
@@ -8,7 +8,7 @@ use crate::daemon;
 #[command(
     name = "mistl",
     version,
-    about = "MISTL - unified P2P daemon: identity, storage, VRChat screen share, offline mailbox, AI network",
+    about = "MISTL - unified P2P daemon: identity, storage, VRChat screen share, offline mailbox/relay, AI network",
     after_help = "Running `mistl` with no arguments opens the web dashboard \
                   (starts the daemon if needed) -- double-clicking mistl.exe does the same."
 )]
@@ -37,6 +37,10 @@ pub enum Command {
     },
     /// Content storage
     Store {
+        /// Print machine-readable JSON instead of tc-storage-cli-style
+        /// human-readable text
+        #[arg(long, global = true)]
+        json: bool,
         #[command(subcommand)]
         action: StoreAction,
     },
@@ -45,10 +49,14 @@ pub enum Command {
         #[command(subcommand)]
         action: StreamAction,
     },
-    /// P2P mailbox: store-and-forward messages/data for offline peers
-    Mailbox {
+    /// P2P mail relay: store-and-forward messages/data for offline peers,
+    /// plus (when configured) a standing tc-chat room relay/bot so chat
+    /// messages keep arriving even without a tc-chat browser tab open.
+    /// Formerly named `mailbox`; that name still works (`mistl mailbox ...`).
+    #[command(visible_alias = "mailbox")]
+    Relay {
         #[command(subcommand)]
-        action: MailboxAction,
+        action: RelayAction,
     },
     /// P2P AI network: consume or provide LLM inference (mistai compatible)
     Ai {
@@ -113,7 +121,7 @@ pub enum AutostartAction {
 pub enum ConfigAction {
     /// Show the current configuration (secrets masked)
     Show,
-    /// Set one field, e.g. `mistl config set ai.upstream_url http://127.0.0.1:11434/v1`
+    /// Set one field, e.g. `mistl config set ai.default_preset_id default`
     Set {
         /// Field path as section.field (see `mistl config show`)
         path: String,
@@ -172,6 +180,138 @@ pub enum StoreAction {
     },
     /// List stored content
     Ls,
+    /// Store a file as an encrypted tc-storage file bundle (web-app
+    /// compatible: AES-256-GCM + PBKDF2), returns its content id
+    PutFile {
+        /// File to encrypt and store
+        path: String,
+        /// Passphrase used to derive the encryption key
+        passphrase: String,
+    },
+    /// Retrieve and decrypt an encrypted file bundle by content id
+    GetFile {
+        id: String,
+        /// Passphrase the bundle was encrypted with
+        passphrase: String,
+        /// Output file path (defaults to the downloads dir)
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+    /// Parse a `tc-share` link and print its fields (no network)
+    ParseLink { url: String },
+    /// Resolve and decrypt a `tc-share` *file* link from the local store
+    FetchShare {
+        /// The `tc-share=...` URL or token
+        url: String,
+        /// Output file path (defaults to the downloads dir)
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+    /// Content sandbox: import external files, list contents
+    Sandbox {
+        #[command(subcommand)]
+        action: StoreSandboxAction,
+    },
+    /// Join the storage p2p room (if `storage.room_id` is configured) and
+    /// report connected peers (tc-storage-cli `connect` compatible); exits
+    /// non-zero if no peers are connected
+    Connect {
+        /// Join this room instead of `storage.room_id` (additive: the store
+        /// can hold several rooms at once)
+        #[arg(long)]
+        room: Option<String>,
+    },
+    /// Fetch a folder share over the network: request access from the
+    /// owner, wait for their approval, and download the folder's files into
+    /// the sandbox (tc-storage-cli `folder-get` compatible)
+    FolderGet {
+        /// The `tc-share=...` folder share URL or token
+        url: String,
+    },
+    /// Import an external file into the sandbox (alias of `sandbox import`;
+    /// tc-storage-cli `sandbox-import` compatible)
+    SandboxImport { path: String },
+    /// List the files currently in the sandbox (alias of `sandbox ls`;
+    /// tc-storage-cli `sandbox-list` compatible)
+    SandboxList,
+    /// Sync a folder share continuously: registers immediately and starts
+    /// fetching it into a local directory in the background (retried
+    /// automatically if the owner is offline), then keeps that directory
+    /// mirrored as the owner announces changes (survives daemon restarts;
+    /// `folder-sync ls`/`stop` to manage)
+    FolderSync {
+        #[command(subcommand)]
+        action: StoreFolderSyncAction,
+    },
+    /// Share a local directory as a tc-storage folder: publish it encrypted
+    /// to the room and print a `#tc-share=` link others can sync from (the
+    /// daemon keeps serving access grants and announcing changes;
+    /// `folder-share ls`/`stop` to manage)
+    FolderShare {
+        #[command(subcommand)]
+        action: StoreFolderShareAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum StoreFolderSyncAction {
+    /// Start syncing a folder-share link into a local directory
+    Start {
+        /// The `tc-share=...` folder share URL or token
+        url: String,
+        /// Local directory to mirror the folder into. Advanced/optional: by
+        /// default (omitted) the sync materializes into a managed
+        /// subdirectory of the content sandbox instead -- extract individual
+        /// files out with `store sandbox export`
+        #[arg(long)]
+        dir: Option<String>,
+    },
+    /// List active folder syncs
+    Ls,
+    /// Stop (and forget) the sync for a folder id; synced files are kept
+    Stop { folder_id: String },
+}
+
+#[derive(Subcommand)]
+pub enum StoreFolderShareAction {
+    /// Publish a local directory as a shared folder and print its link
+    Start {
+        /// Local directory to share
+        path: String,
+        /// Passphrase protecting the folder's encryption key
+        #[arg(long)]
+        passphrase: String,
+        /// Folder display name (defaults to the directory name)
+        #[arg(long)]
+        name: Option<String>,
+        /// Room to announce the share in (defaults to `storage.room_id`)
+        #[arg(long)]
+        room: Option<String>,
+    },
+    /// List folders currently shared from this node
+    Ls,
+    /// Stop sharing a folder id
+    Stop { folder_id: String },
+}
+
+#[derive(Subcommand)]
+pub enum StoreSandboxAction {
+    /// Import an external file into the sandbox
+    Import { path: String },
+    /// List the files currently in the sandbox
+    Ls,
+    /// Remove a file (sandbox-relative path) from the sandbox
+    Rm { path: String },
+    /// Copy a sandbox file out to a real path (defaults to `storage.export_dir`
+    /// if configured -- see `mistl config set storage.export_dir <dir>` --
+    /// else the downloads dir)
+    Export {
+        /// Sandbox-relative path of the file to export
+        path: String,
+        /// Output file path (defaults to the downloads dir)
+        #[arg(short, long)]
+        output: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -220,7 +360,7 @@ pub enum StreamAction {
 }
 
 #[derive(Subcommand)]
-pub enum MailboxAction {
+pub enum RelayAction {
     /// Deposit data for a (possibly offline) recipient
     Send {
         /// Recipient DID or peer id
@@ -236,6 +376,17 @@ pub enum MailboxAction {
     Ls,
     /// Fetch pending messages
     Fetch,
+    /// tc-chat rooms configured for relay (`mailbox.chat_rooms`), and
+    /// whether each is currently joined
+    Rooms,
+    /// Recently relayed tc-chat messages for one room
+    ChatLog {
+        /// tc-chat room id (see `mailbox.chat_rooms` in settings)
+        room: String,
+        /// Max number of entries to return (default 50)
+        #[arg(short, long)]
+        limit: Option<usize>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -299,16 +450,96 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             KeyAction::List => client_call("key.list", json!({})),
             KeyAction::Did => client_call("key.did", json!({})),
         },
-        Command::Store { action } => match action {
+        Command::Store { json, action } => match action {
             StoreAction::Put { path } => {
-                let abs = std::fs::canonicalize(&path)
-                    .with_context(|| format!("file not found: {path}"))?;
-                client_call("store.put", json!({ "path": abs.to_string_lossy() }))
+                let abs = canonicalize_or_die(&path);
+                store_call("store.put", json!({ "path": abs.to_string_lossy() }), json, render_cid)
             }
             StoreAction::Get { id, output } => {
-                client_call("store.get", json!({ "id": id, "output": output }))
+                store_call("store.get", json!({ "id": id, "output": output }), json, render_get)
             }
-            StoreAction::Ls => client_call("store.ls", json!({})),
+            StoreAction::Ls => store_call("store.ls", json!({}), json, render_ls),
+            StoreAction::PutFile { path, passphrase } => {
+                let abs = canonicalize_or_die(&path);
+                store_call(
+                    "store.put-file",
+                    json!({ "path": abs.to_string_lossy(), "passphrase": passphrase }),
+                    json,
+                    render_cid,
+                )
+            }
+            StoreAction::GetFile { id, passphrase, output } => store_call(
+                "store.get-file",
+                json!({ "cid": id, "passphrase": passphrase, "output": output }),
+                json,
+                render_get_file,
+            ),
+            StoreAction::ParseLink { url } => {
+                store_call("store.parse-link", json!({ "url": url }), json, render_parse_link)
+            }
+            StoreAction::FetchShare { url, output } => store_call(
+                "store.fetch-share",
+                json!({ "url": url, "output": output }),
+                json,
+                render_get,
+            ),
+            StoreAction::Sandbox { action } => match action {
+                StoreSandboxAction::Import { path } => sandbox_import(path, json),
+                StoreSandboxAction::Ls => sandbox_list(json),
+                StoreSandboxAction::Rm { path } => store_call(
+                    "store.sandbox.rm",
+                    json!({ "path": path }),
+                    json,
+                    render_sandbox_rm,
+                ),
+                StoreSandboxAction::Export { path, output } => store_call(
+                    "store.sandbox.export",
+                    json!({ "path": path, "output": output }),
+                    json,
+                    render_sandbox_export,
+                ),
+            },
+            StoreAction::Connect { room } => store_connect(room, json),
+            StoreAction::FolderGet { url } => store_folder_get(url, json),
+            StoreAction::SandboxImport { path } => sandbox_import(path, json),
+            StoreAction::SandboxList => sandbox_list(json),
+            StoreAction::FolderSync { action } => match action {
+                StoreFolderSyncAction::Start { url, dir } => store_call(
+                    "store.folder-sync",
+                    json!({ "url": url, "dir": dir }),
+                    json,
+                    render_folder_sync_start,
+                ),
+                StoreFolderSyncAction::Ls => store_call(
+                    "store.folder-sync.ls",
+                    json!({}),
+                    json,
+                    render_folder_sync_ls,
+                ),
+                StoreFolderSyncAction::Stop { folder_id } => store_call(
+                    "store.folder-sync.stop",
+                    json!({ "folder_id": folder_id }),
+                    json,
+                    render_stopped,
+                ),
+            },
+            StoreAction::FolderShare { action } => match action {
+                StoreFolderShareAction::Start { path, passphrase, name, room } => {
+                    store_folder_share_start(path, passphrase, name, room, json)
+                }
+                StoreFolderShareAction::Ls => store_call(
+                    "store.folder-share.ls",
+                    json!({}),
+                    json,
+                    render_folder_share_ls,
+                ),
+                StoreFolderShareAction::Stop { folder_id } => store_call(
+                    "store.folder-share.stop",
+                    json!({ "folder_id": folder_id }),
+                    json,
+                    render_stopped,
+                ),
+            },
         },
         Command::Stream { action } => match action {
             StreamAction::Start => client_call("stream.start", json!({})),
@@ -357,8 +588,8 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             StreamAction::Stop => client_call("stream.stop", json!({})),
             StreamAction::Status => client_call("stream.status", json!({})),
         },
-        Command::Mailbox { action } => match action {
-            MailboxAction::Send { to, file, message } => {
+        Command::Relay { action } => match action {
+            RelayAction::Send { to, file, message } => {
                 if file.is_none() && message.is_none() {
                     bail!("provide --file or --message");
                 }
@@ -367,8 +598,12 @@ pub fn dispatch(cli: Cli) -> Result<()> {
                     json!({ "to": to, "file": file, "message": message }),
                 )
             }
-            MailboxAction::Ls => client_call("mailbox.ls", json!({})),
-            MailboxAction::Fetch => client_call("mailbox.fetch", json!({})),
+            RelayAction::Ls => client_call("mailbox.ls", json!({})),
+            RelayAction::Fetch => client_call("mailbox.fetch", json!({})),
+            RelayAction::Rooms => client_call("mailbox.chat.rooms", json!({})),
+            RelayAction::ChatLog { room, limit } => {
+                client_call("mailbox.chat.log", json!({ "room": room, "limit": limit }))
+            }
         },
         Command::Ai { action } => match action {
             AiAction::Chat { prompt, model } => {
@@ -556,4 +791,538 @@ fn client_call(cmd: &str, args: Value) -> Result<()> {
     let response = request(cmd, args)?;
     println!("{}", serde_json::to_string_pretty(&response)?);
     Ok(())
+}
+
+// -- `mistl store`: tc-storage-cli-style human output --------------------
+//
+// tc-storage's `storage-cli` prints plain human text by default and never
+// JSON (see its `cmd/tc-storage/main.go`): `put-file` prints just the CID,
+// `get-file` prints "name\t<size> bytes\t<checksum>", `parse-link` prints
+// "type=... room=... folder=... file=... cid=...", `sandbox-list` prints
+// one entry per line, and every command reports failure as "error: <msg>"
+// on stderr with a non-zero exit. `mistl store` matches that by default
+// (formatting client-side from the daemon's unchanged JSON response) and
+// falls back to the previous pretty-JSON behavior under `--json`.
+
+/// Print "error: <msg>" to stderr and exit 1, tc-storage-cli's error
+/// convention -- used for every `mistl store` command instead of the rest
+/// of the CLI's default anyhow-chain formatting.
+fn store_error(error: anyhow::Error) -> ! {
+    eprintln!("error: {error}");
+    std::process::exit(1);
+}
+
+/// Resolve `path` to an absolute path, or exit via [`store_error`] with the
+/// same "error: <msg>" convention as every other `store` failure (rather
+/// than propagating a differently-formatted error through the rest of the
+/// CLI's anyhow chain).
+fn canonicalize_or_die(path: &str) -> std::path::PathBuf {
+    match std::fs::canonicalize(path) {
+        Ok(abs) => abs,
+        Err(_) => store_error(anyhow::anyhow!("file not found: {path}")),
+    }
+}
+
+/// Send a `store.*` request and print either pretty JSON (`--json`) or a
+/// human-rendered line built by `render` from the response. Errors (from
+/// the request itself, or from JSON formatting) go through [`store_error`].
+fn store_call(cmd: &str, args: Value, json: bool, render: impl FnOnce(&Value) -> String) -> Result<()> {
+    let response = match request(cmd, args) {
+        Ok(response) => response,
+        Err(error) => store_error(error),
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&response)?);
+    } else {
+        println!("{}", render(&response));
+    }
+    Ok(())
+}
+
+fn sandbox_import(path: String, json: bool) -> Result<()> {
+    let abs = canonicalize_or_die(&path);
+    store_call(
+        "store.sandbox.import",
+        json!({ "path": abs.to_string_lossy() }),
+        json,
+        render_sandbox_import,
+    )
+}
+
+fn sandbox_list(json: bool) -> Result<()> {
+    store_call("store.sandbox.ls", json!({}), json, render_sandbox_ls)
+}
+
+/// `mistl store connect`: like [`store_call`], but the peer count also
+/// decides the exit code (tc-storage-cli's `connect` prints its
+/// node/room/peer summary either way, then fails if zero peers connected).
+fn store_connect(room: Option<String>, json: bool) -> Result<()> {
+    let response = match request("store.connect", json!({ "room": room })) {
+        Ok(response) => response,
+        Err(error) => store_error(error),
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&response)?);
+    } else {
+        println!("{}", render_connect(&response));
+    }
+    let peer_count = response.get("peers").and_then(Value::as_array).map_or(0, Vec::len);
+    if peer_count == 0 {
+        store_error(anyhow::anyhow!("no peers connected"));
+    }
+    Ok(())
+}
+
+/// `mistl store folder-get`: like [`store_call`], but also flushes the
+/// response's batched `progress` lines to stderr (prefixed "… ", matching
+/// tc-storage-cli) before the primary output, and any `skipped` files after
+/// it -- see `storage::folder_share`'s module doc for why progress is
+/// batched rather than streamed.
+fn store_folder_get(url: String, json: bool) -> Result<()> {
+    let response = match request("store.folder-get", json!({ "url": url })) {
+        Ok(response) => response,
+        Err(error) => store_error(error),
+    };
+    if let Some(lines) = response.get("progress").and_then(Value::as_array) {
+        for line in lines.iter().filter_map(Value::as_str) {
+            eprintln!("… {line}");
+        }
+    }
+    if json {
+        println!("{}", serde_json::to_string_pretty(&response)?);
+    } else {
+        println!("{}", render_folder_get(&response));
+    }
+    if let Some(skipped) = response.get("skipped").and_then(Value::as_array) {
+        for entry in skipped.iter().filter_map(Value::as_str) {
+            eprintln!("  skipped: {entry}");
+        }
+    }
+    Ok(())
+}
+
+fn render_cid(response: &Value) -> String {
+    response.get("cid").and_then(Value::as_str).unwrap_or_default().to_string()
+}
+
+fn render_get(response: &Value) -> String {
+    let name = response.get("name").and_then(Value::as_str).unwrap_or_default();
+    let size = response.get("size").and_then(Value::as_u64).unwrap_or_default();
+    let output = response.get("output").and_then(Value::as_str).unwrap_or_default();
+    format!("saved {name} ({size} bytes) to {output}")
+}
+
+fn render_ls(response: &Value) -> String {
+    let entries = response.as_array().cloned().unwrap_or_default();
+    if entries.is_empty() {
+        return "(empty)".to_string();
+    }
+    entries
+        .iter()
+        .map(|entry| {
+            let cid = entry.get("cid").and_then(Value::as_str).unwrap_or_default();
+            let name = entry.get("name").and_then(Value::as_str).unwrap_or_default();
+            let size = entry.get("size").and_then(Value::as_u64).unwrap_or_default();
+            let stored_at = entry.get("stored_at").and_then(Value::as_str).unwrap_or_default();
+            format!("{cid}\t{name}\t{size} bytes\t{stored_at}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Matches tc-storage-cli's `get-file` line exactly
+/// (`"%s\t%d bytes\t%s\n", file.Name, file.Size, file.Checksum`). Unlike
+/// tc-storage's version (metadata only), mistl's `store.get-file` also
+/// materializes the file -- noted separately on stderr so the primary
+/// stdout line stays script-compatible with tc-storage's.
+fn render_get_file(response: &Value) -> String {
+    let name = response.get("name").and_then(Value::as_str).unwrap_or_default();
+    let size = response.get("size").and_then(Value::as_u64).unwrap_or_default();
+    let checksum = response.get("checksum").and_then(Value::as_str).unwrap_or_default();
+    if let Some(output) = response.get("output").and_then(Value::as_str) {
+        eprintln!("saved to {output}");
+    }
+    if response.get("checksum_ok").and_then(Value::as_bool) == Some(false) {
+        eprintln!("warning: checksum mismatch");
+    }
+    if let Some(note) = response.get("note").and_then(Value::as_str) {
+        eprintln!("note: {note}");
+    }
+    format!("{name}\t{size} bytes\t{checksum}")
+}
+
+/// Matches tc-storage-cli's `parse-link` line exactly
+/// (`"type=%s room=%s folder=%s file=%s cid=%s\n"`).
+fn render_parse_link(response: &Value) -> String {
+    let field = |key: &str| response.get(key).and_then(Value::as_str).unwrap_or_default();
+    format!(
+        "type={} room={} folder={} file={} cid={}",
+        field("type"),
+        field("room_id"),
+        field("folder_id"),
+        field("file_id"),
+        field("cid"),
+    )
+}
+
+fn render_sandbox_import(response: &Value) -> String {
+    response.get("imported").and_then(Value::as_str).unwrap_or_default().to_string()
+}
+
+fn render_sandbox_ls(response: &Value) -> String {
+    response
+        .get("entries")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_sandbox_rm(response: &Value) -> String {
+    response.get("removed").and_then(Value::as_str).unwrap_or_default().to_string()
+}
+
+fn render_sandbox_export(response: &Value) -> String {
+    let name = response.get("name").and_then(Value::as_str).unwrap_or_default();
+    let size = response.get("size").and_then(Value::as_u64).unwrap_or_default();
+    let output = response.get("output").and_then(Value::as_str).unwrap_or_default();
+    format!("exported {name} ({size} bytes) to {output}")
+}
+
+/// Matches tc-storage-cli's `connect` output
+/// (`"node=%s room=%s peers=%d\n"` + one `"peer %s"` line each).
+fn render_connect(response: &Value) -> String {
+    let node_id = response.get("node_id").and_then(Value::as_str).unwrap_or_default();
+    let room = response.get("room").and_then(Value::as_str).unwrap_or_default();
+    let peers = response.get("peers").and_then(Value::as_array).cloned().unwrap_or_default();
+    let mut lines = vec![format!("node={node_id} room={room} peers={}", peers.len())];
+    lines.extend(peers.iter().filter_map(Value::as_str).map(|id| format!("peer {id}")));
+    lines.join("\n")
+}
+
+/// Matches tc-storage-cli's `folder-get` output
+/// (`"folder: %s\nsaved %d file(s):\n"` + one `"  %s"` line each).
+fn render_folder_get(response: &Value) -> String {
+    let folder_name = response.get("folder_name").and_then(Value::as_str).unwrap_or_default();
+    let files = response.get("files").and_then(Value::as_array).cloned().unwrap_or_default();
+    let mut lines = vec![format!("folder: {folder_name}"), format!("saved {} file(s):", files.len())];
+    lines.extend(files.iter().filter_map(Value::as_str).map(|path| format!("  {path}")));
+    lines.join("\n")
+}
+
+/// `mistl store folder-share start`: publish a directory, print its link.
+fn store_folder_share_start(
+    path: String,
+    passphrase: String,
+    name: Option<String>,
+    room: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let abs = canonicalize_or_die(&path);
+    let response = match request(
+        "store.folder-share",
+        json!({
+            "path": abs.to_string_lossy(),
+            "passphrase": passphrase,
+            "name": name,
+            "room": room,
+        }),
+    ) {
+        Ok(response) => response,
+        Err(error) => store_error(error),
+    };
+    flush_progress(&response);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&response)?);
+    } else {
+        println!("{}", render_folder_share_start(&response));
+    }
+    Ok(())
+}
+
+/// Flush a response's batched `progress` lines to stderr ("… " prefixed,
+/// matching tc-storage-cli), shared by the folder-get/share commands
+/// (folder-sync registers instantly and has no synchronous progress to
+/// flush -- see [`render_folder_sync_start`]).
+fn flush_progress(response: &Value) {
+    if let Some(lines) = response.get("progress").and_then(Value::as_array) {
+        for line in lines.iter().filter_map(Value::as_str) {
+            eprintln!("… {line}");
+        }
+    }
+}
+
+/// A folder sync's display destination: its managed sandbox subdirectory
+/// (the normal case) if `sandbox_dir` is set, else its raw `local_dir` (a
+/// legacy entry, or one registered with an explicit `--dir` override).
+fn folder_sync_destination(sync: &Value) -> String {
+    match sync.get("sandbox_dir").and_then(Value::as_str) {
+        Some(sandbox_dir) if !sandbox_dir.is_empty() => format!("sandbox/{sandbox_dir}"),
+        _ => sync.get("local_dir").and_then(Value::as_str).unwrap_or_default().to_string(),
+    }
+}
+
+/// `mistl store folder-sync start`: the daemon persists a `"connecting"`
+/// entry and returns immediately -- the access-grant handshake and first
+/// fetch run in the background (retried automatically if the owner is
+/// offline), so this only ever prints a registration confirmation, never
+/// sync progress.
+fn render_folder_sync_start(response: &Value) -> String {
+    let sync = response.get("sync").cloned().unwrap_or_default();
+    format!(
+        "registered sync for folder {:?} ({}) into {}\nconnecting and fetching in the background \
+         -- run `mistl store folder-sync ls` for status, `mistl store sandbox export` to extract files",
+        sync.get("folder_name").and_then(Value::as_str).unwrap_or_default(),
+        sync.get("folder_id").and_then(Value::as_str).unwrap_or_default(),
+        folder_sync_destination(&sync),
+    )
+}
+
+fn render_folder_sync_ls(response: &Value) -> String {
+    let syncs = response.get("syncs").and_then(Value::as_array).cloned().unwrap_or_default();
+    if syncs.is_empty() {
+        return "no active folder syncs".to_string();
+    }
+    let mut lines = vec![format!("{} folder sync(s):", syncs.len())];
+    lines.extend(syncs.iter().map(|sync| {
+        let status = sync.get("status").and_then(Value::as_str).unwrap_or("synced");
+        let mut line = format!(
+            "  {} {:?} -> {} (room {}, status {status}, last sync {})",
+            sync.get("folder_id").and_then(Value::as_str).unwrap_or_default(),
+            sync.get("folder_name").and_then(Value::as_str).unwrap_or_default(),
+            folder_sync_destination(sync),
+            sync.get("room_id").and_then(Value::as_str).unwrap_or_default(),
+            sync.get("last_synced_at").and_then(Value::as_str).unwrap_or("never"),
+        );
+        if let Some(error) = sync.get("last_error").and_then(Value::as_str) {
+            line.push_str(&format!(" [error: {error}]"));
+        }
+        line
+    }));
+    lines.join("\n")
+}
+
+fn render_folder_share_start(response: &Value) -> String {
+    format!(
+        "sharing folder {} in room {} ({} file(s) published)\nshare link:\n{}",
+        response.get("folder_id").and_then(Value::as_str).unwrap_or_default(),
+        response.get("room_id").and_then(Value::as_str).unwrap_or_default(),
+        response.get("files_published").and_then(Value::as_u64).unwrap_or(0),
+        response.get("share_url").and_then(Value::as_str).unwrap_or_default(),
+    )
+}
+
+fn render_folder_share_ls(response: &Value) -> String {
+    let shares = response.get("shares").and_then(Value::as_array).cloned().unwrap_or_default();
+    if shares.is_empty() {
+        return "no shared folders".to_string();
+    }
+    let mut lines = vec![format!("{} shared folder(s):", shares.len())];
+    lines.extend(shares.iter().map(|share| {
+        format!(
+            "  {} {:?} from {} (room {}, last published {})",
+            share.get("folder_id").and_then(Value::as_str).unwrap_or_default(),
+            share.get("folder_name").and_then(Value::as_str).unwrap_or_default(),
+            share.get("local_dir").and_then(Value::as_str).unwrap_or_default(),
+            share.get("room_id").and_then(Value::as_str).unwrap_or_default(),
+            share.get("last_published_at").and_then(Value::as_str).unwrap_or("never"),
+        )
+    }));
+    lines.join("\n")
+}
+
+fn render_stopped(response: &Value) -> String {
+    if response.get("stopped").and_then(Value::as_bool).unwrap_or(false) {
+        "stopped".to_string()
+    } else {
+        "not found".to_string()
+    }
+}
+
+#[cfg(test)]
+mod store_render_tests {
+    use super::*;
+
+    #[test]
+    fn render_cid_extracts_the_cid_field() {
+        assert_eq!(render_cid(&json!({ "cid": "bafyabc", "name": "x", "size": 1 })), "bafyabc");
+    }
+
+    #[test]
+    fn render_get_formats_saved_line() {
+        let response = json!({ "name": "notes.txt", "size": 42, "output": "/tmp/notes.txt" });
+        assert_eq!(render_get(&response), "saved notes.txt (42 bytes) to /tmp/notes.txt");
+    }
+
+    #[test]
+    fn render_ls_lists_entries_tab_separated() {
+        let response = json!([
+            { "cid": "bafy1", "name": "a.txt", "size": 10, "stored_at": "2026-01-01T00:00:00Z" },
+            { "cid": "bafy2", "name": "b.txt", "size": 20, "stored_at": "2026-01-02T00:00:00Z" },
+        ]);
+        let rendered = render_ls(&response);
+        assert_eq!(
+            rendered,
+            "bafy1\ta.txt\t10 bytes\t2026-01-01T00:00:00Z\nbafy2\tb.txt\t20 bytes\t2026-01-02T00:00:00Z"
+        );
+    }
+
+    #[test]
+    fn render_ls_reports_empty_store() {
+        assert_eq!(render_ls(&json!([])), "(empty)");
+    }
+
+    #[test]
+    fn render_get_file_matches_tc_storage_format() {
+        let response = json!({
+            "name": "notes.txt",
+            "size": 42,
+            "checksum": "deadbeef",
+            "output": "/tmp/notes.txt",
+        });
+        // Primary stdout line matches tc-storage-cli's
+        // "%s\t%d bytes\t%s\n" exactly; the `output` field is only ever
+        // surfaced via a separate stderr note (not asserted here).
+        assert_eq!(render_get_file(&response), "notes.txt\t42 bytes\tdeadbeef");
+    }
+
+    #[test]
+    fn render_parse_link_matches_tc_storage_format() {
+        let response = json!({
+            "type": "file-share",
+            "room_id": "r",
+            "folder_id": "folder-1",
+            "file_id": "file-1",
+            "cid": "bafyabc",
+        });
+        assert_eq!(
+            render_parse_link(&response),
+            "type=file-share room=r folder=folder-1 file=file-1 cid=bafyabc"
+        );
+    }
+
+    #[test]
+    fn render_parse_link_handles_missing_fields_as_empty() {
+        let response = json!({ "type": "folder-share", "room_id": "r" });
+        assert_eq!(render_parse_link(&response), "type=folder-share room=r folder= file= cid=");
+    }
+
+    #[test]
+    fn render_sandbox_import_prints_bare_name() {
+        assert_eq!(render_sandbox_import(&json!({ "imported": "sub/name.txt" })), "sub/name.txt");
+    }
+
+    #[test]
+    fn render_sandbox_ls_lists_one_per_line() {
+        let response = json!({ "entries": ["a.txt", "sub/b.txt"] });
+        assert_eq!(render_sandbox_ls(&response), "a.txt\nsub/b.txt");
+    }
+
+    #[test]
+    fn render_sandbox_rm_prints_removed_path() {
+        assert_eq!(render_sandbox_rm(&json!({ "removed": "sub/name.txt" })), "sub/name.txt");
+    }
+
+    #[test]
+    fn render_sandbox_export_formats_exported_line() {
+        let response = json!({ "name": "a.txt", "size": 5, "output": "/tmp/a.txt" });
+        assert_eq!(render_sandbox_export(&response), "exported a.txt (5 bytes) to /tmp/a.txt");
+    }
+
+    #[test]
+    fn render_connect_matches_tc_storage_format() {
+        let response = json!({
+            "node_id": "abc123",
+            "room": "tc-storage-cli",
+            "peers": ["peer1", "peer2"],
+        });
+        assert_eq!(
+            render_connect(&response),
+            "node=abc123 room=tc-storage-cli peers=2\npeer peer1\npeer peer2"
+        );
+    }
+
+    #[test]
+    fn render_connect_handles_zero_peers() {
+        let response = json!({ "node_id": "abc123", "room": "r", "peers": [] });
+        assert_eq!(render_connect(&response), "node=abc123 room=r peers=0");
+    }
+
+    #[test]
+    fn render_folder_get_matches_tc_storage_format() {
+        let response = json!({
+            "folder_name": "Fixture Folder",
+            "files": ["Fixture Folder/a.txt", "Fixture Folder/b.txt"],
+        });
+        assert_eq!(
+            render_folder_get(&response),
+            "folder: Fixture Folder\nsaved 2 file(s):\n  Fixture Folder/a.txt\n  Fixture Folder/b.txt"
+        );
+    }
+
+    #[test]
+    fn render_folder_sync_start_shows_the_sandbox_destination() {
+        let response = json!({
+            "sync": {
+                "folder_id": "folder-1",
+                "folder_name": "Fixture Folder",
+                "local_dir": "C:\\Users\\testuser\\AppData\\Local\\mistl\\sandbox\\Fixture Folder",
+                "sandbox_dir": "Fixture Folder",
+            }
+        });
+        let rendered = render_folder_sync_start(&response);
+        assert!(rendered.contains("into sandbox/Fixture Folder"), "{rendered}");
+    }
+
+    #[test]
+    fn render_folder_sync_start_falls_back_to_local_dir_for_a_dir_override() {
+        let response = json!({
+            "sync": {
+                "folder_id": "folder-1",
+                "folder_name": "Fixture Folder",
+                "local_dir": "D:\\my-sync-target",
+                "sandbox_dir": "",
+            }
+        });
+        let rendered = render_folder_sync_start(&response);
+        assert!(rendered.contains("into D:\\my-sync-target"), "{rendered}");
+    }
+
+    #[test]
+    fn render_folder_sync_ls_shows_sandbox_destination_and_status() {
+        let response = json!({
+            "syncs": [{
+                "folder_id": "folder-1",
+                "folder_name": "Fixture Folder",
+                "local_dir": "C:\\data\\sandbox\\Fixture Folder",
+                "sandbox_dir": "Fixture Folder",
+                "room_id": "room-1",
+                "status": "synced",
+                "last_synced_at": "2026-07-09T00:00:00Z",
+            }]
+        });
+        let rendered = render_folder_sync_ls(&response);
+        assert!(rendered.contains("sandbox/Fixture Folder"), "{rendered}");
+        assert!(rendered.contains("status synced"), "{rendered}");
+    }
+
+    #[test]
+    fn render_folder_sync_ls_reports_errors() {
+        let response = json!({
+            "syncs": [{
+                "folder_id": "folder-1",
+                "folder_name": "Fixture Folder",
+                "local_dir": "C:\\data\\sandbox\\Fixture Folder",
+                "sandbox_dir": "Fixture Folder",
+                "room_id": "room-1",
+                "status": "error",
+                "last_synced_at": null,
+                "last_error": "owner offline",
+            }]
+        });
+        let rendered = render_folder_sync_ls(&response);
+        assert!(rendered.contains("[error: owner offline]"), "{rendered}");
+    }
 }
