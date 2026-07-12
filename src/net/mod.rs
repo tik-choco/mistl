@@ -15,9 +15,9 @@
 //!
 //! Most callers (mailbox, ai, stream relay) join once at service start and
 //! hold their room for the process lifetime, never calling [`leave_room`].
-//! Storage is the exception: it re-resolves its configured room on every
-//! command and calls [`leave_room`]/[`ensure_started`] to hop rooms live,
-//! so `storage.room_id` can change without a daemon restart.
+//! Storage is the exception: it re-resolves its configured rooms on every
+//! command and calls [`leave_room`]/[`ensure_started`] to reconcile live,
+//! so `storage.room_ids` can change without a daemon restart.
 //!
 //! Modules coexist on the wire by shape: each handler parses inbound bytes
 //! against its own schema and silently ignores what it can't parse

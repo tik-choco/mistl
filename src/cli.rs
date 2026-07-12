@@ -63,6 +63,11 @@ pub enum Command {
         #[command(subcommand)]
         action: AiAction,
     },
+    /// Job scheduler: run commands on a cron or interval schedule
+    Sched {
+        #[command(subcommand)]
+        action: SchedAction,
+    },
     /// Open the web dashboard in the default browser (starts the daemon if needed)
     Ui,
     /// Show a combined status overview (daemon, stream, AI)
@@ -212,12 +217,12 @@ pub enum StoreAction {
         #[command(subcommand)]
         action: StoreSandboxAction,
     },
-    /// Join the storage p2p room (if `storage.room_id` is configured) and
-    /// report connected peers (tc-storage-cli `connect` compatible); exits
-    /// non-zero if no peers are connected
+    /// Join the storage p2p room(s) (if `storage.room_ids` is configured)
+    /// and report connected peers (tc-storage-cli `connect` compatible);
+    /// exits non-zero if no peers are connected
     Connect {
-        /// Join this room instead of `storage.room_id` (additive: the store
-        /// can hold several rooms at once)
+        /// Join only this room instead of all of `storage.room_ids`
+        /// (additive: the store can hold several rooms at once)
         #[arg(long)]
         room: Option<String>,
     },
@@ -284,7 +289,8 @@ pub enum StoreFolderShareAction {
         /// Folder display name (defaults to the directory name)
         #[arg(long)]
         name: Option<String>,
-        /// Room to announce the share in (defaults to `storage.room_id`)
+        /// Room to announce the share in (defaults to the first
+        /// `storage.room_ids` entry)
         #[arg(long)]
         room: Option<String>,
     },
@@ -423,6 +429,82 @@ pub enum AiToggleAction {
     Stop,
 }
 
+#[derive(Subcommand)]
+pub enum SchedAction {
+    /// Create a new scheduled job
+    Add {
+        /// Job name
+        #[arg(long)]
+        name: String,
+        /// Schedule expression: 5- or 6-field cron (seconds field
+        /// optional), an `@every` interval (`@every 90m`, `@every 2d`,
+        /// `@every 1w Sun 21:00`, `@every 3d 09:30`), or a descriptor
+        /// (`@daily`, `@hourly`, `@weekly`, ...)
+        #[arg(long)]
+        schedule: String,
+        /// Shell command to run
+        #[arg(long)]
+        command: String,
+        /// Create the job disabled (jobs are enabled by default)
+        #[arg(long)]
+        disabled: bool,
+    },
+    /// List all scheduled jobs
+    Ls,
+    /// Update one or more fields of an existing job
+    Set {
+        /// Job id (e.g. job-042117)
+        id: String,
+        /// New name
+        #[arg(long)]
+        name: Option<String>,
+        /// New schedule expression (see `sched add --help` for the syntax)
+        #[arg(long)]
+        schedule: Option<String>,
+        /// New command
+        #[arg(long)]
+        command: Option<String>,
+    },
+    /// Remove a job
+    Rm {
+        /// Job id
+        id: String,
+    },
+    /// Enable a job so it runs on its schedule again
+    Enable {
+        /// Job id
+        id: String,
+    },
+    /// Disable a job without removing it
+    Disable {
+        /// Job id
+        id: String,
+    },
+    /// Run a job immediately, outside its schedule
+    Run {
+        /// Job id
+        id: String,
+    },
+    /// Show recent run history
+    Logs {
+        /// Only show runs for this job id
+        #[arg(long)]
+        id: Option<String>,
+        /// Max number of runs to show (default 20)
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Compute upcoming run times for a schedule expression, without
+    /// creating a job
+    Next {
+        /// Schedule expression (see `sched add --help` for the syntax)
+        expr: String,
+        /// Number of upcoming times to show (default 5)
+        #[arg(short, long)]
+        n: Option<usize>,
+    },
+}
+
 /// Dispatch a parsed CLI invocation: either run the daemon, or act as a
 /// client sending one request to the running daemon over local IPC.
 pub fn dispatch(cli: Cli) -> Result<()> {
@@ -453,11 +535,19 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         Command::Store { json, action } => match action {
             StoreAction::Put { path } => {
                 let abs = canonicalize_or_die(&path);
-                store_call("store.put", json!({ "path": abs.to_string_lossy() }), json, render_cid)
+                store_call(
+                    "store.put",
+                    json!({ "path": abs.to_string_lossy() }),
+                    json,
+                    render_cid,
+                )
             }
-            StoreAction::Get { id, output } => {
-                store_call("store.get", json!({ "id": id, "output": output }), json, render_get)
-            }
+            StoreAction::Get { id, output } => store_call(
+                "store.get",
+                json!({ "id": id, "output": output }),
+                json,
+                render_get,
+            ),
             StoreAction::Ls => store_call("store.ls", json!({}), json, render_ls),
             StoreAction::PutFile { path, passphrase } => {
                 let abs = canonicalize_or_die(&path);
@@ -468,15 +558,22 @@ pub fn dispatch(cli: Cli) -> Result<()> {
                     render_cid,
                 )
             }
-            StoreAction::GetFile { id, passphrase, output } => store_call(
+            StoreAction::GetFile {
+                id,
+                passphrase,
+                output,
+            } => store_call(
                 "store.get-file",
                 json!({ "cid": id, "passphrase": passphrase, "output": output }),
                 json,
                 render_get_file,
             ),
-            StoreAction::ParseLink { url } => {
-                store_call("store.parse-link", json!({ "url": url }), json, render_parse_link)
-            }
+            StoreAction::ParseLink { url } => store_call(
+                "store.parse-link",
+                json!({ "url": url }),
+                json,
+                render_parse_link,
+            ),
             StoreAction::FetchShare { url, output } => store_call(
                 "store.fetch-share",
                 json!({ "url": url, "output": output }),
@@ -524,9 +621,12 @@ pub fn dispatch(cli: Cli) -> Result<()> {
                 ),
             },
             StoreAction::FolderShare { action } => match action {
-                StoreFolderShareAction::Start { path, passphrase, name, room } => {
-                    store_folder_share_start(path, passphrase, name, room, json)
-                }
+                StoreFolderShareAction::Start {
+                    path,
+                    passphrase,
+                    name,
+                    room,
+                } => store_folder_share_start(path, passphrase, name, room, json),
                 StoreFolderShareAction::Ls => store_call(
                     "store.folder-share.ls",
                     json!({}),
@@ -555,7 +655,13 @@ pub fn dispatch(cli: Cli) -> Result<()> {
                 }
                 Ok(())
             }
-            StreamAction::Selftest { audio, width, height, fps, seconds } => {
+            StreamAction::Selftest {
+                audio,
+                width,
+                height,
+                fps,
+                seconds,
+            } => {
                 let response = request(
                     "stream.selftest.start",
                     json!({ "audio": audio, "width": width, "height": height, "fps": fps, "seconds": seconds }),
@@ -620,6 +726,55 @@ pub fn dispatch(cli: Cli) -> Result<()> {
                 AiToggleAction::Stop => client_call("ai.serve.stop", json!({})),
             },
         },
+        Command::Sched { action } => match action {
+            SchedAction::Add {
+                name,
+                schedule,
+                command,
+                disabled,
+            } => client_call(
+                "sched.add",
+                json!({ "name": name, "schedule": schedule, "command": command, "enabled": !disabled }),
+            ),
+            SchedAction::Ls => {
+                let response = request("sched.ls", json!({}))?;
+                println!("{}", render_sched_ls(&response));
+                Ok(())
+            }
+            SchedAction::Set {
+                id,
+                name,
+                schedule,
+                command,
+            } => client_call(
+                "sched.set",
+                json!({ "id": id, "name": name, "schedule": schedule, "command": command }),
+            ),
+            SchedAction::Rm { id } => client_call("sched.rm", json!({ "id": id })),
+            SchedAction::Enable { id } => {
+                client_call("sched.enable", json!({ "id": id, "enabled": true }))
+            }
+            SchedAction::Disable { id } => {
+                client_call("sched.enable", json!({ "id": id, "enabled": false }))
+            }
+            SchedAction::Run { id } => client_call("sched.run", json!({ "id": id })),
+            SchedAction::Logs { id, limit } => {
+                let response = request(
+                    "sched.logs",
+                    json!({ "id": id, "limit": limit.unwrap_or(20) }),
+                )?;
+                println!("{}", render_sched_logs(&response));
+                Ok(())
+            }
+            SchedAction::Next { expr, n } => {
+                let response = request(
+                    "sched.next",
+                    json!({ "schedule": expr, "n": n.unwrap_or(5) }),
+                )?;
+                println!("{}", render_sched_next(&response));
+                Ok(())
+            }
+        },
         Command::Ui => open_dashboard(),
         Command::Status => status_overview(),
         Command::Config { action } => match action {
@@ -650,10 +805,16 @@ pub fn dispatch(cli: Cli) -> Result<()> {
                 let response = request("update.check", json!({}))?;
                 println!("{}", serde_json::to_string_pretty(&response)?);
                 if response.get("update_available").and_then(Value::as_bool) == Some(true) {
-                    let latest = response.get("latest").and_then(Value::as_str).unwrap_or("?");
+                    let latest = response
+                        .get("latest")
+                        .and_then(Value::as_str)
+                        .unwrap_or("?");
                     println!();
                     if response.get("asset_available").and_then(Value::as_bool) == Some(false) {
-                        let notes = response.get("notes_url").and_then(Value::as_str).unwrap_or("");
+                        let notes = response
+                            .get("notes_url")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
                         println!("  v{latest} is available but has no binary for this platform.");
                         println!("  Download it manually: {notes}");
                     } else {
@@ -826,7 +987,12 @@ fn canonicalize_or_die(path: &str) -> std::path::PathBuf {
 /// Send a `store.*` request and print either pretty JSON (`--json`) or a
 /// human-rendered line built by `render` from the response. Errors (from
 /// the request itself, or from JSON formatting) go through [`store_error`].
-fn store_call(cmd: &str, args: Value, json: bool, render: impl FnOnce(&Value) -> String) -> Result<()> {
+fn store_call(
+    cmd: &str,
+    args: Value,
+    json: bool,
+    render: impl FnOnce(&Value) -> String,
+) -> Result<()> {
     let response = match request(cmd, args) {
         Ok(response) => response,
         Err(error) => store_error(error),
@@ -866,7 +1032,10 @@ fn store_connect(room: Option<String>, json: bool) -> Result<()> {
     } else {
         println!("{}", render_connect(&response));
     }
-    let peer_count = response.get("peers").and_then(Value::as_array).map_or(0, Vec::len);
+    let peer_count = response
+        .get("peers")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
     if peer_count == 0 {
         store_error(anyhow::anyhow!("no peers connected"));
     }
@@ -902,13 +1071,26 @@ fn store_folder_get(url: String, json: bool) -> Result<()> {
 }
 
 fn render_cid(response: &Value) -> String {
-    response.get("cid").and_then(Value::as_str).unwrap_or_default().to_string()
+    response
+        .get("cid")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
 }
 
 fn render_get(response: &Value) -> String {
-    let name = response.get("name").and_then(Value::as_str).unwrap_or_default();
-    let size = response.get("size").and_then(Value::as_u64).unwrap_or_default();
-    let output = response.get("output").and_then(Value::as_str).unwrap_or_default();
+    let name = response
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let size = response
+        .get("size")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let output = response
+        .get("output")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     format!("saved {name} ({size} bytes) to {output}")
 }
 
@@ -921,9 +1103,18 @@ fn render_ls(response: &Value) -> String {
         .iter()
         .map(|entry| {
             let cid = entry.get("cid").and_then(Value::as_str).unwrap_or_default();
-            let name = entry.get("name").and_then(Value::as_str).unwrap_or_default();
-            let size = entry.get("size").and_then(Value::as_u64).unwrap_or_default();
-            let stored_at = entry.get("stored_at").and_then(Value::as_str).unwrap_or_default();
+            let name = entry
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let size = entry
+                .get("size")
+                .and_then(Value::as_u64)
+                .unwrap_or_default();
+            let stored_at = entry
+                .get("stored_at")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             format!("{cid}\t{name}\t{size} bytes\t{stored_at}")
         })
         .collect::<Vec<_>>()
@@ -936,9 +1127,18 @@ fn render_ls(response: &Value) -> String {
 /// materializes the file -- noted separately on stderr so the primary
 /// stdout line stays script-compatible with tc-storage's.
 fn render_get_file(response: &Value) -> String {
-    let name = response.get("name").and_then(Value::as_str).unwrap_or_default();
-    let size = response.get("size").and_then(Value::as_u64).unwrap_or_default();
-    let checksum = response.get("checksum").and_then(Value::as_str).unwrap_or_default();
+    let name = response
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let size = response
+        .get("size")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let checksum = response
+        .get("checksum")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     if let Some(output) = response.get("output").and_then(Value::as_str) {
         eprintln!("saved to {output}");
     }
@@ -954,7 +1154,12 @@ fn render_get_file(response: &Value) -> String {
 /// Matches tc-storage-cli's `parse-link` line exactly
 /// (`"type=%s room=%s folder=%s file=%s cid=%s\n"`).
 fn render_parse_link(response: &Value) -> String {
-    let field = |key: &str| response.get(key).and_then(Value::as_str).unwrap_or_default();
+    let field = |key: &str| {
+        response
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+    };
     format!(
         "type={} room={} folder={} file={} cid={}",
         field("type"),
@@ -966,7 +1171,11 @@ fn render_parse_link(response: &Value) -> String {
 }
 
 fn render_sandbox_import(response: &Value) -> String {
-    response.get("imported").and_then(Value::as_str).unwrap_or_default().to_string()
+    response
+        .get("imported")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
 }
 
 fn render_sandbox_ls(response: &Value) -> String {
@@ -981,34 +1190,97 @@ fn render_sandbox_ls(response: &Value) -> String {
 }
 
 fn render_sandbox_rm(response: &Value) -> String {
-    response.get("removed").and_then(Value::as_str).unwrap_or_default().to_string()
+    response
+        .get("removed")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
 }
 
 fn render_sandbox_export(response: &Value) -> String {
-    let name = response.get("name").and_then(Value::as_str).unwrap_or_default();
-    let size = response.get("size").and_then(Value::as_u64).unwrap_or_default();
-    let output = response.get("output").and_then(Value::as_str).unwrap_or_default();
+    let name = response
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let size = response
+        .get("size")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let output = response
+        .get("output")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     format!("exported {name} ({size} bytes) to {output}")
 }
 
 /// Matches tc-storage-cli's `connect` output
-/// (`"node=%s room=%s peers=%d\n"` + one `"peer %s"` line each).
+/// (`"node=%s room=%s peers=%d\n"` + one `"peer %s"` line each) when the
+/// response carries a single `room` -- i.e. an explicit `--room` was given,
+/// or exactly one room was involved (one `storage.room_ids` entry
+/// configured, or none). This single-room shape is frozen: it is the
+/// contract tc-storage-cli's own `connect` output must keep matching byte
+/// for byte, so existing scripts parsing it don't break now that the store
+/// can join several rooms at once.
+///
+/// When there is no single `room` (zero or several rooms joined, none of
+/// them singled out), the response instead carries a `rooms` array and this
+/// renders `"node=%s rooms=%s,%s,... peers=%d\n"` (comma-joined, in the
+/// order the daemon returned them -- sorted), followed by the same `peer
+/// %s` lines.
 fn render_connect(response: &Value) -> String {
-    let node_id = response.get("node_id").and_then(Value::as_str).unwrap_or_default();
-    let room = response.get("room").and_then(Value::as_str).unwrap_or_default();
-    let peers = response.get("peers").and_then(Value::as_array).cloned().unwrap_or_default();
-    let mut lines = vec![format!("node={node_id} room={room} peers={}", peers.len())];
-    lines.extend(peers.iter().filter_map(Value::as_str).map(|id| format!("peer {id}")));
+    let node_id = response
+        .get("node_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let peers = response
+        .get("peers")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let header = if let Some(room) = response.get("room").and_then(Value::as_str) {
+        format!("node={node_id} room={room} peers={}", peers.len())
+    } else if let Some(rooms) = response.get("rooms").and_then(Value::as_array) {
+        let rooms = rooms
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("node={node_id} rooms={rooms} peers={}", peers.len())
+    } else {
+        format!("node={node_id} room= peers={}", peers.len())
+    };
+    let mut lines = vec![header];
+    lines.extend(
+        peers
+            .iter()
+            .filter_map(Value::as_str)
+            .map(|id| format!("peer {id}")),
+    );
     lines.join("\n")
 }
 
 /// Matches tc-storage-cli's `folder-get` output
 /// (`"folder: %s\nsaved %d file(s):\n"` + one `"  %s"` line each).
 fn render_folder_get(response: &Value) -> String {
-    let folder_name = response.get("folder_name").and_then(Value::as_str).unwrap_or_default();
-    let files = response.get("files").and_then(Value::as_array).cloned().unwrap_or_default();
-    let mut lines = vec![format!("folder: {folder_name}"), format!("saved {} file(s):", files.len())];
-    lines.extend(files.iter().filter_map(Value::as_str).map(|path| format!("  {path}")));
+    let folder_name = response
+        .get("folder_name")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let files = response
+        .get("files")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut lines = vec![
+        format!("folder: {folder_name}"),
+        format!("saved {} file(s):", files.len()),
+    ];
+    lines.extend(
+        files
+            .iter()
+            .filter_map(Value::as_str)
+            .map(|path| format!("  {path}")),
+    );
     lines.join("\n")
 }
 
@@ -1060,7 +1332,11 @@ fn flush_progress(response: &Value) {
 fn folder_sync_destination(sync: &Value) -> String {
     match sync.get("sandbox_dir").and_then(Value::as_str) {
         Some(sandbox_dir) if !sandbox_dir.is_empty() => format!("sandbox/{sandbox_dir}"),
-        _ => sync.get("local_dir").and_then(Value::as_str).unwrap_or_default().to_string(),
+        _ => sync
+            .get("local_dir")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
     }
 }
 
@@ -1074,27 +1350,46 @@ fn render_folder_sync_start(response: &Value) -> String {
     format!(
         "registered sync for folder {:?} ({}) into {}\nconnecting and fetching in the background \
          -- run `mistl store folder-sync ls` for status, `mistl store sandbox export` to extract files",
-        sync.get("folder_name").and_then(Value::as_str).unwrap_or_default(),
-        sync.get("folder_id").and_then(Value::as_str).unwrap_or_default(),
+        sync.get("folder_name")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        sync.get("folder_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
         folder_sync_destination(&sync),
     )
 }
 
 fn render_folder_sync_ls(response: &Value) -> String {
-    let syncs = response.get("syncs").and_then(Value::as_array).cloned().unwrap_or_default();
+    let syncs = response
+        .get("syncs")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     if syncs.is_empty() {
         return "no active folder syncs".to_string();
     }
     let mut lines = vec![format!("{} folder sync(s):", syncs.len())];
     lines.extend(syncs.iter().map(|sync| {
-        let status = sync.get("status").and_then(Value::as_str).unwrap_or("synced");
+        let status = sync
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("synced");
         let mut line = format!(
             "  {} {:?} -> {} (room {}, status {status}, last sync {})",
-            sync.get("folder_id").and_then(Value::as_str).unwrap_or_default(),
-            sync.get("folder_name").and_then(Value::as_str).unwrap_or_default(),
+            sync.get("folder_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            sync.get("folder_name")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
             folder_sync_destination(sync),
-            sync.get("room_id").and_then(Value::as_str).unwrap_or_default(),
-            sync.get("last_synced_at").and_then(Value::as_str).unwrap_or("never"),
+            sync.get("room_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            sync.get("last_synced_at")
+                .and_then(Value::as_str)
+                .unwrap_or("never"),
         );
         if let Some(error) = sync.get("last_error").and_then(Value::as_str) {
             line.push_str(&format!(" [error: {error}]"));
@@ -1107,15 +1402,31 @@ fn render_folder_sync_ls(response: &Value) -> String {
 fn render_folder_share_start(response: &Value) -> String {
     format!(
         "sharing folder {} in room {} ({} file(s) published)\nshare link:\n{}",
-        response.get("folder_id").and_then(Value::as_str).unwrap_or_default(),
-        response.get("room_id").and_then(Value::as_str).unwrap_or_default(),
-        response.get("files_published").and_then(Value::as_u64).unwrap_or(0),
-        response.get("share_url").and_then(Value::as_str).unwrap_or_default(),
+        response
+            .get("folder_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        response
+            .get("room_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        response
+            .get("files_published")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        response
+            .get("share_url")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
     )
 }
 
 fn render_folder_share_ls(response: &Value) -> String {
-    let shares = response.get("shares").and_then(Value::as_array).cloned().unwrap_or_default();
+    let shares = response
+        .get("shares")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     if shares.is_empty() {
         return "no shared folders".to_string();
     }
@@ -1123,22 +1434,171 @@ fn render_folder_share_ls(response: &Value) -> String {
     lines.extend(shares.iter().map(|share| {
         format!(
             "  {} {:?} from {} (room {}, last published {})",
-            share.get("folder_id").and_then(Value::as_str).unwrap_or_default(),
-            share.get("folder_name").and_then(Value::as_str).unwrap_or_default(),
-            share.get("local_dir").and_then(Value::as_str).unwrap_or_default(),
-            share.get("room_id").and_then(Value::as_str).unwrap_or_default(),
-            share.get("last_published_at").and_then(Value::as_str).unwrap_or("never"),
+            share
+                .get("folder_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            share
+                .get("folder_name")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            share
+                .get("local_dir")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            share
+                .get("room_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            share
+                .get("last_published_at")
+                .and_then(Value::as_str)
+                .unwrap_or("never"),
         )
     }));
     lines.join("\n")
 }
 
 fn render_stopped(response: &Value) -> String {
-    if response.get("stopped").and_then(Value::as_bool).unwrap_or(false) {
+    if response
+        .get("stopped")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
         "stopped".to_string()
     } else {
         "not found".to_string()
     }
+}
+
+// -- `mistl sched`: human-readable job/run rendering ----------------------
+
+/// `mistl sched ls`: one row per job, tab-separated, sorted by name (as
+/// returned by `sched.ls`). `next_run` prints "-" when null (job disabled or
+/// otherwise not scheduled).
+fn render_sched_ls(response: &Value) -> String {
+    let jobs = response
+        .get("jobs")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if jobs.is_empty() {
+        return "no scheduled jobs".to_string();
+    }
+    let mut lines = vec!["ID\tNAME\tENABLED\tSCHEDULE\tNEXT RUN".to_string()];
+    lines.extend(jobs.iter().map(|job| {
+        let id = job.get("id").and_then(Value::as_str).unwrap_or_default();
+        let name = job.get("name").and_then(Value::as_str).unwrap_or_default();
+        let enabled = job.get("enabled").and_then(Value::as_bool).unwrap_or(false);
+        let schedule = job
+            .get("schedule")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let next_run = job.get("next_run").and_then(Value::as_str).unwrap_or("-");
+        format!("{id}\t{name}\t{enabled}\t{schedule}\t{next_run}")
+    }));
+    lines.join("\n")
+}
+
+/// `mistl sched logs`: one block per run (newest first, as returned by
+/// `sched.logs`), separated by a blank line.
+fn render_sched_logs(response: &Value) -> String {
+    let runs = response
+        .get("runs")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if runs.is_empty() {
+        return "no runs recorded".to_string();
+    }
+    runs.iter()
+        .map(render_sched_run)
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Render one run record: a header line (start time, job name, OK/FAIL plus
+/// exit code, duration if both timestamps parse) followed by its output,
+/// indented and capped at [`SCHED_LOG_OUTPUT_LINES`] lines.
+fn render_sched_run(run: &Value) -> String {
+    let job_name = run
+        .get("job_name")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let started_at = run
+        .get("started_at")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let ended_at = run.get("ended_at").and_then(Value::as_str);
+    let ok = run.get("ok").and_then(Value::as_bool).unwrap_or(false);
+    let exit_code = run.get("exit_code").and_then(Value::as_i64);
+    let outcome = if ok {
+        "OK".to_string()
+    } else {
+        match exit_code {
+            Some(code) => format!("FAIL({code})"),
+            None => "FAIL".to_string(),
+        }
+    };
+    let mut header = format!("{started_at}  {job_name}  {outcome}");
+    if let Some(ended_at) = ended_at
+        && let Some(duration) = sched_duration(started_at, ended_at)
+    {
+        header.push_str(&format!("  ({duration})"));
+    }
+    let output = run
+        .get("output")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let mut lines = vec![header];
+    lines.extend(
+        truncate_sched_output(output)
+            .into_iter()
+            .map(|line| format!("    {line}")),
+    );
+    lines.join("\n")
+}
+
+/// Elapsed wall-clock time between two RFC3339 timestamps, formatted to one
+/// decimal place of seconds, or `None` if either fails to parse.
+fn sched_duration(started_at: &str, ended_at: &str) -> Option<String> {
+    let started = chrono::DateTime::parse_from_rfc3339(started_at).ok()?;
+    let ended = chrono::DateTime::parse_from_rfc3339(ended_at).ok()?;
+    let seconds = (ended - started).num_milliseconds().max(0) as f64 / 1000.0;
+    Some(format!("{seconds:.1}s"))
+}
+
+/// Max output lines shown per run in `sched logs` before truncating.
+const SCHED_LOG_OUTPUT_LINES: usize = 10;
+
+/// Split `output` into lines, capping at [`SCHED_LOG_OUTPUT_LINES`] and
+/// appending a "… (truncated)" marker line if more remain.
+fn truncate_sched_output(output: &str) -> Vec<String> {
+    if output.is_empty() {
+        return Vec::new();
+    }
+    let lines: Vec<&str> = output.lines().collect();
+    if lines.len() <= SCHED_LOG_OUTPUT_LINES {
+        return lines.into_iter().map(str::to_string).collect();
+    }
+    let mut truncated: Vec<String> = lines[..SCHED_LOG_OUTPUT_LINES]
+        .iter()
+        .map(|line| line.to_string())
+        .collect();
+    truncated.push("… (truncated)".to_string());
+    truncated
+}
+
+/// `mistl sched next`: one upcoming RFC3339 time per line.
+fn render_sched_next(response: &Value) -> String {
+    response
+        .get("times")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(test)]
@@ -1147,13 +1607,19 @@ mod store_render_tests {
 
     #[test]
     fn render_cid_extracts_the_cid_field() {
-        assert_eq!(render_cid(&json!({ "cid": "bafyabc", "name": "x", "size": 1 })), "bafyabc");
+        assert_eq!(
+            render_cid(&json!({ "cid": "bafyabc", "name": "x", "size": 1 })),
+            "bafyabc"
+        );
     }
 
     #[test]
     fn render_get_formats_saved_line() {
         let response = json!({ "name": "notes.txt", "size": 42, "output": "/tmp/notes.txt" });
-        assert_eq!(render_get(&response), "saved notes.txt (42 bytes) to /tmp/notes.txt");
+        assert_eq!(
+            render_get(&response),
+            "saved notes.txt (42 bytes) to /tmp/notes.txt"
+        );
     }
 
     #[test]
@@ -1206,12 +1672,18 @@ mod store_render_tests {
     #[test]
     fn render_parse_link_handles_missing_fields_as_empty() {
         let response = json!({ "type": "folder-share", "room_id": "r" });
-        assert_eq!(render_parse_link(&response), "type=folder-share room=r folder= file= cid=");
+        assert_eq!(
+            render_parse_link(&response),
+            "type=folder-share room=r folder= file= cid="
+        );
     }
 
     #[test]
     fn render_sandbox_import_prints_bare_name() {
-        assert_eq!(render_sandbox_import(&json!({ "imported": "sub/name.txt" })), "sub/name.txt");
+        assert_eq!(
+            render_sandbox_import(&json!({ "imported": "sub/name.txt" })),
+            "sub/name.txt"
+        );
     }
 
     #[test]
@@ -1222,13 +1694,19 @@ mod store_render_tests {
 
     #[test]
     fn render_sandbox_rm_prints_removed_path() {
-        assert_eq!(render_sandbox_rm(&json!({ "removed": "sub/name.txt" })), "sub/name.txt");
+        assert_eq!(
+            render_sandbox_rm(&json!({ "removed": "sub/name.txt" })),
+            "sub/name.txt"
+        );
     }
 
     #[test]
     fn render_sandbox_export_formats_exported_line() {
         let response = json!({ "name": "a.txt", "size": 5, "output": "/tmp/a.txt" });
-        assert_eq!(render_sandbox_export(&response), "exported a.txt (5 bytes) to /tmp/a.txt");
+        assert_eq!(
+            render_sandbox_export(&response),
+            "exported a.txt (5 bytes) to /tmp/a.txt"
+        );
     }
 
     #[test]
@@ -1248,6 +1726,27 @@ mod store_render_tests {
     fn render_connect_handles_zero_peers() {
         let response = json!({ "node_id": "abc123", "room": "r", "peers": [] });
         assert_eq!(render_connect(&response), "node=abc123 room=r peers=0");
+    }
+
+    #[test]
+    fn render_connect_renders_multiple_rooms_comma_joined() {
+        // No `room` field: several `storage.room_ids` joined at once, none
+        // singled out by an explicit `--room`.
+        let response = json!({
+            "node_id": "abc123",
+            "rooms": ["a", "b"],
+            "peers": ["peer1"],
+        });
+        assert_eq!(
+            render_connect(&response),
+            "node=abc123 rooms=a,b peers=1\npeer peer1"
+        );
+    }
+
+    #[test]
+    fn render_connect_renders_multiple_rooms_with_zero_peers() {
+        let response = json!({ "node_id": "abc123", "rooms": ["a", "b"], "peers": [] });
+        assert_eq!(render_connect(&response), "node=abc123 rooms=a,b peers=0");
     }
 
     #[test]
@@ -1273,7 +1772,10 @@ mod store_render_tests {
             }
         });
         let rendered = render_folder_sync_start(&response);
-        assert!(rendered.contains("into sandbox/Fixture Folder"), "{rendered}");
+        assert!(
+            rendered.contains("into sandbox/Fixture Folder"),
+            "{rendered}"
+        );
     }
 
     #[test]
@@ -1324,5 +1826,158 @@ mod store_render_tests {
         });
         let rendered = render_folder_sync_ls(&response);
         assert!(rendered.contains("[error: owner offline]"), "{rendered}");
+    }
+}
+
+#[cfg(test)]
+mod sched_render_tests {
+    use super::*;
+
+    #[test]
+    fn render_sched_ls_reports_no_jobs() {
+        assert_eq!(render_sched_ls(&json!({ "jobs": [] })), "no scheduled jobs");
+    }
+
+    #[test]
+    fn render_sched_ls_lists_jobs_with_next_run() {
+        let response = json!({
+            "jobs": [{
+                "id": "job-042117",
+                "name": "backup",
+                "schedule": "@daily",
+                "command": "backup.sh",
+                "enabled": true,
+                "created_at": "2026-07-01T00:00:00Z",
+                "updated_at": "2026-07-01T00:00:00Z",
+                "next_run": "2026-07-11T00:00:00Z",
+            }]
+        });
+        let rendered = render_sched_ls(&response);
+        assert_eq!(
+            rendered,
+            "ID\tNAME\tENABLED\tSCHEDULE\tNEXT RUN\n\
+             job-042117\tbackup\ttrue\t@daily\t2026-07-11T00:00:00Z"
+        );
+    }
+
+    #[test]
+    fn render_sched_ls_shows_dash_for_null_next_run() {
+        let response = json!({
+            "jobs": [{
+                "id": "job-1",
+                "name": "disabled-job",
+                "schedule": "@daily",
+                "command": "x",
+                "enabled": false,
+                "created_at": "2026-07-01T00:00:00Z",
+                "updated_at": "2026-07-01T00:00:00Z",
+                "next_run": null,
+            }]
+        });
+        let rendered = render_sched_ls(&response);
+        assert!(
+            rendered.ends_with("job-1\tdisabled-job\tfalse\t@daily\t-"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn render_sched_logs_reports_no_runs() {
+        assert_eq!(
+            render_sched_logs(&json!({ "runs": [] })),
+            "no runs recorded"
+        );
+    }
+
+    #[test]
+    fn render_sched_logs_formats_a_successful_run_with_duration() {
+        let response = json!({
+            "runs": [{
+                "job_id": "job-1",
+                "job_name": "backup",
+                "started_at": "2026-07-10T00:00:00Z",
+                "ended_at": "2026-07-10T00:00:02Z",
+                "exit_code": 0,
+                "ok": true,
+                "output": "done\n",
+            }]
+        });
+        let rendered = render_sched_logs(&response);
+        assert!(
+            rendered.starts_with("2026-07-10T00:00:00Z  backup  OK  (2.0s)"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("    done"), "{rendered}");
+    }
+
+    #[test]
+    fn render_sched_logs_formats_a_failed_run_with_exit_code() {
+        let response = json!({
+            "runs": [{
+                "job_id": "job-1",
+                "job_name": "backup",
+                "started_at": "2026-07-10T00:00:00Z",
+                "ended_at": "2026-07-10T00:00:01Z",
+                "exit_code": 1,
+                "ok": false,
+                "output": "error: disk full\n",
+            }]
+        });
+        let rendered = render_sched_logs(&response);
+        assert!(rendered.contains("FAIL(1)"), "{rendered}");
+    }
+
+    #[test]
+    fn render_sched_logs_truncates_long_output() {
+        let output = (1..=15)
+            .map(|n| format!("line{n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let response = json!({
+            "runs": [{
+                "job_id": "job-1",
+                "job_name": "chatty",
+                "started_at": "2026-07-10T00:00:00Z",
+                "ended_at": "2026-07-10T00:00:01Z",
+                "exit_code": 0,
+                "ok": true,
+                "output": output,
+            }]
+        });
+        let rendered = render_sched_logs(&response);
+        assert!(rendered.contains("line10"), "{rendered}");
+        assert!(!rendered.contains("line11"), "{rendered}");
+        assert!(rendered.contains("… (truncated)"), "{rendered}");
+    }
+
+    #[test]
+    fn render_sched_logs_handles_missing_ended_at_without_a_duration() {
+        let response = json!({
+            "runs": [{
+                "job_id": "job-1",
+                "job_name": "still-running",
+                "started_at": "2026-07-10T00:00:00Z",
+                "ended_at": null,
+                "exit_code": null,
+                "ok": false,
+                "output": "",
+            }]
+        });
+        let rendered = render_sched_logs(&response);
+        assert_eq!(rendered, "2026-07-10T00:00:00Z  still-running  FAIL");
+    }
+
+    #[test]
+    fn render_sched_next_lists_one_time_per_line() {
+        let response = json!({ "times": ["2026-07-11T00:00:00Z", "2026-07-12T00:00:00Z"] });
+        assert_eq!(
+            render_sched_next(&response),
+            "2026-07-11T00:00:00Z\n2026-07-12T00:00:00Z"
+        );
+    }
+
+    #[test]
+    fn render_sched_next_handles_empty_times() {
+        assert_eq!(render_sched_next(&json!({ "times": [] })), "");
     }
 }
