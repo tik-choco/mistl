@@ -618,6 +618,78 @@
   }
   .toast .msg { flex: 1; word-break: break-word; }
 
+  /* ---- generic modal overlay (currently only the store export-dir folder
+     picker uses this, but kept unscoped in case another panel needs a
+     modal later) ---- */
+  .modal-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 200;
+    background: rgba(10, 12, 18, 0.45);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+  .modal-overlay[hidden] { display: none; }
+  .modal-panel {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    width: 100%;
+    max-width: 480px;
+    max-height: min(560px, 84vh);
+    display: flex;
+    flex-direction: column;
+    padding: 16px;
+    gap: 10px;
+  }
+  .modal-header { display: flex; align-items: center; gap: 8px; }
+  .modal-header h3 { margin: 0; font-size: 14px; flex: 1; }
+  .modal-close {
+    background: none;
+    border: none;
+    color: var(--text-faint);
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 2px 4px;
+  }
+  .modal-close:hover { color: var(--text); }
+  .store-picker-path {
+    font-size: 12px;
+    color: var(--text-dim);
+    background: var(--bg-alt);
+    border-radius: 6px;
+    padding: 6px 8px;
+    overflow-wrap: anywhere;
+  }
+  .store-picker-roots { flex-wrap: wrap; }
+  .store-picker-roots button, #store-picker-up { font-size: 11.5px; padding: 4px 8px; }
+  .store-picker-list {
+    flex: 1;
+    min-height: 120px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    padding: 4px;
+  }
+  .store-picker-item {
+    text-align: left;
+    background: none;
+    border: none;
+    border-radius: 6px;
+    padding: 6px 8px;
+    font-size: 12.5px;
+    cursor: pointer;
+  }
+  .store-picker-item:hover { background: var(--bg-alt); color: var(--accent); }
+  .store-picker-actions { justify-content: flex-end; margin-top: 2px; }
+
   .muted { color: var(--text-faint); }
   .section-actions { display: flex; gap: 8px; margin-left: auto; }
   hr.sep { border: none; border-top: 1px solid var(--panel-border); margin: 4px 0; }
@@ -777,6 +849,12 @@
   .topo-strip-dot.state-connecting { background: var(--warn); }
   .topo-strip-dot.state-down { background: var(--err); }
   .topo-strip a { color: var(--accent); margin-left: auto; white-space: nowrap; }
+  /* Store strip can list several room ids (storage.room_ids) instead of the
+     single room mailbox/ai show, so each gets its own click-to-copy chip,
+     styled off .badge like .topology-room-chip on the full graph card. */
+  .topo-strip-room-chip { cursor: pointer; margin: 2px 4px 2px 0; }
+  .topo-strip-room-chip:hover { background: var(--accent-dim); color: var(--accent); }
+  .topo-strip-room-chip.not-joined { background: var(--warn-dim); color: var(--warn); }
 
   .info-hint {
     display: flex;
@@ -824,6 +902,37 @@
   .ai-provider-list, .ai-preset-list { display: flex; flex-direction: column; gap: 8px; }
   .ai-provider-row, .ai-preset-row { padding-bottom: 8px; border-bottom: 1px solid var(--panel-border); }
   .ai-provider-row:last-child, .ai-preset-row:last-child { border-bottom: none; padding-bottom: 0; }
+
+  /* ---- chip-style editor for "list" settings fields (mailbox.chat_rooms,
+     storage.room_ids) -- chips styled off .badge, each with its own remove
+     button, plus an add row below. ---- */
+  .chip-list-editor { display: flex; flex-direction: column; gap: 6px; flex: 1; min-width: 200px; }
+  .chip-list { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: var(--panel-border);
+    color: var(--text);
+    border-radius: 999px;
+    padding: 2px 4px 2px 10px;
+    font-size: 12px;
+  }
+  .chip-text { word-break: break-all; }
+  .chip-remove {
+    background: none;
+    border: none;
+    color: var(--text-faint);
+    cursor: pointer;
+    font-size: 13px;
+    line-height: 1;
+    border-radius: 50%;
+    width: 18px;
+    height: 18px;
+  }
+  .chip-remove:hover { background: var(--err-dim); color: var(--err); }
+  .chip-add-row { display: flex; gap: 6px; }
+  .chip-add-row input[type=text] { flex: 1; min-width: 120px; }
 
   /* ---- in-panel settings drawer (relocated settings sections) ---------- */
   .settings-drawer {
@@ -948,10 +1057,12 @@
   .store-save-form { margin: 6px 0 0; }
   .store-save-form input { width: 140px; }
   #panel-store p.muted { margin: 6px 0 10px; }
-  .store-sync-row { margin: 6px 0; font-size: 12.5px; }
-  .store-sync-row .muted { flex: 1; min-width: 0; overflow-wrap: anywhere; }
-  .store-sync-row .badge { flex: none; }
-  .store-sync-err { flex-basis: 100%; color: var(--err); }
+  /* ---- folder-sync table (#store-sync-table): one row per sync, with its
+     files[] expanded as extra <tr>s directly beneath when the chevron is
+     open -- see storeSyncOpenFolders in the JS for why file rows are simply
+     hidden/shown rather than being torn down and rebuilt. ---- */
+  .store-sync-folder-cell { display: flex; align-items: center; gap: 4px; }
+  .store-sync-err { display: block; color: var(--err); font-size: 11px; margin-top: 2px; overflow-wrap: anywhere; }
   .badge.status-synced { background: var(--ok-dim); color: var(--ok); }
   .badge.status-error { background: var(--err-dim); color: var(--err); }
   .badge.status-connecting { background: var(--warn-dim); color: var(--warn); animation: badge-pulse 1.4s ease-in-out infinite; }
@@ -959,11 +1070,10 @@
   @media (prefers-reduced-motion: reduce) {
     .badge.status-connecting { animation: none; }
   }
-  .store-export-dir-row { margin: 8px 0 12px; }
+  .store-export-dir-row { margin: 8px 0 2px; }
   .store-export-dir-row label { font-size: 12.5px; color: var(--text-dim); flex: none; }
   .store-export-dir-row input { flex: 1; min-width: 160px; }
-  .store-sync-entry { margin: 6px 0; }
-  .store-sync-entry .store-sync-row { margin: 0; }
+  .store-export-dir-note { font-size: 11.5px; margin: 2px 0 12px; overflow-wrap: anywhere; }
   .store-sync-toggle {
     flex: none;
     background: none;
@@ -978,9 +1088,28 @@
   .store-sync-toggle::after { content: "\25be"; }
   .store-sync-toggle:hover { color: var(--accent); }
   .store-sync-toggle.open { transform: rotate(-180deg); }
-  .store-sync-files { display: flex; flex-direction: column; gap: 2px; margin: 4px 0 4px 24px; }
-  .store-sync-file-row { font-size: 12px; gap: 8px; }
-  .store-sync-file-row .mono { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .store-sync-file-row td { background: var(--bg-alt); font-size: 12px; }
+  .store-sync-file-name { padding-left: 28px; }
+  .store-sync-file-name .mono { overflow-wrap: anywhere; }
+
+  /* ---- scheduler panel -------------------------------------------------- */
+  .sched-preview-list { display: flex; flex-direction: column; gap: 2px; margin: 4px 0 0; font-size: 12.5px; }
+  .sched-preview-error { color: var(--err); font-size: 12.5px; margin: 4px 0 0; }
+  .sched-run-output {
+    margin: 6px 0 0;
+    padding: 8px 10px;
+    max-height: 220px;
+    overflow: auto;
+    font-family: var(--mono);
+    font-size: 12px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    background: var(--bg-alt);
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+  }
+  #scheduler-runs-table details summary { cursor: pointer; font-size: 12.5px; color: var(--text-dim); }
+  #scheduler-runs-table details summary:hover { color: var(--accent); }
 
   /* ---- identity avatar (topbar) + profile avatar editor --------------- */
   .identity-avatar {
@@ -1122,6 +1251,7 @@
     <a href="#panel-ai"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3"/></svg><span data-i18n="nav.ai">AI</span></a>
     <a href="#panel-mailbox"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.5 5h13l3.5 7v7a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-7z"/></svg><span data-i18n="nav.mailbox">Mailbox</span></a>
     <a href="#panel-store"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.7 4 3 9 3s9-1.3 9-3V5"/><path d="M3 12c0 1.7 4 3 9 3s9-1.3 9-3"/></svg><span data-i18n="nav.store">Store</span></a>
+    <a href="#panel-scheduler"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l3 2"/><path d="M9 2h6"/></svg><span data-i18n="nav.scheduler">Scheduler</span></a>
     <a href="#panel-profile"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/></svg><span data-i18n="nav.profile">Profile</span></a>
     <a href="#panel-update"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m8 11 4 4 4-4"/><path d="M4 17v2a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-2"/></svg><span data-i18n="nav.update">Updates</span></a>
     <a href="#panel-settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg><span data-i18n="nav.settings">Settings</span></a>
@@ -1360,7 +1490,9 @@
     </h2>
     <div class="topo-strip" id="topo-strip-store">
       <span class="topo-strip-label" data-i18n="topoStrip.room">room</span>
-      <span class="topo-strip-note" data-i18n="topoStrip.storeLocal">local content store &mdash; no room</span>
+      <span class="mono" data-role="room">&mdash;</span>
+      <span class="topo-strip-note" data-role="note" hidden></span>
+      <span class="topo-strip-peers" data-role="peers"></span>
       <a href="#topology-card" data-i18n="topoStrip.viewFull">View full topology</a>
     </div>
     <div class="table-wrap">
@@ -1440,8 +1572,10 @@
     <div class="row store-export-dir-row">
       <label for="store-export-dir" data-i18n="store.sync.exportDirLabel">Extract to</label>
       <input type="text" id="store-export-dir" data-i18n-placeholder="store.sync.exportDirPlaceholder" placeholder="Defaults to your downloads folder" autocomplete="off">
+      <button type="button" id="btn-store-export-dir-browse" data-i18n="store.sync.browseBtn">Browse&hellip;</button>
       <button type="button" id="btn-store-export-dir-save" data-i18n="common.save">Save</button>
     </div>
+    <p class="muted store-export-dir-note" id="store-export-dir-note"></p>
     <form class="inline" id="store-sync-form">
       <div class="field" style="flex: 2;">
         <label for="store-sync-url" data-i18n="store.sync.urlLabel">Share link</label>
@@ -1449,7 +1583,19 @@
       </div>
       <button type="submit" class="primary" id="btn-store-sync" data-i18n="store.sync.startBtn">Start sync</button>
     </form>
-    <div id="store-sync-list"></div>
+    <div class="table-wrap" id="store-sync-list">
+      <table id="store-sync-table">
+        <thead><tr>
+          <th data-i18n="store.sync.col.folder">Folder</th>
+          <th data-i18n="store.sync.col.status">Status</th>
+          <th data-i18n="store.sync.col.files">Files</th>
+          <th data-i18n="store.sync.col.lastSynced">Last synced</th>
+          <th data-i18n="store.sync.col.actions">Actions</th>
+        </tr></thead>
+        <tbody id="store-sync-tbody"></tbody>
+      </table>
+      <div class="empty-note" id="store-sync-empty" data-i18n="store.sync.none">No active folder syncs.</div>
+    </div>
     <hr class="sep">
     <div class="topology-slot" id="topology-slot-store"></div>
     <details class="settings-drawer" id="settings-drawer-storage">
@@ -1459,6 +1605,70 @@
         <span class="drawer-chevron" aria-hidden="true"></span>
       </summary>
       <div class="settings-drawer-body" id="settings-drawer-body-storage"></div>
+    </details>
+  </section>
+
+  <section class="panel panel-span2" id="panel-scheduler">
+    <h2><span data-i18n="sched.title">Scheduler</span> <span class="spacer"></span>
+      <button data-role="refresh" data-target="scheduler" data-i18n="common.refresh">Refresh</button>
+    </h2>
+    <p class="muted" style="font-size: 12px;" data-i18n="sched.hint">Runs shell commands on this node on a recurring schedule. The scheduler must be enabled below (applies on daemon restart).</p>
+    <div class="table-wrap">
+      <table id="scheduler-table">
+        <thead><tr>
+          <th data-i18n="sched.col.name">Name</th>
+          <th data-i18n="sched.col.schedule">Schedule</th>
+          <th data-i18n="sched.col.nextRun">Next run</th>
+          <th data-i18n="sched.col.enabled">Enabled</th>
+          <th data-i18n="sched.col.actions">Actions</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="empty-note" id="scheduler-empty" data-i18n="sched.empty">No scheduled jobs yet.</div>
+    </div>
+    <hr class="sep">
+    <h3 id="scheduler-form-title" style="margin: 0 0 8px;" data-i18n="sched.form.addTitle">Add a job</h3>
+    <form class="inline" id="scheduler-form">
+      <div class="field" style="flex: 1; min-width: 160px;">
+        <label for="scheduler-name" data-i18n="sched.form.nameLabel">Name</label>
+        <input type="text" id="scheduler-name" autocomplete="off">
+      </div>
+      <div class="field" style="flex: 1; min-width: 200px;">
+        <label for="scheduler-schedule" data-i18n="sched.form.scheduleLabel">Schedule expression</label>
+        <input type="text" id="scheduler-schedule" data-i18n-placeholder="sched.form.schedulePlaceholder" placeholder="0 */5 * * * *" autocomplete="off">
+      </div>
+      <div class="field" style="flex: 2; min-width: 220px;">
+        <label for="scheduler-command" data-i18n="sched.form.commandLabel">Command</label>
+        <input type="text" id="scheduler-command" autocomplete="off">
+      </div>
+      <label class="checkline"><input type="checkbox" id="scheduler-enabled-input" checked> <span data-i18n="sched.form.enabledLabel">Enabled</span></label>
+      <button type="submit" class="primary" id="btn-scheduler-save" data-i18n="sched.form.addBtn">Add job</button>
+      <button type="button" id="btn-scheduler-cancel-edit" hidden data-i18n="sched.form.cancelBtn">Cancel edit</button>
+    </form>
+    <p class="muted" style="font-size: 12px;" data-i18n="sched.form.scheduleHint">Supported forms: 6-field cron like &ldquo;0 */5 * * * *&rdquo;, &ldquo;@every 90m&rdquo;, &ldquo;@every 1w Sun 21:00&rdquo;, or &ldquo;@hourly&rdquo; / &ldquo;@daily&rdquo; / &ldquo;@weekly&rdquo; / &ldquo;@monthly&rdquo;.</p>
+    <div id="scheduler-preview"></div>
+    <hr class="sep">
+    <h3 style="margin: 0 0 8px;"><span data-i18n="sched.runs.title">Recent runs</span></h3>
+    <div class="table-wrap">
+      <table id="scheduler-runs-table">
+        <thead><tr>
+          <th data-i18n="sched.runs.col.started">Started</th>
+          <th data-i18n="sched.runs.col.job">Job</th>
+          <th data-i18n="sched.runs.col.result">Result</th>
+          <th data-i18n="sched.runs.col.duration">Duration</th>
+          <th data-i18n="sched.runs.col.output">Output</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="empty-note" id="scheduler-runs-empty" data-i18n="sched.runs.empty">No runs yet.</div>
+    </div>
+    <details class="settings-drawer" id="settings-drawer-scheduler">
+      <summary>
+        <svg class="gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg>
+        <span data-i18n="settings.drawer.scheduler">Scheduler settings</span>
+        <span class="drawer-chevron" aria-hidden="true"></span>
+      </summary>
+      <div class="settings-drawer-body" id="settings-drawer-body-scheduler"></div>
     </details>
   </section>
 
@@ -1540,6 +1750,26 @@
 </main>
 </div>
 
+<div class="modal-overlay" id="store-picker-overlay" hidden>
+  <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="store-picker-title">
+    <div class="modal-header">
+      <h3 id="store-picker-title" data-i18n="store.sync.picker.title">Choose export folder</h3>
+      <button type="button" class="modal-close" id="store-picker-close" data-i18n-aria-label="common.close" aria-label="Close">&times;</button>
+    </div>
+    <div class="mono store-picker-path" id="store-picker-path"></div>
+    <div class="row store-picker-roots" id="store-picker-roots"></div>
+    <div class="row">
+      <button type="button" id="store-picker-up" data-i18n="store.sync.picker.up">Up</button>
+    </div>
+    <div class="store-picker-list" id="store-picker-list"></div>
+    <div class="empty-note" id="store-picker-empty" data-i18n="store.sync.picker.noSubfolders" hidden>No subfolders here.</div>
+    <div class="row store-picker-actions">
+      <button type="button" id="store-picker-cancel" data-i18n="store.sync.picker.cancel">Cancel</button>
+      <button type="button" class="primary" id="store-picker-use" data-i18n="store.sync.picker.useFolder">Use this folder</button>
+    </div>
+  </div>
+</div>
+
 <div class="dev-console" id="dev-console" hidden>
   <div class="dev-console-header">
     <strong data-i18n="devlog.title">Developer console</strong>
@@ -1579,6 +1809,7 @@
       "nav.ai": "AI",
       "nav.mailbox": "Relay",
       "nav.store": "Store",
+      "nav.scheduler": "Scheduler",
       "nav.profile": "Profile",
       "nav.settings": "Settings",
       "nav.update": "Updates",
@@ -1869,13 +2100,65 @@
       "store.sync.minutesAgo": "{n}m ago",
       "store.sync.hoursAgo": "{n}h ago",
       "store.sync.daysAgo": "{n}d ago",
+      "store.sync.col.folder": "Folder",
+      "store.sync.col.status": "Status",
+      "store.sync.col.files": "Files",
+      "store.sync.col.lastSynced": "Last synced",
+      "store.sync.col.actions": "Actions",
       "store.sync.exportDirLabel": "Extract to",
       "store.sync.exportDirPlaceholder": "Defaults to your downloads folder",
       "store.sync.exportDirSaved": "Extract destination saved.",
+      "store.sync.browseBtn": "Browse…",
+      "store.sync.exportDirEffective": "Saving to: {path}",
+      "store.sync.picker.title": "Choose export folder",
+      "store.sync.picker.up": "Up",
+      "store.sync.picker.useFolder": "Use this folder",
+      "store.sync.picker.cancel": "Cancel",
+      "store.sync.picker.noSubfolders": "No subfolders here.",
       "store.sync.filesToggle": "Files",
       "store.sync.filesEmpty": "No files yet.",
       "store.sync.extractBtn": "Extract",
       "store.sync.extracted": "Extracted to {output}",
+      "sched.title": "Scheduler",
+      "sched.hint": "Runs shell commands on this node on a recurring schedule. The scheduler must be enabled below (applies on daemon restart).",
+      "sched.col.name": "Name",
+      "sched.col.schedule": "Schedule",
+      "sched.col.nextRun": "Next run",
+      "sched.col.enabled": "Enabled",
+      "sched.col.actions": "Actions",
+      "sched.empty": "No scheduled jobs yet.",
+      "sched.runNow": "Run now",
+      "sched.runStarted": "Started {name}.",
+      "sched.edit": "Edit",
+      "sched.delete": "Delete",
+      "sched.deleteConfirm": "Delete the job “{name}”?",
+      "sched.deleted": "Deleted {name}.",
+      "sched.form.addTitle": "Add a job",
+      "sched.form.editTitle": "Edit job: {name}",
+      "sched.form.nameLabel": "Name",
+      "sched.form.scheduleLabel": "Schedule expression",
+      "sched.form.schedulePlaceholder": "0 */5 * * * *",
+      "sched.form.commandLabel": "Command",
+      "sched.form.enabledLabel": "Enabled",
+      "sched.form.previewLabel": "Next fire times:",
+      "sched.form.previewEmpty": "No upcoming fire times.",
+      "sched.form.previewError": "Invalid schedule: {error}",
+      "sched.form.scheduleHint": "Supported forms: 6-field cron like “0 */5 * * * *”, “@every 90m”, “@every 1w Sun 21:00”, or “@hourly” / “@daily” / “@weekly” / “@monthly”.",
+      "sched.form.addBtn": "Add job",
+      "sched.form.updateBtn": "Save changes",
+      "sched.form.cancelBtn": "Cancel edit",
+      "sched.added": "Job {name} created.",
+      "sched.updated": "Job {name} updated.",
+      "sched.runs.title": "Recent runs",
+      "sched.runs.col.started": "Started",
+      "sched.runs.col.job": "Job",
+      "sched.runs.col.result": "Result",
+      "sched.runs.col.duration": "Duration",
+      "sched.runs.col.output": "Output",
+      "sched.runs.outputToggle": "Output",
+      "sched.runs.empty": "No runs yet.",
+      "sched.runs.ok": "OK",
+      "sched.runs.fail": "FAIL (exit {code})",
       "profile.title": "Profile",
       "profile.did": "did",
       "profile.displayName": "display name",
@@ -1913,12 +2196,16 @@
       "settings.clear": "Clear",
       "settings.passwordSetPlaceholder": "(set) leave blank to keep",
       "settings.passwordNotSet": "not set",
+      "settings.list.addBtn": "Add",
+      "settings.list.addPlaceholder": "Add a value…",
+      "settings.list.removeAria": "Remove {item}",
       "settings.optionDefault": "(default)",
       "settings.drawer.stream": "Stream settings",
       "settings.drawer.ai": "AI settings",
       "settings.drawer.mailbox": "Relay settings",
       "settings.drawer.storage": "Storage settings",
       "settings.drawer.identity": "Identity settings",
+      "settings.drawer.scheduler": "Scheduler settings",
       "settings.advanced": "Advanced",
       "settings.movedNote": "Stream, AI, Relay, Storage and Identity settings now live inside their own tabs.",
       "settings.section.identity": "Identity",
@@ -1926,13 +2213,14 @@
       "settings.section.stream": "Stream",
       "settings.section.mailbox": "Relay",
       "settings.section.ai": "AI",
+      "settings.section.scheduler": "Scheduler",
       "settings.section.ui": "Web dashboard",
       "settings.field.identity.display_name.label": "Display name",
       "settings.field.identity.display_name.desc": "Default display name written to config (applies at next start; use the Profile panel above to change it live).",
       "settings.field.storage.capacity_bytes.label": "Storage capacity",
       "settings.field.storage.capacity_bytes.desc": "Maximum size of the local block store.",
-      "settings.field.storage.room_id.label": "Room id",
-      "settings.field.storage.room_id.desc": "tc-chat room the store joins for peer block exchange. Leave blank to stay local-only.",
+      "settings.field.storage.room_ids.label": "Room ids",
+      "settings.field.storage.room_ids.desc": "tc-chat rooms the store joins for peer block exchange -- every room in the list is joined at once. Leave empty to stay local-only. Applies live, no restart needed.",
       "settings.field.stream.rtsp_url.label": "RTSP URL",
       "settings.field.stream.rtsp_url.desc": "RTSP endpoint used when streaming. Leave blank to use the default.",
       "settings.field.stream.frame_rate.label": "Frame rate",
@@ -1979,7 +2267,9 @@
       "settings.field.ui.listen.label": "Listen address",
       "settings.field.ui.listen.desc": "Address:port this dashboard binds to.",
       "settings.field.ui.enabled.label": "Enabled",
-      "settings.field.ui.enabled.desc": "Whether the web dashboard starts with the daemon."
+      "settings.field.ui.enabled.desc": "Whether the web dashboard starts with the daemon.",
+      "settings.field.scheduler.enabled.label": "Enable the job scheduler",
+      "settings.field.scheduler.enabled.desc": "Runs scheduled jobs in the background. Applies on daemon restart."
     },
     ja: {
       "pageTitle": "MISTL ダッシュボード",
@@ -1996,6 +2286,7 @@
       "nav.ai": "AI",
       "nav.mailbox": "リレー",
       "nav.store": "ストア",
+      "nav.scheduler": "スケジューラ",
       "nav.profile": "プロフィール",
       "nav.settings": "設定",
       "nav.update": "更新",
@@ -2276,6 +2567,11 @@
       "store.sync.minutesAgo": "{n}分前",
       "store.sync.hoursAgo": "{n}時間前",
       "store.sync.daysAgo": "{n}日前",
+      "store.sync.col.folder": "フォルダ",
+      "store.sync.col.status": "ステータス",
+      "store.sync.col.files": "ファイル数",
+      "store.sync.col.lastSynced": "最終同期",
+      "store.sync.col.actions": "操作",
       "store.sync.urlLabel": "共有リンク",
       "store.sync.urlPlaceholder": "#tc-share=… または完全なURL",
       "store.sync.startBtn": "同期を開始",
@@ -2289,10 +2585,57 @@
       "store.sync.exportDirLabel": "取り出し先",
       "store.sync.exportDirPlaceholder": "既定ではダウンロードフォルダになります",
       "store.sync.exportDirSaved": "取り出し先を保存しました。",
+      "store.sync.browseBtn": "参照…",
+      "store.sync.exportDirEffective": "保存先: {path}",
+      "store.sync.picker.title": "取り出し先フォルダを選択",
+      "store.sync.picker.up": "上へ",
+      "store.sync.picker.useFolder": "このフォルダを使う",
+      "store.sync.picker.cancel": "キャンセル",
+      "store.sync.picker.noSubfolders": "サブフォルダはありません。",
       "store.sync.filesToggle": "ファイル",
       "store.sync.filesEmpty": "まだファイルがありません。",
       "store.sync.extractBtn": "取り出す",
       "store.sync.extracted": "{output} へ取り出しました",
+      "sched.title": "スケジューラ",
+      "sched.hint": "このノード上でシェルコマンドを定期的に実行します。下記でスケジューラを有効にする必要があります (デーモンの再起動が必要です)。",
+      "sched.col.name": "名前",
+      "sched.col.schedule": "スケジュール",
+      "sched.col.nextRun": "次回実行",
+      "sched.col.enabled": "有効",
+      "sched.col.actions": "操作",
+      "sched.empty": "スケジュールされたジョブはまだありません。",
+      "sched.runNow": "今すぐ実行",
+      "sched.runStarted": "{name} を開始しました。",
+      "sched.edit": "編集",
+      "sched.delete": "削除",
+      "sched.deleteConfirm": "ジョブ「{name}」を削除しますか?",
+      "sched.deleted": "{name} を削除しました。",
+      "sched.form.addTitle": "ジョブを追加",
+      "sched.form.editTitle": "ジョブを編集: {name}",
+      "sched.form.nameLabel": "名前",
+      "sched.form.scheduleLabel": "スケジュール式",
+      "sched.form.schedulePlaceholder": "0 */5 * * * *",
+      "sched.form.commandLabel": "コマンド",
+      "sched.form.enabledLabel": "有効",
+      "sched.form.previewLabel": "次回の実行時刻:",
+      "sched.form.previewEmpty": "今後の実行予定はありません。",
+      "sched.form.previewError": "スケジュール式が無効です: {error}",
+      "sched.form.scheduleHint": "対応形式: 「0 */5 * * * *」のような6フィールドのcron形式、「@every 90m」、「@every 1w Sun 21:00」、または「@hourly」「@daily」「@weekly」「@monthly」。",
+      "sched.form.addBtn": "ジョブを追加",
+      "sched.form.updateBtn": "変更を保存",
+      "sched.form.cancelBtn": "編集をキャンセル",
+      "sched.added": "ジョブ {name} を作成しました。",
+      "sched.updated": "ジョブ {name} を更新しました。",
+      "sched.runs.title": "最近の実行",
+      "sched.runs.col.started": "開始日時",
+      "sched.runs.col.job": "ジョブ",
+      "sched.runs.col.result": "結果",
+      "sched.runs.col.duration": "所要時間",
+      "sched.runs.col.output": "出力",
+      "sched.runs.outputToggle": "出力",
+      "sched.runs.empty": "実行履歴はまだありません。",
+      "sched.runs.ok": "成功",
+      "sched.runs.fail": "失敗 (終了コード {code})",
       "profile.title": "プロフィール",
       "profile.did": "did",
       "profile.displayName": "表示名",
@@ -2330,12 +2673,16 @@
       "settings.clear": "クリア",
       "settings.passwordSetPlaceholder": "(設定済み) 変更しない場合は空欄のまま",
       "settings.passwordNotSet": "未設定",
+      "settings.list.addBtn": "追加",
+      "settings.list.addPlaceholder": "値を追加…",
+      "settings.list.removeAria": "{item} を削除",
       "settings.optionDefault": "(デフォルト)",
       "settings.drawer.stream": "ストリーム設定",
       "settings.drawer.ai": "AI設定",
       "settings.drawer.mailbox": "リレー設定",
       "settings.drawer.storage": "ストレージ設定",
       "settings.drawer.identity": "アイデンティティ設定",
+      "settings.drawer.scheduler": "スケジューラ設定",
       "settings.advanced": "詳細設定",
       "settings.movedNote": "ストリーム・AI・リレー・ストレージ・アイデンティティの設定は、各タブ内に移動しました。",
       "settings.section.identity": "本人情報",
@@ -2343,13 +2690,14 @@
       "settings.section.stream": "ストリーム",
       "settings.section.mailbox": "リレー",
       "settings.section.ai": "AI",
+      "settings.section.scheduler": "スケジューラ",
       "settings.section.ui": "Webダッシュボード",
       "settings.field.identity.display_name.label": "表示名",
       "settings.field.identity.display_name.desc": "設定ファイルに書き込まれるデフォルトの表示名です (次回起動時に適用されます。今すぐ変更する場合は上のプロフィールパネルを使ってください)。",
       "settings.field.storage.capacity_bytes.label": "ストレージ容量",
       "settings.field.storage.capacity_bytes.desc": "ローカルブロックストアの最大サイズです。",
-      "settings.field.storage.room_id.label": "ルームID",
-      "settings.field.storage.room_id.desc": "ピア間のブロック交換に使うtc-chatルームです。空欄の場合はローカルのみで動作します。",
+      "settings.field.storage.room_ids.label": "ルームID",
+      "settings.field.storage.room_ids.desc": "ピア間のブロック交換のためにストアが参加するtc-chatルームです。リスト内の全ルームに同時に参加します。空欄の場合はローカルのみで動作します。再起動不要で即時反映されます。",
       "settings.field.stream.rtsp_url.label": "RTSP URL",
       "settings.field.stream.rtsp_url.desc": "配信に使用するRTSPエンドポイントです。空欄の場合はデフォルトを使用します。",
       "settings.field.stream.frame_rate.label": "フレームレート",
@@ -2396,7 +2744,9 @@
       "settings.field.ui.listen.label": "待ち受けアドレス",
       "settings.field.ui.listen.desc": "このダッシュボードが待ち受けるアドレス:ポートです。",
       "settings.field.ui.enabled.label": "有効化",
-      "settings.field.ui.enabled.desc": "デーモン起動時にWebダッシュボードを開始するかどうかです。"
+      "settings.field.ui.enabled.desc": "デーモン起動時にWebダッシュボードを開始するかどうかです。",
+      "settings.field.scheduler.enabled.label": "ジョブスケジューラを有効化",
+      "settings.field.scheduler.enabled.desc": "バックグラウンドでスケジュールされたジョブを実行します。デーモンの再起動後に適用されます。"
     },
     zh: {
       "pageTitle": "MISTL 仪表盘",
@@ -2413,6 +2763,7 @@
       "nav.ai": "AI",
       "nav.mailbox": "中继",
       "nav.store": "存储",
+      "nav.scheduler": "调度器",
       "nav.profile": "个人资料",
       "nav.settings": "设置",
       "nav.update": "更新",
@@ -2693,6 +3044,11 @@
       "store.sync.minutesAgo": "{n} 分钟前",
       "store.sync.hoursAgo": "{n} 小时前",
       "store.sync.daysAgo": "{n} 天前",
+      "store.sync.col.folder": "文件夹",
+      "store.sync.col.status": "状态",
+      "store.sync.col.files": "文件数",
+      "store.sync.col.lastSynced": "最后同步",
+      "store.sync.col.actions": "操作",
       "store.sync.urlLabel": "分享链接",
       "store.sync.urlPlaceholder": "#tc-share=… 或完整 URL",
       "store.sync.startBtn": "开始同步",
@@ -2706,10 +3062,57 @@
       "store.sync.exportDirLabel": "提取到",
       "store.sync.exportDirPlaceholder": "默认使用下载文件夹",
       "store.sync.exportDirSaved": "已保存提取目录。",
+      "store.sync.browseBtn": "浏览…",
+      "store.sync.exportDirEffective": "保存到: {path}",
+      "store.sync.picker.title": "选择提取目录",
+      "store.sync.picker.up": "上一级",
+      "store.sync.picker.useFolder": "使用此文件夹",
+      "store.sync.picker.cancel": "取消",
+      "store.sync.picker.noSubfolders": "没有子文件夹。",
       "store.sync.filesToggle": "文件",
       "store.sync.filesEmpty": "暂无文件。",
       "store.sync.extractBtn": "提取",
       "store.sync.extracted": "已提取到 {output}",
+      "sched.title": "调度器",
+      "sched.hint": "按计划在本节点上运行 shell 命令。需要在下方启用调度器 (需要重启守护进程)。",
+      "sched.col.name": "名称",
+      "sched.col.schedule": "计划",
+      "sched.col.nextRun": "下次运行",
+      "sched.col.enabled": "启用",
+      "sched.col.actions": "操作",
+      "sched.empty": "暂无已计划的任务。",
+      "sched.runNow": "立即运行",
+      "sched.runStarted": "已开始运行 {name}。",
+      "sched.edit": "编辑",
+      "sched.delete": "删除",
+      "sched.deleteConfirm": "确定要删除任务“{name}”吗？",
+      "sched.deleted": "已删除 {name}。",
+      "sched.form.addTitle": "添加任务",
+      "sched.form.editTitle": "编辑任务: {name}",
+      "sched.form.nameLabel": "名称",
+      "sched.form.scheduleLabel": "计划表达式",
+      "sched.form.schedulePlaceholder": "0 */5 * * * *",
+      "sched.form.commandLabel": "命令",
+      "sched.form.enabledLabel": "启用",
+      "sched.form.previewLabel": "接下来的触发时间：",
+      "sched.form.previewEmpty": "没有即将到来的触发时间。",
+      "sched.form.previewError": "计划表达式无效: {error}",
+      "sched.form.scheduleHint": "支持的格式：形如“0 */5 * * * *”的六段式 cron、“@every 90m”、“@every 1w Sun 21:00”，或“@hourly”/“@daily”/“@weekly”/“@monthly”。",
+      "sched.form.addBtn": "添加任务",
+      "sched.form.updateBtn": "保存更改",
+      "sched.form.cancelBtn": "取消编辑",
+      "sched.added": "已创建任务 {name}。",
+      "sched.updated": "已更新任务 {name}。",
+      "sched.runs.title": "最近的运行记录",
+      "sched.runs.col.started": "开始时间",
+      "sched.runs.col.job": "任务",
+      "sched.runs.col.result": "结果",
+      "sched.runs.col.duration": "耗时",
+      "sched.runs.col.output": "输出",
+      "sched.runs.outputToggle": "输出",
+      "sched.runs.empty": "暂无运行记录。",
+      "sched.runs.ok": "成功",
+      "sched.runs.fail": "失败 (退出码 {code})",
       "profile.title": "个人资料",
       "profile.did": "did",
       "profile.displayName": "显示名称",
@@ -2747,12 +3150,16 @@
       "settings.clear": "清除",
       "settings.passwordSetPlaceholder": "(已设置) 留空以保持不变",
       "settings.passwordNotSet": "未设置",
+      "settings.list.addBtn": "添加",
+      "settings.list.addPlaceholder": "添加一个值…",
+      "settings.list.removeAria": "移除 {item}",
       "settings.optionDefault": "(默认)",
       "settings.drawer.stream": "串流设置",
       "settings.drawer.ai": "AI 设置",
       "settings.drawer.mailbox": "中继设置",
       "settings.drawer.storage": "存储设置",
       "settings.drawer.identity": "身份设置",
+      "settings.drawer.scheduler": "调度器设置",
       "settings.advanced": "高级",
       "settings.movedNote": "串流、AI、中继、存储和身份设置现在位于各自的标签页中。",
       "settings.section.identity": "身份",
@@ -2760,13 +3167,14 @@
       "settings.section.stream": "串流",
       "settings.section.mailbox": "中继",
       "settings.section.ai": "AI",
+      "settings.section.scheduler": "调度器",
       "settings.section.ui": "Web 仪表盘",
       "settings.field.identity.display_name.label": "显示名称",
       "settings.field.identity.display_name.desc": "写入配置文件的默认显示名称 (下次启动时生效；如需立即修改，请使用上方的个人资料面板)。",
       "settings.field.storage.capacity_bytes.label": "存储容量",
       "settings.field.storage.capacity_bytes.desc": "本地区块存储的最大容量。",
-      "settings.field.storage.room_id.label": "房间 ID",
-      "settings.field.storage.room_id.desc": "用于对等区块交换的 tc-chat 房间。留空则仅在本地运行。",
+      "settings.field.storage.room_ids.label": "房间 ID",
+      "settings.field.storage.room_ids.desc": "用于对等区块交换的 tc-chat 房间列表 -- 会同时加入列表中的所有房间。留空则仅在本地运行。立即生效，无需重启。",
       "settings.field.stream.rtsp_url.label": "RTSP URL",
       "settings.field.stream.rtsp_url.desc": "串流时使用的 RTSP 端点。留空则使用默认值。",
       "settings.field.stream.frame_rate.label": "帧率",
@@ -2813,7 +3221,9 @@
       "settings.field.ui.listen.label": "监听地址",
       "settings.field.ui.listen.desc": "此仪表盘绑定的地址:端口。",
       "settings.field.ui.enabled.label": "启用",
-      "settings.field.ui.enabled.desc": "守护进程启动时是否同时启动 Web 仪表盘。"
+      "settings.field.ui.enabled.desc": "守护进程启动时是否同时启动 Web 仪表盘。",
+      "settings.field.scheduler.enabled.label": "启用任务调度器",
+      "settings.field.scheduler.enabled.desc": "在后台运行已计划的任务。需要重启守护进程才能生效。"
     }
   };
 
@@ -3090,6 +3500,8 @@
     mailboxChatLogItems: [],
     storeItems: [],
     sandboxItems: [],
+    schedulerJobs: [],
+    schedulerRuns: [],
     update: null
   };
 
@@ -3106,6 +3518,8 @@
     renderMailboxChatRooms(state.mailboxChatRooms);
     renderStore(state.storeItems);
     renderSandbox(state.sandboxItems);
+    renderSchedulerJobs(state.schedulerJobs);
+    renderSchedulerRuns(state.schedulerRuns);
     renderProfile(state.identity);
     renderSettings(state.config);
     renderUpdate();
@@ -4304,26 +4718,17 @@
     cascadeSource.hidden = false;
   }
 
-  /* ---- per-module mini-strips (Mailbox / AI panels; the Store strip is
-     static because the content store never joins a room) ----
+  /* ---- per-module mini-strips (Mailbox / AI / Store panels) ----
      Shows the module's room id (from topology.status.modules -- the same
      config-or-default resolution the module itself uses) and the
      process-wide peer dots. Per-room peer membership is not observable
      from mistlib's public API (see src/topology.rs's module doc), so the
      dots deliberately show all connected peers with a tooltip saying so
-     rather than pretending to be room-scoped. */
-  function renderTopoStrip(module) {
-    var root = document.getElementById("topo-strip-" + module);
-    var roomEl = root.querySelector('[data-role="room"]');
-    var noteEl = root.querySelector('[data-role="note"]');
-    var peersEl = root.querySelector('[data-role="peers"]');
+     rather than pretending to be room-scoped. renderTopoStripPeers is shared
+     with the store strip below since both draw the exact same peer-dot
+     row -- only the room half of the strip differs. */
+  function renderTopoStripPeers(peersEl) {
     var data = state.topology;
-    var info = data && data.modules && data.modules[module] ? data.modules[module] : null;
-
-    roomEl.textContent = info && info.room ? info.room : "—";
-    noteEl.hidden = !(info && !info.joined);
-    if (info && !info.joined) noteEl.textContent = t("topoStrip.notJoined");
-
     peersEl.innerHTML = "";
     var peers = data && Array.isArray(data.peers) ? data.peers : [];
     peersEl.title = t("topoStrip.processWide");
@@ -4336,9 +4741,63 @@
     });
   }
 
+  function renderTopoStrip(module) {
+    var root = document.getElementById("topo-strip-" + module);
+    var roomEl = root.querySelector('[data-role="room"]');
+    var noteEl = root.querySelector('[data-role="note"]');
+    var peersEl = root.querySelector('[data-role="peers"]');
+    var data = state.topology;
+    var info = data && data.modules && data.modules[module] ? data.modules[module] : null;
+
+    roomEl.textContent = info && info.room ? info.room : "—";
+    noteEl.hidden = !(info && !info.joined);
+    if (info && !info.joined) noteEl.textContent = t("topoStrip.notJoined");
+
+    renderTopoStripPeers(peersEl);
+  }
+
+  /* Store differs from mailbox/ai: topology.status's modules.store is null
+     when storage.room_ids is empty (local-only), or {rooms: [{room,
+     joined}]} listing every room the store has joined at once (it can join
+     several, unlike the single-room mailbox/ai modules) -- so it needs its
+     own renderer rather than reusing renderTopoStrip's single-room shape.
+     Room ids render as small click-to-copy chips (like the full topology
+     card's .topology-room-chip), each labelled with its own joined state
+     since "joined" isn't uniform across a multi-room list. */
+  function renderStoreTopoStrip() {
+    var root = document.getElementById("topo-strip-store");
+    var roomEl = root.querySelector('[data-role="room"]');
+    var noteEl = root.querySelector('[data-role="note"]');
+    var peersEl = root.querySelector('[data-role="peers"]');
+    var data = state.topology;
+    var info = data && data.modules ? data.modules.store : null;
+    var rooms = info && Array.isArray(info.rooms) ? info.rooms : [];
+
+    roomEl.innerHTML = "";
+    if (!rooms.length) {
+      noteEl.hidden = false;
+      noteEl.textContent = t("topoStrip.storeLocal");
+      roomEl.textContent = "—";
+    } else {
+      noteEl.hidden = true;
+      rooms.forEach(function (r) {
+        var chip = el("span", {
+          class: "badge mono topo-strip-room-chip" + (r.joined ? "" : " not-joined"),
+          title: t("common.clickToCopy")
+        });
+        chip.textContent = r.joined ? r.room : r.room + " (" + t("topoStrip.notJoined") + ")";
+        chip.addEventListener("click", function () { copyToClipboard(r.room); });
+        roomEl.appendChild(chip);
+      });
+    }
+
+    renderTopoStripPeers(peersEl);
+  }
+
   function renderTopoStrips() {
     renderTopoStrip("mailbox");
     renderTopoStrip("ai");
+    renderStoreTopoStrip();
   }
 
   /* Names the room the topology card's *current host panel* is showing, so
@@ -5199,12 +5658,15 @@
 
   /* ---------- store: folder sync (tc-storage interop) ---------- */
 
-  var storeSyncList = document.getElementById("store-sync-list");
+  var storeSyncTbody = document.querySelector("#store-sync-table tbody");
+  var storeSyncEmpty = document.getElementById("store-sync-empty");
   var storeExportDirInput = document.getElementById("store-export-dir");
+  var storeExportDirNote = document.getElementById("store-export-dir-note");
   var btnStoreExportDirSave = document.getElementById("btn-store-export-dir-save");
+  var btnStoreExportDirBrowse = document.getElementById("btn-store-export-dir-browse");
 
   /* Which sync rows have their per-folder file list expanded, keyed by
-     folder_id. renderStoreSyncList fully rebuilds storeSyncList's innerHTML
+     folder_id. renderStoreSyncList fully rebuilds storeSyncTbody's innerHTML
      on every poll (folder sync entries change in the background), so this
      tracked outside the DOM is what lets an operator's open file list
      survive the next 5s poll instead of silently re-collapsing. */
@@ -5236,24 +5698,37 @@
     return status === "connecting" || status === "error" ? status : "synced";
   }
 
-  /* Renders one sync's files[] (file_id, folder_id, rel_path, checksum) into
-     container, sorted by rel_path. sandbox_dir is "" for legacy entries
-     registered before this field existed -- in that case we can't compute a
-     sandbox-relative export path, so file names are shown without an
-     Extract button rather than sending a bogus path to store.sandbox.export. */
-  function renderSyncFiles(sync, container) {
-    container.innerHTML = "";
+  /* Builds this sync's files[] (file_id, folder_id, rel_path, checksum) as
+     <tr>s to be inserted directly under its folder row, sorted by rel_path.
+     Rows are always built (not just when expanded) and toggled via
+     style.display -- see the toggle handler in renderStoreSyncList -- so
+     opening/closing doesn't need another api() round trip or a rebuild.
+     sandbox_dir is "" for legacy entries registered before this field
+     existed -- in that case we can't compute a sandbox-relative export
+     path, so those rows are shown without an Extract button rather than
+     sending a bogus path to store.sandbox.export. */
+  function buildSyncFileRows(sync, isOpen) {
     var files = (sync.files || []).slice().sort(function (a, b) {
       return String(a.rel_path || "").localeCompare(String(b.rel_path || ""));
     });
+    var display = isOpen ? "table-row" : "none";
     if (!files.length) {
-      container.appendChild(el("div", { class: "empty-note", text: t("store.sync.filesEmpty") }));
-      return;
+      var emptyRow = el("tr", { class: "store-sync-file-row" });
+      emptyRow.style.display = display;
+      var emptyCell = el("td", { colspan: "4", class: "store-sync-file-name" });
+      emptyCell.appendChild(el("span", { class: "muted", text: t("store.sync.filesEmpty") }));
+      emptyRow.appendChild(emptyCell);
+      emptyRow.appendChild(el("td", {}));
+      return [emptyRow];
     }
     var sandboxDir = sync.sandbox_dir || "";
-    files.forEach(function (file) {
-      var fileRow = el("div", { class: "row store-sync-file-row" });
-      fileRow.appendChild(el("span", { class: "mono muted", text: file.rel_path }));
+    return files.map(function (file) {
+      var fileRow = el("tr", { class: "store-sync-file-row" });
+      fileRow.style.display = display;
+      var nameCell = el("td", { colspan: "4", class: "store-sync-file-name" });
+      nameCell.appendChild(el("span", { class: "mono", text: file.rel_path }));
+      fileRow.appendChild(nameCell);
+      var actionCell = el("td", {});
       if (sandboxDir) {
         var extractBtn = el("button", { type: "button" });
         extractBtn.textContent = t("store.sync.extractBtn");
@@ -5263,54 +5738,49 @@
             showToast(t("store.sync.extracted", { output: (data && data.output) || "" }), "success");
           });
         });
-        fileRow.appendChild(extractBtn);
+        actionCell.appendChild(extractBtn);
       }
-      container.appendChild(fileRow);
+      fileRow.appendChild(actionCell);
+      return fileRow;
     });
   }
 
   function renderStoreSyncList(data) {
     var syncs = (data && data.syncs) || [];
-    storeSyncList.innerHTML = "";
-    if (!syncs.length) {
-      storeSyncList.appendChild(el("div", { class: "empty-note", text: t("store.sync.none") }));
-      return;
-    }
+    storeSyncTbody.innerHTML = "";
+    storeSyncEmpty.style.display = syncs.length ? "none" : "block";
     syncs.forEach(function (sync) {
       var status = syncStatusClass(sync.status);
       var isOpen = !!storeSyncOpenFolders[sync.folder_id];
 
-      var entry = el("div", { class: "store-sync-entry" });
-      var row = el("div", { class: "row store-sync-row" });
+      var row = el("tr", { class: "store-sync-row" });
 
+      var folderCell = el("td", { class: "store-sync-folder-cell" });
       var toggleBtn = el("button", {
         type: "button",
         class: "store-sync-toggle" + (isOpen ? " open" : ""),
         "aria-expanded": isOpen ? "true" : "false",
         "aria-label": t("store.sync.filesToggle")
       });
-      row.appendChild(toggleBtn);
+      folderCell.appendChild(toggleBtn);
+      folderCell.appendChild(copyButton(sync.folder_id, sync.folder_name || sync.folder_id, ""));
+      row.appendChild(folderCell);
 
-      row.appendChild(copyButton(sync.folder_id, sync.folder_name || sync.folder_id, ""));
-      row.appendChild(el("span", { class: "badge status-" + status, text: t("store.sync.status." + status) }));
-
-      var relTime = relTimeLabel(sync.last_synced_at);
-      var counts = t("store.sync.counts", {
-        folders: (sync.folders || []).length,
-        files: (sync.files || []).length
-      });
-      var meta = [
-        counts,
-        relTime ? t("store.sync.lastSync", { time: relTime }) : t("store.sync.never")
-      ].filter(Boolean).join(" · ");
-      row.appendChild(el("span", { class: "muted", text: meta }));
-
+      var statusCell = el("td", {});
+      statusCell.appendChild(el("span", { class: "badge status-" + status, text: t("store.sync.status." + status) }));
       if (status === "error" && sync.last_error) {
         var errText = String(sync.last_error);
         var errDisplay = errText.length > 70 ? errText.slice(0, 70) + "…" : errText;
-        row.appendChild(el("span", { class: "muted store-sync-err", title: errText, text: errDisplay }));
+        statusCell.appendChild(el("div", { class: "store-sync-err", title: errText, text: errDisplay }));
       }
+      row.appendChild(statusCell);
 
+      row.appendChild(el("td", { text: String((sync.files || []).length) }));
+
+      var relTime = relTimeLabel(sync.last_synced_at);
+      row.appendChild(el("td", { class: "muted", text: relTime || t("store.sync.never") }));
+
+      var actionCell = el("td", {});
       var stopBtn = el("button", { type: "button" });
       stopBtn.textContent = t("store.sync.stop");
       stopBtn.addEventListener("click", function () {
@@ -5320,23 +5790,21 @@
           pollStoreSyncList();
         });
       });
-      row.appendChild(stopBtn);
-      entry.appendChild(row);
+      actionCell.appendChild(stopBtn);
+      row.appendChild(actionCell);
 
-      var filesBody = el("div", { class: "store-sync-files" });
-      filesBody.style.display = isOpen ? "flex" : "none";
-      renderSyncFiles(sync, filesBody);
-      entry.appendChild(filesBody);
+      storeSyncTbody.appendChild(row);
+
+      var fileRows = buildSyncFileRows(sync, isOpen);
+      fileRows.forEach(function (fr) { storeSyncTbody.appendChild(fr); });
 
       toggleBtn.addEventListener("click", function () {
         var nowOpen = !storeSyncOpenFolders[sync.folder_id];
         storeSyncOpenFolders[sync.folder_id] = nowOpen;
-        filesBody.style.display = nowOpen ? "flex" : "none";
         toggleBtn.classList.toggle("open", nowOpen);
         toggleBtn.setAttribute("aria-expanded", nowOpen ? "true" : "false");
+        fileRows.forEach(function (fr) { fr.style.display = nowOpen ? "table-row" : "none"; });
       });
-
-      storeSyncList.appendChild(entry);
     });
   }
 
@@ -5373,11 +5841,32 @@
      this is the one place it's editable). applyExportDir is called from
      renderSettings itself below so any config.show refresh (startup, the
      Settings panel's own refresh button, or the save below) keeps this input
-     in sync instead of maintaining a second fetch path. */
+     in sync instead of maintaining a second fetch path. storeExportDirDefault
+     is the daemon's resolved default (storage.export_dir unset ->
+     data/downloads under the daemon's data dir); it isn't part of
+     config.show, so it's fetched once via store.browse-dirs and cached
+     rather than requeried on every poll -- see loadStoreExportDirDefault. */
+  var storeExportDirDefault = null;
+
   function applyExportDir(cfg) {
     if (!storeExportDirInput) return;
     var dir = cfg && cfg.storage ? cfg.storage.export_dir : null;
     storeExportDirInput.value = dir || "";
+    if (storeExportDirDefault) storeExportDirInput.placeholder = storeExportDirDefault;
+    if (storeExportDirNote) {
+      var effective = dir || storeExportDirDefault;
+      storeExportDirNote.textContent = effective ? t("store.sync.exportDirEffective", { path: effective }) : "";
+    }
+  }
+
+  /* Fetched once (not on every poll) right after the rest of the store
+     panel's initial data loads -- see the init block at the bottom of this
+     file -- then applyExportDir re-runs so the placeholder/note pick it up. */
+  function loadStoreExportDirDefault() {
+    api("store.browse-dirs", {}).then(function (data) {
+      storeExportDirDefault = (data && data.default_export_dir) || null;
+      applyExportDir(state.config);
+    }, function () { /* ignore -- keep the generic placeholder text */ });
   }
 
   if (btnStoreExportDirSave) {
@@ -5388,6 +5877,344 @@
         pollConfig();
       });
     });
+  }
+
+  /* ---------- store: extract-destination folder picker ---------- */
+  /* Modal wrapping store.browse-dirs -- a read-only directory listing scoped
+     server-side (no arbitrary path entry from here), so "Use this folder"
+     is the only way this modal writes anything, via the same config.set
+     call the manual Save button above uses. */
+
+  var storePickerOverlay = document.getElementById("store-picker-overlay");
+  var storePickerPathEl = document.getElementById("store-picker-path");
+  var storePickerRootsEl = document.getElementById("store-picker-roots");
+  var storePickerUpBtn = document.getElementById("store-picker-up");
+  var storePickerListEl = document.getElementById("store-picker-list");
+  var storePickerEmpty = document.getElementById("store-picker-empty");
+  var storePickerCancelBtn = document.getElementById("store-picker-cancel");
+  var storePickerCloseBtn = document.getElementById("store-picker-close");
+  var storePickerUseBtn = document.getElementById("store-picker-use");
+
+  /* Tracks only what "Up" and "Use this folder" need; the browse-dirs
+     response itself drives every render, so there's nothing else to keep
+     in sync here. */
+  var storePickerState = { path: null, parent: null };
+
+  function renderStorePicker(data) {
+    storePickerState.path = data.path || null;
+    storePickerState.parent = data.parent || null;
+    storePickerPathEl.textContent = storePickerState.path || "";
+    storePickerUpBtn.disabled = !storePickerState.parent;
+
+    storePickerRootsEl.innerHTML = "";
+    (data.roots || []).forEach(function (r) {
+      var btn = el("button", { type: "button" });
+      btn.textContent = r.label;
+      btn.addEventListener("click", function () {
+        runAction(btn, "store.browse-dirs", { path: r.path }, renderStorePicker);
+      });
+      storePickerRootsEl.appendChild(btn);
+    });
+
+    storePickerListEl.innerHTML = "";
+    var dirs = data.dirs || [];
+    storePickerEmpty.hidden = dirs.length > 0;
+    dirs.forEach(function (d) {
+      var btn = el("button", { type: "button", class: "store-picker-item" });
+      btn.textContent = d.name;
+      btn.addEventListener("click", function () {
+        runAction(btn, "store.browse-dirs", { path: d.path }, renderStorePicker);
+      });
+      storePickerListEl.appendChild(btn);
+    });
+  }
+
+  function closeStorePicker() {
+    storePickerOverlay.hidden = true;
+  }
+
+  if (btnStoreExportDirBrowse) {
+    btnStoreExportDirBrowse.addEventListener("click", function () {
+      storePickerOverlay.hidden = false;
+      runAction(btnStoreExportDirBrowse, "store.browse-dirs", {}, renderStorePicker);
+    });
+  }
+
+  storePickerUpBtn.addEventListener("click", function () {
+    if (!storePickerState.parent) return;
+    runAction(storePickerUpBtn, "store.browse-dirs", { path: storePickerState.parent }, renderStorePicker);
+  });
+
+  storePickerCancelBtn.addEventListener("click", closeStorePicker);
+  storePickerCloseBtn.addEventListener("click", closeStorePicker);
+  storePickerOverlay.addEventListener("click", function (e) {
+    if (e.target === storePickerOverlay) closeStorePicker();
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && !storePickerOverlay.hidden) closeStorePicker();
+  });
+
+  storePickerUseBtn.addEventListener("click", function () {
+    var path = storePickerState.path;
+    if (!path) return;
+    runAction(storePickerUseBtn, "config.set", { path: "storage.export_dir", value: path }, function () {
+      storeExportDirInput.value = path;
+      showToast(t("store.sync.exportDirSaved"), "success");
+      pollConfig();
+      closeStorePicker();
+    });
+  });
+
+  /* ---------- scheduler ---------- */
+
+  var schedulerTbody = document.querySelector("#scheduler-table tbody");
+  var schedulerEmpty = document.getElementById("scheduler-empty");
+  var schedulerForm = document.getElementById("scheduler-form");
+  var schedulerNameInput = document.getElementById("scheduler-name");
+  var schedulerScheduleInput = document.getElementById("scheduler-schedule");
+  var schedulerCommandInput = document.getElementById("scheduler-command");
+  var schedulerEnabledInput = document.getElementById("scheduler-enabled-input");
+  var schedulerFormTitle = document.getElementById("scheduler-form-title");
+  var schedulerSaveBtn = document.getElementById("btn-scheduler-save");
+  var schedulerCancelEditBtn = document.getElementById("btn-scheduler-cancel-edit");
+  var schedulerPreviewEl = document.getElementById("scheduler-preview");
+  var schedulerRunsTbody = document.querySelector("#scheduler-runs-table tbody");
+  var schedulerRunsEmpty = document.getElementById("scheduler-runs-empty");
+
+  /* id of the job currently being edited, or null while the form is in "add"
+     mode; toggled by a row's Edit button and by Cancel edit. Every other
+     form in this file is add-only, so there's no existing single-form
+     add/edit toggle pattern to mirror -- this is scoped locally. */
+  var schedulerEditingId = null;
+
+  /* RFC3339 -> localized string, shared by the jobs table (next_run) and the
+     runs list (started_at); "-" for null/unparsable input so a job with no
+     upcoming run (e.g. disabled) never renders blank. */
+  function fmtLocalTime(iso) {
+    if (!iso) return "-";
+    var ms = Date.parse(iso);
+    return isNaN(ms) ? "-" : new Date(ms).toLocaleString();
+  }
+
+  /* Wall-clock duration between two RFC3339 timestamps, reusing fmtUptime's
+     h/m/s formatting for anything a second or longer and falling back to a
+     millisecond figure for quick runs, where "0s" would be misleadingly
+     coarse. */
+  function fmtRunDuration(startedAt, endedAt) {
+    var start = Date.parse(startedAt);
+    var end = Date.parse(endedAt);
+    if (isNaN(start) || isNaN(end) || end < start) return "-";
+    var ms = end - start;
+    return ms < 1000 ? ms + "ms" : fmtUptime(Math.round(ms / 1000));
+  }
+
+  function schedulerResetForm() {
+    schedulerEditingId = null;
+    schedulerForm.reset();
+    schedulerEnabledInput.checked = true;
+    schedulerFormTitle.textContent = t("sched.form.addTitle");
+    schedulerSaveBtn.textContent = t("sched.form.addBtn");
+    schedulerCancelEditBtn.hidden = true;
+    schedulerPreviewSeq++; // invalidate any in-flight preview request
+    if (schedulerPreviewTimer) clearTimeout(schedulerPreviewTimer);
+    schedulerPreviewEl.innerHTML = "";
+  }
+
+  function schedulerStartEdit(job) {
+    schedulerEditingId = job.id;
+    schedulerNameInput.value = job.name || "";
+    schedulerScheduleInput.value = job.schedule || "";
+    schedulerCommandInput.value = job.command || "";
+    schedulerEnabledInput.checked = !!job.enabled;
+    schedulerFormTitle.textContent = t("sched.form.editTitle", { name: job.name || "" });
+    schedulerSaveBtn.textContent = t("sched.form.updateBtn");
+    schedulerCancelEditBtn.hidden = false;
+    schedulerNameInput.focus();
+    schedulerPreviewNow();
+  }
+
+  schedulerCancelEditBtn.addEventListener("click", function () { schedulerResetForm(); });
+
+  function renderSchedulerJobs(jobs) {
+    jobs = jobs || [];
+    state.schedulerJobs = jobs;
+    schedulerTbody.innerHTML = "";
+    schedulerEmpty.style.display = jobs.length ? "none" : "block";
+    jobs.forEach(function (job) {
+      var tr = el("tr", {});
+      tr.appendChild(el("td", { text: job.name }));
+      tr.appendChild(el("td", { class: "mono", text: job.schedule }));
+      tr.appendChild(el("td", { text: fmtLocalTime(job.next_run) }));
+
+      var enabledCell = el("td", {});
+      var toggleLabel = el("label", { class: "toggle-switch" });
+      var toggleInput = el("input", { type: "checkbox" });
+      toggleInput.checked = !!job.enabled;
+      toggleLabel.appendChild(toggleInput);
+      toggleLabel.appendChild(el("span", { class: "slider" }));
+      toggleInput.addEventListener("change", function () {
+        var next = toggleInput.checked;
+        toggleInput.disabled = true;
+        api("sched.enable", { id: job.id, enabled: next }).then(function () {
+          toggleInput.disabled = false;
+          pollSchedulerLs();
+        }, function (err) {
+          toggleInput.disabled = false;
+          toggleInput.checked = !next;
+          showToast(err.message || String(err), "error");
+        });
+      });
+      enabledCell.appendChild(toggleLabel);
+      tr.appendChild(enabledCell);
+
+      var actionCell = el("td", {});
+
+      var runBtn = el("button", { type: "button" });
+      runBtn.textContent = t("sched.runNow");
+      runBtn.addEventListener("click", function () {
+        runAction(runBtn, "sched.run", { id: job.id }, function () {
+          showToast(t("sched.runStarted", { name: job.name || "" }), "success");
+          pollSchedulerLogs();
+        });
+      });
+      actionCell.appendChild(runBtn);
+
+      var editBtn = el("button", { type: "button" });
+      editBtn.textContent = t("sched.edit");
+      editBtn.addEventListener("click", function () { schedulerStartEdit(job); });
+      actionCell.appendChild(editBtn);
+
+      /* delete: reuses the same confirm() idiom as the other destructive
+         actions in this file (daemon stop, sandbox delete, update apply) */
+      var delBtn = el("button", { type: "button", class: "danger" });
+      delBtn.textContent = t("sched.delete");
+      delBtn.addEventListener("click", function () {
+        if (!confirm(t("sched.deleteConfirm", { name: job.name || "" }))) return;
+        runAction(delBtn, "sched.rm", { id: job.id }, function () {
+          showToast(t("sched.deleted", { name: job.name || "" }), "success");
+          if (schedulerEditingId === job.id) schedulerResetForm();
+          pollSchedulerLs();
+        });
+      });
+      actionCell.appendChild(delBtn);
+
+      tr.appendChild(actionCell);
+      schedulerTbody.appendChild(tr);
+    });
+  }
+
+  function pollSchedulerLs() {
+    return api("sched.ls", {}).then(function (data) {
+      renderSchedulerJobs((data && data.jobs) || []);
+    }, function () {});
+  }
+
+  document.querySelector('[data-target="scheduler"]').addEventListener("click", function (e) {
+    runAction(e.currentTarget, "sched.ls", {}, function (data) {
+      renderSchedulerJobs((data && data.jobs) || []);
+    });
+  });
+
+  /* Live schedule preview: debounced as the user types, with a sequence
+     guard so a slow response for an older expression can't overwrite the
+     preview of what's currently in the input. */
+  var schedulerPreviewTimer = null;
+  var schedulerPreviewSeq = 0;
+
+  function schedulerPreviewNow() {
+    var seq = ++schedulerPreviewSeq;
+    var schedule = schedulerScheduleInput.value.trim();
+    if (!schedule) {
+      schedulerPreviewEl.innerHTML = "";
+      return;
+    }
+    api("sched.next", { schedule: schedule, n: 5 }).then(function (data) {
+      if (seq !== schedulerPreviewSeq) return;
+      var times = (data && data.times) || [];
+      schedulerPreviewEl.innerHTML = "";
+      if (!times.length) {
+        schedulerPreviewEl.appendChild(el("div", { class: "empty-note", text: t("sched.form.previewEmpty") }));
+        return;
+      }
+      schedulerPreviewEl.appendChild(el("div", { class: "muted", text: t("sched.form.previewLabel") }));
+      var list = el("div", { class: "sched-preview-list" });
+      times.forEach(function (iso) {
+        list.appendChild(el("div", { class: "mono", text: fmtLocalTime(iso) }));
+      });
+      schedulerPreviewEl.appendChild(list);
+    }, function (err) {
+      if (seq !== schedulerPreviewSeq) return;
+      schedulerPreviewEl.innerHTML = "";
+      schedulerPreviewEl.appendChild(el("div", { class: "sched-preview-error", text: t("sched.form.previewError", { error: err.message || String(err) }) }));
+    });
+  }
+
+  schedulerScheduleInput.addEventListener("input", function () {
+    if (schedulerPreviewTimer) clearTimeout(schedulerPreviewTimer);
+    schedulerPreviewTimer = setTimeout(schedulerPreviewNow, 350);
+  });
+
+  schedulerForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    var name = schedulerNameInput.value.trim();
+    var schedule = schedulerScheduleInput.value.trim();
+    var command = schedulerCommandInput.value.trim();
+    if (!name || !schedule || !command) return;
+    if (schedulerEditingId) {
+      var setArgs = { id: schedulerEditingId, name: name, schedule: schedule, command: command, enabled: schedulerEnabledInput.checked };
+      runAction(schedulerSaveBtn, "sched.set", setArgs, function () {
+        showToast(t("sched.updated", { name: name }), "success");
+        schedulerResetForm();
+        pollSchedulerLs();
+      });
+    } else {
+      var addArgs = { name: name, schedule: schedule, command: command, enabled: schedulerEnabledInput.checked };
+      runAction(schedulerSaveBtn, "sched.add", addArgs, function () {
+        showToast(t("sched.added", { name: name }), "success");
+        schedulerResetForm();
+        pollSchedulerLs();
+      });
+    }
+  });
+
+  function schedulerRunOutput(run) {
+    var details = el("details", {});
+    details.appendChild(el("summary", { text: t("sched.runs.outputToggle") }));
+    details.appendChild(el("pre", { class: "sched-run-output", text: run.output || "" }));
+    return details;
+  }
+
+  function renderSchedulerRuns(runs) {
+    runs = runs || [];
+    state.schedulerRuns = runs;
+    schedulerRunsTbody.innerHTML = "";
+    schedulerRunsEmpty.style.display = runs.length ? "none" : "block";
+    runs.forEach(function (run) {
+      var tr = el("tr", {});
+      tr.appendChild(el("td", { text: fmtLocalTime(run.started_at) }));
+      tr.appendChild(el("td", { text: run.job_name || "-" }));
+
+      var resultCell = el("td", {});
+      resultCell.appendChild(el("span", {
+        class: "badge " + (run.ok ? "status-synced" : "status-error"),
+        text: run.ok ? t("sched.runs.ok") : t("sched.runs.fail", { code: run.exit_code })
+      }));
+      tr.appendChild(resultCell);
+
+      tr.appendChild(el("td", { text: fmtRunDuration(run.started_at, run.ended_at) }));
+
+      var outputCell = el("td", {});
+      outputCell.appendChild(schedulerRunOutput(run));
+      tr.appendChild(outputCell);
+
+      schedulerRunsTbody.appendChild(tr);
+    });
+  }
+
+  function pollSchedulerLogs() {
+    return api("sched.logs", { limit: 20 }).then(function (data) {
+      renderSchedulerRuns((data && data.runs) || []);
+    }, function () {});
   }
 
   /* ---------- profile ---------- */
@@ -5587,7 +6414,7 @@
     ] },
     { section: "storage", titleKey: "settings.section.storage", container: "settings-drawer-body-storage", fields: [
       { key: "capacity_bytes", labelKey: "settings.field.storage.capacity_bytes.label", descKey: "settings.field.storage.capacity_bytes.desc", type: "gib" },
-      { key: "room_id", labelKey: "settings.field.storage.room_id.label", descKey: "settings.field.storage.room_id.desc", type: "text" }
+      { key: "room_ids", labelKey: "settings.field.storage.room_ids.label", descKey: "settings.field.storage.room_ids.desc", type: "list" }
     ] },
     { section: "stream", titleKey: "settings.section.stream", container: "settings-drawer-body-stream", fields: [
       { key: "rtsp_url", labelKey: "settings.field.stream.rtsp_url.label", descKey: "settings.field.stream.rtsp_url.desc", type: "text" },
@@ -5608,6 +6435,9 @@
       { key: "request_timeout_secs", labelKey: "settings.field.ai.request_timeout_secs.label", descKey: "settings.field.ai.request_timeout_secs.desc", type: "number", advanced: true },
       { key: "api_listen", labelKey: "settings.field.ai.api_listen.label", descKey: "settings.field.ai.api_listen.desc", type: "text", advanced: true }
     ] },
+    { section: "scheduler", titleKey: "settings.section.scheduler", container: "settings-drawer-body-scheduler", fields: [
+      { key: "enabled", labelKey: "settings.field.scheduler.enabled.label", descKey: "settings.field.scheduler.enabled.desc", type: "toggle" }
+    ] },
     { section: "ui", titleKey: "settings.section.ui", container: "settings-body", fields: [
       { key: "listen", labelKey: "settings.field.ui.listen.label", descKey: "settings.field.ui.listen.desc", type: "text" },
       { key: "enabled", labelKey: "settings.field.ui.enabled.label", descKey: "settings.field.ui.enabled.desc", type: "toggle" }
@@ -5624,6 +6454,7 @@
     mailbox: "panel-mailbox",
     storage: "panel-store",
     identity: "panel-profile",
+    scheduler: "panel-scheduler",
     ui: "panel-settings"
   };
 
@@ -5743,16 +6574,60 @@
         }
       });
     } else if (f.type === "list") {
-      // Comma-separated text in the UI, a JSON string array on the wire
-      // (e.g. mailbox.chat_rooms: Vec<String>). Unlike "text", an empty
-      // input saves `[]`, not null -- the config field isn't optional.
-      input = el("input", { type: "text", id: id, autocomplete: "off" });
-      input.value = Array.isArray(current) ? current.join(", ") : "";
-      input.addEventListener("blur", function () {
-        var items = input.value.split(",").map(function (s) { return s.trim(); }).filter(function (s) { return s !== ""; });
-        saveSetting(path, items, sectionCfg, f.key, badge);
+      // Chip editor: one chip per current array value (mono text + a small
+      // remove button), plus a text input + Add button below (Enter also
+      // adds). Adding splits on commas so pasting "a, b" adds both, then
+      // trims, drops empties and de-dupes against the current list. Wire
+      // format is unchanged from the old comma-separated text field: a JSON
+      // string array (e.g. mailbox.chat_rooms: Vec<String>), and an empty
+      // list still saves `[]`, not null -- the config field isn't optional.
+      var listWrap = el("div", { class: "chip-list-editor" });
+      var chipsEl = el("div", { class: "chip-list" });
+      var items = Array.isArray(current) ? current.slice() : [];
+
+      var renderChips = function () {
+        chipsEl.innerHTML = "";
+        items.forEach(function (item) {
+          var chip = el("span", { class: "chip" });
+          chip.appendChild(el("span", { class: "mono chip-text", text: item }));
+          var rm = el("button", { type: "button", class: "chip-remove", "aria-label": t("settings.list.removeAria", { item: item }) });
+          rm.textContent = "×";
+          rm.addEventListener("click", function () {
+            items = items.filter(function (v) { return v !== item; });
+            saveSetting(path, items, sectionCfg, f.key, badge).then(renderChips);
+          });
+          chip.appendChild(rm);
+          chipsEl.appendChild(chip);
+        });
+      };
+      renderChips();
+      listWrap.appendChild(chipsEl);
+
+      var addRow = el("div", { class: "chip-add-row" });
+      var addInput = el("input", { type: "text", id: id, autocomplete: "off" });
+      addInput.placeholder = t("settings.list.addPlaceholder");
+      var addBtn = el("button", { type: "button" });
+      addBtn.textContent = t("settings.list.addBtn");
+      var addFromInput = function () {
+        var raw = addInput.value;
+        if (!raw.trim()) return;
+        var parts = raw.split(",").map(function (s) { return s.trim(); }).filter(function (s) { return s !== ""; });
+        var next = items.slice();
+        parts.forEach(function (p) { if (next.indexOf(p) === -1) next.push(p); });
+        addInput.value = "";
+        if (next.length === items.length) return;
+        items = next;
+        saveSetting(path, items, sectionCfg, f.key, badge).then(renderChips);
+      };
+      addBtn.addEventListener("click", addFromInput);
+      addInput.addEventListener("keydown", function (e) {
+        if (e.key === "Enter") { e.preventDefault(); addFromInput(); }
       });
-      row.appendChild(input);
+      addRow.appendChild(addInput);
+      addRow.appendChild(addBtn);
+      listWrap.appendChild(addRow);
+
+      row.appendChild(listWrap);
     } else {
       input = el("input", { type: "text", id: id, autocomplete: "off" });
       input.value = current === null || current === undefined ? "" : String(current);
@@ -6364,6 +7239,11 @@
        pollAll has no active-panel gating for any of its other calls, so
        there is no existing gating pattern to mirror here either. */
     pollStoreSyncList();
+    /* scheduler jobs' next_run keeps advancing and runs land in the
+       background, so poll both unconditionally alongside folder sync
+       rather than gating on the scheduler panel being active. */
+    pollSchedulerLs();
+    pollSchedulerLogs();
   }
 
   function startPolling() {
@@ -6402,7 +7282,7 @@
 
   var PANEL_IDS = [
     "panel-overview", "panel-stream", "panel-ai",
-    "panel-mailbox", "panel-store", "panel-profile", "panel-update", "panel-settings"
+    "panel-mailbox", "panel-store", "panel-scheduler", "panel-profile", "panel-update", "panel-settings"
   ];
   var sideLinks = Array.prototype.slice.call(document.querySelectorAll("#sidenav a"));
 
@@ -6520,6 +7400,9 @@
   pollStoreLs();
   pollSandboxLs();
   pollStoreSyncList();
+  loadStoreExportDirDefault();
+  pollSchedulerLs();
+  pollSchedulerLogs();
   pollConfig();
   pollUpdate();
   initDevMode();

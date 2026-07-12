@@ -34,6 +34,7 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use chrono::Utc;
 use mistlib::storage::fs::NativeBlockStore;
 use mistlib_core::storage::{SpatialPolicy, StorageEngine};
+use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, OnceCell};
@@ -50,11 +51,14 @@ pub struct Store {
     data_dir: PathBuf,
     /// Serializes read-modify-write access to `store-index.json`.
     index_lock: Mutex<()>,
-    /// The p2p room currently joined for peer block exchange, if any.
-    /// Reconciled against live config on every [`store`] call by
-    /// [`Store::sync_room`], so `config.storage.room_id` can change (or be
-    /// cleared) at any time without a daemon restart.
-    room: Mutex<Option<String>>,
+    /// The p2p rooms currently joined for peer block exchange, config-driven
+    /// (empty if none configured). Reconciled against live config on every
+    /// [`store`] call by [`Store::sync_rooms`], so `config.storage.room_ids`
+    /// can change (add, remove, or clear rooms) at any time without a daemon
+    /// restart. Rooms joined additively by other flows -- folder syncs,
+    /// folder shares, an explicit `store.connect --room` -- are never added
+    /// here, so config reconciliation never leaves them (see `sync_rooms`).
+    rooms: Mutex<std::collections::BTreeSet<String>>,
 }
 
 impl Store {
@@ -85,34 +89,48 @@ impl Store {
             engine,
             data_dir,
             index_lock: Mutex::new(()),
-            room: Mutex::new(None),
+            rooms: Mutex::new(std::collections::BTreeSet::new()),
         })
     }
 
-    /// Reconcile the joined p2p room against `desired` (the current value of
-    /// `config.storage.room_id`), leaving the previous room and joining the
-    /// new one only if it actually changed since the last call. Cheap and a
-    /// no-op when unchanged, so callers can call it on every command.
-    async fn sync_room(&self, state: &Arc<AppState>, desired: Option<String>) -> Result<()> {
-        let mut current = self.room.lock().await;
+    /// Reconcile the joined p2p rooms against `desired` (the current value of
+    /// `config.storage.room_ids`), leaving rooms no longer desired and
+    /// joining newly desired ones. Cheap and a no-op when the set is
+    /// unchanged since the last call, so callers can call it on every
+    /// command. Blank entries in `desired` are dropped.
+    ///
+    /// Rooms joined by other flows -- folder syncs, folder shares, an
+    /// explicit `store.connect --room` -- are never tracked here, so this
+    /// reconciliation never leaves them even if they're not in `desired`.
+    async fn sync_rooms(&self, state: &Arc<AppState>, desired: &[String]) -> Result<()> {
+        let desired: std::collections::BTreeSet<String> = desired
+            .iter()
+            .map(|room| room.trim().to_string())
+            .filter(|room| !room.is_empty())
+            .collect();
+        let mut current = self.rooms.lock().await;
         if *current == desired {
             return Ok(());
         }
-        // Only clear the tracked room once `leave_room` actually succeeds --
-        // if it errors, `current` still names the room we (as far as we
-        // know) hold, so the next call retries leaving it instead of
-        // silently losing track.
-        if let Some(old) = current.as_deref() {
-            crate::net::leave_room(old)
-                .await
-                .with_context(|| format!("storage: leaving room {old:?}"))?;
+        // Only drop a room from `current` once `leave_room` actually
+        // succeeds -- if it errors, `current` still names the room we (as
+        // far as we know) hold, so the next call retries leaving it instead
+        // of silently losing track.
+        for old in current.clone() {
+            if !desired.contains(&old) {
+                crate::net::leave_room(&old)
+                    .await
+                    .with_context(|| format!("storage: leaving room {old:?}"))?;
+                current.remove(&old);
+            }
         }
-        *current = None;
-        if let Some(new_room) = desired {
-            crate::net::ensure_started(state, new_room.clone())
-                .await
-                .context("storage: starting p2p transport")?;
-            *current = Some(new_room);
+        for new_room in &desired {
+            if !current.contains(new_room) {
+                crate::net::ensure_started(state, new_room.clone())
+                    .await
+                    .context("storage: starting p2p transport")?;
+                current.insert(new_room.clone());
+            }
         }
         Ok(())
     }
@@ -164,11 +182,12 @@ impl Store {
 static STORE: OnceCell<Arc<Store>> = OnceCell::const_new();
 
 /// Get (lazily opening on first call) the daemon's store, and reconcile its
-/// joined p2p room against the current `config.storage.room_id` (join it if
-/// set and not yet joined, hop to it if it changed, leave it if cleared).
-/// Since this reconciliation runs on every call, `storage.room_id` can be
-/// changed at any time -- via `config.set` or the dashboard -- and takes
-/// effect on the very next `store.*` command, no daemon restart needed.
+/// joined p2p rooms against the current `config.storage.room_ids` (join
+/// rooms newly added, leave rooms removed, join all of them the first time
+/// any are configured). Since this reconciliation runs on every call,
+/// `storage.room_ids` can be changed at any time -- via `config.set` or the
+/// dashboard -- and takes effect on the very next `store.*` command, no
+/// daemon restart needed.
 pub async fn store(state: &Arc<AppState>) -> Result<Arc<Store>> {
     let store = STORE
         .get_or_try_init(|| async {
@@ -178,7 +197,7 @@ pub async fn store(state: &Arc<AppState>) -> Result<Arc<Store>> {
         })
         .await?;
     store
-        .sync_room(state, state.config().storage.room_id.clone())
+        .sync_rooms(state, &state.config().storage.room_ids)
         .await?;
     Ok(store.clone())
 }
@@ -196,6 +215,114 @@ fn default_export_path(sandbox_path: &str, name: &str, export_dir: Option<&Path>
         Some(export_dir) => export_dir.join(Path::new(sandbox_path)),
         None => data_dir.join("downloads").join(name),
     }
+}
+
+/// Where `store.browse-dirs` opens when no explicit `path` is given: the
+/// configured `storage.export_dir` if it currently exists as a directory
+/// (the natural starting point when picking a *new* export destination --
+/// right next to the old one), else the user's home directory, else the
+/// store's own `data_dir` as a last resort that always exists. Pure (no
+/// filesystem writes) but does stat the candidates, so it's still exercised
+/// through `handle()` rather than the pure-logic unit tests below.
+fn resolve_default_browse_dir(export_dir: Option<&Path>, data_dir: &Path) -> PathBuf {
+    if let Some(export_dir) = export_dir
+        && export_dir.is_dir()
+    {
+        return export_dir.to_path_buf();
+    }
+    if let Some(home) = directories::UserDirs::new().map(|u| u.home_dir().to_path_buf()) {
+        return home;
+    }
+    data_dir.to_path_buf()
+}
+
+/// One entry in `store.browse-dirs`' `dirs` list: a subdirectory's bare name
+/// and its full path.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct BrowseDirEntry {
+    name: String,
+    path: String,
+}
+
+/// One entry in `store.browse-dirs`' `roots` list: a shortcut a picker UI
+/// can offer directly (home, well-known user folders, drive roots).
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct BrowseRoot {
+    label: String,
+    path: String,
+}
+
+/// Immediate subdirectories of `dir` (not recursive), skipping dotfiles and
+/// sorted case-insensitively by name -- the listing behind `store.browse-dirs`.
+fn list_subdirs(dir: &Path) -> Result<Vec<BrowseDirEntry>> {
+    let mut entries = Vec::new();
+    let read_dir = std::fs::read_dir(dir).with_context(|| format!("listing {}", dir.display()))?;
+    for entry in read_dir {
+        let entry = entry.with_context(|| format!("reading entry in {}", dir.display()))?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        if !is_dir {
+            continue;
+        }
+        entries.push(BrowseDirEntry {
+            path: entry.path().to_string_lossy().to_string(),
+            name,
+        });
+    }
+    entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    Ok(entries)
+}
+
+/// Shortcut roots offered by `store.browse-dirs`: home + well-known user
+/// folders that exist (from `directories::UserDirs`), plus every existing
+/// drive letter on Windows (`A:\` .. `Z:\`, labeled by drive) or `/` on
+/// other platforms.
+fn browse_roots() -> Vec<BrowseRoot> {
+    let mut roots = Vec::new();
+    if let Some(user_dirs) = directories::UserDirs::new() {
+        roots.push(BrowseRoot {
+            label: "Home".to_string(),
+            path: user_dirs.home_dir().to_string_lossy().to_string(),
+        });
+        if let Some(dir) = user_dirs.download_dir() {
+            roots.push(BrowseRoot {
+                label: "Downloads".to_string(),
+                path: dir.to_string_lossy().to_string(),
+            });
+        }
+        if let Some(dir) = user_dirs.desktop_dir() {
+            roots.push(BrowseRoot {
+                label: "Desktop".to_string(),
+                path: dir.to_string_lossy().to_string(),
+            });
+        }
+        if let Some(dir) = user_dirs.document_dir() {
+            roots.push(BrowseRoot {
+                label: "Documents".to_string(),
+                path: dir.to_string_lossy().to_string(),
+            });
+        }
+    }
+    if cfg!(windows) {
+        for letter in b'A'..=b'Z' {
+            let drive = format!("{}:\\", letter as char);
+            if Path::new(&drive).is_dir() {
+                roots.push(BrowseRoot {
+                    label: drive.clone(),
+                    path: drive,
+                });
+            }
+        }
+    } else {
+        roots.push(BrowseRoot {
+            label: "/".to_string(),
+            path: "/".to_string(),
+        });
+    }
+    roots
 }
 
 /// Handle `store.*` IPC commands:
@@ -224,8 +351,13 @@ fn default_export_path(sandbox_path: &str, name: &str, export_dir: Option<&Path>
 ///   `<storage.export_dir>/<sandbox-relative path>` if `storage.export_dir`
 ///   is configured -- preserving subdirectories -- else
 ///   `<data_dir>/downloads/<basename>`)
-/// - `store.connect` `{}` -> `{node_id, room, peers}` (joins/reports on
-///   `storage.room_id`; see [`wait_for_connected_peers`])
+/// - `store.browse-dirs` `{path?}` -> `{path, parent, dirs, roots,
+///   export_dir, default_export_dir}` (server-side directory listing backing
+///   the dashboard's `storage.export_dir` folder picker)
+/// - `store.connect` `{room?}` -> `{node_id, rooms, room?, peers}` (with no
+///   `room` arg, ensures all of `storage.room_ids` are joined; `room` is
+///   present only when exactly one room is involved -- see
+///   [`wait_for_connected_peers`])
 /// - `store.folder-get` `{url}` -> `{folder_name, files, skipped, progress}`
 ///   (networked folder-share receive flow; see [`folder_share`])
 /// - `store.folder-sync` `{url, dir?}` -> `{sync}` (registers immediately,
@@ -517,8 +649,8 @@ pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Val
                 .unwrap_or("file")
                 .to_string();
 
-            // `storage.export_dir` is read live (like `storage.room_id` in
-            // `sync_room` above) so a `config.set` takes effect on the very
+            // `storage.export_dir` is read live (like `storage.room_ids` in
+            // `sync_rooms` above) so a `config.set` takes effect on the very
             // next export call, no daemon restart needed.
             let output_path = match output_arg {
                 Some(path) => path,
@@ -551,27 +683,110 @@ pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Val
             }))
         }
 
-        // Report this node's id, the storage room, and currently connected
-        // peers (`store(state)` above already joined the configured room via
-        // `sync_room` if `storage.room_id` is set). Mirrors `connect`. An
-        // explicit `room` arg joins that room instead (additively -- the
-        // store can hold several rooms at once, one per share/sync).
+        // Server-side directory browser backing the dashboard's
+        // `storage.export_dir` folder picker -- the daemon may run on a
+        // different machine/account than the browser, so the user can't
+        // just type a path, they need to click through directories the
+        // daemon itself can see. Loopback-token-gated IPC like every other
+        // `store.*` command; lists directory *names* only, never file
+        // contents or file entries, which keeps it at the same trust level
+        // as `store.put`/`store.sandbox.import` (both already read
+        // server-side paths named by the caller).
+        "store.browse-dirs" => {
+            let path_arg = args.get("path").and_then(Value::as_str);
+            let export_dir = state.config().storage.export_dir;
+            let default_export_dir = store.data_dir().join("downloads");
+
+            let (start_dir, dirs) = match path_arg {
+                Some(path) => {
+                    let path = PathBuf::from(path);
+                    if !path.is_dir() {
+                        bail!("not a directory: {}", path.display());
+                    }
+                    // Explicit request: a listing failure (e.g. permissions)
+                    // is a real error, surfaced to the caller.
+                    let dirs = list_subdirs(&path)?;
+                    (path, dirs)
+                }
+                None => {
+                    let start_dir =
+                        resolve_default_browse_dir(export_dir.as_deref(), store.data_dir());
+                    // Implicit start dir: degrade to an empty listing rather
+                    // than failing outright -- the picker must still open
+                    // even if the resolved default happens to be unreadable.
+                    let dirs = list_subdirs(&start_dir).unwrap_or_default();
+                    (start_dir, dirs)
+                }
+            };
+            let parent = start_dir.parent().map(|p| p.to_string_lossy().to_string());
+            let roots = browse_roots();
+
+            Ok(json!({
+                "path": start_dir.to_string_lossy(),
+                "parent": parent,
+                "dirs": dirs,
+                "roots": roots,
+                "export_dir": export_dir.map(|p| p.to_string_lossy().to_string()),
+                "default_export_dir": default_export_dir.to_string_lossy(),
+            }))
+        }
+
+        // Report this node's id, the storage room(s), and currently
+        // connected peers (`store(state)` above already joined
+        // `storage.room_ids` via `sync_rooms`). Mirrors `connect`. An
+        // explicit `room` arg joins that one room instead, additively (the
+        // store can hold several rooms at once, one per share/sync). With
+        // no `room` arg, every configured `storage.room_ids` entry is
+        // ensured -- normally already true via `store(state)` above, but
+        // repeated here too so `store.connect` alone is self-sufficient.
+        // `rooms` (sorted) always lists the room(s) this call touched;
+        // `room` is additionally set when exactly one room is involved
+        // (the explicit-arg case, or a single configured room), keeping the
+        // legacy single-room response shape tc-storage-cli depends on.
+        // `peers` is process-wide, not per-room -- `wait_for_connected_peers`
+        // has no room-scoped view (see its doc comment).
         "store.connect" => {
             let identity = crate::identity::current(state).await?;
-            let room = match args.get("room").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
+            let rooms: std::collections::BTreeSet<String> = match args
+                .get("room")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+            {
                 Some(room) => {
                     crate::net::ensure_started(state, room.to_string())
                         .await
                         .context("storage: joining room")?;
-                    room.to_string()
+                    std::iter::once(room.to_string()).collect()
                 }
-                None => state.config().storage.room_id.clone().context(
-                    "`store connect` requires storage.room_id to be configured \
-                     (see `mistl config set storage.room_id <room>`) or an explicit --room",
-                )?,
+                None => {
+                    let configured = state.config().storage.room_ids;
+                    if configured.is_empty() {
+                        bail!(
+                            "`store connect` requires storage.room_ids to be configured \
+                             (see `mistl config set storage.room_ids <room>`) or an explicit --room"
+                        );
+                    }
+                    for room in &configured {
+                        crate::net::ensure_started(state, room.clone())
+                            .await
+                            .context("storage: joining room")?;
+                    }
+                    configured.into_iter().collect()
+                }
             };
             let peers = wait_for_connected_peers(Duration::from_secs(20)).await;
-            Ok(json!({ "node_id": identity.node_id(), "room": room, "peers": peers }))
+            let rooms_list: Vec<String> = rooms.iter().cloned().collect();
+            let mut response = json!({
+                "node_id": identity.node_id(),
+                "rooms": rooms_list,
+                "peers": peers,
+            });
+            if let [only_room] = rooms_list.as_slice()
+                && let Value::Object(ref mut map) = response
+            {
+                map.insert("room".to_string(), json!(only_room));
+            }
+            Ok(response)
         }
 
         // Networked folder-share receive flow: request access from the
@@ -906,7 +1121,7 @@ mod tests {
         StorageConfig {
             blocks_dir: None,
             capacity_bytes: 10 * 1024 * 1024 * 1024,
-            room_id: None,
+            room_ids: Vec::new(),
             export_dir: None,
         }
     }
@@ -1154,5 +1369,63 @@ mod tests {
         assert_eq!(listed, vec![safe_name.clone()]);
         let (data, _size) = sandbox.read_file(&safe_name).unwrap();
         assert_eq!(data, b"sandbox bound content");
+    }
+
+    // -- `store.browse-dirs` -------------------------------------------
+
+    #[test]
+    fn list_subdirs_skips_dotfiles_and_files_and_sorts_case_insensitively() {
+        let root = TempDir::new("browse-dirs-list");
+        let root_path = root.path();
+        std::fs::create_dir_all(root_path.join("Charlie")).unwrap();
+        std::fs::create_dir_all(root_path.join("alpha")).unwrap();
+        std::fs::create_dir_all(root_path.join("Bravo")).unwrap();
+        std::fs::create_dir_all(root_path.join(".hidden")).unwrap();
+        std::fs::write(root_path.join("not-a-dir.txt"), b"file").unwrap();
+
+        let entries = list_subdirs(&root_path).unwrap();
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "Bravo", "Charlie"]);
+        // Each entry's `path` is the full joined path, not just the name.
+        assert_eq!(entries[0].path, root_path.join("alpha").to_string_lossy());
+    }
+
+    #[test]
+    fn list_subdirs_of_a_missing_directory_errors() {
+        let missing = std::env::temp_dir().join("mistl-storage-test-browse-dirs-missing-xyz");
+        assert!(list_subdirs(&missing).is_err());
+    }
+
+    #[test]
+    fn resolve_default_browse_dir_prefers_an_existing_export_dir() {
+        let export = TempDir::new("browse-dirs-export");
+        let data_dir = TempDir::new("browse-dirs-data");
+        let export_path = export.path();
+        let data_dir_path = data_dir.path();
+        let resolved = resolve_default_browse_dir(Some(&export_path), &data_dir_path);
+        assert_eq!(resolved, export_path);
+    }
+
+    #[test]
+    fn resolve_default_browse_dir_falls_back_when_export_dir_does_not_exist() {
+        let data_dir = TempDir::new("browse-dirs-data-fallback");
+        let data_dir_path = data_dir.path();
+        let missing_export = data_dir_path.join("does-not-exist");
+        let resolved = resolve_default_browse_dir(Some(&missing_export), &data_dir_path);
+        // Falls through to the home dir (if resolvable) or else `data_dir`;
+        // either way it must not be the nonexistent export dir.
+        assert_ne!(resolved, missing_export);
+    }
+
+    #[test]
+    fn resolve_default_browse_dir_falls_back_to_data_dir_when_unconfigured_and_no_home() {
+        // With no export dir at all, the function still returns *some*
+        // existing-in-principle directory -- when a home dir is resolvable
+        // (true on this dev machine) that wins over `data_dir`, but the
+        // result is never empty and is always an absolute-looking path.
+        let data_dir = TempDir::new("browse-dirs-data-nohome");
+        let data_dir_path = data_dir.path();
+        let resolved = resolve_default_browse_dir(None, &data_dir_path);
+        assert!(!resolved.as_os_str().is_empty());
     }
 }

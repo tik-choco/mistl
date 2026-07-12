@@ -25,7 +25,7 @@
 //!   `folderSignature`. Per-file edits additionally broadcast incremental
 //!   `folder-change` envelopes.
 //! - Multi-room: each shared folder carries its own `room_id` (defaulting to
-//!   `storage.room_id`), joined for the share's lifetime.
+//!   the first `storage.room_ids` entry), joined for the share's lifetime.
 //!
 //! ## Wire encodings (interop contract, see `folderKeyProof.ts` /
 //! `accessGrantCrypto.ts` in the tc-storage repo)
@@ -208,9 +208,10 @@ async fn write_table_file(store: &Store, table: &[SharedFolder]) -> Result<()> {
     Ok(())
 }
 
-/// Publish `local_dir` as a shared folder in `room` (falling back to
-/// `storage.room_id`) and persist it so the background responder/announcer
-/// keeps serving it. Errors if the dir doesn't exist or is already shared.
+/// Publish `local_dir` as a shared folder in `room` (falling back to the
+/// first configured `storage.room_ids` entry) and persist it so the
+/// background responder/announcer keeps serving it. Errors if the dir
+/// doesn't exist or is already shared.
 pub async fn share_folder(
     local_dir: &str,
     passphrase: &str,
@@ -229,10 +230,12 @@ pub async fn share_folder(
     if !root_path.is_dir() {
         bail!("{} is not a directory", root_path.display());
     }
+    // A share lives in exactly one room, so with several configured rooms
+    // the first one is the default; pass an explicit `room` to pick another.
     let room = room
         .map(str::to_string)
-        .or_else(|| state.config().storage.room_id.clone())
-        .context("folder-share requires --room or a configured storage.room_id")?;
+        .or_else(|| state.config().storage.room_ids.first().cloned())
+        .context("folder-share requires --room or a configured storage.room_ids entry")?;
 
     {
         let _guard = TABLE_LOCK.lock().await;
@@ -1200,7 +1203,7 @@ mod tests {
         let cfg = crate::config::StorageConfig {
             blocks_dir: None,
             capacity_bytes: 10 * 1024 * 1024 * 1024,
-            room_id: None,
+            room_ids: Vec::new(),
             export_dir: None,
         };
         Store::open(&cfg, dir.to_path_buf()).await.expect("open store")

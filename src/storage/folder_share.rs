@@ -860,9 +860,9 @@ async fn fetch_folder_share_once(
         bail!("share link missing roomId");
     }
     // Join the share's own room directly (additive; `net`'s room registry is
-    // refcounted, so this coexists with the configured `storage.room_id` and
-    // any other active share rooms) instead of requiring `storage.room_id`
-    // to match -- shares from different rooms can be fetched concurrently.
+    // refcounted, so this coexists with the configured `storage.room_ids` and
+    // any other active share rooms) instead of requiring `storage.room_ids`
+    // to contain it -- shares from different rooms can be fetched concurrently.
     crate::net::ensure_started(state, share.room_id.clone())
         .await
         .context("storage: joining share room")?;

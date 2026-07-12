@@ -194,7 +194,7 @@ restart):
 [storage]
 # blocks_dir = 'D:\mistl-blocks'
 capacity_bytes = 10737418240
-# room_id = "my-storage-room"                # tc-chat room for peer block exchange; default: local-only, no room joined
+# room_ids = ["my-storage-room"]             # tc-chat room(s) for peer block exchange; default: local-only, no room joined
 
 [stream]
 rtsp_url = "rtsp://127.0.0.1:8554/stream"   # use 0.0.0.0 to expose on the LAN
@@ -239,9 +239,12 @@ listen = "127.0.0.1:6480"                    # keep on loopback (no auth)
 Note: storage, mailbox, ai, and stream relay can each join their **own** room --
 the p2p transport supports multiple simultaneous rooms per process. `[ai] room_id`
 defaults to the mailbox room for convenience when unset; set it explicitly to
-join a different room, e.g. an existing mistai app room. `[storage] room_id` has
-no such fallback -- leave it unset to keep the store purely local (no network
-join at all).
+join a different room, e.g. an existing mistai app room. `[storage] room_ids` has
+no such fallback -- leave it unset (or empty) to keep the store purely local (no
+network join at all). Unlike the other room settings, `room_ids` is a list: the
+store joins **all** listed rooms simultaneously, and the list can be changed at
+any time without a daemon restart. The legacy single-room form (`room_id =
+"my-room"`) still parses, loading as a one-element `room_ids` list.
 
 Data lives in `%APPDATA%\tik-choco\mistl\data\` (keys, blocks, spools, logs).
 

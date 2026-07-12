@@ -37,6 +37,11 @@ rand = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 bytes = "1"
 
+# scheduler (cron-like job scheduler ported from tc-sched): 6-field
+# (with-seconds) cron expression parsing/evaluation, chrono-based like the
+# timestamps stored elsewhere in this crate.
+cron = "0.12"
+
 # identity / crypto (tc-storage interop: did:key ed25519, AES-256-GCM + PBKDF2)
 ed25519-dalek = { version = "2", features = ["pkcs8", "rand_core"] }
 bs58 = "0.5"

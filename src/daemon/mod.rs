@@ -103,6 +103,10 @@ async fn daemon_main() -> Result<()> {
     crate::storage::folder_sync::spawn_background(state.clone());
     crate::storage::folder_owner::spawn_background(state.clone());
 
+    // Cron-like job scheduler: fires due jobs on a 1-second tick. A no-op
+    // (logged) when `[scheduler] enabled = false`.
+    crate::scheduler::spawn_background(state.clone());
+
     tokio::select! {
         _ = tokio::signal::ctrl_c() => info!("interrupted, shutting down"),
         _ = shutdown_rx.wait_for(|&stop| stop) => info!("stop requested, shutting down"),
@@ -291,6 +295,7 @@ pub async fn dispatch(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<V
             Some("store") => crate::storage::handle(cmd, args, state).await,
             Some("stream") => crate::stream::handle(cmd, args, state).await,
             Some("mailbox") => crate::mailbox::handle(cmd, args, state).await,
+            Some("sched") => crate::scheduler::handle(cmd, args, state).await,
             Some("consensus") => crate::consensus::handle(cmd, args, state).await,
             Some("topology") => crate::topology::handle(cmd, args, state).await,
             Some("ai") => crate::ai::handle(cmd, args, state).await,

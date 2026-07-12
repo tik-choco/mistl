@@ -19,6 +19,8 @@ pub struct Config {
     pub ui: UiConfig,
     #[serde(default)]
     pub update: UpdateConfig,
+    #[serde(default)]
+    pub scheduler: SchedulerConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,23 +84,28 @@ pub struct StorageConfig {
     pub blocks_dir: Option<PathBuf>,
     /// Maximum store size in bytes before LRU eviction of remote blocks.
     pub capacity_bytes: u64,
-    /// tc-chat room the store joins for peer block exchange. Independent of
+    /// tc-chat rooms the store joins for peer block exchange. Independent of
     /// `[mailbox] room_id`/`[ai] room_id`/`[stream] relay_room`/`share_room`
     /// for the same reason those are independent of each other -- the p2p
-    /// transport supports multiple simultaneous rooms per process. Unset by
-    /// default: the store stays purely local (no network join) until a room
-    /// is configured. Unlike the other room settings, this one can be
-    /// changed (or cleared) at any time -- `storage::store` re-resolves it
-    /// on every call, hopping to the new room or leaving it entirely, with
-    /// no daemon restart required.
-    pub room_id: Option<String>,
+    /// transport supports multiple simultaneous rooms per process, and here
+    /// it's taken further: the store joins *all* listed rooms simultaneously
+    /// (mistlib supports multiple rooms per process; see `net::ensure_started`).
+    /// Empty by default: the store stays purely local (no network join) until
+    /// at least one room is configured. Unlike the other room settings, this
+    /// one can be changed at any time -- `storage::store` re-resolves the
+    /// whole list on every call, joining newly-added rooms and leaving
+    /// removed ones, with no daemon restart required. Accepts either a TOML
+    /// array (`room_ids = ["a", "b"]`) or, for back-compat, the old single
+    /// `room_id = "a"` string form (also aliased under this field name).
+    #[serde(alias = "room_id", deserialize_with = "deserialize_room_ids")]
+    pub room_ids: Vec<String>,
     /// Destination directory `store.sandbox.export` writes to when no
     /// explicit `output` is given -- the "extract from the sandbox" default,
     /// used by continuous folder syncs (which materialize into a managed
     /// sandbox subdirectory rather than a user-chosen one; see
     /// `folder_sync`) to get files out onto the real filesystem. Unset by
     /// default, in which case export falls back to `<data_dir>/downloads`.
-    /// Read live on every `store.sandbox.export` call, like `room_id` above,
+    /// Read live on every `store.sandbox.export` call, like `room_ids` above,
     /// so this can be changed (or cleared, via `config.set` with a null/empty
     /// value) at any time without a daemon restart.
     pub export_dir: Option<PathBuf>,
@@ -109,10 +116,54 @@ impl Default for StorageConfig {
         Self {
             blocks_dir: None,
             capacity_bytes: 10 * 1024 * 1024 * 1024, // 10 GiB
-            room_id: None,
+            room_ids: Vec::new(),
             export_dir: None,
         }
     }
+}
+
+/// Accepts either a single room-id string (the pre-multi-room config shape,
+/// `room_id = "my-room"`) or a sequence of strings (`room_ids = ["a", "b"]`)
+/// and normalizes both to a `Vec<String>`. A blank/whitespace-only single
+/// string parses as an empty list, matching the old field's `None` meaning
+/// "purely local, no room joined".
+fn deserialize_room_ids<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct RoomIdsVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for RoomIdsVisitor {
+        type Value = Vec<String>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a room id string or an array of room id strings")
+        }
+
+        fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            if value.trim().is_empty() {
+                Ok(Vec::new())
+            } else {
+                Ok(vec![value.to_string()])
+            }
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            let mut rooms = Vec::new();
+            while let Some(room) = seq.next_element::<String>()? {
+                rooms.push(room);
+            }
+            Ok(rooms)
+        }
+    }
+
+    deserializer.deserialize_any(RoomIdsVisitor)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -347,6 +398,21 @@ impl Default for AiConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SchedulerConfig {
+    /// Master switch for the background tick loop that fires due jobs.
+    /// Manual `sched.*` commands (including "run now") work regardless --
+    /// this only gates the automatic scheduling.
+    pub enabled: bool,
+}
+
+impl Default for SchedulerConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
 fn project_dirs() -> Result<directories::ProjectDirs> {
     directories::ProjectDirs::from("com", "tik-choco", "mistl")
         .context("could not determine home directory")
@@ -424,6 +490,20 @@ pub fn set_by_path(config: &Config, path: &str, value: serde_json::Value) -> Res
     if value == serde_json::Value::String("***".into()) {
         anyhow::bail!("refusing to store the masked placeholder \"***\" (re-enter the real value)");
     }
+    // Legacy alias: `storage.room_id` used to be the field name (a single
+    // `Option<String>`). Rewrite both the path and the value shape so
+    // `mistl config set storage.room_id foo` keeps working against the new
+    // `storage.room_ids: Vec<String>` field -- a non-empty string becomes a
+    // one-element array, null/empty becomes an empty array.
+    let (path, value) = if path == "storage.room_id" {
+        let rooms = match value.as_str() {
+            Some(s) if !s.trim().is_empty() => serde_json::json!([s]),
+            _ => serde_json::json!([]),
+        };
+        ("storage.room_ids", rooms)
+    } else {
+        (path, value)
+    };
     let (section, field) = path
         .split_once('.')
         .with_context(|| format!("invalid config path {path:?}; expected \"section.field\""))?;
@@ -456,16 +536,17 @@ pub fn applies_when(path: &str) -> &'static str {
         // mailbox/ai/stream join their room once at service start and hold
         // it for the process lifetime; before any p2p service ran it applies
         // on next start, but "daemon restart" is the safe universal answer.
-        // `storage.room_id` is the one exception -- `storage::store`
-        // re-resolves it on every call and hops rooms live, so it falls
-        // through to "next service start" below (true immediately, since
-        // the next `store.*` command *is* its next "start").
-        "mailbox.room_id"
-        | "mailbox.chat_rooms"
-        | "mailbox.chat_relay"
-        | "ai.room_id"
-        | "stream.relay_room"
-        | "stream.share_room" => "daemon restart",
+        // `storage.room_ids` (and its legacy alias `storage.room_id`) is the
+        // one exception -- `storage::store` re-resolves the whole list on
+        // every call and hops rooms live, so it falls through to "next
+        // service start" below (true immediately, since the next `store.*`
+        // command *is* its next "start").
+        "mailbox.room_id" | "mailbox.chat_rooms" | "mailbox.chat_relay" | "ai.room_id"
+        | "stream.relay_room" | "stream.share_room" => "daemon restart",
+        // The background tick loop is only started once at daemon startup
+        // (see `scheduler::spawn_background`); toggling it live would need
+        // a way to stop an already-running loop, which isn't implemented.
+        "scheduler.enabled" => "daemon restart",
         _ => "next service start",
     }
 }
@@ -592,7 +673,10 @@ mod tests {
         assert_eq!(config.storage.export_dir, None, "unset by default");
 
         let updated = set_by_path(&config, "storage.export_dir", json!("C:\\exports")).unwrap();
-        assert_eq!(updated.storage.export_dir, Some(PathBuf::from("C:\\exports")));
+        assert_eq!(
+            updated.storage.export_dir,
+            Some(PathBuf::from("C:\\exports"))
+        );
 
         let cleared = set_by_path(&updated, "storage.export_dir", serde_json::Value::Null).unwrap();
         assert_eq!(cleared.storage.export_dir, None);
@@ -783,11 +867,101 @@ mod tests {
     }
 
     #[test]
-    fn applies_when_storage_room_id_does_not_require_a_restart() {
-        // Unlike mailbox/ai/stream room settings, storage's room is
+    fn scheduler_defaults_enabled_and_set_by_path_toggles_it() {
+        let config = Config::default();
+        assert!(config.scheduler.enabled);
+        let updated = set_by_path(&config, "scheduler.enabled", json!(false)).unwrap();
+        assert!(!updated.scheduler.enabled);
+        assert_eq!(applies_when("scheduler.enabled"), "daemon restart");
+    }
+
+    #[test]
+    fn applies_when_storage_room_ids_does_not_require_a_restart() {
+        // Unlike mailbox/ai/stream room settings, storage's rooms are
         // re-resolved live on every `store.*` call (see `storage::store`),
-        // so changing it should never tell the user to restart the daemon.
+        // so changing them should never tell the user to restart the daemon.
+        // Both the current field name and its legacy alias answer the same.
+        assert_eq!(applies_when("storage.room_ids"), "next service start");
         assert_eq!(applies_when("storage.room_id"), "next service start");
         assert_eq!(applies_when("mailbox.room_id"), "daemon restart");
+    }
+
+    #[test]
+    fn storage_room_ids_defaults_empty() {
+        let config = Config::default();
+        assert!(config.storage.room_ids.is_empty());
+    }
+
+    #[test]
+    fn storage_room_ids_parses_legacy_single_string_toml() {
+        let config: Config = toml::from_str(
+            r#"
+            [storage]
+            room_id = "my-room"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.storage.room_ids, vec!["my-room".to_string()]);
+    }
+
+    #[test]
+    fn storage_room_ids_parses_legacy_blank_string_toml_as_empty() {
+        let config: Config = toml::from_str(
+            r#"
+            [storage]
+            room_id = "   "
+            "#,
+        )
+        .unwrap();
+        assert!(config.storage.room_ids.is_empty());
+    }
+
+    #[test]
+    fn storage_room_ids_parses_array_toml() {
+        let config: Config = toml::from_str(
+            r#"
+            [storage]
+            room_ids = ["a", "b"]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.storage.room_ids,
+            vec!["a".to_string(), "b".to_string()]
+        );
+    }
+
+    #[test]
+    fn set_by_path_legacy_storage_room_id_string_becomes_one_element_array() {
+        let config = Config::default();
+        let updated = set_by_path(&config, "storage.room_id", json!("my-room")).unwrap();
+        assert_eq!(updated.storage.room_ids, vec!["my-room".to_string()]);
+    }
+
+    #[test]
+    fn set_by_path_legacy_storage_room_id_null_clears_the_list() {
+        let mut config = Config::default();
+        config.storage.room_ids = vec!["existing".to_string()];
+        let updated = set_by_path(&config, "storage.room_id", serde_json::Value::Null).unwrap();
+        assert!(updated.storage.room_ids.is_empty());
+    }
+
+    #[test]
+    fn set_by_path_legacy_storage_room_id_empty_string_clears_the_list() {
+        let mut config = Config::default();
+        config.storage.room_ids = vec!["existing".to_string()];
+        let updated = set_by_path(&config, "storage.room_id", json!("")).unwrap();
+        assert!(updated.storage.room_ids.is_empty());
+    }
+
+    #[test]
+    fn set_by_path_updates_storage_room_ids_directly() {
+        let config = Config::default();
+        let updated =
+            set_by_path(&config, "storage.room_ids", json!(["room-a", "room-b"])).unwrap();
+        assert_eq!(
+            updated.storage.room_ids,
+            vec!["room-a".to_string(), "room-b".to_string()]
+        );
     }
 }

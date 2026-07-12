@@ -56,12 +56,14 @@ pub async fn handle(cmd: &str, _args: Value, state: &Arc<AppState>) -> Result<Va
 /// - `rooms`: joined room ids (`net::joined_rooms`)
 /// - `peers`: `[{node_id, state}]` -- every node mistlib currently sees as
 ///   connected (any joined room), with its best-known connection state
-/// - `modules`: `{mailbox: {room, joined}, ai: {room, joined}, store: null}`
-///   -- each networked module's room id (resolved from config exactly the
+/// - `modules`: `{mailbox: {room, joined}, ai: {room, joined}, store}` --
+///   mailbox/ai report a single room id (resolved from config exactly the
 ///   way the module itself does, without starting it) and whether that room
-///   is joined yet; `store` is `null` because the content store is local
-///   and never joins a room. Deliberately no per-room peer lists -- see the
-///   module doc for why that isn't observable.
+///   is joined yet; `store` reports every room in `storage.room_ids` instead
+///   (the store can join several simultaneously) as `{rooms: [{room,
+///   joined}]}`, or `null` when no rooms are configured (purely local
+///   store, no network join at all). Deliberately no per-room peer lists --
+///   see the module doc for why that isn't observable.
 /// - `consensus`: verbatim `consensus.status` shape (cascade leader
 ///   election: `{active, room?, role?, leader?, peers?}`)
 /// - `stream`: verbatim `stream.status` shape (`{running, rtsp_url?,
@@ -88,22 +90,41 @@ async fn status(state: &Arc<AppState>) -> Result<Value> {
     // then the shared default) -- but reads config only, so asking for the
     // topology never lazily starts a module.
     let config = state.config();
-    let mailbox_room = config
-        .mailbox
-        .room_id
-        .clone()
-        .unwrap_or_else(|| crate::net::DEFAULT_ROOM.to_string());
-    let ai_room = config
-        .ai
-        .room_id
-        .clone()
-        .or_else(|| config.mailbox.room_id.clone())
-        .unwrap_or_else(|| crate::net::DEFAULT_ROOM.to_string());
+    let module_rooms = ModuleRooms {
+        mailbox: config
+            .mailbox
+            .room_id
+            .clone()
+            .unwrap_or_else(|| crate::net::DEFAULT_ROOM.to_string()),
+        ai: config
+            .ai
+            .room_id
+            .clone()
+            .or_else(|| config.mailbox.room_id.clone())
+            .unwrap_or_else(|| crate::net::DEFAULT_ROOM.to_string()),
+        store: config.storage.room_ids.clone(),
+    };
 
     let consensus = crate::consensus::handle("consensus.status", json!({}), state).await?;
     let stream = crate::stream::handle("stream.status", json!({}), state).await?;
 
-    Ok(build_status(self_info, rooms, peers, mailbox_room, ai_room, consensus, stream))
+    Ok(build_status(
+        self_info,
+        rooms,
+        peers,
+        module_rooms,
+        consensus,
+        stream,
+    ))
+}
+
+/// Per-module room resolution passed to [`build_status`]: mailbox and ai
+/// always resolve to exactly one room (falling back to the shared default),
+/// while the store carries zero or more configured `storage.room_ids`.
+struct ModuleRooms {
+    mailbox: String,
+    ai: String,
+    store: Vec<String>,
 }
 
 /// Pure JSON assembly for [`status`], decoupled from the live `identity`/
@@ -114,17 +135,30 @@ fn build_status(
     self_info: Value,
     rooms: Vec<String>,
     peers: Vec<Value>,
-    mailbox_room: String,
-    ai_room: String,
+    module_rooms: ModuleRooms,
     consensus: Value,
     stream: Value,
 ) -> Value {
+    // The content store is `null` only when no `storage.room_ids` are
+    // configured (purely local, no network join at all); otherwise it
+    // reports every configured room and whether each is joined yet -- the
+    // store can hold several rooms at once (see `storage::Store::sync_rooms`).
+    let store = if module_rooms.store.is_empty() {
+        Value::Null
+    } else {
+        let rooms_status: Vec<Value> = module_rooms
+            .store
+            .iter()
+            .map(|room| json!({ "room": room, "joined": rooms.contains(room) }))
+            .collect();
+        json!({ "rooms": rooms_status })
+    };
+    let mailbox_joined = rooms.contains(&module_rooms.mailbox);
+    let ai_joined = rooms.contains(&module_rooms.ai);
     let modules = json!({
-        "mailbox": { "room": mailbox_room, "joined": rooms.contains(&mailbox_room) },
-        "ai": { "room": ai_room, "joined": rooms.contains(&ai_room) },
-        // The content store is a local block store (no mistlib room); null
-        // here is the explicit "not networked" marker the dashboard renders.
-        "store": Value::Null,
+        "mailbox": { "room": module_rooms.mailbox, "joined": mailbox_joined },
+        "ai": { "room": module_rooms.ai, "joined": ai_joined },
+        "store": store,
     });
     json!({
         "self": self_info,
@@ -149,8 +183,11 @@ mod tests {
                 json!({ "node_id": "peer1", "state": "connected" }),
                 json!({ "node_id": "peer2", "state": "connecting" }),
             ],
-            "room-a".to_string(),
-            "room-b".to_string(),
+            ModuleRooms {
+                mailbox: "room-a".to_string(),
+                ai: "room-b".to_string(),
+                store: Vec::new(),
+            },
             json!({ "active": true, "room": "room-a", "role": "leader", "leader": "abc123", "peers": ["abc123", "peer1"] }),
             json!({ "running": true, "rtsp_url": "rtsp://127.0.0.1:8554/stream", "clients": 2, "backend": "relay" }),
         );
@@ -171,13 +208,17 @@ mod tests {
     fn build_status_modules_report_rooms_and_joined_flags() {
         // Mailbox's room is joined, ai's (different) room isn't yet -- the
         // joined flag must track the joined-rooms list per module, and the
-        // local-only store must stay an explicit null.
+        // local-only store (no `storage.room_ids` configured) must stay an
+        // explicit null.
         let value = build_status(
             json!({ "node_id": "abc123", "did": "did:key:z6Mk...", "display_name": Value::Null }),
             vec!["mistl-mailbox-v1".to_string()],
             Vec::new(),
-            "mistl-mailbox-v1".to_string(),
-            "ai-room".to_string(),
+            ModuleRooms {
+                mailbox: "mistl-mailbox-v1".to_string(),
+                ai: "ai-room".to_string(),
+                store: Vec::new(),
+            },
             json!({ "active": false }),
             json!({ "running": false }),
         );
@@ -190,13 +231,42 @@ mod tests {
     }
 
     #[test]
+    fn build_status_store_reports_configured_rooms_and_joined_flags() {
+        // Two configured storage rooms, only one of which is currently
+        // joined -- `store` must switch from `null` to `{rooms: [...]}`,
+        // one entry per configured room, each with its own `joined` flag.
+        let value = build_status(
+            json!({ "node_id": "abc123", "did": "did:key:z6Mk...", "display_name": Value::Null }),
+            vec!["storage-room-a".to_string()],
+            Vec::new(),
+            ModuleRooms {
+                mailbox: "mistl-mailbox-v1".to_string(),
+                ai: "mistl-mailbox-v1".to_string(),
+                store: vec!["storage-room-a".to_string(), "storage-room-b".to_string()],
+            },
+            json!({ "active": false }),
+            json!({ "running": false }),
+        );
+
+        let store_rooms = value["modules"]["store"]["rooms"].as_array().unwrap();
+        assert_eq!(store_rooms.len(), 2);
+        assert_eq!(store_rooms[0]["room"], "storage-room-a");
+        assert_eq!(store_rooms[0]["joined"], true);
+        assert_eq!(store_rooms[1]["room"], "storage-room-b");
+        assert_eq!(store_rooms[1]["joined"], false);
+    }
+
+    #[test]
     fn build_status_passes_through_inactive_consensus_and_stopped_stream() {
         let value = build_status(
             json!({ "node_id": "abc123", "did": "did:key:z6Mk...", "display_name": Value::Null }),
             Vec::new(),
             Vec::new(),
-            "mistl-mailbox-v1".to_string(),
-            "mistl-mailbox-v1".to_string(),
+            ModuleRooms {
+                mailbox: "mistl-mailbox-v1".to_string(),
+                ai: "mistl-mailbox-v1".to_string(),
+                store: Vec::new(),
+            },
             json!({ "active": false }),
             json!({ "running": false }),
         );
