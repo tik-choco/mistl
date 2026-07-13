@@ -68,6 +68,15 @@ pub enum Command {
         #[command(subcommand)]
         action: SchedAction,
     },
+    /// Bot pipeline automation: source -> transform(s) -> sink(s) runs on a
+    /// schedule (e.g. fetch tc-news global articles, summarize, synthesize
+    /// speech, and post to tc-chat / a webhook). Pipelines are defined in
+    /// `config.toml`'s `[bot]` section (`mistl config set bot.pipelines
+    /// <json>`) -- there is no add/edit subcommand in v1.
+    Bot {
+        #[command(subcommand)]
+        action: BotAction,
+    },
     /// Open the web dashboard in the default browser (starts the daemon if needed)
     Ui,
     /// Show a combined status overview (daemon, stream, AI)
@@ -505,6 +514,47 @@ pub enum SchedAction {
     },
 }
 
+#[derive(Subcommand)]
+pub enum BotAction {
+    /// List configured bot pipelines
+    List,
+    /// Run a pipeline immediately, outside its schedule
+    Run {
+        /// Pipeline id
+        id: String,
+    },
+    /// Enable a pipeline so it runs on its schedule again
+    Enable {
+        /// Pipeline id
+        id: String,
+    },
+    /// Disable a pipeline without removing it
+    Disable {
+        /// Pipeline id
+        id: String,
+    },
+    /// Show recent pipeline run history
+    Logs {
+        /// Only show runs for this pipeline id
+        #[arg(long)]
+        id: Option<String>,
+        /// Max number of runs to show (default 20)
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Show recently delivered items (articles turned into posts/webhooks)
+    Items {
+        /// Only show items for this pipeline id
+        #[arg(long)]
+        id: Option<String>,
+        /// Max number of items to show (default 20)
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Show bot engine status (enabled, pipeline count, source rooms)
+    Status,
+}
+
 /// Dispatch a parsed CLI invocation: either run the daemon, or act as a
 /// client sending one request to the running daemon over local IPC.
 pub fn dispatch(cli: Cli) -> Result<()> {
@@ -774,6 +824,25 @@ pub fn dispatch(cli: Cli) -> Result<()> {
                 println!("{}", render_sched_next(&response));
                 Ok(())
             }
+        },
+        Command::Bot { action } => match action {
+            BotAction::List => {
+                let response = request("bot.list", json!({}))?;
+                println!("{}", render_bot_ls(&response));
+                Ok(())
+            }
+            BotAction::Run { id } => client_call("bot.run", json!({ "id": id })),
+            BotAction::Enable { id } => client_call("bot.enable", json!({ "id": id })),
+            BotAction::Disable { id } => client_call("bot.disable", json!({ "id": id })),
+            BotAction::Logs { id, limit } => {
+                let response = request("bot.logs", json!({ "id": id, "limit": limit.unwrap_or(20) }))?;
+                println!("{}", render_bot_logs(&response));
+                Ok(())
+            }
+            BotAction::Items { id, limit } => {
+                client_call("bot.items", json!({ "id": id, "limit": limit.unwrap_or(20) }))
+            }
+            BotAction::Status => client_call("bot.status", json!({})),
         },
         Command::Ui => open_dashboard(),
         Command::Status => status_overview(),
@@ -1599,6 +1668,254 @@ fn render_sched_next(response: &Value) -> String {
         .filter_map(Value::as_str)
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+// -- `mistl bot`: human-readable pipeline/run rendering --------------------
+//
+// Same shape as the `sched` renderers above: `bot list` is a
+// `render_sched_ls`-style tab-separated table, `bot logs` is a
+// `render_sched_run`-style one-block-per-run listing. `bot run`/`status`/
+// `enable`/`disable`/`items` stay pretty-JSON via `client_call`, matching
+// the Wave 2 brief's CLI UX spec.
+
+/// `mistl bot list`: one row per pipeline, tab-separated
+/// (`ID ENABLED SCHEDULE NEXT RUN LAST RUN LAST STATUS`). `LAST STATUS` is
+/// `"OK (N delivered)"`, `"FAIL: <error>"`, or `"-"` when the pipeline has
+/// never run.
+fn render_bot_ls(response: &Value) -> String {
+    let pipelines = response
+        .get("pipelines")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if pipelines.is_empty() {
+        return "no bot pipelines configured".to_string();
+    }
+    let mut lines = vec!["ID\tENABLED\tSCHEDULE\tNEXT RUN\tLAST RUN\tLAST STATUS".to_string()];
+    lines.extend(pipelines.iter().map(|pipeline| {
+        let id = pipeline.get("id").and_then(Value::as_str).unwrap_or_default();
+        let enabled = pipeline.get("enabled").and_then(Value::as_bool).unwrap_or(false);
+        let schedule = pipeline
+            .get("schedule")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let next_run = pipeline.get("next_run").and_then(Value::as_str).unwrap_or("-");
+        let (last_run_at, last_status) = bot_last_run_columns(pipeline.get("last_run"));
+        format!("{id}\t{enabled}\t{schedule}\t{next_run}\t{last_run_at}\t{last_status}")
+    }));
+    lines.join("\n")
+}
+
+/// `(LAST RUN, LAST STATUS)` for one `bot.list` pipeline entry's `last_run`
+/// (a `RunRecord` or `null`).
+fn bot_last_run_columns(last_run: Option<&Value>) -> (String, String) {
+    let Some(run) = last_run.filter(|v| !v.is_null()) else {
+        return ("-".to_string(), "-".to_string());
+    };
+    let started_at = run
+        .get("started_at")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let status = if run.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+        let delivered = run.get("delivered_count").and_then(Value::as_u64).unwrap_or(0);
+        format!("OK ({delivered} delivered)")
+    } else {
+        let error = run.get("error").and_then(Value::as_str).unwrap_or("unknown error");
+        format!("FAIL: {error}")
+    };
+    (started_at, status)
+}
+
+/// `mistl bot logs`: one block per run (newest first, as returned by
+/// `bot.logs`), separated by a blank line.
+fn render_bot_logs(response: &Value) -> String {
+    let runs = response
+        .get("runs")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if runs.is_empty() {
+        return "no bot runs recorded".to_string();
+    }
+    runs.iter().map(render_bot_run).collect::<Vec<_>>().join("\n\n")
+}
+
+/// Render one `RunRecord`: a header line (start time, pipeline id, OK/FAIL,
+/// duration if both timestamps parse) followed by fetched/delivered counts
+/// and, on failure, the error.
+fn render_bot_run(run: &Value) -> String {
+    let pipeline_id = run
+        .get("pipeline_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let started_at = run.get("started_at").and_then(Value::as_str).unwrap_or_default();
+    let ended_at = run.get("ended_at").and_then(Value::as_str);
+    let ok = run.get("ok").and_then(Value::as_bool).unwrap_or(false);
+    let fetched = run.get("fetched_count").and_then(Value::as_u64).unwrap_or(0);
+    let delivered = run.get("delivered_count").and_then(Value::as_u64).unwrap_or(0);
+
+    let mut header = format!("{started_at}  {pipeline_id}  {}", if ok { "OK" } else { "FAIL" });
+    if let Some(ended_at) = ended_at
+        && let Some(duration) = sched_duration(started_at, ended_at)
+    {
+        header.push_str(&format!("  ({duration})"));
+    }
+    let mut lines = vec![header, format!("    fetched={fetched} delivered={delivered}")];
+    if let Some(error) = run.get("error").and_then(Value::as_str) {
+        lines.push(format!("    error: {error}"));
+    }
+    lines.join("\n")
+}
+
+#[cfg(test)]
+mod bot_render_tests {
+    use super::*;
+
+    #[test]
+    fn render_bot_ls_reports_no_pipelines() {
+        assert_eq!(render_bot_ls(&json!({ "pipelines": [] })), "no bot pipelines configured");
+    }
+
+    #[test]
+    fn render_bot_ls_shows_dash_columns_for_a_never_run_pipeline() {
+        let response = json!({
+            "pipelines": [{
+                "id": "news-audio",
+                "enabled": true,
+                "schedule": "@every 30m",
+                "next_run": "2026-07-12T01:00:00Z",
+                "last_run": null,
+                "warnings": [],
+            }]
+        });
+        let rendered = render_bot_ls(&response);
+        assert_eq!(
+            rendered,
+            "ID\tENABLED\tSCHEDULE\tNEXT RUN\tLAST RUN\tLAST STATUS\n\
+             news-audio\ttrue\t@every 30m\t2026-07-12T01:00:00Z\t-\t-"
+        );
+    }
+
+    #[test]
+    fn render_bot_ls_formats_a_successful_last_run() {
+        let response = json!({
+            "pipelines": [{
+                "id": "news-audio",
+                "enabled": true,
+                "schedule": "@every 30m",
+                "next_run": null,
+                "last_run": {
+                    "pipeline_id": "news-audio",
+                    "started_at": "2026-07-12T00:00:00Z",
+                    "ended_at": "2026-07-12T00:00:05Z",
+                    "ok": true,
+                    "error": null,
+                    "fetched_count": 3,
+                    "delivered_count": 2,
+                },
+                "warnings": [],
+            }]
+        });
+        let rendered = render_bot_ls(&response);
+        assert!(rendered.contains("2026-07-12T00:00:00Z\tOK (2 delivered)"), "{rendered}");
+    }
+
+    #[test]
+    fn render_bot_ls_formats_a_failed_last_run() {
+        let response = json!({
+            "pipelines": [{
+                "id": "news-audio",
+                "enabled": false,
+                "schedule": "@every 30m",
+                "next_run": null,
+                "last_run": {
+                    "pipeline_id": "news-audio",
+                    "started_at": "2026-07-12T00:00:00Z",
+                    "ended_at": "2026-07-12T00:00:01Z",
+                    "ok": false,
+                    "error": "preset \"worker\" not found in ai.presets",
+                    "fetched_count": 0,
+                    "delivered_count": 0,
+                },
+                "warnings": ["preset \"worker\" not found in ai.presets"],
+            }]
+        });
+        let rendered = render_bot_ls(&response);
+        assert!(
+            rendered.contains("FAIL: preset \"worker\" not found in ai.presets"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn render_bot_logs_reports_no_runs() {
+        assert_eq!(render_bot_logs(&json!({ "runs": [] })), "no bot runs recorded");
+    }
+
+    #[test]
+    fn render_bot_logs_formats_a_successful_run_with_duration_and_counts() {
+        let response = json!({
+            "runs": [{
+                "pipeline_id": "news-audio",
+                "started_at": "2026-07-12T00:00:00Z",
+                "ended_at": "2026-07-12T00:00:02Z",
+                "ok": true,
+                "error": null,
+                "fetched_count": 2,
+                "delivered_count": 2,
+            }]
+        });
+        let rendered = render_bot_logs(&response);
+        assert!(rendered.starts_with("2026-07-12T00:00:00Z  news-audio  OK  (2.0s)"), "{rendered}");
+        assert!(rendered.contains("fetched=2 delivered=2"), "{rendered}");
+    }
+
+    #[test]
+    fn render_bot_logs_shows_the_error_line_for_a_failed_run() {
+        let response = json!({
+            "runs": [{
+                "pipeline_id": "news-audio",
+                "started_at": "2026-07-12T00:00:00Z",
+                "ended_at": "2026-07-12T00:00:01Z",
+                "ok": false,
+                "error": "source failed: could not join room",
+                "fetched_count": 0,
+                "delivered_count": 0,
+            }]
+        });
+        let rendered = render_bot_logs(&response);
+        assert!(rendered.contains("FAIL"), "{rendered}");
+        assert!(rendered.contains("error: source failed: could not join room"), "{rendered}");
+    }
+
+    #[test]
+    fn render_bot_logs_separates_multiple_runs_with_a_blank_line() {
+        let response = json!({
+            "runs": [
+                {
+                    "pipeline_id": "news-audio",
+                    "started_at": "2026-07-12T00:00:00Z",
+                    "ended_at": "2026-07-12T00:00:01Z",
+                    "ok": true,
+                    "error": null,
+                    "fetched_count": 1,
+                    "delivered_count": 1,
+                },
+                {
+                    "pipeline_id": "news-audio",
+                    "started_at": "2026-07-11T00:00:00Z",
+                    "ended_at": "2026-07-11T00:00:01Z",
+                    "ok": true,
+                    "error": null,
+                    "fetched_count": 1,
+                    "delivered_count": 1,
+                },
+            ]
+        });
+        let rendered = render_bot_logs(&response);
+        assert_eq!(rendered.matches("\n\n").count(), 1);
+    }
 }
 
 #[cfg(test)]

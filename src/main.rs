@@ -1,4 +1,5 @@
 mod ai;
+mod bot;
 mod cli;
 mod config;
 mod consensus;
@@ -14,6 +15,7 @@ mod stream;
 mod topology;
 mod update;
 mod web;
+mod wiresign;
 
 use anyhow::Result;
 use clap::Parser;

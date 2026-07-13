@@ -364,6 +364,34 @@
   .field label { font-size: 11px; color: var(--text-faint); }
   form.inline { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end; }
 
+  /* ---------- bot: recipe cards (selection-first pipeline builder) ---------- */
+  .bot-recipe-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; }
+  .bot-recipe-card {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px 12px;
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    background: var(--bg-alt);
+    cursor: pointer;
+    transition: border-color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out);
+  }
+  .bot-recipe-card:hover { border-color: var(--accent); }
+  .bot-recipe-card.selected { border-color: var(--accent); background: var(--accent-dim); box-shadow: var(--shadow-sm); }
+  .bot-recipe-head { display: flex; align-items: center; gap: 8px; }
+  .bot-recipe-head input[type=radio] { width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; margin: 0; flex: none; }
+  .bot-recipe-icon { width: 18px; height: 18px; flex: none; color: var(--text-dim); }
+  .bot-recipe-card.selected .bot-recipe-icon { color: var(--accent); }
+  .bot-recipe-icon svg { width: 100%; height: 100%; }
+  .bot-recipe-name { font-size: 13px; font-weight: 700; color: var(--text); }
+  .bot-recipe-desc { font-size: 11.5px; color: var(--text-faint); line-height: 1.4; margin-left: 23px; }
+  /* Fixed recipes show a plain group label in place of the custom-only toggle
+     checkbox (see botUpdateToggleLabels) -- both are label elements inside
+     .field, so restore checkline-ish sizing for the toggle variant since the
+     bare ".field label" rule below would otherwise shrink it to 11px. */
+  .field label.bot-toggle { font-size: 13.5px; color: var(--text); }
+
   table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
   thead th {
     text-align: left;
@@ -1252,6 +1280,7 @@
     <a href="#panel-mailbox"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.5 5h13l3.5 7v7a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-7z"/></svg><span data-i18n="nav.mailbox">Mailbox</span></a>
     <a href="#panel-store"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.7 4 3 9 3s9-1.3 9-3V5"/><path d="M3 12c0 1.7 4 3 9 3s9-1.3 9-3"/></svg><span data-i18n="nav.store">Store</span></a>
     <a href="#panel-scheduler"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l3 2"/><path d="M9 2h6"/></svg><span data-i18n="nav.scheduler">Scheduler</span></a>
+    <a href="#panel-bot"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="2"/><circle cx="9" cy="14" r="1.2"/><circle cx="15" cy="14" r="1.2"/><path d="M12 8V4"/><circle cx="12" cy="3" r="1"/><path d="M2 13h2M20 13h2"/></svg><span data-i18n="nav.bot">Bot</span></a>
     <a href="#panel-profile"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/></svg><span data-i18n="nav.profile">Profile</span></a>
     <a href="#panel-update"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m8 11 4 4 4-4"/><path d="M4 17v2a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-2"/></svg><span data-i18n="nav.update">Updates</span></a>
     <a href="#panel-settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg><span data-i18n="nav.settings">Settings</span></a>
@@ -1309,8 +1338,17 @@
         <h3 data-i18n="stream.share.title">Share screen to the room</h3>
         <p data-i18n="stream.share.desc">The daemon captures this PC&#39;s screen and publishes it into the room through mistlib &mdash; no tc-chat client needed.</p>
         <p class="muted" style="font-size: 11.5px; margin: 0;" data-i18n="stream.share.monitorNote">Captures the primary monitor (monitor selection may come later); audio is not shared yet.</p>
+        <form class="inline" id="share-form">
+          <div class="field" style="flex: 2;">
+            <label for="share-room" data-i18n="stream.roomLabel">tc-chat room id</label>
+            <input type="text" id="share-room" data-i18n-placeholder="stream.roomPlaceholder" placeholder="room id (or set a default in Settings)" autocomplete="off">
+          </div>
+          <button type="submit" class="primary" id="btn-share-start" data-i18n="stream.share.startBtn">Start sharing</button>
+        </form>
+        <div class="info-hint neutral" id="share-room-hint" hidden>
+          <span data-i18n="stream.roomHint.prefix">Type a room id above, or set a default relay room in </span><a href="#panel-settings" id="share-room-hint-link" data-i18n="stream.roomHint.link">Settings</a><span data-i18n="stream.roomHint.suffix">.</span>
+        </div>
         <div class="row">
-          <button id="btn-share-start" class="primary" data-i18n="stream.share.startBtn">Start sharing</button>
           <button id="btn-share-stop" class="danger" data-i18n="stream.share.stopBtn" hidden>Stop sharing</button>
         </div>
         <div class="share-status" id="share-status"></div>
@@ -1672,6 +1710,245 @@
     </details>
   </section>
 
+  <section class="panel panel-span2" id="panel-bot">
+    <h2><span data-i18n="bot.title">Bot</span> <span class="spacer"></span>
+      <button data-role="refresh" data-target="bot" data-i18n="common.refresh">Refresh</button>
+    </h2>
+    <p class="muted" style="font-size: 12px;" data-i18n="bot.hint">Create, edit, and delete pipelines right here. Changes save immediately and are picked up within seconds &mdash; no daemon restart needed.</p>
+    <div class="table-wrap">
+      <table id="bot-pipelines-table">
+        <thead><tr>
+          <th data-i18n="bot.col.id">ID</th>
+          <th data-i18n="bot.col.schedule">Schedule</th>
+          <th data-i18n="bot.col.nextRun">Next run</th>
+          <th data-i18n="bot.col.lastRun">Last run</th>
+          <th data-i18n="bot.col.lastStatus">Last status</th>
+          <th data-i18n="bot.col.enabled">Enabled</th>
+          <th data-i18n="bot.col.actions">Actions</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="empty-note" id="bot-pipelines-empty" data-i18n="bot.empty">No bot pipelines configured.</div>
+    </div>
+    <hr class="sep">
+    <h3 id="bot-form-title" style="margin: 0 0 8px;" data-i18n="bot.form.addTitle">Add a pipeline</h3>
+
+    <div class="bot-recipe-grid" id="bot-recipe-grid" role="radiogroup" data-i18n-aria-label="bot.recipe.groupLabel" aria-label="Pipeline recipe">
+      <label class="bot-recipe-card">
+        <div class="bot-recipe-head">
+          <input type="radio" name="bot-recipe" value="news-audio" checked>
+          <span class="bot-recipe-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="12" height="16" rx="1.5"/><path d="M6.5 8h6M6.5 12h6M6.5 16h4"/><path d="M18 9c1.4 1.4 1.4 5.6 0 7"/><path d="M20.5 7c2.6 2.6 2.6 8.4 0 11"/></svg></span>
+          <span class="bot-recipe-name" data-i18n="bot.recipe.newsAudio.name">News → audio</span>
+        </div>
+        <span class="bot-recipe-desc" data-i18n="bot.recipe.newsAudio.desc">Fetch articles → summarize → speak → post to chat.</span>
+      </label>
+      <label class="bot-recipe-card">
+        <div class="bot-recipe-head">
+          <input type="radio" name="bot-recipe" value="news-digest">
+          <span class="bot-recipe-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3" width="16" height="18" rx="1.5"/><path d="M8 8h8M8 12h8M8 16h5"/></svg></span>
+          <span class="bot-recipe-name" data-i18n="bot.recipe.newsDigest.name">News digest</span>
+        </div>
+        <span class="bot-recipe-desc" data-i18n="bot.recipe.newsDigest.desc">Fetch articles → summarize → post to chat.</span>
+      </label>
+      <label class="bot-recipe-card">
+        <div class="bot-recipe-head">
+          <input type="radio" name="bot-recipe" value="news-translate">
+          <span class="bot-recipe-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="9" height="7" rx="1.5"/><rect x="13" y="13" width="9" height="7" rx="1.5"/><path d="M9 11v3a2 2 0 0 0 2 2h2"/><path d="m11 14 2 2-2 2"/></svg></span>
+          <span class="bot-recipe-name" data-i18n="bot.recipe.newsTranslate.name">News translate</span>
+        </div>
+        <span class="bot-recipe-desc" data-i18n="bot.recipe.newsTranslate.desc">Fetch articles → translate → publish as a new article.</span>
+      </label>
+      <label class="bot-recipe-card">
+        <div class="bot-recipe-head">
+          <input type="radio" name="bot-recipe" value="chat-digest">
+          <span class="bot-recipe-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v10H8l-4 4z"/><path d="M8 8h8M8 11.5h5"/></svg></span>
+          <span class="bot-recipe-name" data-i18n="bot.recipe.chatDigest.name">Chat digest</span>
+        </div>
+        <span class="bot-recipe-desc" data-i18n="bot.recipe.chatDigest.desc">Read a chat room → summarize → post back to chat.</span>
+      </label>
+      <label class="bot-recipe-card">
+        <div class="bot-recipe-head">
+          <input type="radio" name="bot-recipe" value="news-webhook">
+          <span class="bot-recipe-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="7" r="2.3"/><circle cx="18" cy="6" r="2.3"/><circle cx="12" cy="18" r="2.3"/><path d="M8 8.3 15 16"/><path d="M8.3 6.6 15.7 6.9"/></svg></span>
+          <span class="bot-recipe-name" data-i18n="bot.recipe.newsWebhook.name">News webhook</span>
+        </div>
+        <span class="bot-recipe-desc" data-i18n="bot.recipe.newsWebhook.desc">Fetch articles → notify an external webhook.</span>
+      </label>
+      <label class="bot-recipe-card">
+        <div class="bot-recipe-head">
+          <input type="radio" name="bot-recipe" value="custom">
+          <span class="bot-recipe-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h10M4 12h16M4 18h10"/><circle cx="17" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/></svg></span>
+          <span class="bot-recipe-name" data-i18n="bot.recipe.custom.name">Custom</span>
+        </div>
+        <span class="bot-recipe-desc" data-i18n="bot.recipe.custom.desc">Build a pipeline freely from any source, transforms, and sinks.</span>
+      </label>
+    </div>
+    <span class="muted" id="bot-options-unavailable-hint" style="font-size: 11px; display: block;" hidden data-i18n="bot.form.roomsUnavailableHint">Could not load the room list — type the room name directly.</span>
+
+    <form class="inline" id="bot-form">
+      <div class="field" style="flex: 1; min-width: 140px;">
+        <label for="bot-id" data-i18n="bot.form.idLabel">ID</label>
+        <input type="text" id="bot-id" autocomplete="off">
+        <span class="muted" style="font-size: 10px;" data-i18n="bot.form.idAutoHint">Auto-filled from the recipe — feel free to change it.</span>
+      </div>
+      <div class="field" style="flex: 1; min-width: 200px;">
+        <label for="bot-schedule-select" data-i18n="bot.form.scheduleLabel">Schedule</label>
+        <select id="bot-schedule-select">
+          <option value="@every 5m" data-i18n="bot.form.scheduleEvery5m">Every 5 minutes</option>
+          <option value="@every 15m" data-i18n="bot.form.scheduleEvery15m">Every 15 minutes</option>
+          <option value="@every 30m" data-i18n="bot.form.scheduleEvery30m">Every 30 minutes</option>
+          <option value="@every 1h" data-i18n="bot.form.scheduleEvery1h">Every hour</option>
+          <option value="@every 3h" data-i18n="bot.form.scheduleEvery3h">Every 3 hours</option>
+          <option value="@every 6h" data-i18n="bot.form.scheduleEvery6h">Every 6 hours</option>
+          <option value="@every 12h" data-i18n="bot.form.scheduleEvery12h">Every 12 hours</option>
+          <option value="@hourly" data-i18n="bot.form.scheduleHourly">Hourly (top of the hour)</option>
+          <option value="@daily" data-i18n="bot.form.scheduleDaily">Daily (midnight)</option>
+          <option value="__custom__" data-i18n="bot.form.scheduleCustom">Custom…</option>
+        </select>
+        <input type="text" id="bot-schedule" data-i18n-placeholder="bot.form.schedulePlaceholder" placeholder="@hourly" autocomplete="off" hidden>
+      </div>
+      <label class="checkline"><input type="checkbox" id="bot-enabled-input" checked> <span data-i18n="bot.form.enabledLabel">Enabled</span></label>
+
+      <div class="field bot-group" data-bot-group="custom-source-kind" style="flex: 1; min-width: 180px;" hidden>
+        <label for="bot-custom-source-kind" data-i18n="bot.form.sourceKindLabel">Source</label>
+        <select id="bot-custom-source-kind">
+          <option value="global-articles" data-i18n="bot.form.sourceKind.globalArticles">Global articles room</option>
+          <option value="chat-room" data-i18n="bot.form.sourceKind.chatRoom">Chat room</option>
+        </select>
+      </div>
+
+      <div class="field bot-group" data-bot-group="source-global-articles" style="flex: 1; min-width: 220px;">
+        <label for="bot-source-room-select" data-i18n="bot.form.sourceRoomLabel">Source room</label>
+        <select id="bot-source-room-select"></select>
+        <input type="text" id="bot-source-room-custom" data-i18n-placeholder="bot.form.sourceRoomsPlaceholder" placeholder="tc-global-articles" autocomplete="off" hidden>
+      </div>
+      <div class="field bot-group" data-bot-group="source-global-articles" style="flex: 1; min-width: 200px;">
+        <label data-i18n="bot.form.sourceLangsLabel">Languages</label>
+        <div class="row" style="gap: 12px;">
+          <label class="checkline"><input type="checkbox" id="bot-lang-ja"> ja</label>
+          <label class="checkline"><input type="checkbox" id="bot-lang-en"> en</label>
+          <label class="checkline"><input type="checkbox" id="bot-lang-zh"> zh</label>
+        </div>
+        <input type="text" id="bot-lang-custom" data-i18n-placeholder="bot.form.sourceLangsCustomPlaceholder" placeholder="other language tags, comma-separated" autocomplete="off">
+        <span class="muted" style="font-size: 11px;" data-i18n="bot.form.sourceLangsHint">Leave all unchecked to allow every language.</span>
+      </div>
+
+      <div class="field bot-group" data-bot-group="source-chat-room" style="flex: 1; min-width: 220px;" hidden>
+        <label for="bot-chatroom-select" data-i18n="bot.form.chatRoomSourceLabel">Chat room to read</label>
+        <select id="bot-chatroom-select"></select>
+        <input type="text" id="bot-chatroom-custom" autocomplete="off" hidden>
+      </div>
+
+      <div class="field bot-group" data-bot-group="transform-summarize" style="flex: 1; min-width: 220px;">
+        <label class="checkline bot-toggle" hidden><input type="checkbox" id="bot-summarize-enabled"> <span data-i18n="bot.form.summarizeLabel">Summarize</span></label>
+        <label class="bot-group-plain-label" data-i18n="bot.form.summarizeLabel">Summarize</label>
+        <select id="bot-summarize-preset"></select>
+      </div>
+
+      <div class="field bot-group" data-bot-group="transform-translate" style="flex: 1; min-width: 280px;" hidden>
+        <label class="checkline bot-toggle" hidden><input type="checkbox" id="bot-translate-enabled"> <span data-i18n="bot.form.translateLabel">Translate</span></label>
+        <label class="bot-group-plain-label" data-i18n="bot.form.translateLabel">Translate</label>
+        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+          <select id="bot-translate-preset"></select>
+          <select id="bot-translate-target-lang" data-i18n-aria-label="bot.form.translateTargetLabel" data-i18n-title="bot.form.translateTargetLabel" aria-label="Target language" title="Target language">
+            <option value="ja">ja</option>
+            <option value="en">en</option>
+            <option value="zh">zh</option>
+            <option value="ko">ko</option>
+            <option value="fr">fr</option>
+            <option value="de">de</option>
+            <option value="es">es</option>
+            <option value="__custom__" data-i18n="bot.form.customOption">Custom…</option>
+          </select>
+          <input type="text" id="bot-translate-target-lang-custom" data-i18n-placeholder="bot.form.translateTargetCustomPlaceholder" placeholder="language tag (e.g. pt)" autocomplete="off" style="max-width: 140px;" hidden>
+        </div>
+      </div>
+
+      <div class="field bot-group" data-bot-group="transform-tts" style="flex: 2; min-width: 340px;" hidden>
+        <label class="checkline bot-toggle" hidden><input type="checkbox" id="bot-tts-enabled"> <span data-i18n="bot.form.ttsLabel">Text-to-speech</span></label>
+        <label class="bot-group-plain-label" data-i18n="bot.form.ttsLabel">Text-to-speech</label>
+        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+          <select id="bot-tts-preset"></select>
+          <select id="bot-tts-format">
+            <option value="" data-i18n="bot.form.formatDefault">Default</option>
+            <option value="mp3">mp3</option>
+            <option value="opus">opus</option>
+            <option value="aac">aac</option>
+            <option value="flac">flac</option>
+            <option value="wav">wav</option>
+          </select>
+          <input type="text" id="bot-tts-speed" inputmode="decimal" data-i18n-placeholder="bot.form.speedPlaceholder" placeholder="1.0" style="max-width: 90px;">
+        </div>
+        <span class="muted" id="bot-tts-voice-hint" style="font-size: 11px;"></span>
+      </div>
+
+      <div class="field bot-group" data-bot-group="sink-chat-post" style="flex: 1; min-width: 220px;">
+        <label class="checkline bot-toggle" hidden><input type="checkbox" id="bot-sink-chat-post-enabled"> <span data-i18n="bot.form.sinkChatRoomLabel">Chat room</span></label>
+        <label class="bot-group-plain-label" data-i18n="bot.form.sinkChatRoomLabel">Chat room</label>
+        <select id="bot-sink-chat-room-select"></select>
+        <input type="text" id="bot-sink-chat-room-custom" autocomplete="off" hidden>
+      </div>
+
+      <div class="field bot-group" data-bot-group="sink-article-publish" style="flex: 1; min-width: 220px;" hidden>
+        <label class="checkline bot-toggle" hidden><input type="checkbox" id="bot-sink-article-publish-enabled"> <span data-i18n="bot.form.sinkArticlePublishLabel">Publish as article</span></label>
+        <label class="bot-group-plain-label" data-i18n="bot.form.sinkArticlePublishLabel">Publish as article</label>
+        <select id="bot-sink-article-room-select"></select>
+        <input type="text" id="bot-sink-article-room-custom" autocomplete="off" hidden>
+      </div>
+
+      <div class="field bot-group" data-bot-group="sink-webhook" style="flex: 1; min-width: 240px;" hidden>
+        <label class="checkline bot-toggle" hidden><input type="checkbox" id="bot-sink-webhook-enabled"> <span data-i18n="bot.form.sinkWebhookLabel">Webhook</span></label>
+        <label class="bot-group-plain-label" data-i18n="bot.form.sinkWebhookLabel">Webhook</label>
+        <label for="bot-sink-webhook-url" class="muted" style="font-size: 10px;" data-i18n="bot.form.sinkWebhookUrlLabel">Webhook URL</label>
+        <input type="text" id="bot-sink-webhook-url" data-i18n-placeholder="bot.form.sinkWebhookUrlPlaceholder" placeholder="https://example.com/webhook" autocomplete="off">
+        <label class="checkline"><input type="checkbox" id="bot-sink-webhook-include-audio"> <span data-i18n="bot.form.sinkWebhookIncludeAudioLabel">Include audio</span></label>
+        <label for="bot-sink-webhook-max-audio-mib" class="muted" style="font-size: 10px;" data-i18n="bot.form.sinkWebhookMaxAudioLabel">Max audio size (MiB)</label>
+        <input type="text" id="bot-sink-webhook-max-audio-mib" data-i18n-placeholder="bot.form.sinkWebhookMaxAudioPlaceholder" inputmode="decimal" autocomplete="off">
+      </div>
+
+      <button type="submit" class="primary" id="btn-bot-save" data-i18n="bot.form.addBtn">Add pipeline</button>
+      <button type="button" id="btn-bot-cancel-edit" hidden data-i18n="bot.form.cancelBtn">Cancel edit</button>
+    </form>
+    <p class="muted" style="font-size: 12px;" data-i18n="bot.form.hint">Pick “Custom…” on any dropdown to type a value directly. Source languages: leave all unchecked to allow every language. Transform order is fixed: Summarize → Translate → Text-to-speech. Changes save immediately and are picked up within seconds &mdash; no daemon restart needed.</p>
+    <hr class="sep">
+    <h3 style="margin: 0 0 8px;"><span data-i18n="bot.runs.title">Recent runs</span></h3>
+    <div class="table-wrap">
+      <table id="bot-runs-table">
+        <thead><tr>
+          <th data-i18n="bot.runs.col.started">Started</th>
+          <th data-i18n="bot.runs.col.pipeline">Pipeline</th>
+          <th data-i18n="bot.runs.col.result">Result</th>
+          <th data-i18n="bot.runs.col.duration">Duration</th>
+          <th data-i18n="bot.runs.col.detail">Detail</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="empty-note" id="bot-runs-empty" data-i18n="bot.runs.empty">No runs yet.</div>
+    </div>
+    <hr class="sep">
+    <h3 style="margin: 0 0 8px;"><span data-i18n="bot.items.title">Delivered items</span></h3>
+    <div class="table-wrap">
+      <table id="bot-items-table">
+        <thead><tr>
+          <th data-i18n="bot.items.col.time">Time</th>
+          <th data-i18n="bot.items.col.pipeline">Pipeline</th>
+          <th data-i18n="bot.items.col.title">Title</th>
+          <th data-i18n="bot.items.col.sinks">Sinks</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="empty-note" id="bot-items-empty" data-i18n="bot.items.empty">No delivered items yet.</div>
+    </div>
+    <details class="settings-drawer" id="settings-drawer-bot">
+      <summary>
+        <svg class="gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg>
+        <span data-i18n="settings.drawer.bot">Bot settings</span>
+        <span class="drawer-chevron" aria-hidden="true"></span>
+      </summary>
+      <div class="settings-drawer-body" id="settings-drawer-body-bot"></div>
+    </details>
+  </section>
+
   <section class="panel" id="panel-profile">
     <h2><span data-i18n="profile.title">Profile</span> <span class="spacer"></span>
       <button data-role="refresh" data-target="profile" data-i18n="common.refresh">Refresh</button>
@@ -1732,6 +2009,14 @@
         <label class="checkline"><input type="checkbox" id="chk-autostart"> <span data-i18n="update.autostartLabel">Start mistl at login</span></label>
       </div>
     </div>
+    <details class="settings-drawer" id="settings-drawer-update">
+      <summary>
+        <svg class="gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg>
+        <span data-i18n="settings.drawer.update">Update settings</span>
+        <span class="drawer-chevron" aria-hidden="true"></span>
+      </summary>
+      <div class="settings-drawer-body" id="settings-drawer-body-update"></div>
+    </details>
   </section>
 
   <section class="panel panel-span2" id="panel-settings">
@@ -1810,6 +2095,7 @@
       "nav.mailbox": "Relay",
       "nav.store": "Store",
       "nav.scheduler": "Scheduler",
+      "nav.bot": "Bot",
       "nav.profile": "Profile",
       "nav.settings": "Settings",
       "nav.update": "Updates",
@@ -2159,6 +2445,126 @@
       "sched.runs.empty": "No runs yet.",
       "sched.runs.ok": "OK",
       "sched.runs.fail": "FAIL (exit {code})",
+      "bot.title": "Bot",
+      "bot.hint": "Pick a recipe, fill in a few fields, and save. Pipelines run on their schedule and can be edited or deleted here at any time. Changes save immediately and are picked up within seconds — no daemon restart needed.",
+      "bot.col.id": "ID",
+      "bot.col.schedule": "Schedule",
+      "bot.col.nextRun": "Next run",
+      "bot.col.lastRun": "Last run",
+      "bot.col.lastStatus": "Last status",
+      "bot.col.enabled": "Enabled",
+      "bot.col.actions": "Actions",
+      "bot.empty": "No bot pipelines configured.",
+      "bot.runNow": "Run now",
+      "bot.runStarted": "Started {id}.",
+      "bot.warningBadge": "Warning",
+      "bot.lastStatus.ok": "OK ({n} delivered)",
+      "bot.lastStatus.fail": "FAIL: {error}",
+      "bot.runs.title": "Recent runs",
+      "bot.runs.col.started": "Started",
+      "bot.runs.col.pipeline": "Pipeline",
+      "bot.runs.col.result": "Result",
+      "bot.runs.col.duration": "Duration",
+      "bot.runs.col.detail": "Detail",
+      "bot.runs.empty": "No runs yet.",
+      "bot.runs.ok": "OK",
+      "bot.runs.fail": "FAIL",
+      "bot.runs.detailToggle": "Detail",
+      "bot.runs.detailFetched": "Fetched: {n}",
+      "bot.runs.detailDelivered": "Delivered: {n}",
+      "bot.runs.detailError": "Error: {error}",
+      "bot.items.title": "Delivered items",
+      "bot.items.col.time": "Time",
+      "bot.items.col.pipeline": "Pipeline",
+      "bot.items.col.title": "Title",
+      "bot.items.col.sinks": "Sinks",
+      "bot.items.empty": "No delivered items yet.",
+      "bot.items.sinkOk": "OK",
+      "bot.items.sinkFail": "FAIL: {error}",
+      "bot.edit": "Edit",
+      "bot.delete": "Delete",
+      "bot.form.addTitle": "Add a pipeline",
+      "bot.form.editTitle": "Edit pipeline: {id}",
+      "bot.form.addBtn": "Add pipeline",
+      "bot.form.updateBtn": "Save changes",
+      "bot.form.cancelBtn": "Cancel edit",
+      "bot.form.idLabel": "ID",
+      "bot.form.scheduleLabel": "Schedule expression",
+      "bot.form.schedulePlaceholder": "@hourly",
+      "bot.form.enabledLabel": "Enabled",
+      "bot.form.sourceRoomsLabel": "Source rooms",
+      "bot.form.sourceRoomsPlaceholder": "tc-global-articles",
+      "bot.form.sourceLangsLabel": "Languages",
+      "bot.form.sourceLangsPlaceholder": "en, ja",
+      "bot.form.summarizeLabel": "Summarize",
+      "bot.form.ttsLabel": "Text-to-speech",
+      "bot.form.formatDefault": "Default",
+      "bot.form.speedPlaceholder": "Speed (e.g. 1.0)",
+      "bot.form.ttsNoVoiceHint": "This preset has no voice configured — audio will fail to synthesize.",
+      "bot.form.presetNone": "(none)",
+      "bot.form.sinkChatRoomLabel": "Chat room",
+      "bot.form.sinkWebhookUrlLabel": "Webhook URL",
+      "bot.form.sinkWebhookIncludeAudioLabel": "Include audio",
+      "bot.form.sinkWebhookMaxAudioLabel": "Max audio size (MiB)",
+      "bot.form.hint": "Pick “Custom…” on any dropdown to type a value directly. Source languages: leave all unchecked to allow every language. Transform order is fixed: Summarize → Translate → Text-to-speech. Changes save immediately and are picked up within seconds — no daemon restart needed.",
+      "bot.form.enterSpeed": "Enter a valid speed number, or leave it blank.",
+      "bot.form.enterMaxAudio": "Enter a valid size in MiB, or leave it blank.",
+      "bot.form.notFound": "Pipeline {id} not found.",
+      "bot.form.duplicateId": "A pipeline with ID “{id}” already exists.",
+      "bot.form.added": "Added {id}.",
+      "bot.form.updated": "Updated {id}.",
+      "bot.form.deleteConfirm": "Delete pipeline “{id}”?",
+      "bot.form.deleted": "Deleted {id}.",
+      "bot.recipe.groupLabel": "Pipeline recipe",
+      "bot.recipe.newsAudio.name": "News → audio",
+      "bot.recipe.newsAudio.desc": "Fetch articles → summarize → speak → post to chat.",
+      "bot.recipe.newsDigest.name": "News digest",
+      "bot.recipe.newsDigest.desc": "Fetch articles → summarize → post to chat.",
+      "bot.recipe.newsTranslate.name": "News translate",
+      "bot.recipe.newsTranslate.desc": "Fetch articles → translate → publish as a new article.",
+      "bot.recipe.chatDigest.name": "Chat digest",
+      "bot.recipe.chatDigest.desc": "Read a chat room → summarize → post back to chat.",
+      "bot.recipe.newsWebhook.name": "News webhook",
+      "bot.recipe.newsWebhook.desc": "Fetch articles → notify an external webhook.",
+      "bot.recipe.custom.name": "Custom",
+      "bot.recipe.custom.desc": "Build a pipeline freely from any source, transforms, and sinks.",
+      "bot.form.roomsUnavailableHint": "Could not load the room list — type the room name directly.",
+      "bot.form.idAutoHint": "Auto-filled from the recipe — feel free to change it.",
+      "bot.form.customOption": "Custom…",
+      "bot.form.roomDefaultOption": "Default (tc-global-articles)",
+      "bot.form.roomJoinedSuffix": "(joined)",
+      "bot.form.scheduleEvery5m": "Every 5 minutes",
+      "bot.form.scheduleEvery15m": "Every 15 minutes",
+      "bot.form.scheduleEvery30m": "Every 30 minutes",
+      "bot.form.scheduleEvery1h": "Every hour",
+      "bot.form.scheduleEvery3h": "Every 3 hours",
+      "bot.form.scheduleEvery6h": "Every 6 hours",
+      "bot.form.scheduleEvery12h": "Every 12 hours",
+      "bot.form.scheduleHourly": "Hourly (top of the hour)",
+      "bot.form.scheduleDaily": "Daily (midnight)",
+      "bot.form.scheduleCustom": "Custom…",
+      "bot.form.sourceKindLabel": "Source",
+      "bot.form.sourceKind.globalArticles": "Global articles room",
+      "bot.form.sourceKind.chatRoom": "Chat room",
+      "bot.form.sourceRoomLabel": "Source room",
+      "bot.form.chatRoomSourceLabel": "Chat room to read",
+      "bot.form.sourceLangsHint": "Leave all unchecked to allow every language.",
+      "bot.form.sourceLangsCustomPlaceholder": "other language tags, comma-separated",
+      "bot.form.translateLabel": "Translate",
+      "bot.form.translateTargetLabel": "Target language",
+      "bot.form.translateTargetCustomPlaceholder": "language tag (e.g. pt)",
+      "bot.form.sinkArticlePublishLabel": "Publish as article",
+      "bot.form.sinkWebhookLabel": "Webhook",
+      "bot.form.sinkWebhookUrlPlaceholder": "https://example.com/webhook",
+      "bot.form.sinkWebhookMaxAudioPlaceholder": "e.g. 8",
+      "bot.form.ttsNoVoicePresetsHint": "No presets have a voice configured — text-to-speech will fail until one is set up in AI presets.",
+      "bot.form.enterId": "Enter a pipeline ID.",
+      "bot.form.enterSchedule": "Choose or enter a schedule.",
+      "bot.form.enterChatRoom": "Choose or enter a chat room.",
+      "bot.form.enterTargetLang": "Choose or enter a target language.",
+      "bot.form.enterSinkRoom": "Choose or enter a room for this destination.",
+      "bot.form.enterWebhookUrl": "Enter a webhook URL.",
+      "bot.form.selectSink": "Add at least one destination (chat room, article, or webhook).",
       "profile.title": "Profile",
       "profile.did": "did",
       "profile.displayName": "display name",
@@ -2206,6 +2612,7 @@
       "settings.drawer.storage": "Storage settings",
       "settings.drawer.identity": "Identity settings",
       "settings.drawer.scheduler": "Scheduler settings",
+      "settings.drawer.bot": "Bot settings",
       "settings.advanced": "Advanced",
       "settings.movedNote": "Stream, AI, Relay, Storage and Identity settings now live inside their own tabs.",
       "settings.section.identity": "Identity",
@@ -2214,6 +2621,7 @@
       "settings.section.mailbox": "Relay",
       "settings.section.ai": "AI",
       "settings.section.scheduler": "Scheduler",
+      "settings.section.bot": "Bot",
       "settings.section.ui": "Web dashboard",
       "settings.field.identity.display_name.label": "Display name",
       "settings.field.identity.display_name.desc": "Default display name written to config (applies at next start; use the Profile panel above to change it live).",
@@ -2231,8 +2639,14 @@
       "settings.field.stream.max_width.desc": "Maximum capture width in pixels; wider input is scaled down.",
       "settings.field.stream.relay_room.label": "Default relay room",
       "settings.field.stream.relay_room.desc": "tc-chat room id used by “Relay a tc-chat share” when none is typed.",
+      "settings.field.stream.share_room.label": "Default share room",
+      "settings.field.stream.share_room.desc": "tc-chat room id used by “Share screen to the room” when none is typed. Applies on daemon restart.",
       "settings.field.stream.audio_codec.label": "Audio codec",
       "settings.field.stream.audio_codec.desc": "Audio codec used for the stream.",
+      "settings.field.stream.audio_capture.label": "Capture audio",
+      "settings.field.stream.audio_capture.desc": "Capture audio alongside video in the native capture pipeline.",
+      "settings.field.stream.cascade.label": "Cascade distribution",
+      "settings.field.stream.cascade.desc": "Elect a leader among relay nodes so followers relay from it instead of the sharer directly. Turn off to fall back to locking onto the first video track.",
       "settings.field.mailbox.room_id.label": "Room id",
       "settings.field.mailbox.room_id.desc": "tc-chat room used for mailbox delivery.",
       "settings.field.mailbox.serve_as_bot.label": "Serve as bot",
@@ -2261,6 +2675,8 @@
       "settings.ai.presets.needProvider": "Add a provider first",
       "settings.ai.presets.labelPlaceholder": "Label",
       "settings.ai.presets.modelPlaceholder": "Model name",
+      "settings.ai.presets.fetchModels": "Fetch models",
+      "settings.ai.presets.fetchModelsError": "Failed to fetch model list",
       "settings.ai.presets.temperaturePlaceholder": "Temperature",
       "settings.ai.defaultPreset.label": "Default preset",
       "settings.ai.defaultPreset.desc": "Which preset \"ai provide\"/\"ai serve\" use when a request doesn't name one.",
@@ -2269,7 +2685,25 @@
       "settings.field.ui.enabled.label": "Enabled",
       "settings.field.ui.enabled.desc": "Whether the web dashboard starts with the daemon.",
       "settings.field.scheduler.enabled.label": "Enable the job scheduler",
-      "settings.field.scheduler.enabled.desc": "Runs scheduled jobs in the background. Applies on daemon restart."
+      "settings.field.scheduler.enabled.desc": "Runs scheduled jobs in the background. Applies on daemon restart.",
+      "settings.field.bot.enabled.label": "Enable the bot background loop",
+      "settings.field.bot.enabled.desc": "Runs bot pipelines (fetch, transform, deliver) in the background. Applies on daemon restart.",
+      "settings.section.update": "Updates",
+      "settings.drawer.update": "Update settings",
+      "settings.field.update.auto_check.label": "Automatically check for updates",
+      "settings.field.update.auto_check.desc": "Periodically check GitHub Releases for a newer version in the background. Applies on daemon restart.",
+      "settings.field.update.auto_apply.label": "Automatically apply updates",
+      "settings.field.update.auto_apply.desc": "When a newer version is found, download it, verify it, and stage it to replace the on-disk binary. Never force-restarts a running daemon -- the new version takes effect the next time it starts.",
+      "settings.field.update.check_interval_hours.label": "Check interval (hours)",
+      "settings.field.update.check_interval_hours.desc": "Hours between background update checks. Applies on daemon restart.",
+      "settings.field.update.prerelease.label": "Include pre-releases",
+      "settings.field.update.prerelease.desc": "Consider GitHub pre-release builds when checking for updates.",
+      "settings.field.update.repo.label": "GitHub repository",
+      "settings.field.update.repo.desc": "owner/name of the GitHub repository releases are published to.",
+      "settings.field.storage.blocks_dir.label": "Blocks directory",
+      "settings.field.storage.blocks_dir.desc": "Directory for content-addressed blocks. Leave empty to use the default, <data_dir>/blocks.",
+      "settings.field.ai.advertised_models.label": "Advertised models",
+      "settings.field.ai.advertised_models.desc": "Models advertised in provider_hello. Leave empty to fetch the list from the resolved preset's provider (GET /models) when providing starts."
     },
     ja: {
       "pageTitle": "MISTL ダッシュボード",
@@ -2287,6 +2721,7 @@
       "nav.mailbox": "リレー",
       "nav.store": "ストア",
       "nav.scheduler": "スケジューラ",
+      "nav.bot": "Bot",
       "nav.profile": "プロフィール",
       "nav.settings": "設定",
       "nav.update": "更新",
@@ -2636,6 +3071,126 @@
       "sched.runs.empty": "実行履歴はまだありません。",
       "sched.runs.ok": "成功",
       "sched.runs.fail": "失敗 (終了コード {code})",
+      "bot.title": "Bot",
+      "bot.hint": "レシピを選び、いくつかの項目を入力して保存するだけです。パイプラインはスケジュールどおりに実行され、このパネルからいつでも編集・削除できます。変更は即座に保存され、数秒以内に反映されます — デーモンの再起動は不要です。",
+      "bot.col.id": "ID",
+      "bot.col.schedule": "スケジュール",
+      "bot.col.nextRun": "次回実行",
+      "bot.col.lastRun": "前回実行",
+      "bot.col.lastStatus": "前回の状態",
+      "bot.col.enabled": "有効",
+      "bot.col.actions": "操作",
+      "bot.empty": "設定済みの bot パイプラインはありません。",
+      "bot.runNow": "今すぐ実行",
+      "bot.runStarted": "{id} を開始しました。",
+      "bot.warningBadge": "警告",
+      "bot.lastStatus.ok": "OK（{n} 件配信）",
+      "bot.lastStatus.fail": "失敗: {error}",
+      "bot.runs.title": "実行履歴",
+      "bot.runs.col.started": "開始日時",
+      "bot.runs.col.pipeline": "パイプライン",
+      "bot.runs.col.result": "結果",
+      "bot.runs.col.duration": "所要時間",
+      "bot.runs.col.detail": "詳細",
+      "bot.runs.empty": "実行履歴はまだありません。",
+      "bot.runs.ok": "成功",
+      "bot.runs.fail": "失敗",
+      "bot.runs.detailToggle": "詳細",
+      "bot.runs.detailFetched": "取得件数: {n}",
+      "bot.runs.detailDelivered": "配信件数: {n}",
+      "bot.runs.detailError": "エラー: {error}",
+      "bot.items.title": "配信済みアイテム",
+      "bot.items.col.time": "時刻",
+      "bot.items.col.pipeline": "パイプライン",
+      "bot.items.col.title": "タイトル",
+      "bot.items.col.sinks": "配信先",
+      "bot.items.empty": "配信済みアイテムはまだありません。",
+      "bot.items.sinkOk": "OK",
+      "bot.items.sinkFail": "失敗: {error}",
+      "bot.edit": "編集",
+      "bot.delete": "削除",
+      "bot.form.addTitle": "パイプラインを追加",
+      "bot.form.editTitle": "パイプラインを編集: {id}",
+      "bot.form.addBtn": "パイプラインを追加",
+      "bot.form.updateBtn": "変更を保存",
+      "bot.form.cancelBtn": "編集をキャンセル",
+      "bot.form.idLabel": "ID",
+      "bot.form.scheduleLabel": "スケジュール式",
+      "bot.form.schedulePlaceholder": "@hourly",
+      "bot.form.enabledLabel": "有効",
+      "bot.form.sourceRoomsLabel": "取得元ルーム",
+      "bot.form.sourceRoomsPlaceholder": "tc-global-articles",
+      "bot.form.sourceLangsLabel": "言語",
+      "bot.form.sourceLangsPlaceholder": "en, ja",
+      "bot.form.summarizeLabel": "要約",
+      "bot.form.ttsLabel": "音声合成 (TTS)",
+      "bot.form.formatDefault": "デフォルト",
+      "bot.form.speedPlaceholder": "速度 (例: 1.0)",
+      "bot.form.ttsNoVoiceHint": "このプリセットには voice が設定されていません — 音声合成に失敗します。",
+      "bot.form.presetNone": "（なし）",
+      "bot.form.sinkChatRoomLabel": "チャットルーム",
+      "bot.form.sinkWebhookUrlLabel": "Webhook URL",
+      "bot.form.sinkWebhookIncludeAudioLabel": "音声を含める",
+      "bot.form.sinkWebhookMaxAudioLabel": "音声の最大サイズ (MiB)",
+      "bot.form.hint": "各プルダウンの「カスタム…」を選ぶと直接入力できます。取得元の言語はすべて未選択のままにするとすべての言語を許可します。変換の順序は固定で、要約 → 翻訳 → 音声合成の順に実行されます。変更は即座に保存され、数秒以内に反映されます — デーモンの再起動は不要です。",
+      "bot.form.enterSpeed": "有効な速度の数値を入力するか、空欄のままにしてください。",
+      "bot.form.enterMaxAudio": "有効なサイズ (MiB) を入力するか、空欄のままにしてください。",
+      "bot.form.notFound": "パイプライン {id} が見つかりません。",
+      "bot.form.duplicateId": "ID「{id}」のパイプラインは既に存在します。",
+      "bot.form.added": "{id} を追加しました。",
+      "bot.form.updated": "{id} を更新しました。",
+      "bot.form.deleteConfirm": "パイプライン「{id}」を削除しますか?",
+      "bot.form.deleted": "{id} を削除しました。",
+      "bot.recipe.groupLabel": "パイプラインのレシピ",
+      "bot.recipe.newsAudio.name": "ニュース音声bot",
+      "bot.recipe.newsAudio.desc": "記事取得 → 要約 → 音声化 → チャットに投稿します。",
+      "bot.recipe.newsDigest.name": "ニュース要約bot",
+      "bot.recipe.newsDigest.desc": "記事取得 → 要約 → チャットに投稿します。",
+      "bot.recipe.newsTranslate.name": "ニュース翻訳配信",
+      "bot.recipe.newsTranslate.desc": "記事取得 → 翻訳 → 新しい記事として配信します。",
+      "bot.recipe.chatDigest.name": "チャット要約bot",
+      "bot.recipe.chatDigest.desc": "チャットルームを読み取り → 要約 → チャットに投稿します。",
+      "bot.recipe.newsWebhook.name": "Webhook通知",
+      "bot.recipe.newsWebhook.desc": "記事取得 → 外部Webhookに通知します。",
+      "bot.recipe.custom.name": "カスタム",
+      "bot.recipe.custom.desc": "ソース・変換・配信先を自由に組み合わせて構築します。",
+      "bot.form.roomsUnavailableHint": "ルーム一覧を取得できませんでした — ルーム名を直接入力してください。",
+      "bot.form.idAutoHint": "レシピから自動入力されます。必要に応じて変更できます。",
+      "bot.form.customOption": "カスタム…",
+      "bot.form.roomDefaultOption": "既定 (tc-global-articles)",
+      "bot.form.roomJoinedSuffix": "（参加済み）",
+      "bot.form.scheduleEvery5m": "5分ごと",
+      "bot.form.scheduleEvery15m": "15分ごと",
+      "bot.form.scheduleEvery30m": "30分ごと",
+      "bot.form.scheduleEvery1h": "1時間ごと",
+      "bot.form.scheduleEvery3h": "3時間ごと",
+      "bot.form.scheduleEvery6h": "6時間ごと",
+      "bot.form.scheduleEvery12h": "12時間ごと",
+      "bot.form.scheduleHourly": "毎時0分",
+      "bot.form.scheduleDaily": "毎日0時",
+      "bot.form.scheduleCustom": "カスタム…",
+      "bot.form.sourceKindLabel": "取得元",
+      "bot.form.sourceKind.globalArticles": "記事配信ルーム (global-articles)",
+      "bot.form.sourceKind.chatRoom": "チャットルーム",
+      "bot.form.sourceRoomLabel": "取得元ルーム",
+      "bot.form.chatRoomSourceLabel": "読み取るチャットルーム",
+      "bot.form.sourceLangsHint": "すべて未選択の場合はすべての言語を許可します。",
+      "bot.form.sourceLangsCustomPlaceholder": "その他の言語タグ（カンマ区切り）",
+      "bot.form.translateLabel": "翻訳",
+      "bot.form.translateTargetLabel": "翻訳先の言語",
+      "bot.form.translateTargetCustomPlaceholder": "言語タグ (例: pt)",
+      "bot.form.sinkArticlePublishLabel": "記事として配信",
+      "bot.form.sinkWebhookLabel": "Webhook",
+      "bot.form.sinkWebhookUrlPlaceholder": "https://example.com/webhook",
+      "bot.form.sinkWebhookMaxAudioPlaceholder": "例: 8",
+      "bot.form.ttsNoVoicePresetsHint": "音声 (voice) が設定されたプリセットがありません — AIプリセットで設定するまで音声合成は失敗します。",
+      "bot.form.enterId": "パイプラインIDを入力してください。",
+      "bot.form.enterSchedule": "スケジュールを選択または入力してください。",
+      "bot.form.enterChatRoom": "チャットルームを選択または入力してください。",
+      "bot.form.enterTargetLang": "翻訳先の言語を選択または入力してください。",
+      "bot.form.enterSinkRoom": "配信先のルームを選択または入力してください。",
+      "bot.form.enterWebhookUrl": "Webhook URLを入力してください。",
+      "bot.form.selectSink": "配信先を少なくとも1つ選択してください（チャット・記事・Webhookのいずれか）。",
       "profile.title": "プロフィール",
       "profile.did": "did",
       "profile.displayName": "表示名",
@@ -2683,6 +3238,7 @@
       "settings.drawer.storage": "ストレージ設定",
       "settings.drawer.identity": "アイデンティティ設定",
       "settings.drawer.scheduler": "スケジューラ設定",
+      "settings.drawer.bot": "Bot設定",
       "settings.advanced": "詳細設定",
       "settings.movedNote": "ストリーム・AI・リレー・ストレージ・アイデンティティの設定は、各タブ内に移動しました。",
       "settings.section.identity": "本人情報",
@@ -2691,6 +3247,7 @@
       "settings.section.mailbox": "リレー",
       "settings.section.ai": "AI",
       "settings.section.scheduler": "スケジューラ",
+      "settings.section.bot": "Bot",
       "settings.section.ui": "Webダッシュボード",
       "settings.field.identity.display_name.label": "表示名",
       "settings.field.identity.display_name.desc": "設定ファイルに書き込まれるデフォルトの表示名です (次回起動時に適用されます。今すぐ変更する場合は上のプロフィールパネルを使ってください)。",
@@ -2708,8 +3265,14 @@
       "settings.field.stream.max_width.desc": "キャプチャの最大幅 (ピクセル) です。これより広い入力は縮小されます。",
       "settings.field.stream.relay_room.label": "デフォルトの中継ルーム",
       "settings.field.stream.relay_room.desc": "「tc-chatの画面共有を中継」でルームIDが未入力のときに使われるtc-chatルームIDです。",
+      "settings.field.stream.share_room.label": "デフォルトの共有ルーム",
+      "settings.field.stream.share_room.desc": "「画面をルームへ共有」でルームIDが未入力のときに使われるtc-chatルームIDです。デーモンの再起動後に適用されます。",
       "settings.field.stream.audio_codec.label": "音声コーデック",
       "settings.field.stream.audio_codec.desc": "配信に使用する音声コーデックです。",
+      "settings.field.stream.audio_capture.label": "音声キャプチャ",
+      "settings.field.stream.audio_capture.desc": "ネイティブキャプチャパイプラインで映像と一緒に音声もキャプチャします。",
+      "settings.field.stream.cascade.label": "カスケード配信",
+      "settings.field.stream.cascade.desc": "中継ノード間でリーダーを選出し、フォロワーは共有元ではなくリーダーから中継します。オフにすると最初に見つかった映像トラックにロックする従来の動作に戻ります。",
       "settings.field.mailbox.room_id.label": "ルームID",
       "settings.field.mailbox.room_id.desc": "メールボックスの配送に使うtc-chatルームです。",
       "settings.field.mailbox.serve_as_bot.label": "ボットとして応答",
@@ -2738,6 +3301,8 @@
       "settings.ai.presets.needProvider": "先にプロバイダーを追加してください",
       "settings.ai.presets.labelPlaceholder": "ラベル",
       "settings.ai.presets.modelPlaceholder": "モデル名",
+      "settings.ai.presets.fetchModels": "モデル一覧を取得",
+      "settings.ai.presets.fetchModelsError": "モデル一覧の取得に失敗しました",
       "settings.ai.presets.temperaturePlaceholder": "Temperature",
       "settings.ai.defaultPreset.label": "デフォルトプリセット",
       "settings.ai.defaultPreset.desc": "リクエストでプリセットが指定されなかった場合に「ai provide」「ai serve」が使用するプリセットです。",
@@ -2746,7 +3311,25 @@
       "settings.field.ui.enabled.label": "有効化",
       "settings.field.ui.enabled.desc": "デーモン起動時にWebダッシュボードを開始するかどうかです。",
       "settings.field.scheduler.enabled.label": "ジョブスケジューラを有効化",
-      "settings.field.scheduler.enabled.desc": "バックグラウンドでスケジュールされたジョブを実行します。デーモンの再起動後に適用されます。"
+      "settings.field.scheduler.enabled.desc": "バックグラウンドでスケジュールされたジョブを実行します。デーモンの再起動後に適用されます。",
+      "settings.field.bot.enabled.label": "Botのバックグラウンドループを有効化",
+      "settings.field.bot.enabled.desc": "バックグラウンドで bot パイプライン（取得・変換・配信）を実行します。デーモンの再起動後に適用されます。",
+      "settings.section.update": "アップデート",
+      "settings.drawer.update": "アップデート設定",
+      "settings.field.update.auto_check.label": "自動的にアップデートを確認",
+      "settings.field.update.auto_check.desc": "GitHub Releasesで新しいバージョンがないか定期的にバックグラウンドで確認します。デーモンの再起動後に適用されます。",
+      "settings.field.update.auto_apply.label": "アップデートを自動適用",
+      "settings.field.update.auto_apply.desc": "新しいバージョンが見つかった場合、ダウンロード・検証したうえで、ディスク上のバイナリを置き換える準備をします。実行中のデーモンを強制的に再起動することはなく、新しいバージョンは次回起動時から有効になります。",
+      "settings.field.update.check_interval_hours.label": "確認間隔 (時間)",
+      "settings.field.update.check_interval_hours.desc": "バックグラウンドでアップデートを確認する間隔 (時間) です。デーモンの再起動後に適用されます。",
+      "settings.field.update.prerelease.label": "プレリリースを含める",
+      "settings.field.update.prerelease.desc": "アップデート確認時にGitHubのプレリリースビルドも対象にします。",
+      "settings.field.update.repo.label": "GitHubリポジトリ",
+      "settings.field.update.repo.desc": "リリースの公開元となるGitHubリポジトリの owner/name です。",
+      "settings.field.storage.blocks_dir.label": "ブロックディレクトリ",
+      "settings.field.storage.blocks_dir.desc": "コンテンツアドレス方式のブロックを保存するディレクトリです。空欄の場合はデフォルトの <data_dir>/blocks が使われます。",
+      "settings.field.ai.advertised_models.label": "公開するモデル",
+      "settings.field.ai.advertised_models.desc": "provider_helloで公開するモデルです。空欄の場合、提供開始時に解決されたプリセットのプロバイダーから (GET /models) 一覧を取得します。"
     },
     zh: {
       "pageTitle": "MISTL 仪表盘",
@@ -2764,6 +3347,7 @@
       "nav.mailbox": "中继",
       "nav.store": "存储",
       "nav.scheduler": "调度器",
+      "nav.bot": "Bot",
       "nav.profile": "个人资料",
       "nav.settings": "设置",
       "nav.update": "更新",
@@ -3113,6 +3697,126 @@
       "sched.runs.empty": "暂无运行记录。",
       "sched.runs.ok": "成功",
       "sched.runs.fail": "失败 (退出码 {code})",
+      "bot.title": "Bot",
+      "bot.hint": "选择一个方案，填写少量字段后保存即可 — 管道会按计划自动运行，随时可以在此编辑或删除。更改会立即保存，并在几秒内生效 —— 无需重启守护进程。",
+      "bot.col.id": "ID",
+      "bot.col.schedule": "计划",
+      "bot.col.nextRun": "下次运行",
+      "bot.col.lastRun": "上次运行",
+      "bot.col.lastStatus": "上次状态",
+      "bot.col.enabled": "启用",
+      "bot.col.actions": "操作",
+      "bot.empty": "尚未配置 bot 管道。",
+      "bot.runNow": "立即运行",
+      "bot.runStarted": "已启动 {id}。",
+      "bot.warningBadge": "警告",
+      "bot.lastStatus.ok": "成功（已投递 {n} 条）",
+      "bot.lastStatus.fail": "失败: {error}",
+      "bot.runs.title": "最近运行",
+      "bot.runs.col.started": "开始时间",
+      "bot.runs.col.pipeline": "管道",
+      "bot.runs.col.result": "结果",
+      "bot.runs.col.duration": "耗时",
+      "bot.runs.col.detail": "详情",
+      "bot.runs.empty": "暂无运行记录。",
+      "bot.runs.ok": "成功",
+      "bot.runs.fail": "失败",
+      "bot.runs.detailToggle": "详情",
+      "bot.runs.detailFetched": "抓取: {n}",
+      "bot.runs.detailDelivered": "投递: {n}",
+      "bot.runs.detailError": "错误: {error}",
+      "bot.items.title": "已投递项目",
+      "bot.items.col.time": "时间",
+      "bot.items.col.pipeline": "管道",
+      "bot.items.col.title": "标题",
+      "bot.items.col.sinks": "投递目标",
+      "bot.items.empty": "暂无已投递项目。",
+      "bot.items.sinkOk": "成功",
+      "bot.items.sinkFail": "失败: {error}",
+      "bot.edit": "编辑",
+      "bot.delete": "删除",
+      "bot.form.addTitle": "添加管道",
+      "bot.form.editTitle": "编辑管道: {id}",
+      "bot.form.addBtn": "添加管道",
+      "bot.form.updateBtn": "保存更改",
+      "bot.form.cancelBtn": "取消编辑",
+      "bot.form.idLabel": "ID",
+      "bot.form.scheduleLabel": "计划表达式",
+      "bot.form.schedulePlaceholder": "@hourly",
+      "bot.form.enabledLabel": "启用",
+      "bot.form.sourceRoomsLabel": "来源房间",
+      "bot.form.sourceRoomsPlaceholder": "tc-global-articles",
+      "bot.form.sourceLangsLabel": "语言",
+      "bot.form.sourceLangsPlaceholder": "en, ja",
+      "bot.form.summarizeLabel": "摘要",
+      "bot.form.ttsLabel": "语音合成 (TTS)",
+      "bot.form.formatDefault": "默认",
+      "bot.form.speedPlaceholder": "语速 (例如 1.0)",
+      "bot.form.ttsNoVoiceHint": "此预设未配置 voice —— 语音合成将会失败。",
+      "bot.form.presetNone": "（无）",
+      "bot.form.sinkChatRoomLabel": "聊天室",
+      "bot.form.sinkWebhookUrlLabel": "Webhook URL",
+      "bot.form.sinkWebhookIncludeAudioLabel": "包含音频",
+      "bot.form.sinkWebhookMaxAudioLabel": "音频最大大小 (MiB)",
+      "bot.form.hint": "在任意下拉菜单中选择“自定义…”即可直接输入。来源语言：全部不勾选表示允许所有语言。转换顺序固定：摘要 → 翻译 → 语音合成。更改会立即保存，并在几秒内生效 —— 无需重启守护进程。",
+      "bot.form.enterSpeed": "请输入有效的语速数值，或留空。",
+      "bot.form.enterMaxAudio": "请输入有效的大小 (MiB)，或留空。",
+      "bot.form.notFound": "未找到管道 {id}。",
+      "bot.form.duplicateId": "ID 为“{id}”的管道已存在。",
+      "bot.form.added": "已添加 {id}。",
+      "bot.form.updated": "已更新 {id}。",
+      "bot.form.deleteConfirm": "确定要删除管道“{id}”吗？",
+      "bot.form.deleted": "已删除 {id}。",
+      "bot.recipe.groupLabel": "管道方案",
+      "bot.recipe.newsAudio.name": "新闻语音机器人",
+      "bot.recipe.newsAudio.desc": "获取文章 → 摘要 → 语音合成 → 发布到聊天室。",
+      "bot.recipe.newsDigest.name": "新闻摘要机器人",
+      "bot.recipe.newsDigest.desc": "获取文章 → 摘要 → 发布到聊天室。",
+      "bot.recipe.newsTranslate.name": "新闻翻译发布",
+      "bot.recipe.newsTranslate.desc": "获取文章 → 翻译 → 作为新文章发布。",
+      "bot.recipe.chatDigest.name": "聊天摘要机器人",
+      "bot.recipe.chatDigest.desc": "读取聊天室 → 摘要 → 发布回聊天室。",
+      "bot.recipe.newsWebhook.name": "新闻 Webhook 通知",
+      "bot.recipe.newsWebhook.desc": "获取文章 → 通知外部 Webhook。",
+      "bot.recipe.custom.name": "自定义",
+      "bot.recipe.custom.desc": "自由组合来源、转换和投递目标来构建管道。",
+      "bot.form.roomsUnavailableHint": "无法加载房间列表 —— 请直接输入房间名称。",
+      "bot.form.idAutoHint": "已根据方案自动填写，可自行修改。",
+      "bot.form.customOption": "自定义…",
+      "bot.form.roomDefaultOption": "默认 (tc-global-articles)",
+      "bot.form.roomJoinedSuffix": "（已加入）",
+      "bot.form.scheduleEvery5m": "每 5 分钟",
+      "bot.form.scheduleEvery15m": "每 15 分钟",
+      "bot.form.scheduleEvery30m": "每 30 分钟",
+      "bot.form.scheduleEvery1h": "每 1 小时",
+      "bot.form.scheduleEvery3h": "每 3 小时",
+      "bot.form.scheduleEvery6h": "每 6 小时",
+      "bot.form.scheduleEvery12h": "每 12 小时",
+      "bot.form.scheduleHourly": "每小时整点",
+      "bot.form.scheduleDaily": "每天午夜",
+      "bot.form.scheduleCustom": "自定义…",
+      "bot.form.sourceKindLabel": "来源",
+      "bot.form.sourceKind.globalArticles": "全局文章房间",
+      "bot.form.sourceKind.chatRoom": "聊天室",
+      "bot.form.sourceRoomLabel": "来源房间",
+      "bot.form.chatRoomSourceLabel": "要读取的聊天室",
+      "bot.form.sourceLangsHint": "全部不勾选则允许所有语言。",
+      "bot.form.sourceLangsCustomPlaceholder": "其他语言标签（用逗号分隔）",
+      "bot.form.translateLabel": "翻译",
+      "bot.form.translateTargetLabel": "目标语言",
+      "bot.form.translateTargetCustomPlaceholder": "语言标签（例如 pt）",
+      "bot.form.sinkArticlePublishLabel": "作为文章发布",
+      "bot.form.sinkWebhookLabel": "Webhook",
+      "bot.form.sinkWebhookUrlPlaceholder": "https://example.com/webhook",
+      "bot.form.sinkWebhookMaxAudioPlaceholder": "例如 8",
+      "bot.form.ttsNoVoicePresetsHint": "没有任何预设配置了语音 (voice) —— 在 AI 预设中设置之前，语音合成会失败。",
+      "bot.form.enterId": "请输入管道 ID。",
+      "bot.form.enterSchedule": "请选择或输入计划表达式。",
+      "bot.form.enterChatRoom": "请选择或输入聊天室。",
+      "bot.form.enterTargetLang": "请选择或输入目标语言。",
+      "bot.form.enterSinkRoom": "请为该投递目标选择或输入房间。",
+      "bot.form.enterWebhookUrl": "请输入 Webhook URL。",
+      "bot.form.selectSink": "请至少添加一个投递目标（聊天室、文章或 Webhook）。",
       "profile.title": "个人资料",
       "profile.did": "did",
       "profile.displayName": "显示名称",
@@ -3160,6 +3864,7 @@
       "settings.drawer.storage": "存储设置",
       "settings.drawer.identity": "身份设置",
       "settings.drawer.scheduler": "调度器设置",
+      "settings.drawer.bot": "Bot 设置",
       "settings.advanced": "高级",
       "settings.movedNote": "串流、AI、中继、存储和身份设置现在位于各自的标签页中。",
       "settings.section.identity": "身份",
@@ -3168,6 +3873,7 @@
       "settings.section.mailbox": "中继",
       "settings.section.ai": "AI",
       "settings.section.scheduler": "调度器",
+      "settings.section.bot": "Bot",
       "settings.section.ui": "Web 仪表盘",
       "settings.field.identity.display_name.label": "显示名称",
       "settings.field.identity.display_name.desc": "写入配置文件的默认显示名称 (下次启动时生效；如需立即修改，请使用上方的个人资料面板)。",
@@ -3185,8 +3891,14 @@
       "settings.field.stream.max_width.desc": "采集的最大宽度 (像素)；超过此宽度的输入将被缩小。",
       "settings.field.stream.relay_room.label": "默认中继房间",
       "settings.field.stream.relay_room.desc": "未输入房间 ID 时，“中继 tc-chat 共享”所使用的 tc-chat 房间 ID。",
+      "settings.field.stream.share_room.label": "默认共享房间",
+      "settings.field.stream.share_room.desc": "未输入房间 ID 时，“将屏幕共享到房间”所使用的 tc-chat 房间 ID。需要重启守护进程才能生效。",
       "settings.field.stream.audio_codec.label": "音频编码",
       "settings.field.stream.audio_codec.desc": "串流使用的音频编码格式。",
+      "settings.field.stream.audio_capture.label": "采集音频",
+      "settings.field.stream.audio_capture.desc": "在原生采集管线中随视频一起采集音频。",
+      "settings.field.stream.cascade.label": "级联分发",
+      "settings.field.stream.cascade.desc": "在中继节点之间选举一个 leader，使 follower 从其中继而非直接从分享者中继。关闭后将回退为锁定遇到的第一条视频轨道。",
       "settings.field.mailbox.room_id.label": "房间 ID",
       "settings.field.mailbox.room_id.desc": "信箱投递所使用的 tc-chat 房间。",
       "settings.field.mailbox.serve_as_bot.label": "以机器人身份响应",
@@ -3215,6 +3927,8 @@
       "settings.ai.presets.needProvider": "请先添加一个提供方",
       "settings.ai.presets.labelPlaceholder": "标签",
       "settings.ai.presets.modelPlaceholder": "模型名称",
+      "settings.ai.presets.fetchModels": "获取模型列表",
+      "settings.ai.presets.fetchModelsError": "获取模型列表失败",
       "settings.ai.presets.temperaturePlaceholder": "Temperature",
       "settings.ai.defaultPreset.label": "默认预设",
       "settings.ai.defaultPreset.desc": "当请求未指定预设时，“ai provide”/“ai serve” 使用的预设。",
@@ -3223,7 +3937,25 @@
       "settings.field.ui.enabled.label": "启用",
       "settings.field.ui.enabled.desc": "守护进程启动时是否同时启动 Web 仪表盘。",
       "settings.field.scheduler.enabled.label": "启用任务调度器",
-      "settings.field.scheduler.enabled.desc": "在后台运行已计划的任务。需要重启守护进程才能生效。"
+      "settings.field.scheduler.enabled.desc": "在后台运行已计划的任务。需要重启守护进程才能生效。",
+      "settings.field.bot.enabled.label": "启用 Bot 后台循环",
+      "settings.field.bot.enabled.desc": "在后台运行 bot 管道（抓取、转换、投递）。需要重启守护进程才能生效。",
+      "settings.section.update": "更新",
+      "settings.drawer.update": "更新设置",
+      "settings.field.update.auto_check.label": "自动检查更新",
+      "settings.field.update.auto_check.desc": "在后台定期检查 GitHub Releases 是否有新版本。需要重启守护进程才能生效。",
+      "settings.field.update.auto_apply.label": "自动应用更新",
+      "settings.field.update.auto_apply.desc": "发现新版本时，下载并验证后暂存以替换磁盘上的二进制文件。不会强制重启正在运行的守护进程 -- 新版本会在下次启动时生效。",
+      "settings.field.update.check_interval_hours.label": "检查间隔 (小时)",
+      "settings.field.update.check_interval_hours.desc": "后台检查更新的间隔小时数。需要重启守护进程才能生效。",
+      "settings.field.update.prerelease.label": "包含预发布版本",
+      "settings.field.update.prerelease.desc": "检查更新时也考虑 GitHub 的预发布构建。",
+      "settings.field.update.repo.label": "GitHub 仓库",
+      "settings.field.update.repo.desc": "发布版本所在的 GitHub 仓库，格式为 owner/name。",
+      "settings.field.storage.blocks_dir.label": "区块目录",
+      "settings.field.storage.blocks_dir.desc": "存放内容寻址区块的目录。留空则使用默认值 <data_dir>/blocks。",
+      "settings.field.ai.advertised_models.label": "公开的模型",
+      "settings.field.ai.advertised_models.desc": "在 provider_hello 中公开的模型列表。留空则在开始提供服务时，从解析出的预设对应的提供方 (GET /models) 获取列表。"
     }
   };
 
@@ -3520,6 +4252,11 @@
     renderSandbox(state.sandboxItems);
     renderSchedulerJobs(state.schedulerJobs);
     renderSchedulerRuns(state.schedulerRuns);
+    renderBotPipelines(state.botPipelines);
+    renderBotRuns(state.botRuns);
+    renderBotItems(state.botItems);
+    botRefreshOptionSelects();
+    botApplyVisibility();
     renderProfile(state.identity);
     renderSettings(state.config);
     renderUpdate();
@@ -3831,6 +4568,11 @@
   var btnShareStop = document.getElementById("btn-share-stop");
   var shareStatusLine = document.getElementById("share-status");
   var shareOptimistic = false;
+  var shareRoomHint = document.getElementById("share-room-hint");
+
+  function showShareRoomHint(show) {
+    shareRoomHint.hidden = !show;
+  }
 
   function shareActive() {
     var s = state.stream;
@@ -3852,13 +4594,30 @@
     shareStatusLine.className = "share-status" + (active ? " on" : "");
   }
 
-  btnShareStart.addEventListener("click", function (e) {
-    runAction(e.currentTarget, "stream.share.start", {}, function () {
+  document.getElementById("share-form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var shareRoomInput = document.getElementById("share-room");
+    var room = shareRoomInput.value.trim();
+    var configuredDefault = state.config && state.config.stream && state.config.stream.share_room;
+    if (!room && !configuredDefault) {
+      showShareRoomHint(true);
+      shareRoomInput.focus();
+      return;
+    }
+    showShareRoomHint(false);
+    runAction(btnShareStart, "stream.share.start", room ? { room: room } : {}, function () {
       shareOptimistic = true;
       showToast(t("stream.share.started"), "success");
       renderShareCard();
       pollStreamViews();
     });
+  });
+
+  document.getElementById("share-room-hint-link").addEventListener("click", function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    showShareRoomHint(false);
+    focusSettingsField(settingsFieldId("stream", "share_room"));
   });
 
   btnShareStop.addEventListener("click", function (e) {
@@ -6217,6 +6976,844 @@
     }, function () {});
   }
 
+  /* ---------- bot ---------- */
+
+  var botPipelinesTbody = document.querySelector("#bot-pipelines-table tbody");
+  var botPipelinesEmpty = document.getElementById("bot-pipelines-empty");
+  var botRunsTbody = document.querySelector("#bot-runs-table tbody");
+  var botRunsEmpty = document.getElementById("bot-runs-empty");
+  var botItemsTbody = document.querySelector("#bot-items-table tbody");
+  var botItemsEmpty = document.getElementById("bot-items-empty");
+
+  /* "OK (N delivered)" / "FAIL: <error>" / "-", mirroring the CLI's
+     render_bot_ls LAST STATUS column so the dashboard and `mistl bot list`
+     read the same. */
+  function botLastStatusText(lastRun) {
+    if (!lastRun) return "-";
+    if (lastRun.ok) return t("bot.lastStatus.ok", { n: lastRun.delivered_count || 0 });
+    return t("bot.lastStatus.fail", { error: lastRun.error || "" });
+  }
+
+  function renderBotPipelines(pipelines) {
+    pipelines = pipelines || [];
+    state.botPipelines = pipelines;
+    botPipelinesTbody.innerHTML = "";
+    botPipelinesEmpty.style.display = pipelines.length ? "none" : "block";
+    pipelines.forEach(function (p) {
+      var tr = el("tr", {});
+
+      var idCell = el("td", { text: p.id || "-" });
+      if (p.warnings && p.warnings.length) {
+        var warnBadge = el("span", { class: "badge deposited", title: p.warnings.join("\n") });
+        warnBadge.textContent = t("bot.warningBadge");
+        warnBadge.style.marginLeft = "6px";
+        idCell.appendChild(warnBadge);
+      }
+      tr.appendChild(idCell);
+
+      tr.appendChild(el("td", { class: "mono", text: p.schedule || "-" }));
+      tr.appendChild(el("td", { text: fmtLocalTime(p.next_run) }));
+      tr.appendChild(el("td", { text: p.last_run ? fmtLocalTime(p.last_run.started_at) : "-" }));
+
+      var statusCell = el("td", {});
+      if (p.last_run) {
+        statusCell.appendChild(el("span", {
+          class: "badge " + (p.last_run.ok ? "status-synced" : "status-error"),
+          text: botLastStatusText(p.last_run)
+        }));
+      } else {
+        statusCell.textContent = "-";
+      }
+      tr.appendChild(statusCell);
+
+      /* Enabled toggle: unlike sched.enable (one command, an `enabled` flag),
+         the bot IPC surface splits this into bot.enable/bot.disable -- see
+         the "IPC commands" section of the pipeline design doc. Same
+         optimistic-update-with-rollback pattern as the scheduler table. */
+      var enabledCell = el("td", {});
+      var toggleLabel = el("label", { class: "toggle-switch" });
+      var toggleInput = el("input", { type: "checkbox" });
+      toggleInput.checked = !!p.enabled;
+      toggleLabel.appendChild(toggleInput);
+      toggleLabel.appendChild(el("span", { class: "slider" }));
+      toggleInput.addEventListener("change", function () {
+        var next = toggleInput.checked;
+        toggleInput.disabled = true;
+        api(next ? "bot.enable" : "bot.disable", { id: p.id }).then(function () {
+          toggleInput.disabled = false;
+          pollBotList();
+        }, function (err) {
+          toggleInput.disabled = false;
+          toggleInput.checked = !next;
+          showToast(err.message || String(err), "error");
+        });
+      });
+      enabledCell.appendChild(toggleLabel);
+      tr.appendChild(enabledCell);
+
+      var actionCell = el("td", {});
+      var runBtn = el("button", { type: "button" });
+      runBtn.textContent = t("bot.runNow");
+      runBtn.addEventListener("click", function () {
+        runAction(runBtn, "bot.run", { id: p.id }, function () {
+          showToast(t("bot.runStarted", { id: p.id || "" }), "success");
+          pollBotList();
+          pollBotLogs();
+          pollBotItems();
+        });
+      });
+      actionCell.appendChild(runBtn);
+
+      var editBtn = el("button", { type: "button" });
+      editBtn.textContent = t("bot.edit");
+      editBtn.addEventListener("click", function () { botEdit(p.id, editBtn); });
+      actionCell.appendChild(editBtn);
+
+      /* delete: reuses the same confirm() idiom as the scheduler's job
+         delete, daemon stop, sandbox delete, and update apply actions in
+         this file. */
+      var delBtn = el("button", { type: "button", class: "danger" });
+      delBtn.textContent = t("bot.delete");
+      delBtn.addEventListener("click", function () { botDelete(p.id, delBtn); });
+      actionCell.appendChild(delBtn);
+
+      tr.appendChild(actionCell);
+
+      botPipelinesTbody.appendChild(tr);
+    });
+  }
+
+  function pollBotList() {
+    return api("bot.list", {}).then(function (data) {
+      renderBotPipelines((data && data.pipelines) || []);
+    }, function () {});
+  }
+
+  document.querySelector('[data-target="bot"]').addEventListener("click", function (e) {
+    runAction(e.currentTarget, "bot.list", {}, function (data) {
+      renderBotPipelines((data && data.pipelines) || []);
+    });
+  });
+
+  function botRunDetail(run) {
+    var details = el("details", {});
+    details.appendChild(el("summary", { text: t("bot.runs.detailToggle") }));
+    var body = el("pre", { class: "sched-run-output" });
+    var lines = [
+      t("bot.runs.detailFetched", { n: run.fetched_count || 0 }),
+      t("bot.runs.detailDelivered", { n: run.delivered_count || 0 })
+    ];
+    if (run.error) lines.push(t("bot.runs.detailError", { error: run.error }));
+    body.textContent = lines.join("\n");
+    details.appendChild(body);
+    return details;
+  }
+
+  function renderBotRuns(runs) {
+    runs = runs || [];
+    state.botRuns = runs;
+    botRunsTbody.innerHTML = "";
+    botRunsEmpty.style.display = runs.length ? "none" : "block";
+    runs.forEach(function (run) {
+      var tr = el("tr", {});
+      tr.appendChild(el("td", { text: fmtLocalTime(run.started_at) }));
+      tr.appendChild(el("td", { text: run.pipeline_id || "-" }));
+
+      var resultCell = el("td", {});
+      resultCell.appendChild(el("span", {
+        class: "badge " + (run.ok ? "status-synced" : "status-error"),
+        text: run.ok ? t("bot.runs.ok") : t("bot.runs.fail")
+      }));
+      tr.appendChild(resultCell);
+
+      tr.appendChild(el("td", { text: fmtRunDuration(run.started_at, run.ended_at) }));
+
+      var detailCell = el("td", {});
+      detailCell.appendChild(botRunDetail(run));
+      tr.appendChild(detailCell);
+
+      botRunsTbody.appendChild(tr);
+    });
+  }
+
+  function pollBotLogs() {
+    return api("bot.logs", { limit: 20 }).then(function (data) {
+      renderBotRuns((data && data.runs) || []);
+    }, function () {});
+  }
+
+  function renderBotItems(items) {
+    items = items || [];
+    state.botItems = items;
+    botItemsTbody.innerHTML = "";
+    botItemsEmpty.style.display = items.length ? "none" : "block";
+    items.forEach(function (item) {
+      var tr = el("tr", {});
+      tr.appendChild(el("td", { text: fmtLocalTime(item.delivered_at) }));
+      tr.appendChild(el("td", { text: item.pipeline_id || "-" }));
+      tr.appendChild(el("td", { text: item.title || "-" }));
+
+      var sinksCell = el("td", {});
+      (item.sinks || []).forEach(function (sink) {
+        var label = (sink.kind || "-") + " " + (sink.ok ? t("bot.items.sinkOk") : t("bot.items.sinkFail", { error: sink.error || "" }));
+        var badge = el("span", { class: "badge " + (sink.ok ? "status-synced" : "status-error"), text: label });
+        badge.style.marginRight = "4px";
+        sinksCell.appendChild(badge);
+      });
+      tr.appendChild(sinksCell);
+
+      botItemsTbody.appendChild(tr);
+    });
+  }
+
+  function pollBotItems() {
+    return api("bot.items", { limit: 20 }).then(function (data) {
+      renderBotItems((data && data.items) || []);
+    }, function () {});
+  }
+
+  /* ---------- bot: pipeline editor ---------- */
+  /* Selection-first pipeline builder: a recipe (radio card, see
+     #bot-recipe-grid) picks a fixed source/transform/sink shape; "custom"
+     exposes the full builder via toggle checkboxes on each transform/sink
+     group. Either way the *checkbox* elements (bot-summarize-enabled etc.)
+     are the single source of truth for what's included -- for a fixed
+     recipe, botOnRecipeChange() force-syncs them to the recipe definition
+     whenever the recipe changes, so submit-time logic never has to branch
+     on recipe vs. custom. Room/schedule/language fields are all
+     select-plus-"custom…"-reveal pairs (see botWireRoomPicker /
+     botWireSimplePicker) so free text is only ever an explicit escape
+     hatch. There's still no per-pipeline IPC (unlike sched.add/set/rm): the
+     whole `bot.pipelines` array is read via config.show and written back
+     via `config.set { path: "bot.pipelines", value: [...] }` (see
+     `crate::config::BotConfig`/`PipelineConfig`). The daemon re-reads
+     pipelines on its next 1s tick, so saves apply live -- no restart. */
+
+  var BOT_RECIPES = {
+    "news-audio": { source: "global-articles", transforms: ["summarize", "tts"], sinks: ["chat-post"] },
+    "news-digest": { source: "global-articles", transforms: ["summarize"], sinks: ["chat-post"] },
+    "news-translate": { source: "global-articles", transforms: ["translate"], sinks: ["article-publish"] },
+    "chat-digest": { source: "chat-room", transforms: ["summarize"], sinks: ["chat-post"] },
+    "news-webhook": { source: "global-articles", transforms: [], sinks: ["webhook"] }
+  };
+  var BOT_OPTIONAL_GROUPS = [
+    "transform-summarize", "transform-translate", "transform-tts",
+    "sink-chat-post", "sink-article-publish", "sink-webhook"
+  ];
+
+  var botForm = document.getElementById("bot-form");
+  var botFormTitle = document.getElementById("bot-form-title");
+  var botOptionsUnavailableHint = document.getElementById("bot-options-unavailable-hint");
+  var botIdInput = document.getElementById("bot-id");
+  var botScheduleSelect = document.getElementById("bot-schedule-select");
+  var botScheduleInput = document.getElementById("bot-schedule");
+  var botEnabledInput = document.getElementById("bot-enabled-input");
+  var botCustomSourceKind = document.getElementById("bot-custom-source-kind");
+  var botSourceRoomSelect = document.getElementById("bot-source-room-select");
+  var botSourceRoomCustom = document.getElementById("bot-source-room-custom");
+  var botLangJa = document.getElementById("bot-lang-ja");
+  var botLangEn = document.getElementById("bot-lang-en");
+  var botLangZh = document.getElementById("bot-lang-zh");
+  var botLangCustom = document.getElementById("bot-lang-custom");
+  var botChatRoomSelect = document.getElementById("bot-chatroom-select");
+  var botChatRoomCustom = document.getElementById("bot-chatroom-custom");
+  var botSummarizeEnabled = document.getElementById("bot-summarize-enabled");
+  var botSummarizePresetSelect = document.getElementById("bot-summarize-preset");
+  var botTranslateEnabled = document.getElementById("bot-translate-enabled");
+  var botTranslatePresetSelect = document.getElementById("bot-translate-preset");
+  var botTranslateTargetLang = document.getElementById("bot-translate-target-lang");
+  var botTranslateTargetLangCustom = document.getElementById("bot-translate-target-lang-custom");
+  var botTtsEnabled = document.getElementById("bot-tts-enabled");
+  var botTtsPresetSelect = document.getElementById("bot-tts-preset");
+  var botTtsFormatSelect = document.getElementById("bot-tts-format");
+  var botTtsSpeedInput = document.getElementById("bot-tts-speed");
+  var botTtsVoiceHint = document.getElementById("bot-tts-voice-hint");
+  var botSinkChatPostEnabled = document.getElementById("bot-sink-chat-post-enabled");
+  var botSinkChatRoomSelect = document.getElementById("bot-sink-chat-room-select");
+  var botSinkChatRoomCustom = document.getElementById("bot-sink-chat-room-custom");
+  var botSinkArticlePublishEnabled = document.getElementById("bot-sink-article-publish-enabled");
+  var botSinkArticleRoomSelect = document.getElementById("bot-sink-article-room-select");
+  var botSinkArticleRoomCustom = document.getElementById("bot-sink-article-room-custom");
+  var botSinkWebhookEnabled = document.getElementById("bot-sink-webhook-enabled");
+  var botSinkWebhookUrlInput = document.getElementById("bot-sink-webhook-url");
+  var botSinkWebhookIncludeAudioInput = document.getElementById("bot-sink-webhook-include-audio");
+  var botSinkWebhookMaxAudioMibInput = document.getElementById("bot-sink-webhook-max-audio-mib");
+  var botSaveBtn = document.getElementById("btn-bot-save");
+  var botCancelEditBtn = document.getElementById("btn-bot-cancel-edit");
+  var botEditingId = null;
+  var botIdTouched = false;
+
+  function botParseCommaList(value) {
+    return (value || "").split(",").map(function (s) { return s.trim(); }).filter(function (s) { return s.length > 0; });
+  }
+
+  /* ---- presets (from bot.options when available, else state.config.ai.presets) ---- */
+
+  function botPresetsList() {
+    if (state.botOptions && state.botOptions.presets) return state.botOptions.presets;
+    var raw = (state.config && state.config.ai && state.config.ai.presets) || [];
+    return raw.map(function (p) {
+      return { id: p.id, label: p.label || p.id, model: p.model, has_voice: !!(p.voice && String(p.voice).trim()) };
+    });
+  }
+
+  function botFillPresetSelect(select, value, opts) {
+    opts = opts || {};
+    var all = botPresetsList();
+    var list = all;
+    if (opts.voiceFirst) {
+      var voiced = all.filter(function (p) { return p.has_voice; });
+      if (voiced.length) list = voiced;
+    }
+    select.innerHTML = "";
+    select.appendChild(el("option", { value: "", text: t("bot.form.presetNone") }));
+    list.forEach(function (p) {
+      var label = p.model ? (p.label || p.id) + " (" + p.model + ")" : (p.label || p.id);
+      select.appendChild(el("option", { value: p.id, text: label }));
+    });
+    if (value && !list.some(function (p) { return p.id === value; })) {
+      select.appendChild(el("option", { value: value, text: value }));
+    }
+    select.value = value || "";
+  }
+
+  /* Shows a hint under the TTS row: either no preset in the whole list has a
+     `voice` configured (global warning), or the currently-selected one
+     doesn't (the pipeline still runs -- the daemon only warns, see
+     bot.list's per-pipeline `warnings` -- but audio synthesis will fail). */
+  function botUpdateTtsVoiceHint() {
+    var all = botPresetsList();
+    if (all.length && !all.some(function (p) { return p.has_voice; })) {
+      botTtsVoiceHint.textContent = t("bot.form.ttsNoVoicePresetsHint");
+      return;
+    }
+    var id = botTtsPresetSelect.value;
+    var preset = null;
+    for (var i = 0; i < all.length; i++) { if (all[i].id === id) { preset = all[i]; break; } }
+    botTtsVoiceHint.textContent = (id && preset && !preset.has_voice) ? t("bot.form.ttsNoVoiceHint") : "";
+  }
+  botTtsPresetSelect.addEventListener("change", botUpdateTtsVoiceHint);
+
+  /* ---- rooms (from bot.options; degrades to a plain text input if that
+     IPC command isn't available on an older daemon) ---- */
+
+  function botRoomOptionsAvailable() {
+    return !!(state.botOptions && Array.isArray(state.botOptions.rooms) && state.botOptions.rooms.length);
+  }
+
+  function botFillRoomSelect(select, opts) {
+    opts = opts || {};
+    var prevValue = select.value;
+    select.innerHTML = "";
+    if (opts.allowDefault) select.appendChild(el("option", { value: "", text: t("bot.form.roomDefaultOption") }));
+    ((state.botOptions && state.botOptions.rooms) || []).forEach(function (r) {
+      var label = r.room + (r.joined ? " " + t("bot.form.roomJoinedSuffix") : "");
+      select.appendChild(el("option", { value: r.room, text: label }));
+    });
+    select.appendChild(el("option", { value: "__custom__", text: t("bot.form.customOption") }));
+    /* Preserve the current selection across a refill -- callers that need a
+       specific value already re-apply it via botSetRoomPickerValue right
+       after (add/edit init); this only matters for the language-switch
+       refresh in rerenderAllDynamic(), which has no such follow-up. */
+    if (Array.prototype.some.call(select.options, function (o) { return o.value === prevValue; })) {
+      select.value = prevValue;
+    }
+  }
+
+  function botWireRoomPicker(select, customInput) {
+    select.addEventListener("change", function () {
+      var custom = select.value === "__custom__";
+      customInput.hidden = !custom;
+      if (custom) customInput.focus();
+    });
+  }
+
+  function botSetRoomPickerValue(select, customInput, value, opts) {
+    opts = opts || {};
+    value = value || "";
+    if (!botRoomOptionsAvailable()) {
+      select.hidden = true;
+      customInput.hidden = false;
+      customInput.value = value;
+      return;
+    }
+    select.hidden = false;
+    if (value === "" && opts.allowDefault) {
+      select.value = "";
+      customInput.hidden = true;
+      return;
+    }
+    var has = Array.prototype.some.call(select.options, function (o) { return o.value === value; });
+    if (value !== "" && has) {
+      select.value = value;
+      customInput.hidden = true;
+    } else {
+      select.value = "__custom__";
+      customInput.value = value;
+      customInput.hidden = false;
+    }
+  }
+
+  function botRoomPickerValue(select, customInput) {
+    if (!botRoomOptionsAvailable() || select.value === "__custom__") return customInput.value.trim();
+    return select.value;
+  }
+
+  /* global-articles `rooms` is a list, but the common case is one room --
+     the select covers that; "Custom…" reveals a comma-separated text field
+     for the rare multi-room case (see the panel's UX spec). */
+  function botSourceRoomsValue() {
+    if (!botRoomOptionsAvailable() || botSourceRoomSelect.value === "__custom__") {
+      return botParseCommaList(botSourceRoomCustom.value);
+    }
+    return botSourceRoomSelect.value ? [botSourceRoomSelect.value] : [];
+  }
+
+  function botSetSourceRoomsValue(rooms) {
+    rooms = rooms || [];
+    if (rooms.length <= 1) {
+      botSetRoomPickerValue(botSourceRoomSelect, botSourceRoomCustom, rooms[0] || "", { allowDefault: true });
+    } else {
+      botSourceRoomSelect.hidden = botRoomOptionsAvailable();
+      if (botRoomOptionsAvailable()) botSourceRoomSelect.value = "__custom__";
+      botSourceRoomCustom.hidden = false;
+      botSourceRoomCustom.value = rooms.join(", ");
+    }
+  }
+
+  /* ---- fixed-choice selects with a "custom…" text reveal (schedule,
+     translate target language) ---- */
+
+  function botWireSimplePicker(select, customInput) {
+    select.addEventListener("change", function () {
+      var custom = select.value === "__custom__";
+      customInput.hidden = !custom;
+      if (custom) customInput.focus();
+    });
+  }
+
+  function botSetSimplePickerValue(select, customInput, value) {
+    var has = Array.prototype.some.call(select.options, function (o) { return o.value === value; });
+    if (value && has) {
+      select.value = value;
+      customInput.hidden = true;
+    } else {
+      select.value = "__custom__";
+      customInput.value = value || "";
+      customInput.hidden = false;
+    }
+  }
+
+  function botSimplePickerValue(select, customInput) {
+    return select.value === "__custom__" ? customInput.value.trim() : select.value;
+  }
+
+  botWireRoomPicker(botSourceRoomSelect, botSourceRoomCustom);
+  botWireRoomPicker(botChatRoomSelect, botChatRoomCustom);
+  botWireRoomPicker(botSinkChatRoomSelect, botSinkChatRoomCustom);
+  botWireRoomPicker(botSinkArticleRoomSelect, botSinkArticleRoomCustom);
+  botWireSimplePicker(botScheduleSelect, botScheduleInput);
+  botWireSimplePicker(botTranslateTargetLang, botTranslateTargetLangCustom);
+
+  /* ---- source languages (ja/en/zh checkboxes + free-form extra tags) ---- */
+
+  function botLangsValue() {
+    var langs = [];
+    if (botLangJa.checked) langs.push("ja");
+    if (botLangEn.checked) langs.push("en");
+    if (botLangZh.checked) langs.push("zh");
+    return langs.concat(botParseCommaList(botLangCustom.value));
+  }
+
+  function botSetLangsValue(langs) {
+    langs = langs || [];
+    botLangJa.checked = langs.indexOf("ja") >= 0;
+    botLangEn.checked = langs.indexOf("en") >= 0;
+    botLangZh.checked = langs.indexOf("zh") >= 0;
+    botLangCustom.value = langs.filter(function (l) { return l !== "ja" && l !== "en" && l !== "zh"; }).join(", ");
+  }
+
+  function botRefreshOptionSelects() {
+    botOptionsUnavailableHint.hidden = botRoomOptionsAvailable();
+    botFillRoomSelect(botSourceRoomSelect, { allowDefault: true });
+    botFillRoomSelect(botChatRoomSelect, {});
+    botFillRoomSelect(botSinkChatRoomSelect, {});
+    botFillRoomSelect(botSinkArticleRoomSelect, {});
+    botFillPresetSelect(botSummarizePresetSelect, botSummarizePresetSelect.value);
+    botFillPresetSelect(botTranslatePresetSelect, botTranslatePresetSelect.value);
+    botFillPresetSelect(botTtsPresetSelect, botTtsPresetSelect.value, { voiceFirst: true });
+    botUpdateTtsVoiceHint();
+  }
+
+  /* ---- recipe selection: drives which field groups are visible, and (for
+     a fixed recipe) force-syncs the underlying include/exclude checkboxes
+     to match the recipe definition -- see the module doc above. ---- */
+
+  function botCurrentRecipe() {
+    var checked = document.querySelector('input[name="bot-recipe"]:checked');
+    return checked ? checked.value : "news-audio";
+  }
+
+  function botSetGroupHidden(name, isHidden) {
+    document.querySelectorAll('[data-bot-group="' + name + '"]').forEach(function (g) { g.hidden = isHidden; });
+  }
+
+  function botUpdateToggleLabels(isCustom) {
+    BOT_OPTIONAL_GROUPS.forEach(function (name) {
+      document.querySelectorAll('[data-bot-group="' + name + '"]').forEach(function (groupEl) {
+        var toggle = groupEl.querySelector(".bot-toggle");
+        var plain = groupEl.querySelector(".bot-group-plain-label");
+        if (toggle) toggle.hidden = !isCustom;
+        if (plain) plain.hidden = isCustom;
+      });
+    });
+  }
+
+  function botUpdateRecipeCardClasses() {
+    document.querySelectorAll("#bot-recipe-grid .bot-recipe-card").forEach(function (card) {
+      var input = card.querySelector('input[name="bot-recipe"]');
+      card.classList.toggle("selected", !!(input && input.checked));
+    });
+  }
+
+  function botApplyVisibility() {
+    var isCustom = !BOT_RECIPES[botCurrentRecipe()];
+    botSetGroupHidden("custom-source-kind", !isCustom);
+
+    var sourceKind = botCustomSourceKind.value;
+    botSetGroupHidden("source-global-articles", sourceKind !== "global-articles");
+    botSetGroupHidden("source-chat-room", sourceKind !== "chat-room");
+
+    botSetGroupHidden("transform-summarize", !botSummarizeEnabled.checked);
+    botSetGroupHidden("transform-translate", !botTranslateEnabled.checked);
+    botSetGroupHidden("transform-tts", !botTtsEnabled.checked);
+    botSetGroupHidden("sink-chat-post", !botSinkChatPostEnabled.checked);
+    botSetGroupHidden("sink-article-publish", !botSinkArticlePublishEnabled.checked);
+    botSetGroupHidden("sink-webhook", !botSinkWebhookEnabled.checked);
+
+    botUpdateToggleLabels(isCustom);
+    botUpdateTtsVoiceHint();
+  }
+
+  function botNextId(recipe) {
+    var existing = {};
+    (state.botPipelines || []).forEach(function (p) { existing[p.id] = true; });
+    var n = 1;
+    var candidate;
+    do {
+      candidate = recipe + "-" + n;
+      n++;
+    } while (existing[candidate]);
+    return candidate;
+  }
+
+  function botOnRecipeChange() {
+    var recipe = botCurrentRecipe();
+    var def = BOT_RECIPES[recipe];
+    if (def) {
+      botCustomSourceKind.value = def.source;
+      botSummarizeEnabled.checked = def.transforms.indexOf("summarize") >= 0;
+      botTranslateEnabled.checked = def.transforms.indexOf("translate") >= 0;
+      botTtsEnabled.checked = def.transforms.indexOf("tts") >= 0;
+      botSinkChatPostEnabled.checked = def.sinks.indexOf("chat-post") >= 0;
+      botSinkArticlePublishEnabled.checked = def.sinks.indexOf("article-publish") >= 0;
+      botSinkWebhookEnabled.checked = def.sinks.indexOf("webhook") >= 0;
+    }
+    botUpdateRecipeCardClasses();
+    if (!botEditingId && !botIdTouched) botIdInput.value = botNextId(recipe);
+    botApplyVisibility();
+  }
+
+  document.querySelectorAll('input[name="bot-recipe"]').forEach(function (r) {
+    r.addEventListener("change", botOnRecipeChange);
+  });
+  botCustomSourceKind.addEventListener("change", botApplyVisibility);
+  [botSummarizeEnabled, botTranslateEnabled, botTtsEnabled,
+    botSinkChatPostEnabled, botSinkArticlePublishEnabled, botSinkWebhookEnabled].forEach(function (cb) {
+    cb.addEventListener("change", botApplyVisibility);
+  });
+  botIdInput.addEventListener("input", function () { botIdTouched = true; });
+
+  /* Refetches config.show + bot.options on every reset so the preset/room
+     pickers reflect the latest server state even if the Settings drawer was
+     never opened (state.config is otherwise only populated by pollConfig()
+     at startup or when a settings drawer is refreshed). bot.options may 404
+     against an older daemon -- botRefreshOptionSelects() degrades every
+     room picker to a plain text field in that case. */
+  function botResetForm() {
+    botEditingId = null;
+    botIdTouched = false;
+    botForm.reset();
+    botEnabledInput.checked = true;
+    botIdInput.readOnly = false;
+    var defaultRecipe = document.querySelector('input[name="bot-recipe"][value="news-audio"]');
+    if (defaultRecipe) defaultRecipe.checked = true;
+    botFormTitle.textContent = t("bot.form.addTitle");
+    botSaveBtn.textContent = t("bot.form.addBtn");
+    botCancelEditBtn.hidden = true;
+    botSetSimplePickerValue(botScheduleSelect, botScheduleInput, "@hourly");
+    botSetSimplePickerValue(botTranslateTargetLang, botTranslateTargetLangCustom, "ja");
+    botSetLangsValue([]);
+    botCustomSourceKind.value = "global-articles";
+
+    api("config.show", {}).then(function (cfg) { state.config = cfg; }, function () {})
+      .then(function () {
+        return api("bot.options", {}).then(function (opts) { state.botOptions = opts; }, function () { state.botOptions = null; });
+      })
+      .then(function () {
+        botRefreshOptionSelects();
+        botSetRoomPickerValue(botSourceRoomSelect, botSourceRoomCustom, "", { allowDefault: true });
+        botSetRoomPickerValue(botChatRoomSelect, botChatRoomCustom, "", {});
+        botSetRoomPickerValue(botSinkChatRoomSelect, botSinkChatRoomCustom, "", {});
+        botSetRoomPickerValue(botSinkArticleRoomSelect, botSinkArticleRoomCustom, "", {});
+        botOnRecipeChange();
+      });
+  }
+
+  botCancelEditBtn.addEventListener("click", function () { botResetForm(); });
+
+  /* Finds a pipeline's transform/sink of a given `kind` -- there's at most
+     one of each per pipeline (the engine doesn't support repeating a
+     transform or sink kind). */
+  function botFindByKind(list, kind) {
+    list = list || [];
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].kind === kind) return list[i];
+    }
+    return null;
+  }
+
+  function botArraysEqual(a, b) {
+    if (a.length !== b.length) return false;
+    for (var i = 0; i < a.length; i++) { if (a[i] !== b[i]) return false; }
+    return true;
+  }
+
+  /* Detects whether a saved pipeline's shape (source kind + ordered
+     transform kinds + sink kinds) matches one of the fixed recipes, so
+     Edit can preselect that card instead of always falling back to
+     "custom". */
+  function botDetectRecipe(pipeline) {
+    var sourceKind = (pipeline.source && pipeline.source.kind) || "global-articles";
+    var transformKinds = (pipeline.transforms || []).map(function (x) { return x.kind; });
+    var sinkKinds = (pipeline.sinks || []).map(function (x) { return x.kind; });
+    var keys = Object.keys(BOT_RECIPES);
+    for (var i = 0; i < keys.length; i++) {
+      var def = BOT_RECIPES[keys[i]];
+      if (def.source === sourceKind && botArraysEqual(def.transforms, transformKinds) && botArraysEqual(def.sinks, sinkKinds)) {
+        return keys[i];
+      }
+    }
+    return "custom";
+  }
+
+  function botStartEdit(pipeline, cfg) {
+    botEditingId = pipeline.id;
+    botIdInput.value = pipeline.id || "";
+    botIdInput.readOnly = true; // id can't be changed once created (config.set below replaces by matching id)
+    botEnabledInput.checked = !!pipeline.enabled;
+
+    var recipe = botDetectRecipe(pipeline);
+    var radio = document.querySelector('input[name="bot-recipe"][value="' + recipe + '"]');
+    if (radio) radio.checked = true;
+
+    botSetSimplePickerValue(botScheduleSelect, botScheduleInput, pipeline.schedule || "");
+
+    var source = pipeline.source || {};
+    var sourceKind = source.kind === "chat-room" ? "chat-room" : "global-articles";
+    botCustomSourceKind.value = sourceKind;
+
+    return api("bot.options", {}).then(function (opts) { state.botOptions = opts; }, function () { state.botOptions = null; }).then(function () {
+      botRefreshOptionSelects();
+
+      if (sourceKind === "chat-room") {
+        botSetRoomPickerValue(botChatRoomSelect, botChatRoomCustom, source.room || "", {});
+        botSetSourceRoomsValue([]);
+        botSetLangsValue([]);
+      } else {
+        botSetRoomPickerValue(botChatRoomSelect, botChatRoomCustom, "", {});
+        botSetSourceRoomsValue(source.rooms || []);
+        botSetLangsValue(source.langs || []);
+      }
+
+      var summarize = botFindByKind(pipeline.transforms, "summarize");
+      var translate = botFindByKind(pipeline.transforms, "translate");
+      var tts = botFindByKind(pipeline.transforms, "tts");
+      botSummarizeEnabled.checked = !!summarize;
+      botFillPresetSelect(botSummarizePresetSelect, summarize ? summarize.preset_id : "");
+      botTranslateEnabled.checked = !!translate;
+      botFillPresetSelect(botTranslatePresetSelect, translate ? translate.preset_id : "");
+      botSetSimplePickerValue(botTranslateTargetLang, botTranslateTargetLangCustom, translate ? (translate.target_lang || "") : "ja");
+      botTtsEnabled.checked = !!tts;
+      botFillPresetSelect(botTtsPresetSelect, tts ? tts.preset_id : "", { voiceFirst: true });
+      botTtsFormatSelect.value = (tts && tts.format) || "";
+      botTtsSpeedInput.value = (tts && tts.speed !== null && tts.speed !== undefined) ? String(tts.speed) : "";
+
+      var chatPost = botFindByKind(pipeline.sinks, "chat-post");
+      var articlePublish = botFindByKind(pipeline.sinks, "article-publish");
+      var webhook = botFindByKind(pipeline.sinks, "webhook");
+      botSinkChatPostEnabled.checked = !!chatPost;
+      botSetRoomPickerValue(botSinkChatRoomSelect, botSinkChatRoomCustom, (chatPost && chatPost.room) || "", {});
+      botSinkArticlePublishEnabled.checked = !!articlePublish;
+      botSetRoomPickerValue(botSinkArticleRoomSelect, botSinkArticleRoomCustom, (articlePublish && articlePublish.room) || "", {});
+      botSinkWebhookEnabled.checked = !!webhook;
+      botSinkWebhookUrlInput.value = (webhook && webhook.url) || "";
+      botSinkWebhookIncludeAudioInput.checked = !!(webhook && webhook.include_audio);
+      botSinkWebhookMaxAudioMibInput.value = (webhook && webhook.max_audio_bytes) ? String(webhook.max_audio_bytes / (1024 * 1024)) : "";
+
+      botOnRecipeChange();
+
+      botFormTitle.textContent = t("bot.form.editTitle", { id: pipeline.id || "" });
+      botSaveBtn.textContent = t("bot.form.updateBtn");
+      botCancelEditBtn.hidden = false;
+    });
+  }
+
+  /* Edit re-fetches the full config (rather than trusting bot.list's
+     display-only rows, which omit source/transforms/sinks) so the form is
+     always seeded from the authoritative pipeline definition. */
+  function botEdit(id, button) {
+    withBusy(button, function () { return api("config.show", {}); }).then(function (cfg) {
+      state.config = cfg;
+      var list = (cfg && cfg.bot && cfg.bot.pipelines) || [];
+      var pipeline = null;
+      for (var i = 0; i < list.length; i++) {
+        if (list[i].id === id) { pipeline = list[i]; break; }
+      }
+      if (!pipeline) { showToast(t("bot.form.notFound", { id: id }), "error"); return; }
+      botStartEdit(pipeline, cfg);
+    }, function (err) { showToast(err.message || String(err), "error"); });
+  }
+
+  /* Both add/save and delete mutate the whole `bot.pipelines` array in one
+     config.set call (there's no per-pipeline IPC command, unlike scheduler
+     jobs' sched.add/set/rm) -- so every mutation re-reads config.show first
+     to start from the authoritative array and avoid clobbering a
+     concurrent edit made elsewhere (CLI, another browser tab). */
+  function botSavePipelines(button, mutateFn, onSuccess) {
+    withBusy(button, function () {
+      return api("config.show", {}).then(function (cfg) {
+        state.config = cfg;
+        var list = ((cfg && cfg.bot && cfg.bot.pipelines) || []).slice();
+        return api("config.set", { path: "bot.pipelines", value: mutateFn(list) });
+      });
+    }).then(function () {
+      if (onSuccess) onSuccess();
+      pollBotList();
+    }, function (err) { showToast(err.message || String(err), "error"); });
+  }
+
+  botForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    var id = botIdInput.value.trim();
+    if (!id) { showToast(t("bot.form.enterId"), "error"); return; }
+    var schedule = botSimplePickerValue(botScheduleSelect, botScheduleInput);
+    if (!schedule) { showToast(t("bot.form.enterSchedule"), "error"); return; }
+
+    var sourceKind = botCustomSourceKind.value;
+    var source;
+    if (sourceKind === "chat-room") {
+      var chatRoom = botRoomPickerValue(botChatRoomSelect, botChatRoomCustom);
+      if (!chatRoom) { showToast(t("bot.form.enterChatRoom"), "error"); return; }
+      source = { kind: "chat-room", room: chatRoom };
+    } else {
+      source = { kind: "global-articles", rooms: botSourceRoomsValue(), langs: botLangsValue() };
+    }
+
+    var transforms = [];
+    if (botSummarizeEnabled.checked) {
+      transforms.push({ kind: "summarize", preset_id: botSummarizePresetSelect.value });
+    }
+    if (botTranslateEnabled.checked) {
+      var targetLang = botSimplePickerValue(botTranslateTargetLang, botTranslateTargetLangCustom);
+      if (!targetLang) { showToast(t("bot.form.enterTargetLang"), "error"); return; }
+      transforms.push({ kind: "translate", preset_id: botTranslatePresetSelect.value, target_lang: targetLang });
+    }
+    if (botTtsEnabled.checked) {
+      var speedVal = botTtsSpeedInput.value.trim();
+      var speedNum = null;
+      if (speedVal !== "") {
+        speedNum = Number(speedVal);
+        if (!isFinite(speedNum)) { showToast(t("bot.form.enterSpeed"), "error"); return; }
+      }
+      transforms.push({
+        kind: "tts",
+        preset_id: botTtsPresetSelect.value,
+        format: botTtsFormatSelect.value || null,
+        speed: speedNum
+      });
+    }
+
+    var sinks = [];
+    if (botSinkChatPostEnabled.checked) {
+      var chatPostRoom = botRoomPickerValue(botSinkChatRoomSelect, botSinkChatRoomCustom);
+      if (!chatPostRoom) { showToast(t("bot.form.enterSinkRoom"), "error"); return; }
+      sinks.push({ kind: "chat-post", room: chatPostRoom });
+    }
+    if (botSinkArticlePublishEnabled.checked) {
+      var articleRoom = botRoomPickerValue(botSinkArticleRoomSelect, botSinkArticleRoomCustom);
+      if (!articleRoom) { showToast(t("bot.form.enterSinkRoom"), "error"); return; }
+      sinks.push({ kind: "article-publish", room: articleRoom });
+    }
+    if (botSinkWebhookEnabled.checked) {
+      var webhookUrl = botSinkWebhookUrlInput.value.trim();
+      if (!webhookUrl) { showToast(t("bot.form.enterWebhookUrl"), "error"); return; }
+      var maxMibVal = botSinkWebhookMaxAudioMibInput.value.trim();
+      var maxBytes = null;
+      if (maxMibVal !== "") {
+        var maxMib = Number(maxMibVal);
+        if (!isFinite(maxMib)) { showToast(t("bot.form.enterMaxAudio"), "error"); return; }
+        maxBytes = Math.round(maxMib * 1024 * 1024);
+      }
+      sinks.push({
+        kind: "webhook",
+        url: webhookUrl,
+        include_audio: botSinkWebhookIncludeAudioInput.checked,
+        max_audio_bytes: maxBytes
+      });
+    }
+    if (!sinks.length) { showToast(t("bot.form.selectSink"), "error"); return; }
+
+    var pipeline = {
+      id: id,
+      enabled: botEnabledInput.checked,
+      schedule: schedule,
+      source: source,
+      transforms: transforms,
+      sinks: sinks
+    };
+
+    if (botEditingId) {
+      botSavePipelines(botSaveBtn, function (list) {
+        return list.map(function (p) { return p.id === botEditingId ? pipeline : p; });
+      }, function () {
+        showToast(t("bot.form.updated", { id: id }), "success");
+        botResetForm();
+      });
+    } else {
+      var exists = (state.botPipelines || []).some(function (p) { return p.id === id; });
+      if (exists) { showToast(t("bot.form.duplicateId", { id: id }), "error"); return; }
+      botSavePipelines(botSaveBtn, function (list) {
+        return list.concat([pipeline]);
+      }, function () {
+        showToast(t("bot.form.added", { id: id }), "success");
+        botResetForm();
+      });
+    }
+  });
+
+  function botDelete(id, button) {
+    if (!confirm(t("bot.form.deleteConfirm", { id: id }))) return;
+    botSavePipelines(button, function (list) {
+      return list.filter(function (p) { return p.id !== id; });
+    }, function () {
+      showToast(t("bot.form.deleted", { id: id }), "success");
+      if (botEditingId === id) botResetForm();
+    });
+  }
+
+  botResetForm();
+
   /* ---------- profile ---------- */
 
   var profileKv = document.getElementById("profile-kv");
@@ -6414,7 +8011,8 @@
     ] },
     { section: "storage", titleKey: "settings.section.storage", container: "settings-drawer-body-storage", fields: [
       { key: "capacity_bytes", labelKey: "settings.field.storage.capacity_bytes.label", descKey: "settings.field.storage.capacity_bytes.desc", type: "gib" },
-      { key: "room_ids", labelKey: "settings.field.storage.room_ids.label", descKey: "settings.field.storage.room_ids.desc", type: "list" }
+      { key: "room_ids", labelKey: "settings.field.storage.room_ids.label", descKey: "settings.field.storage.room_ids.desc", type: "list" },
+      { key: "blocks_dir", labelKey: "settings.field.storage.blocks_dir.label", descKey: "settings.field.storage.blocks_dir.desc", type: "text", advanced: true }
     ] },
     { section: "stream", titleKey: "settings.section.stream", container: "settings-drawer-body-stream", fields: [
       { key: "rtsp_url", labelKey: "settings.field.stream.rtsp_url.label", descKey: "settings.field.stream.rtsp_url.desc", type: "text" },
@@ -6422,7 +8020,10 @@
       { key: "capture_backend", labelKey: "settings.field.stream.capture_backend.label", descKey: "settings.field.stream.capture_backend.desc", type: "select", options: [["", "settings.optionDefault", true], ["native", "native"], ["ffmpeg", "ffmpeg"]], advanced: true },
       { key: "max_width", labelKey: "settings.field.stream.max_width.label", descKey: "settings.field.stream.max_width.desc", type: "number", advanced: true },
       { key: "relay_room", labelKey: "settings.field.stream.relay_room.label", descKey: "settings.field.stream.relay_room.desc", type: "text" },
-      { key: "audio_codec", labelKey: "settings.field.stream.audio_codec.label", descKey: "settings.field.stream.audio_codec.desc", type: "select", options: [["", "settings.optionDefault", true], ["aac", "aac"], ["opus", "opus"]], advanced: true }
+      { key: "share_room", labelKey: "settings.field.stream.share_room.label", descKey: "settings.field.stream.share_room.desc", type: "text" },
+      { key: "audio_codec", labelKey: "settings.field.stream.audio_codec.label", descKey: "settings.field.stream.audio_codec.desc", type: "select", options: [["", "settings.optionDefault", true], ["aac", "aac"], ["opus", "opus"]], advanced: true },
+      { key: "audio_capture", labelKey: "settings.field.stream.audio_capture.label", descKey: "settings.field.stream.audio_capture.desc", type: "toggle", advanced: true },
+      { key: "cascade", labelKey: "settings.field.stream.cascade.label", descKey: "settings.field.stream.cascade.desc", type: "toggle", advanced: true }
     ] },
     { section: "mailbox", titleKey: "settings.section.mailbox", container: "settings-drawer-body-mailbox", fields: [
       { key: "room_id", labelKey: "settings.field.mailbox.room_id.label", descKey: "settings.field.mailbox.room_id.desc", type: "text" },
@@ -6433,10 +8034,21 @@
     { section: "ai", titleKey: "settings.section.ai", container: "settings-drawer-body-ai", fields: [
       { key: "room_id", labelKey: "settings.field.ai.room_id.label", descKey: "settings.field.ai.room_id.desc", type: "text", advanced: true },
       { key: "request_timeout_secs", labelKey: "settings.field.ai.request_timeout_secs.label", descKey: "settings.field.ai.request_timeout_secs.desc", type: "number", advanced: true },
-      { key: "api_listen", labelKey: "settings.field.ai.api_listen.label", descKey: "settings.field.ai.api_listen.desc", type: "text", advanced: true }
+      { key: "api_listen", labelKey: "settings.field.ai.api_listen.label", descKey: "settings.field.ai.api_listen.desc", type: "text", advanced: true },
+      { key: "advertised_models", labelKey: "settings.field.ai.advertised_models.label", descKey: "settings.field.ai.advertised_models.desc", type: "list", advanced: true }
     ] },
     { section: "scheduler", titleKey: "settings.section.scheduler", container: "settings-drawer-body-scheduler", fields: [
       { key: "enabled", labelKey: "settings.field.scheduler.enabled.label", descKey: "settings.field.scheduler.enabled.desc", type: "toggle" }
+    ] },
+    { section: "bot", titleKey: "settings.section.bot", container: "settings-drawer-body-bot", fields: [
+      { key: "enabled", labelKey: "settings.field.bot.enabled.label", descKey: "settings.field.bot.enabled.desc", type: "toggle" }
+    ] },
+    { section: "update", titleKey: "settings.section.update", container: "settings-drawer-body-update", fields: [
+      { key: "auto_check", labelKey: "settings.field.update.auto_check.label", descKey: "settings.field.update.auto_check.desc", type: "toggle" },
+      { key: "auto_apply", labelKey: "settings.field.update.auto_apply.label", descKey: "settings.field.update.auto_apply.desc", type: "toggle" },
+      { key: "check_interval_hours", labelKey: "settings.field.update.check_interval_hours.label", descKey: "settings.field.update.check_interval_hours.desc", type: "number" },
+      { key: "prerelease", labelKey: "settings.field.update.prerelease.label", descKey: "settings.field.update.prerelease.desc", type: "toggle" },
+      { key: "repo", labelKey: "settings.field.update.repo.label", descKey: "settings.field.update.repo.desc", type: "text", advanced: true }
     ] },
     { section: "ui", titleKey: "settings.section.ui", container: "settings-body", fields: [
       { key: "listen", labelKey: "settings.field.ui.listen.label", descKey: "settings.field.ui.listen.desc", type: "text" },
@@ -6455,6 +8067,8 @@
     storage: "panel-store",
     identity: "panel-profile",
     scheduler: "panel-scheduler",
+    bot: "panel-bot",
+    update: "panel-update",
     ui: "panel-settings"
   };
 
@@ -6682,6 +8296,12 @@
   function buildAiProvidersPresetsField(sectionCfg) {
     var wrap = el("div", {});
 
+    // Cache of fetched upstream model lists, keyed by provider_id. Survives
+    // renderAll() re-renders (which happen after every save) for the
+    // lifetime of this settings screen instance; cleared implicitly when the
+    // settings screen is rebuilt from scratch.
+    var modelListByProvider = {};
+
     function providers() { return Array.isArray(sectionCfg.providers) ? sectionCfg.providers : []; }
     function presets() { return Array.isArray(sectionCfg.presets) ? sectionCfg.presets : []; }
 
@@ -6852,15 +8472,58 @@
       });
       row.appendChild(providerSelect);
 
-      var modelInput = el("input", { type: "text", autocomplete: "off", placeholder: t("settings.ai.presets.modelPlaceholder") });
-      modelInput.value = preset.model || "";
-      modelInput.addEventListener("blur", function () {
-        if (modelInput.value === (preset.model || "")) return;
-        savePresets(presets().map(function (p) {
-          return p.id === preset.id ? withField(p, "model", modelInput.value) : p;
-        }));
+      // Model list is only available once fetched (see fetchModelsBtn below)
+      // and browsers never see api_key, so the model field is a select when
+      // a list is cached for this preset's provider, and falls back to a
+      // free-text input otherwise -- mirrors tc-mistllm's settings screen.
+      var cachedModels = modelListByProvider[preset.provider_id];
+      var modelEl;
+      if (Array.isArray(cachedModels) && cachedModels.length > 0) {
+        modelEl = el("select", {});
+        var modelOptions = cachedModels.slice();
+        // Never silently drop the currently-saved model even if it's not in
+        // the fetched list (e.g. it was hand-entered, or the upstream since
+        // removed it).
+        if (preset.model && modelOptions.indexOf(preset.model) === -1) {
+          modelOptions = [preset.model].concat(modelOptions);
+        }
+        modelOptions.forEach(function (m) {
+          modelEl.appendChild(el("option", { value: m, text: m }));
+        });
+        modelEl.value = preset.model || "";
+        modelEl.addEventListener("change", function () {
+          savePresets(presets().map(function (p) {
+            return p.id === preset.id ? withField(p, "model", modelEl.value) : p;
+          }));
+        });
+      } else {
+        modelEl = el("input", { type: "text", autocomplete: "off", placeholder: t("settings.ai.presets.modelPlaceholder") });
+        modelEl.value = preset.model || "";
+        modelEl.addEventListener("blur", function () {
+          if (modelEl.value === (preset.model || "")) return;
+          savePresets(presets().map(function (p) {
+            return p.id === preset.id ? withField(p, "model", modelEl.value) : p;
+          }));
+        });
+      }
+      row.appendChild(modelEl);
+
+      var fetchModelsBtn = el("button", { type: "button" });
+      fetchModelsBtn.textContent = t("settings.ai.presets.fetchModels");
+      fetchModelsBtn.addEventListener("click", function () {
+        fetchModelsBtn.disabled = true;
+        api("ai.upstream_models", { provider_id: preset.provider_id }).then(
+          function (data) {
+            modelListByProvider[preset.provider_id] = (data && data.models) || [];
+            renderAll();
+          },
+          function (err) {
+            fetchModelsBtn.disabled = false;
+            showToast(t("settings.ai.presets.fetchModelsError") + ": " + err.message, "error");
+          }
+        );
       });
-      row.appendChild(modelInput);
+      row.appendChild(fetchModelsBtn);
 
       var tempInput = el("input", { type: "text", inputmode: "decimal", placeholder: t("settings.ai.presets.temperaturePlaceholder") });
       tempInput.value = (preset.temperature === null || preset.temperature === undefined) ? "" : String(preset.temperature);
@@ -6879,7 +8542,7 @@
       row.appendChild(tempInput);
 
       var effortSelect = el("select", {});
-      [["", "settings.optionDefault", true], ["minimal", "minimal"], ["low", "low"], ["medium", "medium"], ["high", "high"]].forEach(function (opt) {
+      [["", "settings.optionDefault", true], ["none", "none"], ["minimal", "minimal"], ["low", "low"], ["medium", "medium"], ["high", "high"]].forEach(function (opt) {
         effortSelect.appendChild(el("option", { value: opt[0], text: opt[2] ? t(opt[1]) : opt[1] }));
       });
       effortSelect.value = preset.reasoning_effort || "";
@@ -7244,6 +8907,12 @@
        rather than gating on the scheduler panel being active. */
     pollSchedulerLs();
     pollSchedulerLogs();
+    /* bot pipelines' next_run/last_run and delivered items change in the
+       background too, so poll all three unconditionally alongside the
+       scheduler rather than gating on the bot panel being active. */
+    pollBotList();
+    pollBotLogs();
+    pollBotItems();
   }
 
   function startPolling() {
@@ -7282,7 +8951,7 @@
 
   var PANEL_IDS = [
     "panel-overview", "panel-stream", "panel-ai",
-    "panel-mailbox", "panel-store", "panel-scheduler", "panel-profile", "panel-update", "panel-settings"
+    "panel-mailbox", "panel-store", "panel-scheduler", "panel-bot", "panel-profile", "panel-update", "panel-settings"
   ];
   var sideLinks = Array.prototype.slice.call(document.querySelectorAll("#sidenav a"));
 
@@ -7403,6 +9072,9 @@
   loadStoreExportDirDefault();
   pollSchedulerLs();
   pollSchedulerLogs();
+  pollBotList();
+  pollBotLogs();
+  pollBotItems();
   pollConfig();
   pollUpdate();
   initDevMode();

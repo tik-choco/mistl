@@ -21,6 +21,8 @@ pub struct Config {
     pub update: UpdateConfig,
     #[serde(default)]
     pub scheduler: SchedulerConfig,
+    #[serde(default)]
+    pub bot: BotConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -278,6 +280,11 @@ pub struct AiPresetConfig {
     pub model: String,
     pub temperature: Option<f64>,
     pub reasoning_effort: Option<String>,
+    /// Upstream TTS voice id (e.g. "alloy"), used by the bot pipeline's `tts`
+    /// transform (`crate::ai::tts::synthesize`) when a preset is resolved for
+    /// speech. Meaningless for a chat-completion preset; left unset there.
+    #[serde(default)]
+    pub voice: Option<String>,
 }
 
 /// Normalizes a base URL for provider-equality comparisons during legacy
@@ -314,6 +321,8 @@ pub struct ResolvedAiPreset {
     pub model: String,
     pub temperature: Option<f64>,
     pub reasoning_effort: Option<String>,
+    /// See [`AiPresetConfig::voice`].
+    pub voice: Option<String>,
 }
 
 /// Mirrors the shared LLM config contract's `resolvePreset(config,
@@ -333,6 +342,7 @@ pub fn resolve_preset(ai: &AiConfig, preset_id: Option<&str>) -> Option<Resolved
         model: preset.model.clone(),
         temperature: preset.temperature,
         reasoning_effort: preset.reasoning_effort.clone(),
+        voice: preset.voice.clone(),
     })
 }
 
@@ -411,6 +421,152 @@ impl Default for SchedulerConfig {
     fn default() -> Self {
         Self { enabled: true }
     }
+}
+
+/// Bot pipeline engine: source -> transform(s) -> sink(s) automation runs
+/// (see `crate::bot` and `tc-docs/drafts/bot-pipeline-v1.md`). Mirrors
+/// `[scheduler]`'s shape -- a master switch plus a list of user-defined
+/// entries -- but the entries themselves (`pipelines`) are read live on
+/// every tick (see `applies_when`, and `crate::bot::spawn_background`'s doc
+/// comment) rather than only at daemon start.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BotConfig {
+    /// Master switch for the background tick loop that fires due pipelines.
+    /// Manual `bot.run` still works regardless -- only the automatic
+    /// scheduling is gated. Mirrors `SchedulerConfig::enabled` exactly,
+    /// including needing a daemon restart to take effect (see
+    /// `crate::bot::spawn_background`).
+    pub enabled: bool,
+    pub pipelines: Vec<PipelineConfig>,
+}
+
+impl Default for BotConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            pipelines: Vec::new(),
+        }
+    }
+}
+
+/// One bot pipeline definition. Field order matters for the `toml` crate's
+/// serializer: scalars (`id`/`enabled`/`schedule`) must precede table-typed
+/// fields (`source`, then the array-of-tables `transforms`/`sinks`) or
+/// `toml::to_string_pretty` errors ("values must be emitted before
+/// tables").
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PipelineConfig {
+    pub id: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Schedule expression, same grammar as `[[sched]]` jobs -- parsed by
+    /// `crate::scheduler::schedule::parse`.
+    pub schedule: String,
+    pub source: SourceConfig,
+    #[serde(default)]
+    pub transforms: Vec<TransformConfig>,
+    #[serde(default)]
+    pub sinks: Vec<SinkConfig>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Where a pipeline reads new content from. An internally-tagged enum
+/// (`kind` field) -- verified to round-trip through the `toml` crate the
+/// same as a hand-written flat struct would (see `config::tests::
+/// bot_pipeline_config_round_trips_through_toml`), so this keeps the config
+/// schema self-documenting without a `kind: String` + a pile of
+/// all-optional fields.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum SourceConfig {
+    /// Subscribes to a `tc-news`-compatible signed article room (see
+    /// `crate::bot::source`). `rooms` defaults to the well-known
+    /// `tc-global-articles` room when empty.
+    GlobalArticles {
+        #[serde(default)]
+        rooms: Vec<String>,
+        /// `NewsArticle.lang` allowlist; empty means every language.
+        #[serde(default)]
+        langs: Vec<String>,
+    },
+    /// Subscribes to a tc-chat room's signed `tc-chat:post` text posts (see
+    /// `crate::bot::source`). Posts published by this bot's own DID are
+    /// skipped, so a pipeline can read from and write to the same room
+    /// without feeding on itself.
+    ChatRoom {
+        #[serde(default)]
+        room: String,
+    },
+}
+
+/// One step of a pipeline's transform chain, applied in list order.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum TransformConfig {
+    /// LLM summarization into a read-aloud script (`crate::ai::openai`,
+    /// resolved via `[[ai.presets]]`). Left blank (rather than `Option`, to
+    /// match `AiProviderConfig`/`AiPresetConfig`'s own style) is a runtime
+    /// validation warning, not a parse error -- see `crate::bot`'s
+    /// `validate_pipeline`.
+    Summarize {
+        #[serde(default)]
+        preset_id: String,
+    },
+    /// Direct-upstream TTS (`crate::ai::tts::synthesize`). `preset_id`
+    /// resolves the model + `AiPresetConfig::voice`; `format`/`speed`
+    /// override `TtsParams` per-pipeline.
+    Tts {
+        #[serde(default)]
+        preset_id: String,
+        #[serde(default)]
+        format: Option<String>,
+        #[serde(default)]
+        speed: Option<f64>,
+    },
+    /// LLM translation of the item's title + body into `target_lang`
+    /// (`crate::ai::openai`, resolved via `[[ai.presets]]` like
+    /// `Summarize`). `target_lang` is a BCP-47-ish language tag (`"ja"`,
+    /// `"en"`, ...); empty is a runtime validation warning.
+    Translate {
+        #[serde(default)]
+        preset_id: String,
+        #[serde(default)]
+        target_lang: String,
+    },
+}
+
+/// One delivery target for a pipeline's output, run independently of the
+/// others -- a sink failure never blocks its siblings (see `crate::bot`'s
+/// module doc for the fatal-vs-non-fatal error split).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum SinkConfig {
+    /// Publishes a `tc-chat:post` (text, then media) into a tc-chat room.
+    ChatPost {
+        #[serde(default)]
+        room: String,
+    },
+    /// `POST`s a signed JSON delivery notice to an arbitrary HTTP endpoint.
+    Webhook {
+        #[serde(default)]
+        url: String,
+        #[serde(default)]
+        include_audio: bool,
+        #[serde(default)]
+        max_audio_bytes: Option<u64>,
+    },
+    /// Publishes the item as a signed `tc-news:article` wire (body stored by
+    /// CID) into a global-articles-compatible room -- the producing mirror
+    /// of `SourceConfig::GlobalArticles`, letting a pipeline feed tc-news
+    /// readers (e.g. translate-and-republish, chat digest -> news).
+    ArticlePublish {
+        #[serde(default)]
+        room: String,
+    },
 }
 
 fn project_dirs() -> Result<directories::ProjectDirs> {
@@ -547,6 +703,12 @@ pub fn applies_when(path: &str) -> &'static str {
         // (see `scheduler::spawn_background`); toggling it live would need
         // a way to stop an already-running loop, which isn't implemented.
         "scheduler.enabled" => "daemon restart",
+        // Same reasoning as `scheduler.enabled` -- `crate::bot`'s tick loop
+        // is only started once at daemon startup. `bot.pipelines` is
+        // deliberately NOT listed here: the tick loop re-reads it on every
+        // tick (see `crate::bot::spawn_background`), so pipeline
+        // add/edit/remove takes effect on the very next tick, not a restart.
+        "bot.enabled" => "daemon restart",
         _ => "next service start",
     }
 }
@@ -634,6 +796,7 @@ impl Config {
                 model: self.ai.default_model.clone().unwrap_or_default(),
                 temperature: self.ai.temperature,
                 reasoning_effort: None,
+                voice: None,
             });
         }
 
@@ -760,6 +923,7 @@ mod tests {
             model: "custom-model".to_string(),
             temperature: None,
             reasoning_effort: None,
+            voice: None,
         });
         config.ai.default_preset_id = "other".to_string();
 
@@ -963,5 +1127,226 @@ mod tests {
             updated.storage.room_ids,
             vec!["room-a".to_string(), "room-b".to_string()]
         );
+    }
+
+    // -- `[bot]` schema: internally-tagged `kind` enums round-trip through TOML --
+
+    #[test]
+    fn bot_config_defaults_enabled_with_no_pipelines() {
+        let config = Config::default();
+        assert!(config.bot.enabled);
+        assert!(config.bot.pipelines.is_empty());
+    }
+
+    fn sample_pipeline() -> PipelineConfig {
+        PipelineConfig {
+            id: "news-audio".to_string(),
+            enabled: true,
+            schedule: "@every 30m".to_string(),
+            source: SourceConfig::GlobalArticles {
+                rooms: vec!["tc-global-articles".to_string()],
+                langs: vec!["ja".to_string()],
+            },
+            transforms: vec![
+                TransformConfig::Summarize {
+                    preset_id: "worker".to_string(),
+                },
+                TransformConfig::Tts {
+                    preset_id: "tts-default".to_string(),
+                    format: Some("mp3".to_string()),
+                    speed: None,
+                },
+            ],
+            sinks: vec![
+                SinkConfig::ChatPost {
+                    room: "chat-room".to_string(),
+                },
+                SinkConfig::Webhook {
+                    url: "https://example.com/hook".to_string(),
+                    include_audio: false,
+                    max_audio_bytes: Some(5_242_880),
+                },
+            ],
+        }
+    }
+
+    /// Confirms the brief's decision point: does `#[serde(tag = "kind",
+    /// rename_all = "kebab-case")]` (an internally-tagged enum) round-trip
+    /// through the `toml` crate's serializer/deserializer for
+    /// `bot.pipelines`' `source`/`transforms`/`sinks`? If this ever starts
+    /// failing (e.g. a `toml` upgrade regresses internally-tagged enum
+    /// support), the fallback is a flat struct (`kind: String` + `Option`
+    /// fields) with the same TOML surface -- see the module doc note next to
+    /// `SourceConfig`/`TransformConfig`/`SinkConfig`.
+    #[test]
+    fn bot_pipeline_config_round_trips_through_toml() {
+        let mut config = Config::default();
+        config.bot.pipelines.push(sample_pipeline());
+
+        let text = toml::to_string_pretty(&config).expect("bot config must serialize to TOML");
+        assert!(text.contains(r#"kind = "global-articles""#), "got:\n{text}");
+        assert!(text.contains(r#"kind = "summarize""#), "got:\n{text}");
+        assert!(text.contains(r#"kind = "tts""#), "got:\n{text}");
+        assert!(text.contains(r#"kind = "chat-post""#), "got:\n{text}");
+        assert!(text.contains(r#"kind = "webhook""#), "got:\n{text}");
+
+        let reloaded: Config = toml::from_str(&text).expect("bot config must parse back from TOML");
+        assert_eq!(reloaded.bot.pipelines.len(), 1);
+        let pipeline = &reloaded.bot.pipelines[0];
+        assert_eq!(pipeline.id, "news-audio");
+        assert_eq!(pipeline.schedule, "@every 30m");
+        match &pipeline.source {
+            SourceConfig::GlobalArticles { rooms, langs } => {
+                assert_eq!(rooms, &vec!["tc-global-articles".to_string()]);
+                assert_eq!(langs, &vec!["ja".to_string()]);
+            }
+            other => panic!("expected GlobalArticles, got {other:?}"),
+        }
+        assert_eq!(pipeline.transforms.len(), 2);
+        match &pipeline.transforms[0] {
+            TransformConfig::Summarize { preset_id } => assert_eq!(preset_id, "worker"),
+            other => panic!("expected Summarize, got {other:?}"),
+        }
+        match &pipeline.transforms[1] {
+            TransformConfig::Tts { preset_id, format, speed } => {
+                assert_eq!(preset_id, "tts-default");
+                assert_eq!(format.as_deref(), Some("mp3"));
+                assert_eq!(*speed, None);
+            }
+            other => panic!("expected Tts, got {other:?}"),
+        }
+        assert_eq!(pipeline.sinks.len(), 2);
+        match &pipeline.sinks[0] {
+            SinkConfig::ChatPost { room } => assert_eq!(room, "chat-room"),
+            other => panic!("expected ChatPost, got {other:?}"),
+        }
+        match &pipeline.sinks[1] {
+            SinkConfig::Webhook { url, include_audio, max_audio_bytes } => {
+                assert_eq!(url, "https://example.com/hook");
+                assert!(!include_audio);
+                assert_eq!(*max_audio_bytes, Some(5_242_880));
+            }
+            other => panic!("expected Webhook, got {other:?}"),
+        }
+    }
+
+    /// Same round-trip guarantee as above, for the v2 kinds (`chat-room`
+    /// source, `translate` transform, `article-publish` sink).
+    #[test]
+    fn bot_pipeline_v2_kinds_round_trip_through_toml() {
+        let mut config = Config::default();
+        config.bot.pipelines.push(PipelineConfig {
+            id: "chat-digest".to_string(),
+            enabled: true,
+            schedule: "@every 1h".to_string(),
+            source: SourceConfig::ChatRoom { room: "team-room".to_string() },
+            transforms: vec![TransformConfig::Translate {
+                preset_id: "worker".to_string(),
+                target_lang: "en".to_string(),
+            }],
+            sinks: vec![SinkConfig::ArticlePublish { room: "tc-global-articles".to_string() }],
+        });
+
+        let text = toml::to_string_pretty(&config).expect("v2 bot config must serialize to TOML");
+        assert!(text.contains(r#"kind = "chat-room""#), "got:\n{text}");
+        assert!(text.contains(r#"kind = "translate""#), "got:\n{text}");
+        assert!(text.contains(r#"kind = "article-publish""#), "got:\n{text}");
+
+        let reloaded: Config = toml::from_str(&text).expect("v2 bot config must parse back from TOML");
+        let pipeline = &reloaded.bot.pipelines[0];
+        match &pipeline.source {
+            SourceConfig::ChatRoom { room } => assert_eq!(room, "team-room"),
+            other => panic!("expected ChatRoom, got {other:?}"),
+        }
+        match &pipeline.transforms[0] {
+            TransformConfig::Translate { preset_id, target_lang } => {
+                assert_eq!(preset_id, "worker");
+                assert_eq!(target_lang, "en");
+            }
+            other => panic!("expected Translate, got {other:?}"),
+        }
+        match &pipeline.sinks[0] {
+            SinkConfig::ArticlePublish { room } => assert_eq!(room, "tc-global-articles"),
+            other => panic!("expected ArticlePublish, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bot_pipeline_config_matches_the_brief_toml_shape_verbatim() {
+        // The brief's `config.toml [bot]` schema, parsed exactly as written
+        // (minus the placeholder `<chat room id>` and the commented-out
+        // optional fields) -- confirms the schema is usable hand-written,
+        // not just round-tripped from a Rust value.
+        let text = r#"
+            [bot]
+            enabled = true
+
+            [[bot.pipelines]]
+            id = "news-audio"
+            enabled = true
+            schedule = "@every 30m"
+
+            [bot.pipelines.source]
+            kind = "global-articles"
+            rooms = ["tc-global-articles"]
+            langs = ["ja"]
+
+            [[bot.pipelines.transforms]]
+            kind = "summarize"
+            preset_id = "worker"
+
+            [[bot.pipelines.transforms]]
+            kind = "tts"
+            preset_id = "tts-default"
+            format = "mp3"
+
+            [[bot.pipelines.sinks]]
+            kind = "chat-post"
+            room = "chat-room"
+
+            [[bot.pipelines.sinks]]
+            kind = "webhook"
+            url = "https://example.com/hook"
+            include_audio = false
+        "#;
+        let config: Config = toml::from_str(text).expect("brief's [bot] schema must parse");
+        assert!(config.bot.enabled);
+        assert_eq!(config.bot.pipelines.len(), 1);
+        assert_eq!(config.bot.pipelines[0].id, "news-audio");
+    }
+
+    #[test]
+    fn set_by_path_updates_bot_enabled_and_applies_when_requires_a_restart() {
+        let config = Config::default();
+        let updated = set_by_path(&config, "bot.enabled", json!(false)).unwrap();
+        assert!(!updated.bot.enabled);
+        assert_eq!(applies_when("bot.enabled"), "daemon restart");
+        assert_eq!(applies_when("bot.pipelines"), "next service start");
+    }
+
+    #[test]
+    fn ai_preset_config_voice_round_trips_through_toml() {
+        let mut config = Config::default();
+        config.ai.providers.push(AiProviderConfig {
+            id: "openai".to_string(),
+            label: "OpenAI".to_string(),
+            base_url: "https://api.openai.com/v1".to_string(),
+            api_key: "sk-test".to_string(),
+        });
+        config.ai.presets.push(AiPresetConfig {
+            id: "tts-default".to_string(),
+            label: "TTS".to_string(),
+            provider_id: "openai".to_string(),
+            model: "tts-1".to_string(),
+            temperature: None,
+            reasoning_effort: None,
+            voice: Some("alloy".to_string()),
+        });
+        let text = toml::to_string_pretty(&config).unwrap();
+        let reloaded: Config = toml::from_str(&text).unwrap();
+        assert_eq!(reloaded.ai.presets[0].voice.as_deref(), Some("alloy"));
+
+        let resolved = resolve_preset(&reloaded.ai, Some("tts-default")).unwrap();
+        assert_eq!(resolved.voice.as_deref(), Some("alloy"));
     }
 }

@@ -371,6 +371,25 @@ pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Val
     }
 }
 
+/// Test-only constructor for callers *outside* this module (e.g.
+/// `crate::wiresign`'s tests) that need a real [`Identity`] to exercise
+/// `sign_wire`/`verify_wire` without touching this machine's real,
+/// persistent per-user identity -- [`current`]/`generate_identity` write to
+/// `crate::config::data_dir()`, which would be an unacceptable side effect
+/// from a test (see the recommendation left in `wiresign.rs`'s test module
+/// doc, from Wave 1's file-ownership split). A fresh in-memory Ed25519
+/// keypair every call; never persisted to disk.
+#[cfg(test)]
+pub(crate) fn for_test() -> Identity {
+    let signing_key = SigningKey::generate(&mut OsRng);
+    let did = did_from_pubkey(&signing_key.verifying_key().to_bytes());
+    Identity {
+        did,
+        signing_key,
+        created_at: Utc::now().to_rfc3339(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

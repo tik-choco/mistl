@@ -14,7 +14,12 @@
 //!   (`sched.*`), and the daemon-lifetime background tick loop.
 
 mod runner;
-mod schedule;
+/// Opened to `pub(crate)` so `crate::bot` can reuse the schedule expression
+/// parser/next-fire calculator for pipeline scheduling, keeping the
+/// expression language identical to `sched`'s (see the bot pipeline draft's
+/// "スケジューリングは既存の mistl sched に乗せる" decision, resolved as
+/// "reuse the parser, not the job runner").
+pub(crate) mod schedule;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
