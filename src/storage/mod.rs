@@ -5,11 +5,22 @@
 //!
 //! The block backend is `mistlib`'s (mistlib-native's) `NativeBlockStore`
 //! (one file per CID under `config.storage.blocks_dir`, default
-//! `<data_dir>/blocks`). Peer resolution is a no-op ([`resolver::NoopResolver`]):
-//! this daemon is a purely local store for now, p2p block exchange comes
-//! later. A local JSON index at `<data_dir>/store-index.json` tracks
-//! name/size/stored_at per root CID, used by `store.ls` and to recover the
-//! original file name on `store.get`.
+//! `<data_dir>/blocks`). Peer resolution is [`resolver::RoomPeerResolver`]:
+//! a block missing from the local store is resolved over p2p, using the
+//! same QUERY/WANT/HAVE(_CHUNK) wire protocol
+//! (`mistlib_core::storage::protocol`) mistlib-native's and mistlib-wasm's
+//! own resolvers speak, so this interoperates with browser tabs (tc-news,
+//! tc-chat, tc-storage) sharing a room -- see the `resolver` module doc
+//! comment for why this reimplements the wire protocol on `crate::net`
+//! rather than reusing mistlib-native's built-in (but internally-wired,
+//! inaccessible from here) P2P storage. [`Store::get`] resolves over
+//! whichever rooms are currently joined via `storage.room_ids`;
+//! [`Store::get_remote`] lets a caller pick specific rooms/timeout instead
+//! (e.g. a bot pipeline resolving a CID from a room it joined itself,
+//! without adding that room to `storage.room_ids`). A local JSON index at
+//! `<data_dir>/store-index.json` tracks name/size/stored_at per root CID,
+//! used by `store.ls` and to recover the original file name on
+//! `store.get`.
 //!
 //! Other modules depend on the exact signatures of [`Store`] and [`store`];
 //! do not change them without updating callers.
@@ -43,11 +54,11 @@ use crate::config::StorageConfig;
 use crate::daemon::AppState;
 
 pub use index::IndexEntry;
-use resolver::NoopResolver;
+use resolver::RoomPeerResolver;
 
 /// Handle to the content-addressed store.
 pub struct Store {
-    engine: StorageEngine<NativeBlockStore, NoopResolver>,
+    engine: StorageEngine<NativeBlockStore, RoomPeerResolver>,
     data_dir: PathBuf,
     /// Serializes read-modify-write access to `store-index.json`.
     index_lock: Mutex<()>,
@@ -76,11 +87,11 @@ impl Store {
                 blocks_dir.display()
             )
         })?;
-        // Local-only store: no VRChat position source, so blocks are never
-        // spatially tagged and the default (decay-disabled) policy applies.
+        // No VRChat position source, so blocks are never spatially tagged
+        // and the default (decay-disabled) policy applies.
         let engine = StorageEngine::new(
             backend,
-            NoopResolver,
+            RoomPeerResolver::new(),
             storage_cfg.capacity_bytes,
             None,
             SpatialPolicy::default(),
@@ -149,9 +160,46 @@ impl Store {
         Ok(cid)
     }
 
-    /// Retrieve content by root CID.
+    /// Retrieve content by root CID: checks the local block store first,
+    /// then -- for any manifest/chunk blocks missing there -- resolves them
+    /// over p2p, scoped to whichever rooms this store currently has joined
+    /// (`storage.room_ids`, reconciled by [`Self::sync_rooms`]) with a
+    /// [`resolver::DEFAULT_REMOTE_TIMEOUT`] budget. Equivalent to
+    /// `get_remote(cid, <currently joined storage rooms>,
+    /// DEFAULT_REMOTE_TIMEOUT)`; see [`Self::get_remote`] to control either.
     pub async fn get(&self, cid: &str) -> Result<Vec<u8>> {
-        let data = self.engine.get(cid).await?;
+        let rooms: Vec<String> = self.rooms.lock().await.iter().cloned().collect();
+        self.get_remote(cid, &rooms, resolver::DEFAULT_REMOTE_TIMEOUT).await
+    }
+
+    /// Like [`Self::get`], but lets the caller pick which rooms to resolve
+    /// missing blocks from and how long to wait, independent of
+    /// `storage.room_ids`. For a bot pipeline (or any other in-process
+    /// caller) reading from a room it joined itself -- e.g. a future
+    /// `tc-global-articles` source -- without adding that room to this
+    /// store's own configured room set. A local hit is still served
+    /// immediately regardless of `rooms`/`timeout` (those only matter on a
+    /// cache miss); an empty `rooms` list resolves nothing remotely and
+    /// fails fast on a miss rather than waiting out `timeout`.
+    pub async fn get_remote(&self, cid: &str, rooms: &[String], timeout: Duration) -> Result<Vec<u8>> {
+        let scope = resolver::ResolveScope {
+            rooms: rooms.to_vec(),
+            timeout,
+        };
+        let data = resolver::with_scope(scope, self.engine.get(cid)).await?;
+        Ok(data)
+    }
+
+    /// Local-only lookup: reads `cid` from this node's own block store
+    /// without triggering peer resolution, even for a manifest root the
+    /// local index doesn't know about (this only touches the block store,
+    /// not `store-index.json`). Used to answer inbound QUERY/WANT (serving
+    /// a request must never trigger our *own* remote resolution -- two
+    /// nodes both missing a block and asking each other for it would
+    /// otherwise loop) and could equally back a future "do we have this
+    /// already" check before kicking off a `get_remote`.
+    async fn get_local(&self, cid: &str) -> Result<Option<Vec<u8>>> {
+        let data = self.engine.get_block(cid).await?;
         Ok(data)
     }
 
@@ -196,6 +244,11 @@ pub async fn store(state: &Arc<AppState>) -> Result<Arc<Store>> {
             Store::open(&storage_cfg, data_dir).await.map(Arc::new)
         })
         .await?;
+    // Idempotent (registers once per process); done after `STORE` is
+    // populated so the handler's `super::STORE.get()` local-block lookups
+    // (answering inbound QUERY/WANT) can actually find it -- see
+    // `resolver::ensure_wire_handler_registered`'s doc comment.
+    resolver::ensure_wire_handler_registered();
     store
         .sync_rooms(state, &state.config().storage.room_ids)
         .await?;

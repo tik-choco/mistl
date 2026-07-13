@@ -10,9 +10,13 @@
 //! - Not JSON / not an object / `v != 1` / unknown `type` -> `None`.
 //! - Unknown extra fields are ignored, never rejected.
 //! - "non-empty string" below means `String` with `len > 0`.
-//! - `provider_hello`: `models` optional; present but not an array -> the
-//!   field is dropped (message still valid); non-string array elements are
-//!   filtered out.
+//! - `provider_hello`: `models`/`services` optional; present but not an
+//!   array -> the field is dropped (message still valid); non-string /
+//!   empty-string array elements are filtered out. `services` missing
+//!   entirely means "advertises chat only" per the wire spec, but that
+//!   default is a *consumer-side* interpretation -- `decode` itself
+//!   preserves `None` and leaves defaulting to callers (see
+//!   `ProviderHello::effective_services`).
 //! - `consumer_hello`: no fields.
 //! - `llm_request`: `id` non-empty; `messages` array with >= 1 element,
 //!   each `{role: "system"|"user"|"assistant", content: string}`; `model`
@@ -21,7 +25,9 @@
 //!   `seq` optional, but if present must be an integer >= 0 (reject
 //!   negative, fractional, non-number) -> else `None`.
 //! - `llm_response_done`: `id` non-empty; `content` optional string.
-//! - `llm_error`: `id` non-empty; `message` string.
+//! - `llm_error`: `id` non-empty; `message` string; `code` optional string
+//!   (present but non-string -> field dropped, message still valid, same
+//!   as `models`/`services`).
 //! - `raft_message`: `payload` non-empty string (opaque; passed through).
 //! - `tts_request`: `id` non-empty; `text` string; `model`/`voice`
 //!   optional strings.
@@ -29,7 +35,8 @@
 //!   integer >= 0; `data` string; `last` bool; `mime` non-empty string;
 //!   `stt_request` additionally has optional `model` / `fileName` strings.
 //! - `stt_response`: `id` non-empty; `text` string.
-//! - `voice_error`: `id` non-empty; `message` string.
+//! - `voice_error`: `id` non-empty; `message` string; `code` optional
+//!   string (same defensive rule as `llm_error.code`).
 //!
 //! ## encode()
 //!
@@ -58,6 +65,14 @@ pub struct ChatMessage {
 pub enum ProtocolMessage {
     ProviderHello {
         models: Option<Vec<String>>,
+        /// Capability advertisement (mistai v0.4.0). Known values: "chat",
+        /// "tts", "stt", "embedding"; unknown strings pass through
+        /// unfiltered (forward-compat). `None` means the field was absent
+        /// from the wire message -- per the wire spec this must be treated
+        /// as `["chat"]` by *readers*, but `decode` itself does not apply
+        /// that default (see [`advertises_service`] for the defaulted
+        /// view).
+        services: Option<Vec<String>>,
     },
     ConsumerHello,
     LlmRequest {
@@ -77,6 +92,10 @@ pub enum ProtocolMessage {
     LlmError {
         id: String,
         message: String,
+        /// Machine-readable reason (mistai v0.4.0). Known value:
+        /// `"unsupported_service"`; other non-empty strings pass through
+        /// unfiltered (forward-compat).
+        code: Option<String>,
     },
     RaftMessage {
         payload: String,
@@ -110,7 +129,28 @@ pub enum ProtocolMessage {
     VoiceError {
         id: String,
         message: String,
+        /// Same defensive parsing / semantics as [`ProtocolMessage::LlmError::code`].
+        code: Option<String>,
     },
+}
+
+/// Known `services` value for chat capability. `services` field absence on
+/// a `provider_hello` means "chat only" per the wire spec (see
+/// [`advertises_service`]).
+pub const SERVICE_CHAT: &str = "chat";
+
+/// Known `code` value meaning "provider does not offer this service at
+/// all" (as opposed to a per-request upstream failure, which omits `code`).
+pub const CODE_UNSUPPORTED_SERVICE: &str = "unsupported_service";
+
+/// Whether a `provider_hello.services` value (already decoded, `None` if
+/// the field was absent/invalid) advertises `service`. Applies the wire
+/// spec's default: a missing `services` field is treated as `["chat"]`.
+pub fn advertises_service(services: &Option<Vec<String>>, service: &str) -> bool {
+    match services {
+        None => service == SERVICE_CHAT,
+        Some(list) => list.iter().any(|s| s == service),
+    }
 }
 
 /// Encode a message to wire bytes (UTF-8 JSON).
@@ -118,12 +158,15 @@ pub fn encode(msg: &ProtocolMessage) -> Vec<u8> {
     use serde_json::{json, Map, Value};
 
     let value: Value = match msg {
-        ProtocolMessage::ProviderHello { models } => {
+        ProtocolMessage::ProviderHello { models, services } => {
             let mut map = Map::new();
             map.insert("v".into(), json!(1));
             map.insert("type".into(), json!("provider_hello"));
             if let Some(models) = models {
                 map.insert("models".into(), json!(models));
+            }
+            if let Some(services) = services {
+                map.insert("services".into(), json!(services));
             }
             Value::Object(map)
         }
@@ -162,8 +205,16 @@ pub fn encode(msg: &ProtocolMessage) -> Vec<u8> {
             }
             Value::Object(map)
         }
-        ProtocolMessage::LlmError { id, message } => {
-            json!({"v": 1, "type": "llm_error", "id": id, "message": message})
+        ProtocolMessage::LlmError { id, message, code } => {
+            let mut map = Map::new();
+            map.insert("v".into(), json!(1));
+            map.insert("type".into(), json!("llm_error"));
+            map.insert("id".into(), json!(id));
+            map.insert("message".into(), json!(message));
+            if let Some(code) = code {
+                map.insert("code".into(), json!(code));
+            }
+            Value::Object(map)
         }
         ProtocolMessage::RaftMessage { payload } => {
             json!({"v": 1, "type": "raft_message", "payload": payload})
@@ -213,8 +264,16 @@ pub fn encode(msg: &ProtocolMessage) -> Vec<u8> {
         ProtocolMessage::SttResponse { id, text } => {
             json!({"v": 1, "type": "stt_response", "id": id, "text": text})
         }
-        ProtocolMessage::VoiceError { id, message } => {
-            json!({"v": 1, "type": "voice_error", "id": id, "message": message})
+        ProtocolMessage::VoiceError { id, message, code } => {
+            let mut map = Map::new();
+            map.insert("v".into(), json!(1));
+            map.insert("type".into(), json!("voice_error"));
+            map.insert("id".into(), json!(id));
+            map.insert("message".into(), json!(message));
+            if let Some(code) = code {
+                map.insert("code".into(), json!(code));
+            }
+            Value::Object(map)
         }
     };
 
@@ -273,18 +332,42 @@ pub fn decode(bytes: &[u8]) -> Option<ProtocolMessage> {
         Some(n as u64)
     }
 
+    /// `models` and `services` share this rule: "field-only ignored if not
+    /// an array"; if it is an array, non-string *and* empty-string elements
+    /// are dropped element-wise, keeping the rest (per the wire spec's
+    /// unified `provider_hello` filtering rule for both fields).
+    fn str_array_non_empty(v: &Value) -> Option<Vec<String>> {
+        match v {
+            Value::Array(arr) => Some(
+                arr.iter()
+                    .filter_map(|item| item.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .collect(),
+            ),
+            _ => None,
+        }
+    }
+
+    /// `code`-style optional field: absent or wrong type -> `None` (field
+    /// dropped, message still valid) rather than rejecting the whole
+    /// message. Distinct from `opt_str`, which rejects the whole message
+    /// on a type mismatch.
+    fn dropped_opt_str(obj: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
+        obj.get(key).and_then(|v| v.as_str()).map(|s| s.to_string())
+    }
+
     match ty {
         "provider_hello" => {
             let models = match obj.get("models") {
                 None => None,
-                Some(Value::Array(arr)) => Some(
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                        .collect(),
-                ),
-                Some(_) => None,
+                Some(v) => str_array_non_empty(v),
             };
-            Some(ProtocolMessage::ProviderHello { models })
+            let services = match obj.get("services") {
+                None => None,
+                Some(v) => str_array_non_empty(v),
+            };
+            Some(ProtocolMessage::ProviderHello { models, services })
         }
         "consumer_hello" => Some(ProtocolMessage::ConsumerHello),
         "llm_request" => {
@@ -326,7 +409,8 @@ pub fn decode(bytes: &[u8]) -> Option<ProtocolMessage> {
         "llm_error" => {
             let id = non_empty_str(obj, "id")?;
             let message = any_str(obj, "message")?;
-            Some(ProtocolMessage::LlmError { id, message })
+            let code = dropped_opt_str(obj, "code");
+            Some(ProtocolMessage::LlmError { id, message, code })
         }
         "raft_message" => {
             let payload = non_empty_str(obj, "payload")?;
@@ -373,7 +457,8 @@ pub fn decode(bytes: &[u8]) -> Option<ProtocolMessage> {
         "voice_error" => {
             let id = non_empty_str(obj, "id")?;
             let message = any_str(obj, "message")?;
-            Some(ProtocolMessage::VoiceError { id, message })
+            let code = dropped_opt_str(obj, "code");
+            Some(ProtocolMessage::VoiceError { id, message, code })
         }
         _ => None,
     }
@@ -417,6 +502,7 @@ mod tests {
     fn encode_provider_hello_with_models() {
         let bytes = encode(&ProtocolMessage::ProviderHello {
             models: Some(vec!["gpt-4o".to_string()]),
+            services: None,
         });
         let v = parsed(&bytes);
         assert_eq!(v["v"], json!(1));
@@ -430,13 +516,37 @@ mod tests {
 
     #[test]
     fn encode_provider_hello_without_models_omits_field() {
-        let bytes = encode(&ProtocolMessage::ProviderHello { models: None });
+        let bytes = encode(&ProtocolMessage::ProviderHello { models: None, services: None });
         assert_eq!(
             keys(&bytes),
             BTreeSet::from(["v".into(), "type".into()])
         );
         let v = parsed(&bytes);
         assert!(v.get("models").is_none());
+    }
+
+    #[test]
+    fn encode_provider_hello_with_services() {
+        let bytes = encode(&ProtocolMessage::ProviderHello {
+            models: None,
+            services: Some(vec!["chat".to_string()]),
+        });
+        let v = parsed(&bytes);
+        assert_eq!(v["services"], json!(["chat"]));
+        assert_eq!(
+            keys(&bytes),
+            BTreeSet::from(["v".into(), "type".into(), "services".into()])
+        );
+    }
+
+    #[test]
+    fn encode_provider_hello_without_services_omits_field() {
+        let bytes = encode(&ProtocolMessage::ProviderHello {
+            models: Some(vec!["gpt-4o".into()]),
+            services: None,
+        });
+        let v = parsed(&bytes);
+        assert!(v.get("services").is_none());
     }
 
     #[test]
@@ -542,10 +652,32 @@ mod tests {
         let bytes = encode(&ProtocolMessage::LlmError {
             id: "a1".into(),
             message: "boom".into(),
+            code: None,
         });
         assert_eq!(
             keys(&bytes),
             BTreeSet::from(["v".into(), "type".into(), "id".into(), "message".into()])
+        );
+    }
+
+    #[test]
+    fn encode_llm_error_with_code() {
+        let bytes = encode(&ProtocolMessage::LlmError {
+            id: "a1".into(),
+            message: "unsupported".into(),
+            code: Some("unsupported_service".into()),
+        });
+        let v = parsed(&bytes);
+        assert_eq!(v["code"], json!("unsupported_service"));
+        assert_eq!(
+            keys(&bytes),
+            BTreeSet::from([
+                "v".into(),
+                "type".into(),
+                "id".into(),
+                "message".into(),
+                "code".into()
+            ])
         );
     }
 
@@ -686,10 +818,32 @@ mod tests {
         let bytes = encode(&ProtocolMessage::VoiceError {
             id: "a1".into(),
             message: "boom".into(),
+            code: None,
         });
         assert_eq!(
             keys(&bytes),
             BTreeSet::from(["v".into(), "type".into(), "id".into(), "message".into()])
+        );
+    }
+
+    #[test]
+    fn encode_voice_error_with_code() {
+        let bytes = encode(&ProtocolMessage::VoiceError {
+            id: "a1".into(),
+            message: "no voice here".into(),
+            code: Some("unsupported_service".into()),
+        });
+        let v = parsed(&bytes);
+        assert_eq!(v["code"], json!("unsupported_service"));
+        assert_eq!(
+            keys(&bytes),
+            BTreeSet::from([
+                "v".into(),
+                "type".into(),
+                "id".into(),
+                "message".into(),
+                "code".into()
+            ])
         );
     }
 
@@ -701,7 +855,21 @@ mod tests {
         assert_eq!(
             decode(bytes),
             Some(ProtocolMessage::ProviderHello {
-                models: Some(vec!["gpt-4o".to_string()])
+                models: Some(vec!["gpt-4o".to_string()]),
+                services: None,
+            })
+        );
+    }
+
+    #[test]
+    fn decode_provider_hello_with_services() {
+        let bytes =
+            br#"{"v":1,"type":"provider_hello","models":["gpt-4o"],"services":["chat","tts"]}"#;
+        assert_eq!(
+            decode(bytes),
+            Some(ProtocolMessage::ProviderHello {
+                models: Some(vec!["gpt-4o".to_string()]),
+                services: Some(vec!["chat".to_string(), "tts".to_string()]),
             })
         );
     }
@@ -746,8 +914,13 @@ mod tests {
     fn roundtrip_all_variants() {
         assert_roundtrip(ProtocolMessage::ProviderHello {
             models: Some(vec!["a".into(), "b".into()]),
+            services: None,
         });
-        assert_roundtrip(ProtocolMessage::ProviderHello { models: None });
+        assert_roundtrip(ProtocolMessage::ProviderHello { models: None, services: None });
+        assert_roundtrip(ProtocolMessage::ProviderHello {
+            models: None,
+            services: Some(vec!["chat".into(), "tts".into()]),
+        });
         assert_roundtrip(ProtocolMessage::ConsumerHello);
         assert_roundtrip(ProtocolMessage::LlmRequest {
             id: "id1".into(),
@@ -792,6 +965,12 @@ mod tests {
         assert_roundtrip(ProtocolMessage::LlmError {
             id: "id1".into(),
             message: "oops".into(),
+            code: None,
+        });
+        assert_roundtrip(ProtocolMessage::LlmError {
+            id: "id1".into(),
+            message: "not supported".into(),
+            code: Some("unsupported_service".into()),
         });
         assert_roundtrip(ProtocolMessage::RaftMessage {
             payload: "cGF5bG9hZA==".into(),
@@ -840,6 +1019,12 @@ mod tests {
         assert_roundtrip(ProtocolMessage::VoiceError {
             id: "id1".into(),
             message: "voice oops".into(),
+            code: None,
+        });
+        assert_roundtrip(ProtocolMessage::VoiceError {
+            id: "id1".into(),
+            message: "not supported".into(),
+            code: Some("unsupported_service".into()),
         });
     }
 
@@ -930,7 +1115,10 @@ mod tests {
     #[test]
     fn decode_provider_hello_non_array_models_degrades_but_keeps_message() {
         let bytes = br#"{"v":1,"type":"provider_hello","models":"not-an-array"}"#;
-        assert_eq!(decode(bytes), Some(ProtocolMessage::ProviderHello { models: None }));
+        assert_eq!(
+            decode(bytes),
+            Some(ProtocolMessage::ProviderHello { models: None, services: None })
+        );
     }
 
     #[test]
@@ -939,9 +1127,138 @@ mod tests {
         assert_eq!(
             decode(bytes),
             Some(ProtocolMessage::ProviderHello {
-                models: Some(vec!["gpt-4o".to_string(), "claude".to_string()])
+                models: Some(vec!["gpt-4o".to_string(), "claude".to_string()]),
+                services: None,
             })
         );
+    }
+
+    #[test]
+    fn decode_provider_hello_filters_non_string_and_empty_models() {
+        // `models` follows the same element-wise filtering rule as
+        // `services`: non-string *and* empty-string elements are dropped,
+        // not just non-string ones.
+        let bytes =
+            br#"{"v":1,"type":"provider_hello","models":["gpt-4o",42,null,"","claude"]}"#;
+        assert_eq!(
+            decode(bytes),
+            Some(ProtocolMessage::ProviderHello {
+                models: Some(vec!["gpt-4o".to_string(), "claude".to_string()]),
+                services: None,
+            })
+        );
+    }
+
+    #[test]
+    fn decode_provider_hello_non_array_services_degrades_but_keeps_message() {
+        let bytes = br#"{"v":1,"type":"provider_hello","services":42}"#;
+        assert_eq!(
+            decode(bytes),
+            Some(ProtocolMessage::ProviderHello { models: None, services: None })
+        );
+    }
+
+    #[test]
+    fn decode_provider_hello_filters_non_string_and_empty_services() {
+        let bytes =
+            br#"{"v":1,"type":"provider_hello","services":["chat",42,null,"","tts"]}"#;
+        assert_eq!(
+            decode(bytes),
+            Some(ProtocolMessage::ProviderHello {
+                models: None,
+                services: Some(vec!["chat".to_string(), "tts".to_string()]),
+            })
+        );
+    }
+
+    #[test]
+    fn decode_provider_hello_services_passes_through_unknown_values() {
+        // Unknown service strings are forward-compat passthrough, not
+        // filtered (only non-string/empty-string elements are dropped).
+        let bytes = br#"{"v":1,"type":"provider_hello","services":["chat","future-service"]}"#;
+        assert_eq!(
+            decode(bytes),
+            Some(ProtocolMessage::ProviderHello {
+                models: None,
+                services: Some(vec!["chat".to_string(), "future-service".to_string()]),
+            })
+        );
+    }
+
+    #[test]
+    fn decode_provider_hello_services_absent_is_none() {
+        let bytes = br#"{"v":1,"type":"provider_hello"}"#;
+        assert_eq!(
+            decode(bytes),
+            Some(ProtocolMessage::ProviderHello { models: None, services: None })
+        );
+    }
+
+    #[test]
+    fn decode_llm_error_with_code() {
+        let bytes = br#"{"v":1,"type":"llm_error","id":"a1","message":"nope","code":"unsupported_service"}"#;
+        assert_eq!(
+            decode(bytes),
+            Some(ProtocolMessage::LlmError {
+                id: "a1".into(),
+                message: "nope".into(),
+                code: Some("unsupported_service".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn decode_llm_error_non_string_code_drops_field_only() {
+        let bytes = br#"{"v":1,"type":"llm_error","id":"a1","message":"nope","code":42}"#;
+        assert_eq!(
+            decode(bytes),
+            Some(ProtocolMessage::LlmError {
+                id: "a1".into(),
+                message: "nope".into(),
+                code: None,
+            })
+        );
+    }
+
+    #[test]
+    fn decode_voice_error_with_code() {
+        let bytes = br#"{"v":1,"type":"voice_error","id":"a1","message":"nope","code":"unsupported_service"}"#;
+        assert_eq!(
+            decode(bytes),
+            Some(ProtocolMessage::VoiceError {
+                id: "a1".into(),
+                message: "nope".into(),
+                code: Some("unsupported_service".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn decode_voice_error_non_string_code_drops_field_only() {
+        let bytes = br#"{"v":1,"type":"voice_error","id":"a1","message":"nope","code":42}"#;
+        assert_eq!(
+            decode(bytes),
+            Some(ProtocolMessage::VoiceError {
+                id: "a1".into(),
+                message: "nope".into(),
+                code: None,
+            })
+        );
+    }
+
+    #[test]
+    fn advertises_service_defaults_missing_to_chat_only() {
+        assert!(advertises_service(&None, SERVICE_CHAT));
+        assert!(!advertises_service(&None, "tts"));
+    }
+
+    #[test]
+    fn advertises_service_checks_explicit_list() {
+        let services = Some(vec!["tts".to_string(), "stt".to_string()]);
+        assert!(!advertises_service(&services, SERVICE_CHAT));
+        assert!(advertises_service(&services, "tts"));
+        assert!(advertises_service(&services, "stt"));
+        assert!(!advertises_service(&services, "embedding"));
     }
 
     #[test]

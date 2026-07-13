@@ -1,15 +1,29 @@
 //! Consumer side of the AI network, ported from mistai's `consumer.ts` +
 //! `client.ts` discovery behavior.
 //!
-//! ## Discovery (first provider wins)
+//! ## Discovery (first *chat* provider wins)
 //!
 //! The service broadcasts `consumer_hello` after joining; providers answer
-//! with `provider_hello`. The first `provider_hello` sender becomes the
-//! locked-in provider; later hellos from the *same* id refresh its model
-//! list, hellos from other ids are ignored. When the locked-in provider
-//! disconnects ([`Consumer::on_peer_disconnected`]), every in-flight
-//! request is rejected and the lock is cleared so a new provider can be
+//! with `provider_hello`. This consumer only ever issues `llm_request`s
+//! (chat), so a `provider_hello` that does not advertise the `"chat"`
+//! service (per `protocol::advertises_service` -- a missing `services`
+//! field defaults to `["chat"]` per the wire spec) is not a candidate at
+//! all: it is never locked onto and never triggers a `consumer_hello`
+//! reply, even if no provider is currently locked in. Among hellos that do
+//! advertise chat, the first sender becomes the locked-in provider; later
+//! hellos from the *same* id refresh its model/service list, hellos from
+//! other ids are ignored. When the locked-in provider disconnects
+//! ([`Consumer::on_peer_disconnected`]), every in-flight request is
+//! rejected and the lock is cleared so a new (chat) provider can be
 //! discovered.
+//!
+//! This is intentionally a narrow, additive change to the existing
+//! first-wins rule (filter candidates to chat providers, otherwise
+//! unchanged) rather than the fuller per-service provider table the wire
+//! spec's "consumer 側の provider 選択手順" section describes (service-
+//! scoped candidate pools, model-aware ranking, failover) -- this consumer
+//! only ever speaks `llm_request`/chat, so that generality isn't needed
+//! here.
 //!
 //! ## Request lifecycle (mirrors consumer.ts)
 //!
@@ -25,7 +39,9 @@
 //!   `next_seq += 1`, then drain now-contiguous buffered entries.
 //! - `llm_response_done`: final content = the message's `content` if
 //!   `Some` (server copy wins), else the accumulated deltas. Resolve.
-//! - `llm_error`: reject with the remote message.
+//! - `llm_error`: reject with the remote message (and, when present, the
+//!   `code` -- e.g. `"unsupported_service"` -- appended for diagnosability;
+//!   see `Event::Error`).
 //! - Timeout is an INACTIVITY timeout: it resets on every received chunk,
 //!   not a total deadline. On expiry, reject with a timeout error.
 //!
@@ -42,6 +58,7 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{mpsc, watch};
+use tracing::debug;
 
 use super::SendFn;
 use super::protocol::{self, ChatMessage, ProtocolMessage};
@@ -52,6 +69,14 @@ pub struct ProviderInfo {
     pub node_id: String,
     /// Models from the provider's latest `provider_hello` (may be empty).
     pub models: Vec<String>,
+    /// Raw `services` from the provider's latest `provider_hello`, as
+    /// decoded (`None` if the field was absent/invalid on the wire). This
+    /// consumer only locks onto providers that advertise chat (see the
+    /// module doc), so every `ProviderInfo` here is a chat provider by
+    /// construction; `services` is kept as-received (not defaulted) so
+    /// callers can distinguish an explicit `["chat"]` advertisement from a
+    /// pre-`services` peer that omitted the field entirely.
+    pub services: Option<Vec<String>>,
 }
 
 /// Internal events routed to an in-flight [`Consumer::request`] call.
@@ -59,7 +84,9 @@ pub struct ProviderInfo {
 enum Event {
     Chunk { delta: String, seq: Option<u64> },
     Done { content: Option<String> },
-    Error { message: String },
+    /// `code` is the wire `llm_error.code` (e.g. `"unsupported_service"`),
+    /// when present.
+    Error { message: String, code: Option<String> },
     Rejected { reason: String },
 }
 
@@ -86,23 +113,36 @@ impl Consumer {
     /// Feed one decoded inbound message. Only `provider_hello`,
     /// `llm_response_chunk`, `llm_response_done`, and `llm_error` are
     /// meaningful; everything else is ignored. On first `provider_hello`
-    /// (lock-in), reply `consumer_hello` directly to that provider via
-    /// `self.send` (mistai does this to let the provider classify us).
+    /// from a chat-capable provider (lock-in), reply `consumer_hello`
+    /// directly to that provider via `self.send` (mistai does this to let
+    /// the provider classify us). `provider_hello`s that don't advertise
+    /// `"chat"` (see [`protocol::advertises_service`]) are not candidates
+    /// at all -- see the module doc's "Discovery" section.
     pub fn handle_message(&self, from: &str, msg: &ProtocolMessage) {
         match msg {
-            ProtocolMessage::ProviderHello { models } => {
+            ProtocolMessage::ProviderHello { models, services } => {
+                if !protocol::advertises_service(services, protocol::SERVICE_CHAT) {
+                    debug!(
+                        %from,
+                        ?services,
+                        "ai: ignoring provider_hello that does not advertise chat"
+                    );
+                    return;
+                }
                 let mut locked_in = false;
                 self.provider.send_if_modified(|current| match current {
                     None => {
                         *current = Some(ProviderInfo {
                             node_id: from.to_string(),
                             models: models.clone().unwrap_or_default(),
+                            services: services.clone(),
                         });
                         locked_in = true;
                         true
                     }
                     Some(info) if info.node_id == from => {
                         info.models = models.clone().unwrap_or_default();
+                        info.services = services.clone();
                         true
                     }
                     Some(_) => false,
@@ -128,11 +168,12 @@ impl Consumer {
                     },
                 );
             }
-            ProtocolMessage::LlmError { id, message } => {
+            ProtocolMessage::LlmError { id, message, code } => {
                 self.send_event(
                     id,
                     Event::Error {
                         message: message.clone(),
+                        code: code.clone(),
                     },
                 );
             }
@@ -279,8 +320,15 @@ impl Consumer {
                 Event::Done { content: final_content } => {
                     return Ok(final_content.unwrap_or(content));
                 }
-                Event::Error { message } => {
-                    bail!(message);
+                Event::Error { message, code } => {
+                    // `code` (e.g. "unsupported_service") is appended for
+                    // diagnosability -- this consumer doesn't act on it
+                    // (no automatic failover; see the module doc), it just
+                    // surfaces it to the caller/logs.
+                    match code {
+                        Some(code) => bail!("{message} (code: {code})"),
+                        None => bail!(message),
+                    }
                 }
                 Event::Rejected { reason } => {
                     bail!(reason);
@@ -644,11 +692,37 @@ mod tests {
             &ProtocolMessage::LlmError {
                 id: id.clone(),
                 message: "upstream exploded".into(),
+                code: None,
             },
         );
 
         let err = handle.await.unwrap().unwrap_err();
         assert_eq!(err.to_string(), "upstream exploded");
+    }
+
+    #[tokio::test]
+    async fn llm_error_with_code_appends_code_to_error_message() {
+        let (send, sent) = fake_send();
+        let consumer = Consumer::new(send);
+        let c2 = consumer.clone();
+        let handle = tokio::spawn(async move {
+            c2.request("provider1", vec![chat("hi")], None, Duration::from_millis(500), None)
+                .await
+        });
+        sleep(Duration::from_millis(20)).await;
+        let id = last_request_id(&sent);
+
+        consumer.handle_message(
+            "provider1",
+            &ProtocolMessage::LlmError {
+                id: id.clone(),
+                message: "chat not supported".into(),
+                code: Some("unsupported_service".into()),
+            },
+        );
+
+        let err = handle.await.unwrap().unwrap_err();
+        assert_eq!(err.to_string(), "chat not supported (code: unsupported_service)");
     }
 
     #[tokio::test]
@@ -686,6 +760,7 @@ mod tests {
             "p1",
             &ProtocolMessage::ProviderHello {
                 models: Some(vec!["gpt-4o".into()]),
+                services: None,
             },
         );
 
@@ -710,12 +785,14 @@ mod tests {
             "p1",
             &ProtocolMessage::ProviderHello {
                 models: Some(vec!["gpt-4o".into()]),
+                services: None,
             },
         );
         consumer.handle_message(
             "p1",
             &ProtocolMessage::ProviderHello {
                 models: Some(vec!["gpt-4o".into(), "gpt-4o-mini".into()]),
+                services: None,
             },
         );
 
@@ -734,15 +811,112 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_lock_in_stores_services() {
+        let (send, _sent) = fake_send();
+        let consumer = Consumer::new(send);
+
+        consumer.handle_message(
+            "p1",
+            &ProtocolMessage::ProviderHello {
+                models: Some(vec!["gpt-4o".into()]),
+                services: Some(vec!["chat".into(), "tts".into()]),
+            },
+        );
+
+        let info = consumer.provider().expect("should be locked in");
+        assert_eq!(info.services, Some(vec!["chat".to_string(), "tts".to_string()]));
+    }
+
+    #[tokio::test]
+    async fn provider_hello_without_chat_service_is_not_a_lock_in_candidate() {
+        // A voice/embedding-only provider (services present, but no
+        // "chat") must not be locked onto: this consumer only issues
+        // llm_request/chat, so it must keep waiting for a chat-capable
+        // provider instead.
+        let (send, sent) = fake_send();
+        let consumer = Consumer::new(send);
+
+        consumer.handle_message(
+            "voice-only",
+            &ProtocolMessage::ProviderHello {
+                models: None,
+                services: Some(vec!["tts".into(), "stt".into()]),
+            },
+        );
+
+        assert!(consumer.provider().is_none(), "must not lock onto a non-chat provider");
+        let sent_to_voice_only = sent.lock().unwrap().iter().any(|(to, _)| to == "voice-only");
+        assert!(
+            !sent_to_voice_only,
+            "must not reply consumer_hello to a non-chat provider"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_provider_hello_after_non_chat_hello_still_locks_in() {
+        // A non-chat hello arriving first must not "use up" the first-wins
+        // slot -- the first genuinely chat-capable hello should still win.
+        let (send, sent) = fake_send();
+        let consumer = Consumer::new(send);
+
+        consumer.handle_message(
+            "voice-only",
+            &ProtocolMessage::ProviderHello {
+                models: None,
+                services: Some(vec!["tts".into()]),
+            },
+        );
+        consumer.handle_message(
+            "chat-provider",
+            &ProtocolMessage::ProviderHello {
+                models: Some(vec!["gpt-4o".into()]),
+                services: Some(vec!["chat".into()]),
+            },
+        );
+
+        let info = consumer.provider().expect("should be locked in");
+        assert_eq!(info.node_id, "chat-provider");
+        let sent = sent.lock().unwrap();
+        assert!(
+            sent.iter().any(
+                |(to, msg)| to == "chat-provider" && matches!(msg, ProtocolMessage::ConsumerHello)
+            ),
+            "expected a consumer_hello reply to the chat provider, got: {sent:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_hello_missing_services_defaults_to_chat_and_locks_in() {
+        // The wire spec's backward-compat default: a `provider_hello` with
+        // no `services` field at all (pre-services-extension peer, e.g.
+        // tc-mistllm core / older mistl) is treated as chat-only, so it
+        // must still be a valid lock-in candidate.
+        let (send, _sent) = fake_send();
+        let consumer = Consumer::new(send);
+
+        consumer.handle_message(
+            "legacy-provider",
+            &ProtocolMessage::ProviderHello { models: None, services: None },
+        );
+
+        let info = consumer.provider().expect("should be locked in");
+        assert_eq!(info.node_id, "legacy-provider");
+    }
+
+    #[tokio::test]
     async fn provider_lock_in_ignores_other_ids() {
         let (send, sent) = fake_send();
         let consumer = Consumer::new(send);
 
-        consumer.handle_message("p1", &ProtocolMessage::ProviderHello { models: None });
+        consumer.handle_message(
+            "p1",
+            &ProtocolMessage::ProviderHello { models: None, services: None },
+        );
         consumer.handle_message(
             "p2",
             &ProtocolMessage::ProviderHello {
                 models: Some(vec!["other-model".into()]),
+                services: None,
             },
         );
 
@@ -757,7 +931,10 @@ mod tests {
     async fn disconnect_of_locked_provider_clears_lock_and_rejects_pending() {
         let (send, sent) = fake_send();
         let consumer = Consumer::new(send);
-        consumer.handle_message("p1", &ProtocolMessage::ProviderHello { models: None });
+        consumer.handle_message(
+            "p1",
+            &ProtocolMessage::ProviderHello { models: None, services: None },
+        );
         assert!(consumer.provider().is_some());
 
         let c2 = consumer.clone();
@@ -779,7 +956,10 @@ mod tests {
     async fn disconnect_of_unrelated_peer_keeps_lock() {
         let (send, _sent) = fake_send();
         let consumer = Consumer::new(send);
-        consumer.handle_message("p1", &ProtocolMessage::ProviderHello { models: None });
+        consumer.handle_message(
+            "p1",
+            &ProtocolMessage::ProviderHello { models: None, services: None },
+        );
 
         consumer.on_peer_disconnected("someone-else");
 
@@ -798,6 +978,7 @@ mod tests {
             "p1",
             &ProtocolMessage::ProviderHello {
                 models: Some(vec!["m1".into()]),
+                services: None,
             },
         );
 

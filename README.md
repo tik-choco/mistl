@@ -229,7 +229,7 @@ request_timeout_secs = 120                   # p2p inactivity timeout (resets pe
 # provider_id = "default"                   # references an [[ai.providers]] id
 # model = "llama3"
 # temperature = 0.7
-# reasoning_effort = "medium"               # optional: "minimal" | "low" | "medium" | "high"
+# reasoning_effort = "medium"               # optional: "none" | "minimal" | "low" | "medium" | "high"
 
 [ui]
 enabled = true                               # serve the dashboard from the daemon

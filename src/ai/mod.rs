@@ -27,9 +27,16 @@
 
 mod api_server;
 mod consumer;
-mod openai;
-mod protocol;
+/// Opened to `pub(crate)` so `crate::bot`'s `summarize` transform can reuse
+/// the upstream chat-completion client directly (`UpstreamConfig` +
+/// `stream_chat_completion`) instead of re-implementing an OpenAI-compatible
+/// client -- see the bot pipeline draft's summarize step.
+pub(crate) mod openai;
+/// Opened to `pub(crate)` for the same reason as [`openai`]: `crate::bot`
+/// needs `ChatMessage` to build a `stream_chat_completion` request.
+pub(crate) mod protocol;
 mod provider;
+pub mod tts;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -219,8 +226,45 @@ impl AiService {
     }
 }
 
+/// Looks up `provider_id` in `ai.providers` and builds an [`UpstreamConfig`]
+/// for a one-off request against it directly -- no preset/model resolution
+/// involved, unlike `crate::config::resolve_preset`. Returns an actionable
+/// error if the provider isn't configured.
+fn provider_upstream(ai: &crate::config::AiConfig, provider_id: &str) -> Result<UpstreamConfig> {
+    let provider = ai
+        .providers
+        .iter()
+        .find(|p| p.id == provider_id)
+        .with_context(|| {
+            format!(
+                "ai: provider {provider_id:?} not found in ai.providers; add it with \
+                 `mistl config set ai.providers <json>` (see `mistl config show`)"
+            )
+        })?;
+    Ok(UpstreamConfig {
+        base_url: provider.base_url.clone(),
+        api_key: provider.api_key.clone(),
+        model: None,
+        temperature: None,
+        reasoning_effort: None,
+    })
+}
+
 /// IPC entry point for all `ai.*` commands.
 pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Value> {
+    // Listing a provider's upstream models is a plain HTTP GET against its
+    // configured `base_url` -- it doesn't touch the p2p AI network, so this
+    // is handled before `ensure_started` (which joins the network room).
+    if cmd == "ai.upstream_models" {
+        let provider_id = args
+            .get("provider_id")
+            .and_then(Value::as_str)
+            .context("ai.upstream_models requires `provider_id`")?;
+        let upstream = provider_upstream(&state.config().ai, provider_id)?;
+        let models = openai::fetch_models(&upstream).await?;
+        return Ok(json!({ "provider_id": provider_id, "models": models }));
+    }
+
     let service = ensure_started(state).await?;
     match cmd {
         "ai.status" => status(&service).await,
@@ -273,7 +317,7 @@ async fn status(service: &Arc<AiService>) -> Result<Value> {
         .as_ref()
         .map(|server| server.addr().to_string());
     let remote = service.consumer.provider().map(|info| {
-        json!({ "node_id": info.node_id, "models": info.models })
+        json!({ "node_id": info.node_id, "models": info.models, "services": info.services })
     });
     Ok(json!({
         "room": service.room,
@@ -281,6 +325,7 @@ async fn status(service: &Arc<AiService>) -> Result<Value> {
         "connected_peers": crate::net::connected_nodes().await.len(),
         "providing": provider.is_some(),
         "models": provider.as_ref().map(|p| p.models()),
+        "services": provider.as_ref().map(|_| vec![protocol::SERVICE_CHAT]),
         "recent_requests": provider.as_ref().map(|p| {
             p.logs().into_iter().take(5).collect::<Vec<_>>()
         }),
@@ -304,7 +349,12 @@ async fn models(service: &Arc<AiService>) -> Result<Value> {
                 .context("ai: no provider found on the network")?
         }
     };
-    Ok(json!({ "via": "p2p", "provider": info.node_id, "models": info.models }))
+    Ok(json!({
+        "via": "p2p",
+        "provider": info.node_id,
+        "models": info.models,
+        "services": info.services,
+    }))
 }
 
 async fn provide_start(service: &Arc<AiService>, state: &Arc<AppState>) -> Result<Value> {
@@ -417,4 +467,36 @@ async fn serve_start(service: &Arc<AiService>, state: &Arc<AppState>) -> Result<
         "listen": addr.to_string(),
         "openai_base_url": format!("http://{addr}/v1"),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{AiConfig, AiProviderConfig};
+
+    #[test]
+    fn provider_upstream_maps_base_url_and_api_key_for_a_known_provider() {
+        let mut ai = AiConfig::default();
+        ai.providers.push(AiProviderConfig {
+            id: "openai".to_string(),
+            label: "OpenAI".to_string(),
+            base_url: "https://api.openai.com/v1".to_string(),
+            api_key: "sk-test".to_string(),
+        });
+
+        let upstream = provider_upstream(&ai, "openai").unwrap();
+        assert_eq!(upstream.base_url, "https://api.openai.com/v1");
+        assert_eq!(upstream.api_key, "sk-test");
+        assert_eq!(upstream.model, None);
+        assert_eq!(upstream.temperature, None);
+        assert_eq!(upstream.reasoning_effort, None);
+    }
+
+    #[test]
+    fn provider_upstream_errors_for_an_unknown_provider() {
+        let ai = AiConfig::default();
+        let err = provider_upstream(&ai, "missing").unwrap_err();
+        assert!(err.to_string().contains("missing"));
+        assert!(err.to_string().contains("ai.providers"));
+    }
 }

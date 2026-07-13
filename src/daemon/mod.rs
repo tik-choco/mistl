@@ -107,6 +107,11 @@ async fn daemon_main() -> Result<()> {
     // (logged) when `[scheduler] enabled = false`.
     crate::scheduler::spawn_background(state.clone());
 
+    // Bot pipeline engine: source -> transform(s) -> sink(s) automation
+    // runs, fired on a 1-second tick. A no-op (logged) when
+    // `[bot] enabled = false`.
+    crate::bot::spawn_background(state.clone());
+
     tokio::select! {
         _ = tokio::signal::ctrl_c() => info!("interrupted, shutting down"),
         _ = shutdown_rx.wait_for(|&stop| stop) => info!("stop requested, shutting down"),
@@ -296,6 +301,7 @@ pub async fn dispatch(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<V
             Some("stream") => crate::stream::handle(cmd, args, state).await,
             Some("mailbox") => crate::mailbox::handle(cmd, args, state).await,
             Some("sched") => crate::scheduler::handle(cmd, args, state).await,
+            Some("bot") => crate::bot::handle(cmd, args, state).await,
             Some("consensus") => crate::consensus::handle(cmd, args, state).await,
             Some("topology") => crate::topology::handle(cmd, args, state).await,
             Some("ai") => crate::ai::handle(cmd, args, state).await,

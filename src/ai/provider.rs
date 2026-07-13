@@ -76,14 +76,21 @@ impl Provider {
     }
 
     /// The `provider_hello` announcement: `models` field included only
-    /// when the list is non-empty (mistai omits it otherwise).
+    /// when the list is non-empty (mistai omits it otherwise). `services`
+    /// always advertises `["chat"]` -- this port is a chat-only provider
+    /// (see the module doc), so it always sets `services` explicitly
+    /// rather than relying on the wire spec's "missing == chat only"
+    /// default; this makes the advertisement self-describing to
+    /// `services`-aware peers even though the two are equivalent today.
     pub fn hello(&self) -> ProtocolMessage {
-        if self.models.is_empty() {
-            ProtocolMessage::ProviderHello { models: None }
+        let models = if self.models.is_empty() {
+            None
         } else {
-            ProtocolMessage::ProviderHello {
-                models: Some(self.models.clone()),
-            }
+            Some(self.models.clone())
+        };
+        ProtocolMessage::ProviderHello {
+            models,
+            services: Some(vec![super::protocol::SERVICE_CHAT.to_string()]),
         }
     }
 
@@ -118,6 +125,7 @@ impl Provider {
             ProtocolMessage::VoiceError {
                 id,
                 message: "this provider does not support voice (tts/stt)".to_string(),
+                code: Some(super::protocol::CODE_UNSUPPORTED_SERVICE.to_string()),
             },
         );
     }
@@ -209,6 +217,11 @@ impl Provider {
                     ProtocolMessage::LlmError {
                         id: id.clone(),
                         message: message.clone(),
+                        // No `code`: this is a generic upstream-call
+                        // failure, not a capability mismatch (this
+                        // provider does support chat) -- distinct from
+                        // `"unsupported_service"` per the wire spec.
+                        code: None,
                     },
                 );
                 self.push_log(RequestLog {
@@ -408,10 +421,11 @@ mod tests {
         let sent = sent.lock().unwrap();
         assert_eq!(sent.len(), 1);
         match &sent[0] {
-            (to, ProtocolMessage::LlmError { id, message }) => {
+            (to, ProtocolMessage::LlmError { id, message, code }) => {
                 assert_eq!(to, "consumer1");
                 assert_eq!(id, "req1");
                 assert_eq!(message, "upstream boom");
+                assert_eq!(*code, None, "generic upstream failure should not carry a code");
             }
             other => panic!("unexpected message: {other:?}"),
         }
@@ -427,7 +441,13 @@ mod tests {
         let (send, _sent) = fake_send();
         let call = fake_call_success(vec![], "");
         let provider = Provider::new(send, call, vec![]);
-        assert_eq!(provider.hello(), ProtocolMessage::ProviderHello { models: None });
+        assert_eq!(
+            provider.hello(),
+            ProtocolMessage::ProviderHello {
+                models: None,
+                services: Some(vec!["chat".into()]),
+            }
+        );
     }
 
     #[test]
@@ -438,9 +458,23 @@ mod tests {
         assert_eq!(
             provider.hello(),
             ProtocolMessage::ProviderHello {
-                models: Some(vec!["gpt-4o".into(), "gpt-4o-mini".into()])
+                models: Some(vec!["gpt-4o".into(), "gpt-4o-mini".into()]),
+                services: Some(vec!["chat".into()]),
             }
         );
+    }
+
+    #[test]
+    fn hello_always_advertises_chat_service() {
+        let (send, _sent) = fake_send();
+        let call = fake_call_success(vec![], "");
+        let provider = Provider::new(send, call, vec![]);
+        match provider.hello() {
+            ProtocolMessage::ProviderHello { services, .. } => {
+                assert_eq!(services, Some(vec!["chat".to_string()]));
+            }
+            other => panic!("expected ProviderHello, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -567,10 +601,11 @@ mod tests {
         let sent = sent.lock().unwrap();
         assert_eq!(sent.len(), 1, "expected exactly one reply, got: {sent:?}");
         match &sent[0] {
-            (to, ProtocolMessage::VoiceError { id, message }) => {
+            (to, ProtocolMessage::VoiceError { id, message, code }) => {
                 assert_eq!(to, "consumer1");
                 assert_eq!(id, "req1");
                 assert!(!message.is_empty());
+                assert_eq!(code.as_deref(), Some("unsupported_service"));
             }
             other => panic!("expected a voice_error reply, got: {other:?}"),
         }
@@ -601,10 +636,11 @@ mod tests {
         let sent = sent.lock().unwrap();
         assert_eq!(sent.len(), 1, "expected exactly one reply, got: {sent:?}");
         match &sent[0] {
-            (to, ProtocolMessage::VoiceError { id, message }) => {
+            (to, ProtocolMessage::VoiceError { id, message, code }) => {
                 assert_eq!(to, "consumer1");
                 assert_eq!(id, "req2");
                 assert!(!message.is_empty());
+                assert_eq!(code.as_deref(), Some("unsupported_service"));
             }
             other => panic!("expected a voice_error reply, got: {other:?}"),
         }

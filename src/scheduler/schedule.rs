@@ -10,7 +10,7 @@ use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, TimeZone, Weekday};
 
 /// A parsed schedule expression, ready to compute successive fire times
 /// from. See `parse` for the accepted syntax.
-pub(super) enum Schedule {
+pub(crate) enum Schedule {
     /// `@every Xw <dow> HH:MM`: every X weeks on a given weekday at a fixed
     /// time of day.
     WeeklyOnDow {
@@ -40,7 +40,7 @@ impl Schedule {
     /// expression has no more occurrences (the `cron` crate's iterator can
     /// exhaust itself for expressions like an unreachable Feb 30 -- our own
     /// interval variants always return `Some`).
-    pub(super) fn next_after(&self, t: DateTime<Local>) -> Option<DateTime<Local>> {
+    pub(crate) fn next_after(&self, t: DateTime<Local>) -> Option<DateTime<Local>> {
         match self {
             Schedule::WeeklyOnDow {
                 weeks,
@@ -63,7 +63,7 @@ impl Schedule {
 /// or a 5- or 6-field cron expression. Case-insensitive, whitespace-trimmed.
 /// Returns a clear `Err` (surfaced verbatim by `sched.add`/`sched.set`/
 /// `sched.next`) on anything that doesn't match one of those forms.
-pub(super) fn parse(expr: &str) -> Result<Schedule> {
+pub(crate) fn parse(expr: &str) -> Result<Schedule> {
     let trimmed = expr.trim();
     if trimmed.is_empty() {
         bail!("empty schedule expression");

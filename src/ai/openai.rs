@@ -45,7 +45,7 @@ pub struct UpstreamConfig {
     pub model: Option<String>,
     /// Sampling temperature; omitted from the request when `None`.
     pub temperature: Option<f64>,
-    /// Reasoning effort hint ("minimal"|"low"|"medium"|"high", a free
+    /// Reasoning effort hint ("none"|"minimal"|"low"|"medium"|"high", a free
     /// string -- not validated here); omitted from the request when
     /// `None`. Mirrors the web apps' @tik-choco/mistai client behavior.
     pub reasoning_effort: Option<String>,
