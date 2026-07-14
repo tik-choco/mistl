@@ -8301,6 +8301,10 @@
     // lifetime of this settings screen instance; cleared implicitly when the
     // settings screen is rebuilt from scratch.
     var modelListByProvider = {};
+    // Per-provider fetch status ("loading" | "failed"). A "failed" marker
+    // stops renderAll()'s auto-fetch from retrying in a loop; the manual
+    // refresh button clears it for an explicit retry.
+    var modelFetchState = {};
 
     function providers() { return Array.isArray(sectionCfg.providers) ? sectionCfg.providers : []; }
     function presets() { return Array.isArray(sectionCfg.presets) ? sectionCfg.presets : []; }
@@ -8377,10 +8381,55 @@
     /* ---- save + (re)render ---- */
 
     function saveProviders(next) {
-      return saveSetting("ai.providers", next, sectionCfg, "providers", provBadge).then(renderAll);
+      var prev = providers();
+      return saveSetting("ai.providers", next, sectionCfg, "providers", provBadge).then(function () {
+        // Connection details may have changed; drop stale model lists so
+        // renderAll()'s auto-fetch pulls a fresh list for the changed
+        // (or removed) provider.
+        prev.forEach(function (p) {
+          var np = null;
+          for (var i = 0; i < next.length; i++) { if (next[i].id === p.id) np = next[i]; }
+          if (!np || np.base_url !== p.base_url || np.api_key !== p.api_key) {
+            delete modelListByProvider[p.id];
+            delete modelFetchState[p.id];
+          }
+        });
+        renderAll();
+      });
     }
     function savePresets(next) {
       return saveSetting("ai.presets", next, sectionCfg, "presets", presetBadge).then(renderAll);
+    }
+
+    function fetchModelsFor(providerId, toastOnError) {
+      modelFetchState[providerId] = "loading";
+      api("ai.upstream_models", { provider_id: providerId }).then(
+        function (data) {
+          delete modelFetchState[providerId];
+          modelListByProvider[providerId] = (data && data.models) || [];
+          renderAll();
+        },
+        function (err) {
+          modelFetchState[providerId] = "failed";
+          if (toastOnError) {
+            showToast(t("settings.ai.presets.fetchModelsError") + ": " + err.message, "error");
+          }
+          renderAll();
+        }
+      );
+    }
+
+    // Fetch every configured provider's model list automatically (silently)
+    // so the preset model field is a select without any manual step. Guarded
+    // by the cache and the loading/failed markers, so the renderAll() each
+    // fetch triggers can't cascade into repeated requests.
+    function autoFetchModels() {
+      providers().forEach(function (p) {
+        if (!p.base_url) return;
+        if (Object.prototype.hasOwnProperty.call(modelListByProvider, p.id)) return;
+        if (modelFetchState[p.id]) return;
+        fetchModelsFor(p.id, false);
+      });
     }
 
     function buildProviderRow(provider) {
@@ -8472,10 +8521,11 @@
       });
       row.appendChild(providerSelect);
 
-      // Model list is only available once fetched (see fetchModelsBtn below)
-      // and browsers never see api_key, so the model field is a select when
-      // a list is cached for this preset's provider, and falls back to a
-      // free-text input otherwise -- mirrors tc-mistllm's settings screen.
+      // The model list is fetched automatically per provider (see
+      // autoFetchModels; browsers never see api_key, so the daemon does the
+      // fetch), so the model field is a select as soon as a list is cached
+      // for this preset's provider, and falls back to a free-text input
+      // otherwise -- mirrors tc-mistllm's settings screen.
       var cachedModels = modelListByProvider[preset.provider_id];
       var modelEl;
       if (Array.isArray(cachedModels) && cachedModels.length > 0) {
@@ -8508,20 +8558,18 @@
       }
       row.appendChild(modelEl);
 
+      // Manual refresh: clears the cache (and any "failed" marker) for this
+      // preset's provider and refetches, with an error toast -- the
+      // automatic fetch stays silent. renderAll() rebuilds this row when the
+      // fetch settles, so no explicit re-enable is needed.
       var fetchModelsBtn = el("button", { type: "button" });
       fetchModelsBtn.textContent = t("settings.ai.presets.fetchModels");
+      fetchModelsBtn.disabled = modelFetchState[preset.provider_id] === "loading";
       fetchModelsBtn.addEventListener("click", function () {
         fetchModelsBtn.disabled = true;
-        api("ai.upstream_models", { provider_id: preset.provider_id }).then(
-          function (data) {
-            modelListByProvider[preset.provider_id] = (data && data.models) || [];
-            renderAll();
-          },
-          function (err) {
-            fetchModelsBtn.disabled = false;
-            showToast(t("settings.ai.presets.fetchModelsError") + ": " + err.message, "error");
-          }
-        );
+        delete modelListByProvider[preset.provider_id];
+        delete modelFetchState[preset.provider_id];
+        fetchModelsFor(preset.provider_id, true);
       });
       row.appendChild(fetchModelsBtn);
 
@@ -8578,6 +8626,8 @@
       });
       var wantDefault = sectionCfg.default_preset_id || "";
       defSelect.value = presets().some(function (p) { return p.id === wantDefault; }) ? wantDefault : "";
+
+      autoFetchModels();
     }
 
     provAddBtn.addEventListener("click", function () {
@@ -8587,8 +8637,11 @@
     presetAddBtn.addEventListener("click", function () {
       if (!providers().length) return;
       var id = genAiEntryId("preset", presets().map(function (p) { return p.id; }));
+      // New presets start at temperature 0.7 (the README's documented
+      // example default) rather than blank; clearing the field still means
+      // "omit the parameter".
       savePresets(presets().concat([{
-        id: id, label: "", provider_id: providers()[0].id, model: "", temperature: null, reasoning_effort: null
+        id: id, label: "", provider_id: providers()[0].id, model: "", temperature: 0.7, reasoning_effort: null
       }]));
     });
 
