@@ -27,7 +27,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use serde_json::json;
@@ -169,6 +169,105 @@ pub type RoomEventHandler = Box<dyn Fn(u32, &str, &str, &[u8]) + Send + Sync>;
 
 static ROOM_HANDLERS: RwLock<Vec<RoomEventHandler>> = RwLock::new(Vec::new());
 
+/// One direction's raw counters for one (room, peer) activity entry: how
+/// many events, how many bytes total, and when the last one happened. `last`
+/// is `None` until that direction has seen its first event.
+#[derive(Debug, Clone, Copy, Default)]
+struct DirectionStats {
+    count: u64,
+    bytes: u64,
+    last: Option<Instant>,
+}
+
+/// Send/receive activity for one (room, peer) key, updated at mistl's own
+/// send/receive choke points -- not derived from mistlib, which has no
+/// concept of "activity" beyond connection state.
+#[derive(Debug, Clone, Copy, Default)]
+struct ActivityRecord {
+    tx: DirectionStats,
+    rx: DirectionStats,
+}
+
+/// Process-wide send/receive activity, keyed by `(room, peer)` with an empty
+/// peer id meaning a room-wide broadcast (see [`send_broadcast`]). Entries
+/// are only ever added, never evicted -- but the key space is naturally
+/// small (one entry per peer actually seen in a room this process has
+/// joined, plus one broadcast entry per room actually broadcast to), so
+/// unbounded growth isn't a practical concern the way it would be for e.g. a
+/// per-message log.
+static ACTIVITY: LazyLock<RwLock<HashMap<(String, String), ActivityRecord>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// Record a successful send. Called from [`send_direct`] (peer = the target
+/// node) and [`send_broadcast`] (peer = `""`).
+fn record_tx(room: &str, peer: &str, bytes: usize) {
+    let mut activity = ACTIVITY.write().expect("net activity lock poisoned");
+    let entry = activity.entry((room.to_string(), peer.to_string())).or_default();
+    entry.tx.count += 1;
+    entry.tx.bytes += bytes as u64;
+    entry.tx.last = Some(Instant::now());
+}
+
+/// Record an inbound raw event. Called from [`dispatch_room_event`] for
+/// [`EVENT_RAW`] events only -- that function runs synchronously on
+/// mistlib's dispatch thread, so this must stay cheap: one write-lock
+/// acquisition and one hash map entry lookup/insert, no other allocation.
+fn record_rx(room: &str, peer: &str, bytes: usize) {
+    let mut activity = ACTIVITY.write().expect("net activity lock poisoned");
+    let entry = activity.entry((room.to_string(), peer.to_string())).or_default();
+    entry.rx.count += 1;
+    entry.rx.bytes += bytes as u64;
+    entry.rx.last = Some(Instant::now());
+}
+
+/// One direction's counters as exposed by [`activity_snapshot`].
+#[derive(Debug, Clone, Copy)]
+pub struct DirectionActivity {
+    pub count: u64,
+    pub bytes: u64,
+    /// Time elapsed since the last event in this direction, measured against
+    /// the moment the snapshot was taken.
+    pub age: Duration,
+}
+
+/// One (room, peer) activity entry, as exposed by [`activity_snapshot`]. An
+/// empty `peer` means a room-wide broadcast rather than a specific node (see
+/// [`send_broadcast`]). `tx`/`rx` are `None` until that direction has seen at
+/// least one event for this key.
+#[derive(Debug, Clone)]
+pub struct ActivityEntry {
+    pub room: String,
+    pub peer: String,
+    pub tx: Option<DirectionActivity>,
+    pub rx: Option<DirectionActivity>,
+}
+
+/// Snapshot of every (room, peer) activity entry seen so far this process,
+/// in arbitrary order (callers wanting a stable order, e.g. `topology`,
+/// should sort it themselves). See [`ACTIVITY`]'s doc comment for why no
+/// eviction is needed.
+pub fn activity_snapshot() -> Vec<ActivityEntry> {
+    let now = Instant::now();
+    let activity = ACTIVITY.read().expect("net activity lock poisoned");
+    activity
+        .iter()
+        .map(|((room, peer), record)| ActivityEntry {
+            room: room.clone(),
+            peer: peer.clone(),
+            tx: record.tx.last.map(|last| DirectionActivity {
+                count: record.tx.count,
+                bytes: record.tx.bytes,
+                age: now.saturating_duration_since(last),
+            }),
+            rx: record.rx.last.map(|last| DirectionActivity {
+                count: record.rx.count,
+                bytes: record.rx.bytes,
+                age: now.saturating_duration_since(last),
+            }),
+        })
+        .collect()
+}
+
 /// Register a room-aware handler: like [`register_handler`], but additionally
 /// told which room each event arrived from. Needed by callers that join more
 /// than one room and must tell them apart -- e.g. the tc-chat relay
@@ -204,6 +303,9 @@ unsafe extern "C" fn dispatch_room_event(
     let room = String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(room_ptr, room_len) });
     let from = String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(from_ptr, from_len) });
     let data = unsafe { std::slice::from_raw_parts(data_ptr, data_len) };
+    if event_type == EVENT_RAW {
+        record_rx(&room, &from, data.len());
+    }
     let handlers = ROOM_HANDLERS.read().expect("net room handler registry poisoned");
     for handler in handlers.iter() {
         handler(event_type, &room, &from, data);
@@ -295,6 +397,22 @@ pub async fn connected_nodes() -> Vec<String> {
     }
 }
 
+/// Per-room connected peers and their per-room connection state, bounded by
+/// [`NET_TIMEOUT`] (empty on timeout) the same way [`connected_nodes`] is.
+/// Unlike that cross-session union, this is one entry per active session
+/// (room), so a peer connected in more than one room appears once under each
+/// room -- and a joined room with no peers yet still appears, with an empty
+/// peer list. No cross-room dedup. Backs `topology.status`'s `room_peers`.
+pub async fn room_connections() -> Vec<(String, Vec<(String, String)>)> {
+    match tokio::time::timeout(NET_TIMEOUT, mistlib::app::get_room_connections_async()).await {
+        Ok(rooms) => rooms,
+        Err(_) => {
+            tracing::debug!("net: get_room_connections timed out");
+            Vec::new()
+        }
+    }
+}
+
 /// Rooms this process currently holds (refcount > 0), sorted for a
 /// deterministic result. Read for `topology.status`'s dashboard view --
 /// e.g. mailbox/ai/stream relay each sitting in their own room, or sharing
@@ -319,8 +437,8 @@ pub async fn joined_rooms() -> Vec<String> {
 /// timeout.
 ///
 /// mistlib exposes no finer-grained per-peer detail than this (no ICE state,
-/// RTT, or bitrate, and no room-scoped breakdown) -- this is genuinely all
-/// that's observable about one peer's link right now.
+/// RTT, or bitrate) -- for a room-scoped breakdown of who's connected where,
+/// see [`room_connections`] instead.
 pub async fn peer_connection_state(node_id: &str) -> String {
     match tokio::time::timeout(NET_TIMEOUT, mistlib::app::get_connection_state_async(node_id)).await {
         Ok(state) => state,
@@ -333,27 +451,36 @@ pub async fn peer_connection_state(node_id: &str) -> String {
 
 /// Reliable direct send to one peer, scoped to `room` (the peer must be
 /// reachable in that specific room's session -- unlike a bare broadcast,
-/// there's no reasonable cross-room fallback).
+/// there's no reasonable cross-room fallback). Records TX activity (see
+/// [`activity_snapshot`]) once the send itself has succeeded.
 pub async fn send_direct(room: &str, to_node: &str, bytes: Vec<u8>) -> Result<()> {
+    let len = bytes.len();
     mistlib::app::try_send_message_in_room(
         room.to_string(),
         to_node.to_string(),
         &bytes,
         mistlib::app::DELIVERY_RELIABLE,
     )
-    .map_err(|err| anyhow::anyhow!("net: send in room {room:?} failed: {err}"))
+    .map_err(|err| anyhow::anyhow!("net: send in room {room:?} failed: {err}"))?;
+    record_tx(room, to_node, len);
+    Ok(())
 }
 
 /// Reliable room-wide broadcast (every peer in `room`), scoped the same way
 /// [`send_direct`] is. An empty target node id is mistlib-core's broadcast
 /// sentinel -- the same convention tc-chat's own web client uses
-/// (`node.sendMessage(null, ...)`).
+/// (`node.sendMessage(null, ...)`). Records TX activity under the same empty
+/// peer id, meaning "room-wide" rather than one specific node (see
+/// [`activity_snapshot`]), once the send itself has succeeded.
 pub async fn send_broadcast(room: &str, bytes: Vec<u8>) -> Result<()> {
+    let len = bytes.len();
     mistlib::app::try_send_message_in_room(
         room.to_string(),
         String::new(),
         &bytes,
         mistlib::app::DELIVERY_RELIABLE,
     )
-    .map_err(|err| anyhow::anyhow!("net: broadcast in room {room:?} failed: {err}"))
+    .map_err(|err| anyhow::anyhow!("net: broadcast in room {room:?} failed: {err}"))?;
+    record_tx(room, "", len);
+    Ok(())
 }

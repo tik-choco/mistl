@@ -1,6 +1,10 @@
 # Fetches mistlib (MISTLIB_REPO/MISTLIB_REF from .env) into .mistlib-src, a
 # plain git clone that the Cargo path dependencies point into. Safe to re-run:
 # updates the existing clone to the configured ref (detached checkout).
+# Local uncommitted changes in the cache are auto-stashed around the update
+# and restored afterwards; if they conflict with the new upstream commit, the
+# stash is rolled back and the cache stays on its previous commit instead of
+# discarding anything.
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $PSScriptRoot
@@ -34,10 +38,62 @@ if (-not (Test-Path (Join-Path $cache ".git"))) {
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 
+# LF working files show as phantom-modified under a global core.autocrlf=true;
+# force this clone to leave line endings alone.
+git -C $cache config core.autocrlf false
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
 git -C $cache fetch origin $ref
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+if ($LASTEXITCODE -ne 0) {
+    $shortHead = git -C $cache rev-parse --short HEAD
+    Write-Host "warning: could not fetch mistlib (offline?); keeping $shortHead"
+    exit 0
+}
+
+$old = git -C $cache rev-parse HEAD
+$new = git -C $cache rev-parse FETCH_HEAD
+
+if ($old -eq $new) {
+    $commit = git -C $cache rev-parse --short HEAD
+    Write-Host "mistlib ($ref @ $commit) ready in .mistlib-src"
+    exit 0
+}
+
+$dirty = git -C $cache status --porcelain
+$stashed = $false
+if ($dirty) {
+    git -C $cache stash push --include-untracked -m "fetch auto-stash"
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "error: failed to stash local changes in .mistlib-src"
+        exit 1
+    }
+    $stashed = $true
+}
+
 git -C $cache checkout --detach FETCH_HEAD
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+if ($LASTEXITCODE -ne 0) {
+    if ($stashed) {
+        git -C $cache reset --hard
+        git -C $cache checkout --detach $old
+        git -C $cache stash pop
+    }
+    Write-Host "error: failed to checkout FETCH_HEAD in .mistlib-src"
+    exit 1
+}
+
+if ($stashed) {
+    git -C $cache stash pop
+    if ($LASTEXITCODE -ne 0) {
+        git -C $cache reset --hard
+        git -C $cache checkout --detach $old
+        git -C $cache stash pop
+        $oldShort = git -C $cache rev-parse --short $old
+        Write-Host "warning: the upstream update to mistlib conflicts with local uncommitted changes in .mistlib-src."
+        Write-Host "warning: staying on the previous commit $oldShort."
+        Write-Host "warning: commit/push or resolve the local changes, then re-run 'just fetch-mistlib'."
+        exit 0
+    }
+}
 
 $commit = git -C $cache rev-parse --short HEAD
 Write-Host "mistlib ($ref @ $commit) ready in .mistlib-src"

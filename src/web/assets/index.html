@@ -273,6 +273,57 @@
   .panel h2 .spacer { flex: 1; }
   .panel-span2 { grid-column: auto; }   /* legacy hook: single-view is full width */
 
+  /* ---- in-panel sub-tabs ----
+     Long panels (Bot, Store, Mailbox, Scheduler) split their stacked
+     sections into tab pages so one task doesn't require scrolling past all
+     the others (same reasoning as tc-town's settings tabs). Markup
+     contract, wired automatically by initSubTabs() -- no per-panel JS:
+       <div class="subtabs" role="tablist">
+         <button type="button" data-subtab-target="x">…</button> …
+       </div>
+       <div class="subtab-page" data-subtab="x">…</div> …
+     The tablist and its pages must live in the same .panel. The active tab
+     is remembered per panel (localStorage mistl-subtab-<panel-id>). Tab
+     visibility is pure UI state -- polling never gates on it, so tables in
+     hidden pages keep updating. Panel-wide furniture (topo strips,
+     topology slots, settings drawers) stays OUTSIDE the pages: the
+     topology card is re-parented into panels and must not vanish inside a
+     hidden tab. */
+  .subtabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    padding: 4px;
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    background: var(--bg-alt);
+    align-self: flex-start;
+    max-width: 100%;
+  }
+  .subtabs button {
+    border: none;
+    background: none;
+    color: var(--text-dim);
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 6px 14px;
+    border-radius: 7px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+  }
+  .subtabs button:hover { color: var(--text); }
+  .subtabs button.active {
+    background: var(--panel);
+    color: var(--accent);
+    box-shadow: var(--shadow-sm);
+  }
+  /* pages mirror .panel's own column layout so wrapping existing sections
+     into a page doesn't change their spacing */
+  .subtab-page { display: none; flex-direction: column; gap: 16px; min-width: 0; }
+  .subtab-page.active { display: flex; animation: risein var(--dur) var(--ease); }
+
   .hint-banner {
     display: flex;
     align-items: center;
@@ -809,6 +860,32 @@
     animation: topology-flow 0.8s linear infinite;
   }
   @keyframes topology-flow { to { stroke-dashoffset: -10; } }
+  /* Transient data-activity pulses (topology.status's `activity` field --
+     distinct from the media `.flowing` state above): a brief directional
+     "marching ants" flash on a peer's edge whenever a new message crosses
+     it, added/removed by JS (updateTopologyActivity/topologyFlash) rather
+     than tied to a persistent render state. TX (this node -> peer) reuses
+     the forward dash-offset direction the edge is already drawn in; RX
+     (peer -> this node) runs the same animation backwards so the two read
+     as opposite flows on the same line. Colors intentionally pair with the
+     tx/rx glyphs in the per-room breakdown below (accent = TX, ok = RX) so
+     the two surfaces read as one language. Stroke/dasharray are static
+     properties on the rule itself (not only inside the keyframe), so
+     disabling `animation` under reduced-motion (further down) still leaves
+     a visibly distinct, just non-moving, edge. */
+  .topology-edge.activity-tx {
+    stroke: var(--accent);
+    stroke-width: 1.8;
+    stroke-dasharray: 5 4;
+    animation: topology-flow 0.6s linear infinite;
+  }
+  .topology-edge.activity-rx {
+    stroke: var(--ok);
+    stroke-width: 1.8;
+    stroke-dasharray: 5 4;
+    animation: topology-flow-rev 0.6s linear infinite;
+  }
+  @keyframes topology-flow-rev { to { stroke-dashoffset: 10; } }
   .topology-edge-arrowhead { fill: var(--text-faint); }
   .topology-edge-label {
     fill: var(--text-dim);
@@ -843,13 +920,56 @@
   }
   @keyframes topology-flow-legend { to { background-position: 10px 0; } }
   @media (prefers-reduced-motion: reduce) {
-    .topology-edge.flowing, .topology-legend-line.flowing { animation: none; }
+    .topology-edge.flowing, .topology-legend-line.flowing,
+    .topology-edge.activity-tx, .topology-edge.activity-rx,
+    .topology-room-chip.activity-flash, .topology-room-peer-dir.active {
+      animation: none;
+    }
   }
   .topology-rooms { font-size: 12px; color: var(--text-dim); margin-top: 8px; }
   .topology-rooms .mono { color: var(--text); }
   /* Room ids as small click-to-copy chips, styled off the existing .badge. */
   .topology-room-chip { cursor: pointer; margin: 2px 4px 2px 0; }
   .topology-room-chip:hover { background: var(--accent-dim); color: var(--accent); }
+
+  /* ---- per-room breakdown (topology.status's optional `room_peers` field)
+     -- one block per joined room, pairing its room id with which modules
+     use it and which peers mistlib reports as connected *in that room
+     specifically* (see renderTopologyRoomBreakdown). This replaces the
+     plain .topology-room-chip list above when the daemon sends
+     `room_peers`; an older daemon that doesn't still gets that flat list. */
+  .topology-rooms-heading { font-weight: 600; color: var(--text-dim); margin-bottom: 2px; }
+  .topology-room-breakdown { display: flex; flex-direction: column; gap: 8px; }
+  .topology-room-item {
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    padding: 7px 10px;
+    background: var(--bg-alt);
+  }
+  .topology-room-item-head { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; }
+  /* Module badges (mailbox/ai/store/stream/cascade) reuse .badge but get a
+     tinted look so they read as "tags" rather than status pills. */
+  .topology-room-module-badge { background: var(--accent-dim); color: var(--accent); }
+  .topology-room-peers { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin-top: 6px; }
+  .topology-room-peer { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+  .topology-room-empty { color: var(--text-faint); font-style: italic; }
+  /* Per-peer TX/RX activity glyphs (topology.status's `activity` field):
+     only rendered at all once a peer has ever sent/received something this
+     daemon run (see renderTopologyRoomBreakdown), dim by default, and
+     briefly lit + popped by updateTopologyActivity/topologyFlash whenever a
+     fresh message crosses that direction. Color pairing (accent = TX,
+     ok = RX) matches the SVG edge activity classes above. */
+  .topology-room-peer-dirs { display: inline-flex; gap: 2px; font-size: 9px; line-height: 1; }
+  .topology-room-peer-dir { color: var(--text-faint); transition: color var(--dur-fast) var(--ease-out); }
+  .topology-room-peer-dir.tx.active { color: var(--accent); animation: topology-activity-pop 1.4s ease-out; }
+  .topology-room-peer-dir.rx.active { color: var(--ok); animation: topology-activity-pop 1.4s ease-out; }
+  @keyframes topology-activity-pop { 0% { transform: scale(1.8); } 100% { transform: scale(1); } }
+  /* Broadcast entries (room_peers has no peer row to flash) light the room
+     chip itself instead -- a static ring plus a brief fade, same reasoning
+     as the edge classes: the box-shadow is a plain property on the rule, so
+     reduced-motion (further up) only strips the animation, not the ring. */
+  .topology-room-chip.activity-flash { box-shadow: 0 0 0 2px var(--accent); animation: topology-activity-ring 1.4s ease-out; }
+  @keyframes topology-activity-ring { 0% { box-shadow: 0 0 0 0 var(--accent); } 100% { box-shadow: 0 0 0 4px transparent; } }
 
   /* ---- per-module topology mini-strips (Mailbox / AI / Store) ----
      One compact row: the module's room id, connection-state dots for the
@@ -1228,6 +1348,7 @@
     .topology-graph-wrap { -webkit-overflow-scrolling: touch; }
     .topo-strip { font-size: 11.5px; }
     .topo-strip a { margin-left: 0; }   /* wrap under the peers row instead of forcing width */
+    .topology-room-item { font-size: 11.5px; }
   }
 
   /* ---- respect reduced-motion: keep it calm, kill the movement --------- */
@@ -1384,7 +1505,7 @@
       </div>
     </div>
     <div class="row">
-      <button id="btn-stream-stop" class="danger" data-i18n="stream.stopBtn">Stop</button>
+      <button id="btn-stream-stop" class="danger" data-i18n="stream.stopBtn" hidden>Stop</button>
     </div>
     <details class="settings-drawer" id="settings-drawer-stream">
       <summary>
@@ -1410,10 +1531,8 @@
     <div id="ai-hints"></div>
     <dl class="kv" id="ai-kv"></dl>
     <div class="row">
-      <button id="btn-ai-provide-start" class="primary" data-i18n="ai.startProviding">Start providing</button>
-      <button id="btn-ai-provide-stop" class="danger" data-i18n="ai.stopProviding">Stop providing</button>
-      <button id="btn-ai-serve-start" class="primary" data-i18n="ai.startServe">Start API server</button>
-      <button id="btn-ai-serve-stop" class="danger" data-i18n="ai.stopServe">Stop API server</button>
+      <button id="btn-ai-provide-toggle" class="primary" data-i18n="ai.startProviding">Start providing</button>
+      <button id="btn-ai-serve-toggle" class="primary" data-i18n="ai.startServe">Start API server</button>
     </div>
     <div id="ai-models" class="row"></div>
     <hr class="sep">
@@ -1454,62 +1573,69 @@
       <span class="topo-strip-peers" data-role="peers"></span>
       <a href="#topology-card" data-i18n="topoStrip.viewFull">View full topology</a>
     </div>
-    <div class="table-wrap">
-      <table id="mailbox-held-table">
-        <thead><tr>
-          <th data-i18n="mailbox.heldCol.id">ID</th>
-          <th data-i18n="mailbox.heldCol.from">From</th>
-          <th data-i18n="mailbox.heldCol.to">To</th>
-          <th data-i18n="mailbox.heldCol.size">Size</th>
-          <th data-i18n="mailbox.heldCol.since">Held since</th>
-        </tr></thead>
-        <tbody></tbody>
-      </table>
-      <div class="empty-note" id="mailbox-held-empty" data-i18n="mailbox.heldEmpty">No held deposits &mdash; deposits are messages other nodes left here for their recipients to fetch later.</div>
+    <div class="subtabs" role="tablist" data-i18n-aria-label="mailbox.tabs.groupLabel" aria-label="Mailbox sections">
+      <button type="button" data-subtab-target="messages" data-i18n="mailbox.tabs.messages">Messages</button>
+      <button type="button" data-subtab-target="chatlog" data-i18n="mailbox.tabs.chatlog">tc-chat relay log</button>
     </div>
-    <div class="table-wrap">
-      <table id="mailbox-fetch-table">
-        <thead><tr>
-          <th data-i18n="mailbox.fetchCol.id">ID</th>
-          <th data-i18n="mailbox.fetchCol.from">From</th>
-          <th data-i18n="mailbox.fetchCol.content">Content</th>
-        </tr></thead>
-        <tbody></tbody>
-      </table>
-      <div class="empty-note" id="mailbox-fetch-empty" data-i18n="mailbox.fetchEmpty">Nothing fetched yet. Click &quot;Fetch my messages&quot; to check for new mail.</div>
+    <div class="subtab-page" data-subtab="messages">
+      <div class="table-wrap">
+        <table id="mailbox-held-table">
+          <thead><tr>
+            <th data-i18n="mailbox.heldCol.id">ID</th>
+            <th data-i18n="mailbox.heldCol.from">From</th>
+            <th data-i18n="mailbox.heldCol.to">To</th>
+            <th data-i18n="mailbox.heldCol.size">Size</th>
+            <th data-i18n="mailbox.heldCol.since">Held since</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="empty-note" id="mailbox-held-empty" data-i18n="mailbox.heldEmpty">No held deposits &mdash; deposits are messages other nodes left here for their recipients to fetch later.</div>
+      </div>
+      <div class="table-wrap">
+        <table id="mailbox-fetch-table">
+          <thead><tr>
+            <th data-i18n="mailbox.fetchCol.id">ID</th>
+            <th data-i18n="mailbox.fetchCol.from">From</th>
+            <th data-i18n="mailbox.fetchCol.content">Content</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="empty-note" id="mailbox-fetch-empty" data-i18n="mailbox.fetchEmpty">Nothing fetched yet. Click &quot;Fetch my messages&quot; to check for new mail.</div>
+      </div>
+      <hr class="sep">
+      <form class="inline" id="mailbox-send-form">
+        <div class="field" style="flex: 1; min-width: 160px;">
+          <label for="mailbox-to" data-i18n="mailbox.toLabel">To (DID or node id)</label>
+          <input type="text" id="mailbox-to" data-i18n-placeholder="mailbox.toPlaceholder" placeholder="did:key:z6Mk&hellip; or a 16-hex node id" autocomplete="off">
+        </div>
+        <div class="field" style="flex: 2;">
+          <label for="mailbox-message" data-i18n="mailbox.messageLabel">Message</label>
+          <input type="text" id="mailbox-message" autocomplete="off">
+        </div>
+        <button type="submit" class="primary" id="btn-mailbox-send" data-i18n="mailbox.send">Send</button>
+      </form>
     </div>
-    <hr class="sep">
-    <form class="inline" id="mailbox-send-form">
-      <div class="field" style="flex: 1; min-width: 160px;">
-        <label for="mailbox-to" data-i18n="mailbox.toLabel">To (DID or node id)</label>
-        <input type="text" id="mailbox-to" data-i18n-placeholder="mailbox.toPlaceholder" placeholder="did:key:z6Mk&hellip; or a 16-hex node id" autocomplete="off">
+    <div class="subtab-page" data-subtab="chatlog">
+      <h3 style="margin: 0 0 8px;"><span data-i18n="mailbox.chatLog.title">tc-chat relay log</span></h3>
+      <div class="inline" style="align-items: flex-end;">
+        <div class="field" style="flex: 1; min-width: 160px;">
+          <label for="mailbox-chat-room" data-i18n="mailbox.chatLog.roomLabel">tc-chat room</label>
+          <select id="mailbox-chat-room"></select>
+        </div>
+        <button type="button" id="btn-mailbox-chat-refresh" data-i18n="mailbox.chatLog.refresh">Refresh</button>
       </div>
-      <div class="field" style="flex: 2;">
-        <label for="mailbox-message" data-i18n="mailbox.messageLabel">Message</label>
-        <input type="text" id="mailbox-message" autocomplete="off">
+      <div class="table-wrap">
+        <table id="mailbox-chat-log-table">
+          <thead><tr>
+            <th data-i18n="mailbox.chatLog.col.time">Time</th>
+            <th data-i18n="mailbox.chatLog.col.from">From</th>
+            <th data-i18n="mailbox.chatLog.col.kind">Kind</th>
+            <th data-i18n="mailbox.chatLog.col.content">Content</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="empty-note" id="mailbox-chat-log-empty" data-i18n="mailbox.chatLog.empty">No relayed tc-chat messages yet for this room.</div>
       </div>
-      <button type="submit" class="primary" id="btn-mailbox-send" data-i18n="mailbox.send">Send</button>
-    </form>
-    <hr class="sep">
-    <h3 style="margin: 0 0 8px;"><span data-i18n="mailbox.chatLog.title">tc-chat relay log</span></h3>
-    <div class="inline" style="align-items: flex-end;">
-      <div class="field" style="flex: 1; min-width: 160px;">
-        <label for="mailbox-chat-room" data-i18n="mailbox.chatLog.roomLabel">tc-chat room</label>
-        <select id="mailbox-chat-room"></select>
-      </div>
-      <button type="button" id="btn-mailbox-chat-refresh" data-i18n="mailbox.chatLog.refresh">Refresh</button>
-    </div>
-    <div class="table-wrap">
-      <table id="mailbox-chat-log-table">
-        <thead><tr>
-          <th data-i18n="mailbox.chatLog.col.time">Time</th>
-          <th data-i18n="mailbox.chatLog.col.from">From</th>
-          <th data-i18n="mailbox.chatLog.col.kind">Kind</th>
-          <th data-i18n="mailbox.chatLog.col.content">Content</th>
-        </tr></thead>
-        <tbody></tbody>
-      </table>
-      <div class="empty-note" id="mailbox-chat-log-empty" data-i18n="mailbox.chatLog.empty">No relayed tc-chat messages yet for this room.</div>
     </div>
     <div class="topology-slot" id="topology-slot-mailbox"></div>
     <details class="settings-drawer" id="settings-drawer-mailbox">
@@ -1533,108 +1659,116 @@
       <span class="topo-strip-peers" data-role="peers"></span>
       <a href="#topology-card" data-i18n="topoStrip.viewFull">View full topology</a>
     </div>
-    <div class="table-wrap">
-      <table id="store-table">
-        <thead><tr>
-          <th data-i18n="store.col.cid">CID</th>
-          <th data-i18n="store.col.name">Name</th>
-          <th data-i18n="store.col.size">Size</th>
-          <th data-i18n="store.col.storedAt">Stored at</th>
-          <th data-i18n="store.col.actions">Actions</th>
-        </tr></thead>
-        <tbody></tbody>
-      </table>
-      <div class="empty-note" id="store-empty" data-i18n="store.empty">No stored items.</div>
+    <div class="subtabs" role="tablist" data-i18n-aria-label="store.tabs.groupLabel" aria-label="Store sections">
+      <button type="button" data-subtab-target="files" data-i18n="store.tabs.files">Files</button>
+      <button type="button" data-subtab-target="sandbox" data-i18n="store.tabs.sandbox">Sandbox</button>
+      <button type="button" data-subtab-target="sync" data-i18n="store.tabs.sync">Folder sync</button>
     </div>
-    <hr class="sep">
-    <div class="store-dropzone" id="store-dropzone" tabindex="0" role="button">
-      <span data-i18n="store.dropzoneText">Drag files here, or click to browse</span>
-      <span class="muted" style="font-size: 11.5px;" data-i18n="store.dropzoneHint">Uploads directly to this node&#39;s store.</span>
-      <input type="file" id="store-file-input" multiple hidden>
-    </div>
-    <div id="store-upload-status"></div>
-    <details id="store-path-details">
-      <summary data-i18n="store.addByPathSummary">Add by file path on this machine (for very large local files)</summary>
-      <form class="inline" id="store-put-form">
-        <div class="field" style="flex: 1;">
-          <label for="store-path" data-i18n="store.pathLabel">Path on this machine (read server-side by the daemon)</label>
-          <input type="text" id="store-path" data-i18n-placeholder="store.pathPlaceholder" placeholder="C:\path\to\file or /path/to/file" autocomplete="off">
-        </div>
-        <button type="submit" class="primary" id="btn-store-put" data-i18n="store.addBtn">Add</button>
-      </form>
-    </details>
-    <hr class="sep">
-    <div class="row" style="justify-content: space-between;">
-      <h3 style="margin: 0;"><span data-i18n="store.sandbox.title">Sandbox</span></h3>
-      <button type="button" id="btn-store-sandbox-refresh" data-i18n="common.refresh">Refresh</button>
-    </div>
-    <p class="muted" style="font-size: 12px;" data-i18n="store.sandbox.hint">A scratch folder on this node for one-shot imports, downloads and encryption &mdash; like the storage-cli sandbox.</p>
-    <div class="table-wrap">
-      <table id="store-sandbox-table">
-        <thead><tr>
-          <th data-i18n="store.sandbox.col.path">Path</th>
-          <th data-i18n="store.sandbox.col.actions">Actions</th>
-        </tr></thead>
-        <tbody></tbody>
-      </table>
-      <div class="empty-note" id="store-sandbox-empty" data-i18n="store.sandbox.empty">Sandbox is empty.</div>
-    </div>
-    <div class="store-dropzone" id="store-sandbox-dropzone" tabindex="0" role="button">
-      <span data-i18n="store.sandbox.dropzoneText">Drag files here, or click to browse</span>
-      <span class="muted" style="font-size: 11.5px;" data-i18n="store.sandbox.dropzoneHint">Imports into this node&#39;s sandbox (not yet stored or encrypted).</span>
-      <input type="file" id="store-sandbox-file-input" multiple hidden>
-    </div>
-    <div id="store-sandbox-upload-status"></div>
-    <hr class="sep">
-    <details id="store-getfile-details">
-      <summary data-i18n="store.getfile.summary">Decrypt a stored CID into the sandbox</summary>
-      <form class="inline" id="store-getfile-form">
-        <div class="field" style="flex: 2;">
-          <label for="store-getfile-cid" data-i18n="store.getfile.cidLabel">CID</label>
-          <input type="text" id="store-getfile-cid" autocomplete="off">
-        </div>
-        <div class="field" style="flex: 1;">
-          <label for="store-getfile-pass" data-i18n="store.getfile.passLabel">Passphrase</label>
-          <input type="password" id="store-getfile-pass" autocomplete="current-password">
-        </div>
-        <button type="submit" class="primary" id="btn-store-getfile" data-i18n="store.getfile.startBtn">Decrypt to sandbox</button>
-      </form>
-      <div id="store-getfile-result"></div>
-    </details>
-    <hr class="sep">
-    <div class="row" style="justify-content: space-between;">
-      <h3 style="margin: 0;" data-i18n="store.sync.summary">Folder sync (tc-storage share links)</h3>
-      <button type="button" id="btn-store-sync-refresh" data-i18n="common.refresh">Refresh</button>
-    </div>
-    <p class="muted" style="font-size: 12px;" data-i18n="store.sync.hint">Paste a folder share link below. The folder appears in the list right away with a &ldquo;connecting&rdquo; status while this node joins the room and fetches it into a managed sandbox in the background &mdash; the owner must be online for that to complete, and the daemon keeps retrying automatically every 30 seconds until it succeeds. Files stay in the sandbox until you press Extract on one to save a copy to your configured extract destination.</p>
-    <div class="row store-export-dir-row">
-      <label for="store-export-dir" data-i18n="store.sync.exportDirLabel">Extract to</label>
-      <input type="text" id="store-export-dir" data-i18n-placeholder="store.sync.exportDirPlaceholder" placeholder="Defaults to your downloads folder" autocomplete="off">
-      <button type="button" id="btn-store-export-dir-browse" data-i18n="store.sync.browseBtn">Browse&hellip;</button>
-      <button type="button" id="btn-store-export-dir-save" data-i18n="common.save">Save</button>
-    </div>
-    <p class="muted store-export-dir-note" id="store-export-dir-note"></p>
-    <form class="inline" id="store-sync-form">
-      <div class="field" style="flex: 2;">
-        <label for="store-sync-url" data-i18n="store.sync.urlLabel">Share link</label>
-        <input type="text" id="store-sync-url" data-i18n-placeholder="store.sync.urlPlaceholder" placeholder="#tc-share=… or full URL" autocomplete="off">
+    <div class="subtab-page" data-subtab="files">
+      <div class="table-wrap">
+        <table id="store-table">
+          <thead><tr>
+            <th data-i18n="store.col.cid">CID</th>
+            <th data-i18n="store.col.name">Name</th>
+            <th data-i18n="store.col.size">Size</th>
+            <th data-i18n="store.col.storedAt">Stored at</th>
+            <th data-i18n="store.col.actions">Actions</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="empty-note" id="store-empty" data-i18n="store.empty">No stored items.</div>
       </div>
-      <button type="submit" class="primary" id="btn-store-sync" data-i18n="store.sync.startBtn">Start sync</button>
-    </form>
-    <div class="table-wrap" id="store-sync-list">
-      <table id="store-sync-table">
-        <thead><tr>
-          <th data-i18n="store.sync.col.folder">Folder</th>
-          <th data-i18n="store.sync.col.status">Status</th>
-          <th data-i18n="store.sync.col.files">Files</th>
-          <th data-i18n="store.sync.col.lastSynced">Last synced</th>
-          <th data-i18n="store.sync.col.actions">Actions</th>
-        </tr></thead>
-        <tbody id="store-sync-tbody"></tbody>
-      </table>
-      <div class="empty-note" id="store-sync-empty" data-i18n="store.sync.none">No active folder syncs.</div>
+      <hr class="sep">
+      <div class="store-dropzone" id="store-dropzone" tabindex="0" role="button">
+        <span data-i18n="store.dropzoneText">Drag files here, or click to browse</span>
+        <span class="muted" style="font-size: 11.5px;" data-i18n="store.dropzoneHint">Uploads directly to this node&#39;s store.</span>
+        <input type="file" id="store-file-input" multiple hidden>
+      </div>
+      <div id="store-upload-status"></div>
+      <details id="store-path-details">
+        <summary data-i18n="store.addByPathSummary">Add by file path on this machine (for very large local files)</summary>
+        <form class="inline" id="store-put-form">
+          <div class="field" style="flex: 1;">
+            <label for="store-path" data-i18n="store.pathLabel">Path on this machine (read server-side by the daemon)</label>
+            <input type="text" id="store-path" data-i18n-placeholder="store.pathPlaceholder" placeholder="C:\path\to\file or /path/to/file" autocomplete="off">
+          </div>
+          <button type="submit" class="primary" id="btn-store-put" data-i18n="store.addBtn">Add</button>
+        </form>
+      </details>
     </div>
-    <hr class="sep">
+    <div class="subtab-page" data-subtab="sandbox">
+      <div class="row" style="justify-content: space-between;">
+        <h3 style="margin: 0;"><span data-i18n="store.sandbox.title">Sandbox</span></h3>
+        <button type="button" id="btn-store-sandbox-refresh" data-i18n="common.refresh">Refresh</button>
+      </div>
+      <p class="muted" style="font-size: 12px;" data-i18n="store.sandbox.hint">A scratch folder on this node for one-shot imports, downloads and encryption &mdash; like the storage-cli sandbox.</p>
+      <div class="table-wrap">
+        <table id="store-sandbox-table">
+          <thead><tr>
+            <th data-i18n="store.sandbox.col.path">Path</th>
+            <th data-i18n="store.sandbox.col.actions">Actions</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="empty-note" id="store-sandbox-empty" data-i18n="store.sandbox.empty">Sandbox is empty.</div>
+      </div>
+      <div class="store-dropzone" id="store-sandbox-dropzone" tabindex="0" role="button">
+        <span data-i18n="store.sandbox.dropzoneText">Drag files here, or click to browse</span>
+        <span class="muted" style="font-size: 11.5px;" data-i18n="store.sandbox.dropzoneHint">Imports into this node&#39;s sandbox (not yet stored or encrypted).</span>
+        <input type="file" id="store-sandbox-file-input" multiple hidden>
+      </div>
+      <div id="store-sandbox-upload-status"></div>
+      <hr class="sep">
+      <details id="store-getfile-details">
+        <summary data-i18n="store.getfile.summary">Decrypt a stored CID into the sandbox</summary>
+        <form class="inline" id="store-getfile-form">
+          <div class="field" style="flex: 2;">
+            <label for="store-getfile-cid" data-i18n="store.getfile.cidLabel">CID</label>
+            <input type="text" id="store-getfile-cid" autocomplete="off">
+          </div>
+          <div class="field" style="flex: 1;">
+            <label for="store-getfile-pass" data-i18n="store.getfile.passLabel">Passphrase</label>
+            <input type="password" id="store-getfile-pass" autocomplete="current-password">
+          </div>
+          <button type="submit" class="primary" id="btn-store-getfile" data-i18n="store.getfile.startBtn">Decrypt to sandbox</button>
+        </form>
+        <div id="store-getfile-result"></div>
+      </details>
+    </div>
+    <div class="subtab-page" data-subtab="sync">
+      <div class="row" style="justify-content: space-between;">
+        <h3 style="margin: 0;" data-i18n="store.sync.summary">Folder sync (tc-storage share links)</h3>
+        <button type="button" id="btn-store-sync-refresh" data-i18n="common.refresh">Refresh</button>
+      </div>
+      <p class="muted" style="font-size: 12px;" data-i18n="store.sync.hint">Paste a folder share link below. The folder appears in the list right away with a &ldquo;connecting&rdquo; status while this node joins the room and fetches it into a managed sandbox in the background &mdash; the owner must be online for that to complete, and the daemon keeps retrying automatically every 30 seconds until it succeeds. Files stay in the sandbox until you press Extract on one to save a copy to your configured extract destination.</p>
+      <div class="row store-export-dir-row">
+        <label for="store-export-dir" data-i18n="store.sync.exportDirLabel">Extract to</label>
+        <input type="text" id="store-export-dir" data-i18n-placeholder="store.sync.exportDirPlaceholder" placeholder="Defaults to your downloads folder" autocomplete="off">
+        <button type="button" id="btn-store-export-dir-browse" data-i18n="store.sync.browseBtn">Browse&hellip;</button>
+        <button type="button" id="btn-store-export-dir-save" data-i18n="common.save">Save</button>
+      </div>
+      <p class="muted store-export-dir-note" id="store-export-dir-note"></p>
+      <form class="inline" id="store-sync-form">
+        <div class="field" style="flex: 2;">
+          <label for="store-sync-url" data-i18n="store.sync.urlLabel">Share link</label>
+          <input type="text" id="store-sync-url" data-i18n-placeholder="store.sync.urlPlaceholder" placeholder="#tc-share=… or full URL" autocomplete="off">
+        </div>
+        <button type="submit" class="primary" id="btn-store-sync" data-i18n="store.sync.startBtn">Start sync</button>
+      </form>
+      <div class="table-wrap" id="store-sync-list">
+        <table id="store-sync-table">
+          <thead><tr>
+            <th data-i18n="store.sync.col.folder">Folder</th>
+            <th data-i18n="store.sync.col.status">Status</th>
+            <th data-i18n="store.sync.col.files">Files</th>
+            <th data-i18n="store.sync.col.lastSynced">Last synced</th>
+            <th data-i18n="store.sync.col.actions">Actions</th>
+          </tr></thead>
+          <tbody id="store-sync-tbody"></tbody>
+        </table>
+        <div class="empty-note" id="store-sync-empty" data-i18n="store.sync.none">No active folder syncs.</div>
+      </div>
+    </div>
     <div class="topology-slot" id="topology-slot-store"></div>
     <details class="settings-drawer" id="settings-drawer-storage">
       <summary>
@@ -1650,6 +1784,11 @@
     <h2><span data-i18n="sched.title">Scheduler</span> <span class="spacer"></span>
       <button data-role="refresh" data-target="scheduler" data-i18n="common.refresh">Refresh</button>
     </h2>
+    <div class="subtabs" role="tablist" data-i18n-aria-label="sched.tabs.groupLabel" aria-label="Scheduler sections">
+      <button type="button" data-subtab-target="jobs" data-i18n="sched.tabs.jobs">Jobs</button>
+      <button type="button" data-subtab-target="runs" data-i18n="sched.tabs.runs">Recent runs</button>
+    </div>
+    <div class="subtab-page" data-subtab="jobs">
     <p class="muted" style="font-size: 12px;" data-i18n="sched.hint">Runs shell commands on this node on a recurring schedule. The scheduler must be enabled below (applies on daemon restart).</p>
     <div class="table-wrap">
       <table id="scheduler-table">
@@ -1685,7 +1824,8 @@
     </form>
     <p class="muted" style="font-size: 12px;" data-i18n="sched.form.scheduleHint">Supported forms: 6-field cron like &ldquo;0 */5 * * * *&rdquo;, &ldquo;@every 90m&rdquo;, &ldquo;@every 1w Sun 21:00&rdquo;, or &ldquo;@hourly&rdquo; / &ldquo;@daily&rdquo; / &ldquo;@weekly&rdquo; / &ldquo;@monthly&rdquo;.</p>
     <div id="scheduler-preview"></div>
-    <hr class="sep">
+    </div>
+    <div class="subtab-page" data-subtab="runs">
     <h3 style="margin: 0 0 8px;"><span data-i18n="sched.runs.title">Recent runs</span></h3>
     <div class="table-wrap">
       <table id="scheduler-runs-table">
@@ -1699,6 +1839,7 @@
         <tbody></tbody>
       </table>
       <div class="empty-note" id="scheduler-runs-empty" data-i18n="sched.runs.empty">No runs yet.</div>
+    </div>
     </div>
     <details class="settings-drawer" id="settings-drawer-scheduler">
       <summary>
@@ -1714,6 +1855,12 @@
     <h2><span data-i18n="bot.title">Bot</span> <span class="spacer"></span>
       <button data-role="refresh" data-target="bot" data-i18n="common.refresh">Refresh</button>
     </h2>
+    <div class="subtabs" role="tablist" data-i18n-aria-label="bot.tabs.groupLabel" aria-label="Bot sections">
+      <button type="button" data-subtab-target="pipelines" data-i18n="bot.tabs.pipelines">Pipelines</button>
+      <button type="button" data-subtab-target="runs" data-i18n="bot.tabs.runs">Recent runs</button>
+      <button type="button" data-subtab-target="items" data-i18n="bot.tabs.items">Delivered items</button>
+    </div>
+    <div class="subtab-page" data-subtab="pipelines">
     <p class="muted" style="font-size: 12px;" data-i18n="bot.hint">Create, edit, and delete pipelines right here. Changes save immediately and are picked up within seconds &mdash; no daemon restart needed.</p>
     <div class="table-wrap">
       <table id="bot-pipelines-table">
@@ -1910,7 +2057,8 @@
       <button type="button" id="btn-bot-cancel-edit" hidden data-i18n="bot.form.cancelBtn">Cancel edit</button>
     </form>
     <p class="muted" style="font-size: 12px;" data-i18n="bot.form.hint">Pick “Custom…” on any dropdown to type a value directly. Source languages: leave all unchecked to allow every language. Transform order is fixed: Summarize → Translate → Text-to-speech. Changes save immediately and are picked up within seconds &mdash; no daemon restart needed.</p>
-    <hr class="sep">
+    </div>
+    <div class="subtab-page" data-subtab="runs">
     <h3 style="margin: 0 0 8px;"><span data-i18n="bot.runs.title">Recent runs</span></h3>
     <div class="table-wrap">
       <table id="bot-runs-table">
@@ -1925,7 +2073,8 @@
       </table>
       <div class="empty-note" id="bot-runs-empty" data-i18n="bot.runs.empty">No runs yet.</div>
     </div>
-    <hr class="sep">
+    </div>
+    <div class="subtab-page" data-subtab="items">
     <h3 style="margin: 0 0 8px;"><span data-i18n="bot.items.title">Delivered items</span></h3>
     <div class="table-wrap">
       <table id="bot-items-table">
@@ -1938,6 +2087,7 @@
         <tbody></tbody>
       </table>
       <div class="empty-note" id="bot-items-empty" data-i18n="bot.items.empty">No delivered items yet.</div>
+    </div>
     </div>
     <details class="settings-drawer" id="settings-drawer-bot">
       <summary>
@@ -2244,6 +2394,10 @@
       "topology.kv.cascadeOff": "off",
       "topology.rooms": "Joined rooms",
       "topology.noRooms": "No rooms joined yet.",
+      "topology.room.noPeers": "No peers connected in this room yet.",
+      "topology.activity.tx": "TX {count} msg / {bytes}",
+      "topology.activity.rx": "RX {count} msg / {bytes}",
+      "topology.activity.broadcast": "Broadcast",
       "topology.emptyHint": "No peers connected yet — peers appear here as rooms are joined.",
       "topology.aria": "Topology: {peers} connected peers across {rooms} joined rooms",
       "topology.contextRoom": "This tab's room",
@@ -2290,6 +2444,9 @@
       "chat.error": "error",
       "chat.assistant": "assistant",
       "chat.noProviderError": "No provider reachable — start providing locally or wait for a p2p provider.",
+      "mailbox.tabs.groupLabel": "Mailbox sections",
+      "mailbox.tabs.messages": "Messages",
+      "mailbox.tabs.chatlog": "tc-chat relay log",
       "mailbox.title": "Relay",
       "mailbox.fetchBtn": "Fetch my messages",
       "mailbox.refreshHeld": "Refresh held",
@@ -2321,6 +2478,10 @@
       "mailbox.chatLog.disabled": "tc-chat relay is off. Set rooms and enable it below (requires a daemon restart).",
       "mailbox.chatLog.noRooms": "No tc-chat rooms configured yet.",
       "mailbox.chatLog.notJoined": "not joined",
+      "store.tabs.groupLabel": "Store sections",
+      "store.tabs.files": "Files",
+      "store.tabs.sandbox": "Sandbox",
+      "store.tabs.sync": "Folder sync",
       "store.title": "Store",
       "store.col.cid": "CID",
       "store.col.name": "Name",
@@ -2405,6 +2566,9 @@
       "store.sync.filesEmpty": "No files yet.",
       "store.sync.extractBtn": "Extract",
       "store.sync.extracted": "Extracted to {output}",
+      "sched.tabs.groupLabel": "Scheduler sections",
+      "sched.tabs.jobs": "Jobs",
+      "sched.tabs.runs": "Recent runs",
       "sched.title": "Scheduler",
       "sched.hint": "Runs shell commands on this node on a recurring schedule. The scheduler must be enabled below (applies on daemon restart).",
       "sched.col.name": "Name",
@@ -2445,6 +2609,10 @@
       "sched.runs.empty": "No runs yet.",
       "sched.runs.ok": "OK",
       "sched.runs.fail": "FAIL (exit {code})",
+      "bot.tabs.groupLabel": "Bot sections",
+      "bot.tabs.pipelines": "Pipelines",
+      "bot.tabs.runs": "Recent runs",
+      "bot.tabs.items": "Delivered items",
       "bot.title": "Bot",
       "bot.hint": "Pick a recipe, fill in a few fields, and save. Pipelines run on their schedule and can be edited or deleted here at any time. Changes save immediately and are picked up within seconds — no daemon restart needed.",
       "bot.col.id": "ID",
@@ -2870,6 +3038,10 @@
       "topology.kv.cascadeOff": "オフ",
       "topology.rooms": "参加中のルーム",
       "topology.noRooms": "まだルームに参加していません。",
+      "topology.room.noPeers": "まだこのルームに接続中のピアはいません。",
+      "topology.activity.tx": "TX {count}件 / {bytes}",
+      "topology.activity.rx": "RX {count}件 / {bytes}",
+      "topology.activity.broadcast": "ブロードキャスト",
       "topology.emptyHint": "まだ接続中のピアはいません。ルームに参加すると、ここに表示されます。",
       "topology.aria": "トポロジー: {rooms} ルームで {peers} 件のピアと接続中",
       "topology.contextRoom": "このタブのルーム",
@@ -2916,6 +3088,9 @@
       "chat.error": "エラー",
       "chat.assistant": "アシスタント",
       "chat.noProviderError": "利用可能なプロバイダーがありません。ローカルで提供を開始するか、p2pプロバイダーが見つかるまでお待ちください。",
+      "mailbox.tabs.groupLabel": "メールボックスのセクション",
+      "mailbox.tabs.messages": "メッセージ",
+      "mailbox.tabs.chatlog": "tc-chatリレーログ",
       "mailbox.title": "リレー",
       "mailbox.fetchBtn": "メッセージを取得",
       "mailbox.refreshHeld": "保留中を更新",
@@ -2947,6 +3122,10 @@
       "mailbox.chatLog.disabled": "tc-chatリレーはオフです。下でルームを設定して有効化してください(デーモンの再起動が必要です)。",
       "mailbox.chatLog.noRooms": "tc-chatルームがまだ設定されていません。",
       "mailbox.chatLog.notJoined": "未参加",
+      "store.tabs.groupLabel": "ストアのセクション",
+      "store.tabs.files": "ファイル",
+      "store.tabs.sandbox": "サンドボックス",
+      "store.tabs.sync": "フォルダ同期",
       "store.title": "ストア",
       "store.col.cid": "CID",
       "store.col.name": "名前",
@@ -3031,6 +3210,9 @@
       "store.sync.filesEmpty": "まだファイルがありません。",
       "store.sync.extractBtn": "取り出す",
       "store.sync.extracted": "{output} へ取り出しました",
+      "sched.tabs.groupLabel": "スケジューラのセクション",
+      "sched.tabs.jobs": "ジョブ",
+      "sched.tabs.runs": "実行履歴",
       "sched.title": "スケジューラ",
       "sched.hint": "このノード上でシェルコマンドを定期的に実行します。下記でスケジューラを有効にする必要があります (デーモンの再起動が必要です)。",
       "sched.col.name": "名前",
@@ -3071,6 +3253,10 @@
       "sched.runs.empty": "実行履歴はまだありません。",
       "sched.runs.ok": "成功",
       "sched.runs.fail": "失敗 (終了コード {code})",
+      "bot.tabs.groupLabel": "Bot セクション",
+      "bot.tabs.pipelines": "パイプライン",
+      "bot.tabs.runs": "実行履歴",
+      "bot.tabs.items": "配信済みアイテム",
       "bot.title": "Bot",
       "bot.hint": "レシピを選び、いくつかの項目を入力して保存するだけです。パイプラインはスケジュールどおりに実行され、このパネルからいつでも編集・削除できます。変更は即座に保存され、数秒以内に反映されます — デーモンの再起動は不要です。",
       "bot.col.id": "ID",
@@ -3496,6 +3682,10 @@
       "topology.kv.cascadeOff": "关闭",
       "topology.rooms": "已加入的房间",
       "topology.noRooms": "尚未加入任何房间。",
+      "topology.room.noPeers": "此房间中暂无已连接的节点。",
+      "topology.activity.tx": "TX {count} 条 / {bytes}",
+      "topology.activity.rx": "RX {count} 条 / {bytes}",
+      "topology.activity.broadcast": "广播",
       "topology.emptyHint": "尚无已连接的节点——加入房间后节点会显示在这里。",
       "topology.aria": "拓扑：在 {rooms} 个房间中与 {peers} 个节点相连",
       "topology.contextRoom": "此标签页的房间",
@@ -3542,6 +3732,9 @@
       "chat.error": "错误",
       "chat.assistant": "助手",
       "chat.noProviderError": "没有可用的提供方 — 请在本地开始提供服务，或等待 p2p 提供方出现。",
+      "mailbox.tabs.groupLabel": "邮箱部分",
+      "mailbox.tabs.messages": "消息",
+      "mailbox.tabs.chatlog": "tc-chat 中继日志",
       "mailbox.title": "中继",
       "mailbox.fetchBtn": "获取我的消息",
       "mailbox.refreshHeld": "刷新暂存",
@@ -3573,6 +3766,10 @@
       "mailbox.chatLog.disabled": "tc-chat 中继已关闭。请在下方设置房间并启用(需要重启守护进程)。",
       "mailbox.chatLog.noRooms": "尚未配置 tc-chat 房间。",
       "mailbox.chatLog.notJoined": "未加入",
+      "store.tabs.groupLabel": "存储部分",
+      "store.tabs.files": "文件",
+      "store.tabs.sandbox": "沙盒",
+      "store.tabs.sync": "文件夹同步",
       "store.title": "存储",
       "store.col.cid": "CID",
       "store.col.name": "名称",
@@ -3657,6 +3854,9 @@
       "store.sync.filesEmpty": "暂无文件。",
       "store.sync.extractBtn": "提取",
       "store.sync.extracted": "已提取到 {output}",
+      "sched.tabs.groupLabel": "调度器部分",
+      "sched.tabs.jobs": "任务",
+      "sched.tabs.runs": "运行记录",
       "sched.title": "调度器",
       "sched.hint": "按计划在本节点上运行 shell 命令。需要在下方启用调度器 (需要重启守护进程)。",
       "sched.col.name": "名称",
@@ -3697,6 +3897,10 @@
       "sched.runs.empty": "暂无运行记录。",
       "sched.runs.ok": "成功",
       "sched.runs.fail": "失败 (退出码 {code})",
+      "bot.tabs.groupLabel": "Bot 部分",
+      "bot.tabs.pipelines": "管道",
+      "bot.tabs.runs": "运行记录",
+      "bot.tabs.items": "已投递项目",
       "bot.title": "Bot",
       "bot.hint": "选择一个方案，填写少量字段后保存即可 — 管道会按计划自动运行，随时可以在此编辑或删除。更改会立即保存，并在几秒内生效 —— 无需重启守护进程。",
       "bot.col.id": "ID",
@@ -4391,6 +4595,8 @@
   var streamKv = document.getElementById("stream-kv");
   var streamUrlCallout = document.getElementById("stream-url-callout");
   var streamUrlText = document.getElementById("stream-url-text");
+  var btnStreamStart = document.getElementById("btn-stream-start");
+  var btnStreamStop = document.getElementById("btn-stream-stop");
   var relayRoomHint = document.getElementById("relay-room-hint");
   var streamVrchatHint = document.getElementById("stream-vrchat-hint");
   var cascadeRoleBadge = document.getElementById("cascade-role-badge");
@@ -4437,6 +4643,20 @@
     }
   }
 
+  /* Start/Stop are mutually exclusive, mirroring renderShareCard() below:
+     only the button for the action that's currently valid is shown. A
+     running stream may be either backend (native capture or tc-chat relay)
+     -- both report through the same s.running flag, so one check covers
+     both start flows (#btn-stream-start and the relay form). Unknown status
+     (poll failed / not yet loaded, s === null) is treated like "not
+     running": show Start, hide Stop. */
+  function renderStreamButtons() {
+    var s = state.stream;
+    var running = !!(s && s.running);
+    btnStreamStart.hidden = running;
+    btnStreamStop.hidden = !running;
+  }
+
   function renderStream() {
     streamKv.innerHTML = "";
     var s = state.stream;
@@ -4445,6 +4665,7 @@
       streamUrlCallout.hidden = true;
       renderVrchatHint(null);
       renderShareCard();
+      renderStreamButtons();
       return;
     }
     if (s.running) {
@@ -4464,6 +4685,7 @@
     }
     renderVrchatHint(s);
     renderShareCard();
+    renderStreamButtons();
   }
 
   /* Short display form of a node/transport id. Historically a plain 8-char
@@ -4719,6 +4941,153 @@
     if (connState === "connected") return "state-connected";
     if (connState === "connecting" || connState === "reconnecting") return "state-connecting";
     return "state-down"; // failed / disconnected / unknown
+  }
+
+  /* ---- data-activity pulses (topology.status's optional `activity` field)
+     ----
+     One entry per (room, peer) pair that has ever seen traffic this daemon
+     run (`node_id: null` = room-wide broadcast TX). This section turns a
+     rising message counter into a brief, CSS-driven flash on whatever's
+     already rendered for that room/peer -- the SVG peer edge, the per-room
+     breakdown's tx/rx glyphs, or (for a broadcast entry, which has no peer
+     row) the room chip itself. Deliberately decoupled from renderTopology's
+     own render-skip cache (topologyLastSig): activity ticks constantly
+     while the graph's actual shape (nodes/edges/rooms) usually doesn't, so
+     gating this on that signature would either force a full re-render every
+     poll (defeating the point of the cache) or get silently swallowed by
+     it. Instead this runs on every poll unconditionally and only ever
+     mutates classList on elements the last real render already produced. */
+
+  var TOPOLOGY_ACTIVITY_FLASH_MS = 1500;
+
+  /* null = not yet seeded (page just loaded, or the daemon connection was
+     just lost) -- see updateTopologyActivity. */
+  var topologyActivityMemory = null;
+
+  /* Registries of currently-rendered elements an activity pulse can target,
+     keyed the same way `activity` entries are. Populated by
+     renderTopologyGraph / renderTopologyRoomBreakdown every time they
+     actually rebuild their DOM, and left alone (so still valid) whenever a
+     poll's render is skipped, since the elements they point to haven't
+     changed either. */
+  var topologyEdgeRegistry = {};     // node_id -> [SVGPathElement, ...]
+  var topologyRoomPeerRegistry = {}; // "room|nodeId" -> { tx: el|null, rx: el|null }
+  var topologyRoomChipRegistry = {}; // room -> chip element (broadcast target)
+
+  function topologyActivityKey(room, nodeId) {
+    return room + "|" + (nodeId || "");
+  }
+
+  /* Looks up a (room, node_id) pair's tx/rx activity entry -- shared by the
+     delta-animation trigger below and by renderTopologyRoomBreakdown's
+     cumulative-counter tooltips and glyph visibility. */
+  function topologyActivityMap(data) {
+    var map = {};
+    var activity = (data && Array.isArray(data.activity)) ? data.activity : [];
+    activity.forEach(function (entry) {
+      if (!entry || !entry.room) return;
+      map[topologyActivityKey(entry.room, entry.node_id)] = entry;
+    });
+    return map;
+  }
+
+  /* "TX 3 msg / 1.2 KB · RX 1 msg / 88 B"-style summary for a tooltip, or
+     null when the entry has never seen traffic in either direction. */
+  function topologyActivitySummary(entry) {
+    if (!entry) return null;
+    var parts = [];
+    if (entry.tx) parts.push(t("topology.activity.tx", { count: entry.tx.count, bytes: fmtBytes(entry.tx.bytes) }));
+    if (entry.rx) parts.push(t("topology.activity.rx", { count: entry.rx.count, bytes: fmtBytes(entry.rx.bytes) }));
+    return parts.length ? parts.join(" · ") : null;
+  }
+
+  /* Adds `className` to `el`, then removes it again after the flash window
+     -- restarting the timer (rather than stacking a second one) if the same
+     class is re-triggered before the previous flash finished decaying. */
+  function topologyFlash(el, className) {
+    if (!el) return;
+    el.classList.add(className);
+    el._topoFlashTimers = el._topoFlashTimers || {};
+    clearTimeout(el._topoFlashTimers[className]);
+    el._topoFlashTimers[className] = setTimeout(function () {
+      el.classList.remove(className);
+    }, TOPOLOGY_ACTIVITY_FLASH_MS);
+  }
+
+  /* Flashes whatever's currently registered for one (room, node, direction)
+     triple: the shared SVG edge for that peer (keyed by node id only -- the
+     graph draws one edge per peer, unioned across rooms, same as the rest
+     of buildTopologyGraph -- so activity in any one room lights that same
+     edge), plus either that peer's row in the per-room breakdown, or --
+     when nodeId is null, i.e. a room-wide broadcast with no peer row -- the
+     room's own chip. */
+  function topologyFireActivity(room, nodeId, dir) {
+    if (nodeId) {
+      (topologyEdgeRegistry[nodeId] || []).forEach(function (path) {
+        topologyFlash(path, dir === "tx" ? "activity-tx" : "activity-rx");
+      });
+      var rowEls = topologyRoomPeerRegistry[topologyActivityKey(room, nodeId)];
+      if (rowEls) topologyFlash(rowEls[dir], "active");
+    } else {
+      topologyFlash(topologyRoomChipRegistry[room], "activity-flash");
+    }
+  }
+
+  /* Delta-based activity trigger: compares this poll's `data.activity`
+     counts against the previous poll's (topologyActivityMemory) and fires
+     topologyFireActivity for whichever (room, peer, direction) triples show
+     a *higher* message count than last time -- age_ms alone is deliberately
+     not the trigger (a merely-recent-but-unchanged age would otherwise
+     re-flash on every poll). The one place age_ms *is* used is a key with
+     no previous count to diff against -- the very first poll after page
+     load / a reconnect, or a (room, peer) entry newly appearing mid-session
+     (its first-ever message) -- where a sub-poll-interval age is the only
+     signal that something "just happened" rather than happened minutes ago.
+     Counts reset to zero on a daemon restart; if any remembered count is
+     ever higher than the fresh value for the same key, the whole snapshot
+     is treated as a silent reseed (no animation this poll) rather than
+     misreading a counter rollback as a burst of new traffic. */
+  function updateTopologyActivity(data) {
+    var activity = (data && Array.isArray(data.activity)) ? data.activity : null;
+    if (!activity) {
+      topologyActivityMemory = null; // reseed cleanly whenever the field reappears
+      return;
+    }
+
+    var firstSeed = topologyActivityMemory === null;
+    var prevMemory = topologyActivityMemory || {};
+    var restarted = false;
+    if (!firstSeed) {
+      activity.forEach(function (entry) {
+        if (!entry || !entry.room) return;
+        var prev = prevMemory[topologyActivityKey(entry.room, entry.node_id)];
+        if (!prev) return;
+        ["tx", "rx"].forEach(function (dir) {
+          var prevCount = prev[dir] ? prev[dir].count : null;
+          var newCount = entry[dir] ? entry[dir].count : null;
+          if (prevCount != null && newCount != null && newCount < prevCount) restarted = true;
+        });
+      });
+    }
+
+    var nextMemory = {};
+    activity.forEach(function (entry) {
+      if (!entry || !entry.room) return;
+      var key = topologyActivityKey(entry.room, entry.node_id);
+      var prev = (!firstSeed && !restarted) ? prevMemory[key] : null;
+      nextMemory[key] = { tx: entry.tx || null, rx: entry.rx || null };
+
+      ["tx", "rx"].forEach(function (dir) {
+        var cur = entry[dir];
+        if (!cur) return;
+        var prevCount = prev && prev[dir] ? prev[dir].count : null;
+        var isNew = prevCount == null
+          ? (cur.age_ms != null && cur.age_ms < POLL_INTERVAL_MS)
+          : cur.count > prevCount;
+        if (isNew && !restarted) topologyFireActivity(entry.room, entry.node_id, dir);
+      });
+    });
+    topologyActivityMemory = nextMemory;
   }
 
   /* Pure: turns a `topology.status` payload into the node/edge lists the
@@ -5206,6 +5575,10 @@
   function renderTopologyGraph(graph) {
     topologySvg.innerHTML = "";
     topologySvg.appendChild(topologyArrowDefs());
+    /* Every edge this rebuild draws replaces the last one, so the activity
+       registry has to be thrown away and rebuilt alongside it -- see the
+       "data-activity pulses" section above topologyStateClass. */
+    topologyEdgeRegistry = {};
 
     var rightCount = graph.rightNodes.length;
     var leftCount = graph.leftNodes.length;
@@ -5351,9 +5724,18 @@
        already-placed label), sharing nodeRects so every edge's path bends
        around any box it isn't attached to, and recording each edge's
        endpoint keys for hover highlighting below. */
+    /* Registers a peer's edge so a later activity pulse (topologyFireActivity)
+       can find it -- keyed by node id only, since a given peer has exactly
+       one edge on this graph no matter how many rooms it's active in. */
+    function registerActivityEdge(id, path) {
+      if (!id) return;
+      (topologyEdgeRegistry[id] = topologyEdgeRegistry[id] || []).push(path);
+    }
+
     graph.leftNodes.forEach(function (n, i) {
       var path = topologyEdge(topologySvg, leftBoxes[i], selfBox, edgeLabelFor(n.edge), { flowing: !!n.flowing, placedRects: placedRects, nodeRects: nodeRects });
       hoverEdges.push({ el: path, from: n.id || ("left" + i), to: "self" });
+      registerActivityEdge(n.id, path);
     });
 
     graph.rightNodes.forEach(function (n, i) {
@@ -5371,6 +5753,7 @@
         path = topologyEdge(topologySvg, selfBox, box, edgeLabelFor(n.edge), { dashed: dashed, noArrow: noArrow, flowing: !!n.flowing, placedRects: placedRects, nodeRects: nodeRects });
       }
       hoverEdges.push({ el: path, from: "self", to: key });
+      registerActivityEdge(n.id, path);
     });
 
     if (viewerBox) {
@@ -5606,6 +5989,15 @@
       viewer: graph.viewerNode ? [graph.viewerNode.label, graph.viewerNode.sub, !!graph.viewerNode.flowing] : null,
       peersCount: (data.peers || []).length,
       rooms: data.rooms || [],
+      /* Drives the per-room breakdown (renderTopologyRoomBreakdown) when
+         present; the module/stream/consensus room ids are included too since
+         they feed that same breakdown's module badges but otherwise aren't
+         part of this signature (topoStrips render unconditionally on every
+         call, unaffected by the dedup below). */
+      roomPeers: data.room_peers || null,
+      moduleRoomInfo: data.modules ? [data.modules.mailbox, data.modules.ai, data.modules.store] : null,
+      streamRoom: (data.stream && data.stream.room) || null,
+      consensusRoom: (data.consensus && data.consensus.room) || null,
       cascade: graph.cascade ? [graph.cascade.role, graph.cascade.leader, graph.cascade.self, graph.cascade.source, graph.relayPeersCount] : null,
       consensusPeers: (data.consensus && data.consensus.active && Array.isArray(data.consensus.peers)) ? data.consensus.peers.length : null,
       streamRunning: graph.stream.running,
@@ -5613,6 +6005,107 @@
       videoFlow: graph.stream.running ? [graph.videoDelivered, graph.videoFlowing] : null,
       audioFlow: graph.stream.running ? [graph.audioDelivered, graph.audioFlowing] : null
     };
+  }
+
+  /* Which modules use a given room id, as short badge labels for the
+     per-room breakdown below -- reuses each module's own user-facing panel
+     title (mailbox/ai/store/stream) plus the existing cascade label instead
+     of inventing a second set of i18n strings for the same concepts. */
+  function topologyModuleBadgesForRoom(data, room) {
+    var badges = [];
+    var modules = data.modules || {};
+    if (modules.mailbox && modules.mailbox.room === room) badges.push(t("mailbox.title"));
+    if (modules.ai && modules.ai.room === room) badges.push(t("ai.title"));
+    if (modules.store && Array.isArray(modules.store.rooms) &&
+        modules.store.rooms.some(function (r) { return r && r.room === room; })) {
+      badges.push(t("store.title"));
+    }
+    if (data.stream && data.stream.room === room) badges.push(t("stream.title"));
+    if (data.consensus && data.consensus.room === room) badges.push(t("topology.kv.cascade"));
+    return badges;
+  }
+
+  /* Per-room breakdown, driven by topology.status's `room_peers` (one entry
+     per joined room, each carrying the peers mistlib reports as connected
+     in that *specific* room -- unlike the process-wide `peers` union the
+     rest of this card and the per-module mini-strips use). Only called when
+     the daemon actually sends that field; see the `Array.isArray` guard in
+     renderTopology, which falls back to the flat room-chip list otherwise
+     so an older daemon still renders cleanly. */
+  function renderTopologyRoomBreakdown(data) {
+    var roomPeers = data.room_peers || [];
+    /* Every chip/row this rebuild draws replaces the last one, so the
+       activity registries (topologyRoomPeerRegistry/topologyRoomChipRegistry)
+       have to be thrown away and rebuilt alongside them -- same reasoning as
+       topologyEdgeRegistry in renderTopologyGraph. */
+    topologyRoomPeerRegistry = {};
+    topologyRoomChipRegistry = {};
+    if (!roomPeers.length) {
+      topologyRooms.appendChild(el("span", { text: t("topology.noRooms") }));
+      return;
+    }
+    var activityMap = topologyActivityMap(data);
+    topologyRooms.appendChild(el("div", { class: "topology-rooms-heading", text: t("topology.rooms") }));
+    var list = el("div", { class: "topology-room-breakdown" });
+    roomPeers.forEach(function (entry) {
+      var room = entry && entry.room;
+      if (!room) return;
+      var peers = (entry && Array.isArray(entry.peers)) ? entry.peers : [];
+      var item = el("div", { class: "topology-room-item" });
+
+      var head = el("div", { class: "topology-room-item-head" });
+      /* Room-wide broadcast traffic has no peer row of its own, so its
+         cumulative counters (when any) ride on the room chip's tooltip, and
+         topologyFireActivity flashes the chip itself (see
+         .topology-room-chip.activity-flash) for a fresh broadcast send. */
+      var broadcastSummary = topologyActivitySummary(activityMap[topologyActivityKey(room, null)]);
+      var chipTitle = t("common.clickToCopy");
+      if (broadcastSummary) chipTitle += "\n" + t("topology.activity.broadcast") + ": " + broadcastSummary;
+      var chip = el("span", { class: "badge mono topology-room-chip", text: room, title: chipTitle });
+      chip.addEventListener("click", function () { copyToClipboard(room); });
+      head.appendChild(chip);
+      topologyRoomChipRegistry[room] = chip;
+      topologyModuleBadgesForRoom(data, room).forEach(function (label) {
+        head.appendChild(el("span", { class: "badge topology-room-module-badge", text: label }));
+      });
+      item.appendChild(head);
+
+      var peersEl = el("div", { class: "topology-room-peers" });
+      if (!peers.length) {
+        peersEl.appendChild(el("span", { class: "topology-room-empty", text: t("topology.room.noPeers") }));
+      } else {
+        peers.forEach(function (p) {
+          if (!p || !p.node_id) return;
+          var stateKey = "topology.state." + p.state;
+          var stateLabel = t(stateKey) === stateKey ? p.state : t(stateKey);
+          var activityEntry = activityMap[topologyActivityKey(room, p.node_id)];
+          var activitySummary = topologyActivitySummary(activityEntry);
+          var title = p.node_id + " · " + stateLabel;
+          if (activitySummary) title += "\n" + activitySummary;
+          var peerEl = el("span", { class: "topology-room-peer", title: title });
+          peerEl.appendChild(el("span", { class: "topo-strip-dot " + topologyStateClass(p.state) }));
+          peerEl.appendChild(el("span", { class: "mono", text: shortNodeId(p.node_id) }));
+          /* TX/RX glyphs only appear once that direction has ever carried
+             traffic (activityEntry.tx/rx is non-null) -- an idle-but-
+             connected peer keeps the plain dot+id it always had. Once
+             present, topologyFireActivity briefly highlights one via its
+             "active" class on every fresh delta (see updateTopologyActivity). */
+          var txEl = null, rxEl = null;
+          if (activityEntry && (activityEntry.tx || activityEntry.rx)) {
+            var dirs = el("span", { class: "topology-room-peer-dirs" });
+            if (activityEntry.tx) { txEl = el("span", { class: "topology-room-peer-dir tx", text: "▲" }); dirs.appendChild(txEl); }
+            if (activityEntry.rx) { rxEl = el("span", { class: "topology-room-peer-dir rx", text: "▼" }); dirs.appendChild(rxEl); }
+            peerEl.appendChild(dirs);
+          }
+          peerEl.addEventListener("click", function () { copyToClipboard(p.node_id); });
+          peersEl.appendChild(peerEl);
+          topologyRoomPeerRegistry[topologyActivityKey(room, p.node_id)] = { tx: txEl, rx: rxEl };
+        });
+      }
+      item.appendChild(peersEl);
+      list.appendChild(item);
+    });
+    topologyRooms.appendChild(list);
   }
 
   var topologyLastSig = null;
@@ -5628,9 +6121,15 @@
 
     topologyKv.innerHTML = "";
     topologyRooms.innerHTML = "";
+    /* Cleared here (not just inside renderTopologyRoomBreakdown) so the flat
+       room-chip fallback below and the "no data" early return also drop any
+       stale activity-registry entries from a previous render. */
+    topologyRoomPeerRegistry = {};
+    topologyRoomChipRegistry = {};
 
     if (!data) {
       topologySvg.innerHTML = "";
+      topologyEdgeRegistry = {};
       topologySvg.setAttribute("viewBox", "0 0 640 80");
       var placeholder = svgEl("text", { x: "320", y: "44", "text-anchor": "middle", class: "topology-node-sub" });
       placeholder.textContent = t("topology.kv.unknown");
@@ -5665,17 +6164,24 @@
       addKv(topologyKv, t("topology.kv.audioFlow"), t(flowStatusKey(graph.audioDelivered, graph.audioFlowing)));
     }
 
-    /* Room ids as small click-to-copy chips instead of a plain comma list. */
-    var rooms = data.rooms || [];
-    if (rooms.length) {
-      topologyRooms.appendChild(el("span", { text: t("topology.rooms") + ": " }));
-      rooms.forEach(function (room) {
-        var chip = el("span", { class: "badge mono topology-room-chip", text: room, title: t("common.clickToCopy") });
-        chip.addEventListener("click", function () { copyToClipboard(room); });
-        topologyRooms.appendChild(chip);
-      });
+    /* Per-room breakdown when the daemon reports `room_peers` (pairs each
+       joined room with the modules using it and the peers actually
+       connected in it); falls back to the flat room-chip list for an older
+       daemon that doesn't send that field yet. */
+    if (Array.isArray(data.room_peers)) {
+      renderTopologyRoomBreakdown(data);
     } else {
-      topologyRooms.appendChild(el("span", { text: t("topology.noRooms") }));
+      var rooms = data.rooms || [];
+      if (rooms.length) {
+        topologyRooms.appendChild(el("span", { text: t("topology.rooms") + ": " }));
+        rooms.forEach(function (room) {
+          var chip = el("span", { class: "badge mono topology-room-chip", text: room, title: t("common.clickToCopy") });
+          chip.addEventListener("click", function () { copyToClipboard(room); });
+          topologyRooms.appendChild(chip);
+        });
+      } else {
+        topologyRooms.appendChild(el("span", { text: t("topology.noRooms") }));
+      }
     }
     renderTopologyContext();
   }
@@ -5684,9 +6190,17 @@
     return api("topology.status", {}).then(function (data) {
       state.topology = data;
       renderTopology();
+      /* After renderTopology, so a peer/room appearing for the first time
+         this poll is already in the flash registries (edge paths, breakdown
+         rows) before its activity fires. Runs on every poll regardless of
+         renderTopology's own render-skip cache -- see the "data-activity
+         pulses" doc comment above topologyStateClass for why activity can't
+         ride on that gate. */
+      updateTopologyActivity(data);
     }, function () {
       state.topology = null;
       renderTopology();
+      updateTopologyActivity(null); // daemon unreachable -- reseed memory once it's back
     });
   }
 
@@ -5702,6 +6216,8 @@
   var aiKv = document.getElementById("ai-kv");
   var aiModelsBox = document.getElementById("ai-models");
   var aiHintsBox = document.getElementById("ai-hints");
+  var btnAiProvideToggle = document.getElementById("btn-ai-provide-toggle");
+  var btnAiServeToggle = document.getElementById("btn-ai-serve-toggle");
   var chatModelSelect = document.getElementById("chat-model");
   /* signature (lang + model list) of the options currently in #chat-model,
      so the 5s poll doesn't rebuild the select and close it under the user */
@@ -5752,9 +6268,23 @@
     }
   }
 
+  function setAiToggleButton(btn, active, startKey, stopKey) {
+    var key = active ? stopKey : startKey;
+    btn.setAttribute("data-i18n", key);
+    btn.textContent = t(key);
+    btn.classList.toggle("primary", !active);
+    btn.classList.toggle("danger", active);
+  }
+
+  function renderAiToggleButtons(a) {
+    setAiToggleButton(btnAiProvideToggle, !!(a && a.providing), "ai.startProviding", "ai.stopProviding");
+    setAiToggleButton(btnAiServeToggle, !!(a && a.serving), "ai.startServe", "ai.stopServe");
+  }
+
   function renderAi() {
     aiKv.innerHTML = "";
     var a = state.ai;
+    renderAiToggleButtons(a);
     if (!a) {
       addKv(aiKv, t("ai.statusLabel"), t("stream.statusUnknown"));
       aiModelsBox.innerHTML = "";
@@ -5817,32 +6347,32 @@
     });
   });
 
-  document.getElementById("btn-ai-provide-start").addEventListener("click", function (e) {
-    runAction(e.currentTarget, "ai.provide.start", {}, function (data) {
-      showToast(data.already_running ? t("ai.alreadyProviding") : t("ai.nowProviding"), "success");
-      pollAiStatus();
-    });
+  btnAiProvideToggle.addEventListener("click", function (e) {
+    if (state.ai && state.ai.providing) {
+      runAction(e.currentTarget, "ai.provide.stop", {}, function (data) {
+        showToast(data.was_running ? t("ai.stoppedProviding") : t("ai.wasNotProviding"), "success");
+        pollAiStatus();
+      });
+    } else {
+      runAction(e.currentTarget, "ai.provide.start", {}, function (data) {
+        showToast(data.already_running ? t("ai.alreadyProviding") : t("ai.nowProviding"), "success");
+        pollAiStatus();
+      });
+    }
   });
 
-  document.getElementById("btn-ai-provide-stop").addEventListener("click", function (e) {
-    runAction(e.currentTarget, "ai.provide.stop", {}, function (data) {
-      showToast(data.was_running ? t("ai.stoppedProviding") : t("ai.wasNotProviding"), "success");
-      pollAiStatus();
-    });
-  });
-
-  document.getElementById("btn-ai-serve-start").addEventListener("click", function (e) {
-    runAction(e.currentTarget, "ai.serve.start", {}, function (data) {
-      showToast(data.already_running ? t("ai.serveAlready", { listen: data.listen }) : t("ai.serveStarted", { listen: data.listen }), "success");
-      pollAiStatus();
-    });
-  });
-
-  document.getElementById("btn-ai-serve-stop").addEventListener("click", function (e) {
-    runAction(e.currentTarget, "ai.serve.stop", {}, function (data) {
-      showToast(data.was_running ? t("ai.serveStopped") : t("ai.serveWasNotRunning"), "success");
-      pollAiStatus();
-    });
+  btnAiServeToggle.addEventListener("click", function (e) {
+    if (state.ai && state.ai.serving) {
+      runAction(e.currentTarget, "ai.serve.stop", {}, function (data) {
+        showToast(data.was_running ? t("ai.serveStopped") : t("ai.serveWasNotRunning"), "success");
+        pollAiStatus();
+      });
+    } else {
+      runAction(e.currentTarget, "ai.serve.start", {}, function (data) {
+        showToast(data.already_running ? t("ai.serveAlready", { listen: data.listen }) : t("ai.serveStarted", { listen: data.listen }), "success");
+        pollAiStatus();
+      });
+    }
   });
 
   /* ---------- chat ---------- */
@@ -9106,6 +9636,66 @@
     if (card) card.scrollIntoView({ behavior: "smooth", block: "start" });
   });
 
+  /* ---------- in-panel sub-tabs ---------- */
+
+  /* Wires every .subtabs tablist declared in markup (the CSS block above
+     the .subtabs rules documents the contract). Self-discovering so a
+     panel can gain tabs with markup + i18n keys alone -- no shared init
+     edits. Showing/hiding pages is pure UI state: it never gates polling,
+     and pollers keep rendering into hidden pages. */
+  var subtabActivate = {};   /* panelId -> activate(name), for JS flows that must reveal a specific tab before focusing something inside it */
+
+  function initSubTabs() {
+    var lists = Array.prototype.slice.call(document.querySelectorAll(".panel .subtabs"));
+    lists.forEach(function (list) {
+      var panel = list.closest(".panel");
+      var tabs = Array.prototype.slice.call(list.querySelectorAll("button[data-subtab-target]"));
+      var pages = Array.prototype.slice.call(panel.querySelectorAll("[data-subtab]"));
+      if (!tabs.length || !pages.length) return;
+      var storeKey = "mistl-subtab-" + panel.id;
+
+      function activate(name) {
+        tabs.forEach(function (b) {
+          var on = b.getAttribute("data-subtab-target") === name;
+          b.classList.toggle("active", on);
+          b.setAttribute("aria-selected", on ? "true" : "false");
+          b.tabIndex = on ? 0 : -1;
+        });
+        pages.forEach(function (pg) {
+          pg.classList.toggle("active", pg.getAttribute("data-subtab") === name);
+        });
+        try { localStorage.setItem(storeKey, name); } catch (e) { /* ignore */ }
+      }
+      subtabActivate[panel.id] = activate;
+
+      tabs.forEach(function (b, i) {
+        var name = b.getAttribute("data-subtab-target");
+        if (!b.id) b.id = panel.id + "-subtab-" + name;
+        b.setAttribute("role", "tab");
+        b.addEventListener("click", function () { activate(name); });
+        /* roving tabindex + arrow-key movement, per the tablist pattern */
+        b.addEventListener("keydown", function (e) {
+          var dir = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+          if (!dir) return;
+          e.preventDefault();
+          var next = tabs[(i + dir + tabs.length) % tabs.length];
+          activate(next.getAttribute("data-subtab-target"));
+          next.focus();
+        });
+      });
+      pages.forEach(function (pg) {
+        var name = pg.getAttribute("data-subtab");
+        pg.setAttribute("role", "tabpanel");
+        pg.setAttribute("aria-labelledby", panel.id + "-subtab-" + name);
+      });
+
+      var stored = null;
+      try { stored = localStorage.getItem(storeKey); } catch (e) { /* ignore */ }
+      var validStored = tabs.some(function (b) { return b.getAttribute("data-subtab-target") === stored; });
+      activate(validStored ? stored : tabs[0].getAttribute("data-subtab-target"));
+    });
+  }
+
   /* ---------- init ---------- */
 
   document.documentElement.lang = currentLang;
@@ -9113,6 +9703,7 @@
   updateLangButtons();
   updateThemeToggle();
   renderChat();
+  initSubTabs();
   routeFromHash();
   startPolling();
   startTicker();
