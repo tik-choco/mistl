@@ -2,6 +2,9 @@
 # Fetches mistlib (MISTLIB_REPO/MISTLIB_REF from .env) into .mistlib-src, a
 # plain git clone that the Cargo path dependencies point into. Safe to re-run:
 # updates the existing clone to the configured ref (detached checkout).
+# Local uncommitted changes in the cache are auto-stashed around the update
+# and restored afterwards; never discarded. Tolerates being offline once the
+# clone exists.
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -28,7 +31,37 @@ if [ ! -d "$cache/.git" ]; then
     git clone "$MISTLIB_REPO" "$cache"
 fi
 
-git -C "$cache" fetch origin "$MISTLIB_REF"
+git -C "$cache" config core.autocrlf false
+
+if ! git -C "$cache" fetch origin "$MISTLIB_REF"; then
+    echo "warning: could not fetch mistlib (offline?); keeping $(git -C "$cache" rev-parse --short HEAD)" >&2
+    exit 0
+fi
+
+old=$(git -C "$cache" rev-parse HEAD)
+new=$(git -C "$cache" rev-parse FETCH_HEAD)
+
+if [ "$old" = "$new" ]; then
+    echo "mistlib ($MISTLIB_REF @ $(git -C "$cache" rev-parse --short HEAD)) ready in .mistlib-src"
+    exit 0
+fi
+
+stashed=0
+if [ -n "$(git -C "$cache" status --porcelain)" ]; then
+    git -C "$cache" stash push --include-untracked -m "fetch auto-stash"
+    stashed=1
+fi
+
 git -C "$cache" checkout --detach FETCH_HEAD
+
+if [ "$stashed" -eq 1 ]; then
+    if ! git -C "$cache" stash pop; then
+        git -C "$cache" reset --hard
+        git -C "$cache" checkout --detach "$old"
+        git -C "$cache" stash pop
+        echo "warning: upstream update for mistlib conflicts with local uncommitted changes in .mistlib-src; staying on the previous commit ($(git -C "$cache" rev-parse --short "$old")). Commit/push or resolve those changes, then re-run 'just fetch-mistlib'." >&2
+        exit 0
+    fi
+fi
 
 echo "mistlib ($MISTLIB_REF @ $(git -C "$cache" rev-parse --short HEAD)) ready in .mistlib-src"

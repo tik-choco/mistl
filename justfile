@@ -58,6 +58,13 @@ _ensure-mistlib-consensus:
 
 # Optimized release build (lto=thin, stripped — see Cargo.toml), then
 # (re)start the daemon from the freshly built exe.
+# Unlike the dev recipes below, release fetches/updates both mistlib clones
+# first (fetch-mistlib fetch-mistlib-consensus) rather than only cloning them
+# if missing, so a release build always picks up the latest pinned refs. The
+# fetch scripts are offline-tolerant — if the fetch fails they warn and keep
+# the existing checkout — and they auto-stash/re-apply any local changes in
+# the clone, rolling back with a warning on conflict, so this won't fail
+# outright when offline or clobber uncommitted work in the dependency clones.
 # On Windows, first free the exe if a running daemon is holding it (the
 # release link fails on a locked target). `Stop-Process -ErrorAction
 # SilentlyContinue` hides the "process not found" message but still leaves
@@ -67,13 +74,13 @@ _ensure-mistlib-consensus:
 # treatment: a build that succeeded shouldn't fail the recipe just because
 # the daemon was, say, already started some other way in the meantime.
 [windows]
-release: _ensure-mistlib _ensure-mistlib-consensus
+release: fetch-mistlib fetch-mistlib-consensus
     Stop-Process -Name "{{bin}}" -Force -ErrorAction SilentlyContinue; exit 0
     cargo build --release
     .\target\release\{{bin}}.exe daemon start; exit 0
 
 [unix]
-release: _ensure-mistlib _ensure-mistlib-consensus
+release: fetch-mistlib fetch-mistlib-consensus
     cargo build --release
     ./target/release/{{bin}} daemon start || true
 
