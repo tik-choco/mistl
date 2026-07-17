@@ -551,6 +551,17 @@ pub enum SinkConfig {
         room: String,
     },
     /// `POST`s a signed JSON delivery notice to an arbitrary HTTP endpoint.
+    ///
+    /// By default (`body_template` unset/blank) the body is the legacy
+    /// `tc-bot:delivery` envelope, signed via `crate::wiresign::sign_wire`
+    /// (unless `sign` is `false`) -- see `WIRE_WEBHOOK_DELIVERY_WIRE` in
+    /// `src/wiresign.rs`, which pins that default payload's exact bytes when
+    /// every field below is left at its default. When `body_template` is set
+    /// it is rendered (`{{var}}` substitution -- see
+    /// `bot::sink::render_webhook_template`) and sent raw instead; templated
+    /// bodies are never wiresigned, and `include_audio`/`max_audio_bytes`
+    /// (which only inline base64 audio into the *default* body's
+    /// `item.audio.b64`) are ignored in that mode.
     Webhook {
         #[serde(default)]
         url: String,
@@ -558,6 +569,30 @@ pub enum SinkConfig {
         include_audio: bool,
         #[serde(default)]
         max_audio_bytes: Option<u64>,
+        /// HTTP method: `"POST"` (default)|`"PUT"`|`"PATCH"`, case-insensitive.
+        /// Anything else is treated as `POST` with a validation warning.
+        #[serde(default)]
+        method: Option<String>,
+        /// Raw body template (`{{var}}` substitution); `None`/blank means
+        /// "use the legacy default signed JSON body" -- see the variant doc.
+        #[serde(default)]
+        body_template: Option<String>,
+        /// Whether the default body is wiresigned (`X-Mistl-Signature`).
+        /// Only meaningful when `body_template` is unset -- templated bodies
+        /// are never signed regardless of this flag.
+        #[serde(default = "default_true")]
+        sign: bool,
+        /// When `true`, the default body's `item` gains a `"body"` field
+        /// (`article.body`). Ignored in template mode (use `{{body}}`
+        /// there instead).
+        #[serde(default)]
+        include_body: bool,
+        /// Custom headers, applied after the default headers so a custom
+        /// `Content-Type` overrides `application/json`. Must be last: the
+        /// `toml` serializer requires scalar fields before array-of-tables
+        /// fields within a variant.
+        #[serde(default)]
+        headers: Vec<WebhookHeader>,
     },
     /// Publishes the item as a signed `tc-news:article` wire (body stored by
     /// CID) into a global-articles-compatible room -- the producing mirror
@@ -567,6 +602,16 @@ pub enum SinkConfig {
         #[serde(default)]
         room: String,
     },
+}
+
+/// A single custom HTTP header for `SinkConfig::Webhook`. Applied after the
+/// sink's default headers, so a custom `Content-Type` (or any other) wins.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookHeader {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub value: String,
 }
 
 fn project_dirs() -> Result<directories::ProjectDirs> {
@@ -1165,6 +1210,11 @@ mod tests {
                     url: "https://example.com/hook".to_string(),
                     include_audio: false,
                     max_audio_bytes: Some(5_242_880),
+                    method: None,
+                    body_template: None,
+                    sign: true,
+                    include_body: false,
+                    headers: Vec::new(),
                 },
             ],
         }
@@ -1221,10 +1271,94 @@ mod tests {
             other => panic!("expected ChatPost, got {other:?}"),
         }
         match &pipeline.sinks[1] {
-            SinkConfig::Webhook { url, include_audio, max_audio_bytes } => {
+            SinkConfig::Webhook { url, include_audio, max_audio_bytes, sign, headers, .. } => {
                 assert_eq!(url, "https://example.com/hook");
                 assert!(!include_audio);
                 assert_eq!(*max_audio_bytes, Some(5_242_880));
+                assert!(*sign, "sign must default to true");
+                assert!(headers.is_empty());
+            }
+            other => panic!("expected Webhook, got {other:?}"),
+        }
+    }
+
+    /// Confirms the flexible-webhook-sink fields (`method`, `body_template`,
+    /// `sign`, `include_body`, `headers`) round-trip through `toml`, and in
+    /// particular that `headers` (a `Vec<WebhookHeader>`, i.e. an
+    /// array-of-tables) being the *last* field in the variant is required --
+    /// the `toml` serializer errors if a table/array-of-tables field
+    /// precedes a scalar field within the same struct/variant.
+    #[test]
+    fn bot_pipeline_webhook_extended_fields_round_trip_through_toml() {
+        let mut config = Config::default();
+        config.bot.pipelines.push(PipelineConfig {
+            id: "webhook-extended".to_string(),
+            enabled: true,
+            schedule: "@every 1h".to_string(),
+            source: SourceConfig::ChatRoom { room: "team-room".to_string() },
+            transforms: vec![],
+            sinks: vec![SinkConfig::Webhook {
+                url: "https://example.com/hook".to_string(),
+                include_audio: true,
+                max_audio_bytes: None,
+                method: Some("PUT".to_string()),
+                body_template: Some(r#"{"title":"{{title}}"}"#.to_string()),
+                sign: false,
+                include_body: true,
+                headers: vec![
+                    WebhookHeader { name: "X-Api-Key".to_string(), value: "secret".to_string() },
+                    WebhookHeader { name: "Content-Type".to_string(), value: "application/custom".to_string() },
+                ],
+            }],
+        });
+
+        let text = toml::to_string_pretty(&config).expect("extended webhook config must serialize to TOML");
+        let reloaded: Config = toml::from_str(&text).expect("extended webhook config must parse back from TOML");
+        match &reloaded.bot.pipelines[0].sinks[0] {
+            SinkConfig::Webhook { url, method, body_template, sign, include_body, headers, .. } => {
+                assert_eq!(url, "https://example.com/hook");
+                assert_eq!(method.as_deref(), Some("PUT"));
+                assert_eq!(body_template.as_deref(), Some(r#"{"title":"{{title}}"}"#));
+                assert!(!sign);
+                assert!(include_body);
+                assert_eq!(headers.len(), 2);
+                assert_eq!(headers[0].name, "X-Api-Key");
+                assert_eq!(headers[0].value, "secret");
+                assert_eq!(headers[1].name, "Content-Type");
+                assert_eq!(headers[1].value, "application/custom");
+            }
+            other => panic!("expected Webhook, got {other:?}"),
+        }
+    }
+
+    /// A `SinkConfig::Webhook` with none of the new fields set must still
+    /// parse (backward compatibility for existing configs) and default
+    /// `sign` to `true` and everything else to empty/`None`/`false`.
+    #[test]
+    fn bot_pipeline_webhook_legacy_toml_still_parses_with_new_field_defaults() {
+        let text = r#"
+            [[bot.pipelines]]
+            id = "legacy-webhook"
+            enabled = true
+            schedule = "@every 1h"
+
+            [bot.pipelines.source]
+            kind = "chat-room"
+            room = "team-room"
+
+            [[bot.pipelines.sinks]]
+            kind = "webhook"
+            url = "https://example.com/hook"
+            include_audio = false
+        "#;
+        let config: Config = toml::from_str(text).expect("legacy webhook config must still parse");
+        match &config.bot.pipelines[0].sinks[0] {
+            SinkConfig::Webhook { method, body_template, sign, include_body, headers, .. } => {
+                assert_eq!(*method, None);
+                assert_eq!(*body_template, None);
+                assert!(*sign, "sign must default to true for legacy configs");
+                assert!(!include_body);
+                assert!(headers.is_empty());
             }
             other => panic!("expected Webhook, got {other:?}"),
         }

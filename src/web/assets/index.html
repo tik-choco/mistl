@@ -253,12 +253,14 @@
     display: flex;
     animation: viewin var(--dur) var(--ease);
   }
-  .panel.active > * { animation: risein var(--dur) var(--ease) backwards; }
+  /* Only the first few children get their own staggered entrance -- animating
+     every direct child was extra per-frame paint work on panels with big
+     tables. Children past this point simply ride the panel-level viewin fade. */
+  .panel.active > *:nth-child(-n+4) { animation: risein var(--dur) var(--ease) backwards; }
   .panel.active > *:nth-child(2) { animation-delay: 0.04s; }
   .panel.active > *:nth-child(3) { animation-delay: 0.08s; }
   .panel.active > *:nth-child(4) { animation-delay: 0.11s; }
-  .panel.active > *:nth-child(n+5) { animation-delay: 0.13s; }
-  @keyframes viewin { from { opacity: 0; transform: translateY(10px) scale(0.994); } to { opacity: 1; transform: none; } }
+  @keyframes viewin { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
   @keyframes risein { from { opacity: 0; transform: translateY(7px); } to { opacity: 1; transform: none; } }
   .panel h2 {
     font-size: 20px;
@@ -442,6 +444,58 @@
      .field, so restore checkline-ish sizing for the toggle variant since the
      bare ".field label" rule below would otherwise shrink it to 11px. */
   .field label.bot-toggle { font-size: 13.5px; color: var(--text); }
+
+  /* ---------- bot: webhook sink -- custom header rows (name/value pair +
+     remove button, reusing .chip-remove for the small round remove icon) --- */
+  .bot-webhook-headers { display: flex; flex-direction: column; gap: 6px; }
+  .bot-webhook-header-row { display: flex; gap: 6px; align-items: center; }
+  .bot-webhook-header-row input[type=text] { flex: 1; min-width: 0; }
+
+  /* ---------- bot: structured `#bot-form` layout ---------------------------
+     form.inline's free flex-wrap (the ".inline" rule above, shared by every
+     other form in the app) reflows badly for this one form -- it has far
+     more fields than any other form here, plus optional groups that pop
+     in/out with the recipe/toggle state, so items land in whatever order
+     the wrap happens to produce. #bot-form (only) gets a fixed set of
+     logical rows instead, each its own auto-fit grid, so fields never
+     drift across rows and always keep their neighbours regardless of
+     viewport width or which optional groups are currently shown. */
+  #bot-form { display: flex; flex-direction: column; gap: 16px; align-items: stretch; }
+  #bot-form .bot-form-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 10px 14px;
+    align-items: start;
+    /* #bot-form is a flex column, so each row is sized as a flex item first --
+       without an explicit width, the browser resolves the row's *intrinsic*
+       height contribution using an indefinite inline size, which collapses
+       `auto-fit` to a single column for that pass (fields stacked, e.g. a
+       3-field row measuring ~163px tall instead of ~69px) even though the
+       final paint correctly lays out multiple columns. Giving the row an
+       explicit width makes the auto-fit column count consistent between
+       the intrinsic-sizing pass and the final render. */
+    width: 100%;
+  }
+  #bot-form .bot-form-row .field { min-width: 0; }
+  #bot-form .bot-form-row-submit { display: flex; justify-content: flex-end; align-items: center; gap: 8px; }
+  /* A row whose fields are ALL optional bot-groups collapses instead of
+     leaving an empty gap when every group in it is hidden -- e.g. the
+     "news webhook" recipe has no transforms at all, so the transforms row
+     would otherwise render as a blank strip between source and sinks. Rows
+     that mix plain fields with bot-groups (basics, submit) don't get this
+     class and are always shown. */
+  #bot-form .bot-form-row-collapsible:not(:has(.bot-group:not([hidden]))) { display: none; }
+  /* The webhook sink carries its own header-rows editor and a template
+     textarea, so it needs the full row width and reads better as a
+     distinct card rather than another same-size column next to the plain
+     room-picker sinks. */
+  #bot-form [data-bot-group="sink-webhook"] {
+    grid-column: 1 / -1;
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    background: var(--bg-alt);
+    padding: 12px 14px;
+  }
 
   table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
   thead th {
@@ -1933,128 +1987,155 @@
     <span class="muted" id="bot-options-unavailable-hint" style="font-size: 11px; display: block;" hidden data-i18n="bot.form.roomsUnavailableHint">Could not load the room list — type the room name directly.</span>
 
     <form class="inline" id="bot-form">
-      <div class="field" style="flex: 1; min-width: 140px;">
-        <label for="bot-id" data-i18n="bot.form.idLabel">ID</label>
-        <input type="text" id="bot-id" autocomplete="off">
-        <span class="muted" style="font-size: 10px;" data-i18n="bot.form.idAutoHint">Auto-filled from the recipe — feel free to change it.</span>
-      </div>
-      <div class="field" style="flex: 1; min-width: 200px;">
-        <label for="bot-schedule-select" data-i18n="bot.form.scheduleLabel">Schedule</label>
-        <select id="bot-schedule-select">
-          <option value="@every 5m" data-i18n="bot.form.scheduleEvery5m">Every 5 minutes</option>
-          <option value="@every 15m" data-i18n="bot.form.scheduleEvery15m">Every 15 minutes</option>
-          <option value="@every 30m" data-i18n="bot.form.scheduleEvery30m">Every 30 minutes</option>
-          <option value="@every 1h" data-i18n="bot.form.scheduleEvery1h">Every hour</option>
-          <option value="@every 3h" data-i18n="bot.form.scheduleEvery3h">Every 3 hours</option>
-          <option value="@every 6h" data-i18n="bot.form.scheduleEvery6h">Every 6 hours</option>
-          <option value="@every 12h" data-i18n="bot.form.scheduleEvery12h">Every 12 hours</option>
-          <option value="@hourly" data-i18n="bot.form.scheduleHourly">Hourly (top of the hour)</option>
-          <option value="@daily" data-i18n="bot.form.scheduleDaily">Daily (midnight)</option>
-          <option value="__custom__" data-i18n="bot.form.scheduleCustom">Custom…</option>
-        </select>
-        <input type="text" id="bot-schedule" data-i18n-placeholder="bot.form.schedulePlaceholder" placeholder="@hourly" autocomplete="off" hidden>
-      </div>
-      <label class="checkline"><input type="checkbox" id="bot-enabled-input" checked> <span data-i18n="bot.form.enabledLabel">Enabled</span></label>
-
-      <div class="field bot-group" data-bot-group="custom-source-kind" style="flex: 1; min-width: 180px;" hidden>
-        <label for="bot-custom-source-kind" data-i18n="bot.form.sourceKindLabel">Source</label>
-        <select id="bot-custom-source-kind">
-          <option value="global-articles" data-i18n="bot.form.sourceKind.globalArticles">Global articles room</option>
-          <option value="chat-room" data-i18n="bot.form.sourceKind.chatRoom">Chat room</option>
-        </select>
-      </div>
-
-      <div class="field bot-group" data-bot-group="source-global-articles" style="flex: 1; min-width: 220px;">
-        <label for="bot-source-room-select" data-i18n="bot.form.sourceRoomLabel">Source room</label>
-        <select id="bot-source-room-select"></select>
-        <input type="text" id="bot-source-room-custom" data-i18n-placeholder="bot.form.sourceRoomsPlaceholder" placeholder="tc-global-articles" autocomplete="off" hidden>
-      </div>
-      <div class="field bot-group" data-bot-group="source-global-articles" style="flex: 1; min-width: 200px;">
-        <label data-i18n="bot.form.sourceLangsLabel">Languages</label>
-        <div class="row" style="gap: 12px;">
-          <label class="checkline"><input type="checkbox" id="bot-lang-ja"> ja</label>
-          <label class="checkline"><input type="checkbox" id="bot-lang-en"> en</label>
-          <label class="checkline"><input type="checkbox" id="bot-lang-zh"> zh</label>
+      <div class="bot-form-row bot-form-row-basics">
+        <div class="field">
+          <label for="bot-id" data-i18n="bot.form.idLabel">ID</label>
+          <input type="text" id="bot-id" autocomplete="off">
+          <span class="muted" style="font-size: 10px;" data-i18n="bot.form.idAutoHint">Auto-filled from the recipe — feel free to change it.</span>
         </div>
-        <input type="text" id="bot-lang-custom" data-i18n-placeholder="bot.form.sourceLangsCustomPlaceholder" placeholder="other language tags, comma-separated" autocomplete="off">
-        <span class="muted" style="font-size: 11px;" data-i18n="bot.form.sourceLangsHint">Leave all unchecked to allow every language.</span>
-      </div>
-
-      <div class="field bot-group" data-bot-group="source-chat-room" style="flex: 1; min-width: 220px;" hidden>
-        <label for="bot-chatroom-select" data-i18n="bot.form.chatRoomSourceLabel">Chat room to read</label>
-        <select id="bot-chatroom-select"></select>
-        <input type="text" id="bot-chatroom-custom" autocomplete="off" hidden>
-      </div>
-
-      <div class="field bot-group" data-bot-group="transform-summarize" style="flex: 1; min-width: 220px;">
-        <label class="checkline bot-toggle" hidden><input type="checkbox" id="bot-summarize-enabled"> <span data-i18n="bot.form.summarizeLabel">Summarize</span></label>
-        <label class="bot-group-plain-label" data-i18n="bot.form.summarizeLabel">Summarize</label>
-        <select id="bot-summarize-preset"></select>
-      </div>
-
-      <div class="field bot-group" data-bot-group="transform-translate" style="flex: 1; min-width: 280px;" hidden>
-        <label class="checkline bot-toggle" hidden><input type="checkbox" id="bot-translate-enabled"> <span data-i18n="bot.form.translateLabel">Translate</span></label>
-        <label class="bot-group-plain-label" data-i18n="bot.form.translateLabel">Translate</label>
-        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-          <select id="bot-translate-preset"></select>
-          <select id="bot-translate-target-lang" data-i18n-aria-label="bot.form.translateTargetLabel" data-i18n-title="bot.form.translateTargetLabel" aria-label="Target language" title="Target language">
-            <option value="ja">ja</option>
-            <option value="en">en</option>
-            <option value="zh">zh</option>
-            <option value="ko">ko</option>
-            <option value="fr">fr</option>
-            <option value="de">de</option>
-            <option value="es">es</option>
-            <option value="__custom__" data-i18n="bot.form.customOption">Custom…</option>
+        <div class="field">
+          <label for="bot-schedule-select" data-i18n="bot.form.scheduleLabel">Schedule</label>
+          <select id="bot-schedule-select">
+            <option value="@every 5m" data-i18n="bot.form.scheduleEvery5m">Every 5 minutes</option>
+            <option value="@every 15m" data-i18n="bot.form.scheduleEvery15m">Every 15 minutes</option>
+            <option value="@every 30m" data-i18n="bot.form.scheduleEvery30m">Every 30 minutes</option>
+            <option value="@every 1h" data-i18n="bot.form.scheduleEvery1h">Every hour</option>
+            <option value="@every 3h" data-i18n="bot.form.scheduleEvery3h">Every 3 hours</option>
+            <option value="@every 6h" data-i18n="bot.form.scheduleEvery6h">Every 6 hours</option>
+            <option value="@every 12h" data-i18n="bot.form.scheduleEvery12h">Every 12 hours</option>
+            <option value="@hourly" data-i18n="bot.form.scheduleHourly">Hourly (top of the hour)</option>
+            <option value="@daily" data-i18n="bot.form.scheduleDaily">Daily (midnight)</option>
+            <option value="__custom__" data-i18n="bot.form.scheduleCustom">Custom…</option>
           </select>
-          <input type="text" id="bot-translate-target-lang-custom" data-i18n-placeholder="bot.form.translateTargetCustomPlaceholder" placeholder="language tag (e.g. pt)" autocomplete="off" style="max-width: 140px;" hidden>
+          <input type="text" id="bot-schedule" data-i18n-placeholder="bot.form.schedulePlaceholder" placeholder="@hourly" autocomplete="off" hidden>
+        </div>
+        <div class="field bot-form-checkline-field">
+          <label class="checkline"><input type="checkbox" id="bot-enabled-input" checked> <span data-i18n="bot.form.enabledLabel">Enabled</span></label>
         </div>
       </div>
 
-      <div class="field bot-group" data-bot-group="transform-tts" style="flex: 2; min-width: 340px;" hidden>
-        <label class="checkline bot-toggle" hidden><input type="checkbox" id="bot-tts-enabled"> <span data-i18n="bot.form.ttsLabel">Text-to-speech</span></label>
-        <label class="bot-group-plain-label" data-i18n="bot.form.ttsLabel">Text-to-speech</label>
-        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-          <select id="bot-tts-preset"></select>
-          <select id="bot-tts-format">
-            <option value="" data-i18n="bot.form.formatDefault">Default</option>
-            <option value="mp3">mp3</option>
-            <option value="opus">opus</option>
-            <option value="aac">aac</option>
-            <option value="flac">flac</option>
-            <option value="wav">wav</option>
+      <div class="bot-form-row bot-form-row-source bot-form-row-collapsible">
+        <div class="field bot-group" data-bot-group="custom-source-kind" hidden>
+          <label for="bot-custom-source-kind" data-i18n="bot.form.sourceKindLabel">Source</label>
+          <select id="bot-custom-source-kind">
+            <option value="global-articles" data-i18n="bot.form.sourceKind.globalArticles">Global articles room</option>
+            <option value="chat-room" data-i18n="bot.form.sourceKind.chatRoom">Chat room</option>
           </select>
-          <input type="text" id="bot-tts-speed" inputmode="decimal" data-i18n-placeholder="bot.form.speedPlaceholder" placeholder="1.0" style="max-width: 90px;">
         </div>
-        <span class="muted" id="bot-tts-voice-hint" style="font-size: 11px;"></span>
+
+        <div class="field bot-group" data-bot-group="source-global-articles">
+          <label for="bot-source-room-select" data-i18n="bot.form.sourceRoomLabel">Source room</label>
+          <select id="bot-source-room-select"></select>
+          <input type="text" id="bot-source-room-custom" data-i18n-placeholder="bot.form.sourceRoomsPlaceholder" placeholder="tc-global-articles" autocomplete="off" hidden>
+        </div>
+        <div class="field bot-group" data-bot-group="source-global-articles">
+          <label data-i18n="bot.form.sourceLangsLabel">Languages</label>
+          <div class="row" style="gap: 12px;">
+            <label class="checkline"><input type="checkbox" id="bot-lang-ja"> ja</label>
+            <label class="checkline"><input type="checkbox" id="bot-lang-en"> en</label>
+            <label class="checkline"><input type="checkbox" id="bot-lang-zh"> zh</label>
+          </div>
+          <input type="text" id="bot-lang-custom" data-i18n-placeholder="bot.form.sourceLangsCustomPlaceholder" placeholder="other language tags, comma-separated" autocomplete="off">
+          <span class="muted" style="font-size: 11px;" data-i18n="bot.form.sourceLangsHint">Leave all unchecked to allow every language.</span>
+        </div>
+
+        <div class="field bot-group" data-bot-group="source-chat-room" hidden>
+          <label for="bot-chatroom-select" data-i18n="bot.form.chatRoomSourceLabel">Chat room to read</label>
+          <select id="bot-chatroom-select"></select>
+          <input type="text" id="bot-chatroom-custom" autocomplete="off" hidden>
+        </div>
       </div>
 
-      <div class="field bot-group" data-bot-group="sink-chat-post" style="flex: 1; min-width: 220px;">
-        <label class="checkline bot-toggle" hidden><input type="checkbox" id="bot-sink-chat-post-enabled"> <span data-i18n="bot.form.sinkChatRoomLabel">Chat room</span></label>
-        <label class="bot-group-plain-label" data-i18n="bot.form.sinkChatRoomLabel">Chat room</label>
-        <select id="bot-sink-chat-room-select"></select>
-        <input type="text" id="bot-sink-chat-room-custom" autocomplete="off" hidden>
+      <div class="bot-form-row bot-form-row-transforms bot-form-row-collapsible">
+        <div class="field bot-group" data-bot-group="transform-summarize">
+          <label class="checkline bot-toggle" hidden><input type="checkbox" id="bot-summarize-enabled"> <span data-i18n="bot.form.summarizeLabel">Summarize</span></label>
+          <label class="bot-group-plain-label" data-i18n="bot.form.summarizeLabel">Summarize</label>
+          <select id="bot-summarize-preset"></select>
+        </div>
+
+        <div class="field bot-group" data-bot-group="transform-translate" hidden>
+          <label class="checkline bot-toggle" hidden><input type="checkbox" id="bot-translate-enabled"> <span data-i18n="bot.form.translateLabel">Translate</span></label>
+          <label class="bot-group-plain-label" data-i18n="bot.form.translateLabel">Translate</label>
+          <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+            <select id="bot-translate-preset"></select>
+            <select id="bot-translate-target-lang" data-i18n-aria-label="bot.form.translateTargetLabel" data-i18n-title="bot.form.translateTargetLabel" aria-label="Target language" title="Target language">
+              <option value="ja">ja</option>
+              <option value="en">en</option>
+              <option value="zh">zh</option>
+              <option value="ko">ko</option>
+              <option value="fr">fr</option>
+              <option value="de">de</option>
+              <option value="es">es</option>
+              <option value="__custom__" data-i18n="bot.form.customOption">Custom…</option>
+            </select>
+            <input type="text" id="bot-translate-target-lang-custom" data-i18n-placeholder="bot.form.translateTargetCustomPlaceholder" placeholder="language tag (e.g. pt)" autocomplete="off" style="max-width: 140px;" hidden>
+          </div>
+        </div>
+
+        <div class="field bot-group" data-bot-group="transform-tts" hidden>
+          <label class="checkline bot-toggle" hidden><input type="checkbox" id="bot-tts-enabled"> <span data-i18n="bot.form.ttsLabel">Text-to-speech</span></label>
+          <label class="bot-group-plain-label" data-i18n="bot.form.ttsLabel">Text-to-speech</label>
+          <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+            <select id="bot-tts-preset"></select>
+            <select id="bot-tts-format">
+              <option value="" data-i18n="bot.form.formatDefault">Default</option>
+              <option value="mp3">mp3</option>
+              <option value="opus">opus</option>
+              <option value="aac">aac</option>
+              <option value="flac">flac</option>
+              <option value="wav">wav</option>
+            </select>
+            <input type="text" id="bot-tts-speed" inputmode="decimal" data-i18n-placeholder="bot.form.speedPlaceholder" placeholder="1.0" style="max-width: 90px;">
+          </div>
+          <span class="muted" id="bot-tts-voice-hint" style="font-size: 11px;"></span>
+        </div>
       </div>
 
-      <div class="field bot-group" data-bot-group="sink-article-publish" style="flex: 1; min-width: 220px;" hidden>
-        <label class="checkline bot-toggle" hidden><input type="checkbox" id="bot-sink-article-publish-enabled"> <span data-i18n="bot.form.sinkArticlePublishLabel">Publish as article</span></label>
-        <label class="bot-group-plain-label" data-i18n="bot.form.sinkArticlePublishLabel">Publish as article</label>
-        <select id="bot-sink-article-room-select"></select>
-        <input type="text" id="bot-sink-article-room-custom" autocomplete="off" hidden>
+      <div class="bot-form-row bot-form-row-sinks bot-form-row-collapsible">
+        <div class="field bot-group" data-bot-group="sink-chat-post">
+          <label class="checkline bot-toggle" hidden><input type="checkbox" id="bot-sink-chat-post-enabled"> <span data-i18n="bot.form.sinkChatRoomLabel">Chat room</span></label>
+          <label class="bot-group-plain-label" data-i18n="bot.form.sinkChatRoomLabel">Chat room</label>
+          <select id="bot-sink-chat-room-select"></select>
+          <input type="text" id="bot-sink-chat-room-custom" autocomplete="off" hidden>
+        </div>
+
+        <div class="field bot-group" data-bot-group="sink-article-publish" hidden>
+          <label class="checkline bot-toggle" hidden><input type="checkbox" id="bot-sink-article-publish-enabled"> <span data-i18n="bot.form.sinkArticlePublishLabel">Publish as article</span></label>
+          <label class="bot-group-plain-label" data-i18n="bot.form.sinkArticlePublishLabel">Publish as article</label>
+          <select id="bot-sink-article-room-select"></select>
+          <input type="text" id="bot-sink-article-room-custom" autocomplete="off" hidden>
+        </div>
+
+        <div class="field bot-group" data-bot-group="sink-webhook" hidden>
+          <label class="checkline bot-toggle" hidden><input type="checkbox" id="bot-sink-webhook-enabled"> <span data-i18n="bot.form.sinkWebhookLabel">Webhook</span></label>
+          <label class="bot-group-plain-label" data-i18n="bot.form.sinkWebhookLabel">Webhook</label>
+          <label for="bot-sink-webhook-url" class="muted" style="font-size: 10px;" data-i18n="bot.form.sinkWebhookUrlLabel">Webhook URL</label>
+          <input type="text" id="bot-sink-webhook-url" data-i18n-placeholder="bot.form.sinkWebhookUrlPlaceholder" placeholder="https://example.com/webhook" autocomplete="off">
+          <label for="bot-sink-webhook-method" class="muted" style="font-size: 10px;" data-i18n="bot.form.sinkWebhookMethodLabel">Method</label>
+          <select id="bot-sink-webhook-method">
+            <option value="POST">POST</option>
+            <option value="PUT">PUT</option>
+            <option value="PATCH">PATCH</option>
+          </select>
+          <label class="checkline"><input type="checkbox" id="bot-sink-webhook-include-audio"> <span data-i18n="bot.form.sinkWebhookIncludeAudioLabel">Include audio</span></label>
+          <label for="bot-sink-webhook-max-audio-mib" class="muted" style="font-size: 10px;" data-i18n="bot.form.sinkWebhookMaxAudioLabel">Max audio size (MiB)</label>
+          <input type="text" id="bot-sink-webhook-max-audio-mib" data-i18n-placeholder="bot.form.sinkWebhookMaxAudioPlaceholder" inputmode="decimal" autocomplete="off">
+          <label class="checkline"><input type="checkbox" id="bot-sink-webhook-sign" checked> <span data-i18n="bot.form.sinkWebhookSignLabel">Sign payload</span></label>
+          <label class="checkline"><input type="checkbox" id="bot-sink-webhook-include-body"> <span data-i18n="bot.form.sinkWebhookIncludeBodyLabel">Include article body</span></label>
+          <label class="muted" style="font-size: 10px;" data-i18n="bot.form.sinkWebhookHeadersLabel">Custom headers</label>
+          <div class="bot-webhook-headers" id="bot-sink-webhook-headers"></div>
+          <button type="button" id="bot-sink-webhook-add-header" data-i18n="bot.form.sinkWebhookAddHeaderBtn">Add header</button>
+          <label for="bot-sink-webhook-body-template" class="muted" style="font-size: 10px;" data-i18n="bot.form.sinkWebhookBodyTemplateLabel">Body template</label>
+          <textarea id="bot-sink-webhook-body-template" class="mono" rows="5" style="resize: vertical;"></textarea>
+          <span class="muted" style="font-size: 10px;" data-i18n="bot.form.sinkWebhookBodyTemplateHint">Variables: {{id}} {{title}} {{excerpt}} {{body}} {{author}} {{lang}} {{pipeline}} {{from_id}} {{published_at}} {{link}} {{links}} {{item_json}}. String variables are JSON-escaped; {{item_json}} is raw JSON. Leave blank to send the default signed JSON payload.</span>
+          <span class="muted" id="bot-sink-webhook-template-note" style="font-size: 10px;" data-i18n="bot.form.sinkWebhookTemplateModeNote" hidden>Template mode: the payload is sent as-is, unsigned.</span>
+        </div>
       </div>
 
-      <div class="field bot-group" data-bot-group="sink-webhook" style="flex: 1; min-width: 240px;" hidden>
-        <label class="checkline bot-toggle" hidden><input type="checkbox" id="bot-sink-webhook-enabled"> <span data-i18n="bot.form.sinkWebhookLabel">Webhook</span></label>
-        <label class="bot-group-plain-label" data-i18n="bot.form.sinkWebhookLabel">Webhook</label>
-        <label for="bot-sink-webhook-url" class="muted" style="font-size: 10px;" data-i18n="bot.form.sinkWebhookUrlLabel">Webhook URL</label>
-        <input type="text" id="bot-sink-webhook-url" data-i18n-placeholder="bot.form.sinkWebhookUrlPlaceholder" placeholder="https://example.com/webhook" autocomplete="off">
-        <label class="checkline"><input type="checkbox" id="bot-sink-webhook-include-audio"> <span data-i18n="bot.form.sinkWebhookIncludeAudioLabel">Include audio</span></label>
-        <label for="bot-sink-webhook-max-audio-mib" class="muted" style="font-size: 10px;" data-i18n="bot.form.sinkWebhookMaxAudioLabel">Max audio size (MiB)</label>
-        <input type="text" id="bot-sink-webhook-max-audio-mib" data-i18n-placeholder="bot.form.sinkWebhookMaxAudioPlaceholder" inputmode="decimal" autocomplete="off">
+      <div class="bot-form-row bot-form-row-submit">
+        <button type="submit" class="primary" id="btn-bot-save" data-i18n="bot.form.addBtn">Add pipeline</button>
+        <button type="button" id="btn-bot-cancel-edit" hidden data-i18n="bot.form.cancelBtn">Cancel edit</button>
       </div>
-
-      <button type="submit" class="primary" id="btn-bot-save" data-i18n="bot.form.addBtn">Add pipeline</button>
-      <button type="button" id="btn-bot-cancel-edit" hidden data-i18n="bot.form.cancelBtn">Cancel edit</button>
     </form>
     <p class="muted" style="font-size: 12px;" data-i18n="bot.form.hint">Pick “Custom…” on any dropdown to type a value directly. Source languages: leave all unchecked to allow every language. Transform order is fixed: Summarize → Translate → Text-to-speech. Changes save immediately and are picked up within seconds &mdash; no daemon restart needed.</p>
     </div>
@@ -2674,6 +2755,17 @@
       "bot.form.sinkWebhookUrlLabel": "Webhook URL",
       "bot.form.sinkWebhookIncludeAudioLabel": "Include audio",
       "bot.form.sinkWebhookMaxAudioLabel": "Max audio size (MiB)",
+      "bot.form.sinkWebhookMethodLabel": "Method",
+      "bot.form.sinkWebhookSignLabel": "Sign payload",
+      "bot.form.sinkWebhookIncludeBodyLabel": "Include article body",
+      "bot.form.sinkWebhookHeadersLabel": "Custom headers",
+      "bot.form.sinkWebhookAddHeaderBtn": "Add header",
+      "bot.form.sinkWebhookHeaderNamePlaceholder": "Header name",
+      "bot.form.sinkWebhookHeaderValuePlaceholder": "Value",
+      "bot.form.sinkWebhookRemoveHeaderAria": "Remove header",
+      "bot.form.sinkWebhookBodyTemplateLabel": "Body template",
+      "bot.form.sinkWebhookBodyTemplateHint": "Variables: {{id}} {{title}} {{excerpt}} {{body}} {{author}} {{lang}} {{pipeline}} {{from_id}} {{published_at}} {{link}} {{links}} {{item_json}}. String variables are JSON-escaped; {{item_json}} is raw JSON. Leave blank to send the default signed JSON payload.",
+      "bot.form.sinkWebhookTemplateModeNote": "Template mode: the payload is sent as-is, unsigned.",
       "bot.form.hint": "Pick “Custom…” on any dropdown to type a value directly. Source languages: leave all unchecked to allow every language. Transform order is fixed: Summarize → Translate → Text-to-speech. Changes save immediately and are picked up within seconds — no daemon restart needed.",
       "bot.form.enterSpeed": "Enter a valid speed number, or leave it blank.",
       "bot.form.enterMaxAudio": "Enter a valid size in MiB, or leave it blank.",
@@ -3318,6 +3410,17 @@
       "bot.form.sinkWebhookUrlLabel": "Webhook URL",
       "bot.form.sinkWebhookIncludeAudioLabel": "音声を含める",
       "bot.form.sinkWebhookMaxAudioLabel": "音声の最大サイズ (MiB)",
+      "bot.form.sinkWebhookMethodLabel": "メソッド",
+      "bot.form.sinkWebhookSignLabel": "ペイロードに署名する",
+      "bot.form.sinkWebhookIncludeBodyLabel": "記事本文を含める",
+      "bot.form.sinkWebhookHeadersLabel": "カスタムヘッダー",
+      "bot.form.sinkWebhookAddHeaderBtn": "ヘッダーを追加",
+      "bot.form.sinkWebhookHeaderNamePlaceholder": "ヘッダー名",
+      "bot.form.sinkWebhookHeaderValuePlaceholder": "値",
+      "bot.form.sinkWebhookRemoveHeaderAria": "ヘッダーを削除",
+      "bot.form.sinkWebhookBodyTemplateLabel": "本文テンプレート",
+      "bot.form.sinkWebhookBodyTemplateHint": "利用できる変数: {{id}} {{title}} {{excerpt}} {{body}} {{author}} {{lang}} {{pipeline}} {{from_id}} {{published_at}} {{link}} {{links}} {{item_json}}。文字列の変数はJSONエスケープ済みです。{{item_json}} のみ生のJSONです。空欄の場合は既定の署名付きJSONペイロードを送信します。",
+      "bot.form.sinkWebhookTemplateModeNote": "テンプレートモード: ペイロードはそのまま送信され、署名は付与されません。",
       "bot.form.hint": "各プルダウンの「カスタム…」を選ぶと直接入力できます。取得元の言語はすべて未選択のままにするとすべての言語を許可します。変換の順序は固定で、要約 → 翻訳 → 音声合成の順に実行されます。変更は即座に保存され、数秒以内に反映されます — デーモンの再起動は不要です。",
       "bot.form.enterSpeed": "有効な速度の数値を入力するか、空欄のままにしてください。",
       "bot.form.enterMaxAudio": "有効なサイズ (MiB) を入力するか、空欄のままにしてください。",
@@ -3962,6 +4065,17 @@
       "bot.form.sinkWebhookUrlLabel": "Webhook URL",
       "bot.form.sinkWebhookIncludeAudioLabel": "包含音频",
       "bot.form.sinkWebhookMaxAudioLabel": "音频最大大小 (MiB)",
+      "bot.form.sinkWebhookMethodLabel": "方法",
+      "bot.form.sinkWebhookSignLabel": "对负载签名",
+      "bot.form.sinkWebhookIncludeBodyLabel": "包含文章正文",
+      "bot.form.sinkWebhookHeadersLabel": "自定义请求头",
+      "bot.form.sinkWebhookAddHeaderBtn": "添加请求头",
+      "bot.form.sinkWebhookHeaderNamePlaceholder": "请求头名称",
+      "bot.form.sinkWebhookHeaderValuePlaceholder": "值",
+      "bot.form.sinkWebhookRemoveHeaderAria": "移除该请求头",
+      "bot.form.sinkWebhookBodyTemplateLabel": "请求体模板",
+      "bot.form.sinkWebhookBodyTemplateHint": "可用变量: {{id}} {{title}} {{excerpt}} {{body}} {{author}} {{lang}} {{pipeline}} {{from_id}} {{published_at}} {{link}} {{links}} {{item_json}}。字符串变量已进行 JSON 转义；{{item_json}} 为原始 JSON。留空则发送默认的已签名 JSON 负载。",
+      "bot.form.sinkWebhookTemplateModeNote": "模板模式：负载将原样发送，不进行签名。",
       "bot.form.hint": "在任意下拉菜单中选择“自定义…”即可直接输入。来源语言：全部不勾选表示允许所有语言。转换顺序固定：摘要 → 翻译 → 语音合成。更改会立即保存，并在几秒内生效 —— 无需重启守护进程。",
       "bot.form.enterSpeed": "请输入有效的语速数值，或留空。",
       "bot.form.enterMaxAudio": "请输入有效的大小 (MiB)，或留空。",
@@ -7766,8 +7880,15 @@
   var botSinkArticleRoomCustom = document.getElementById("bot-sink-article-room-custom");
   var botSinkWebhookEnabled = document.getElementById("bot-sink-webhook-enabled");
   var botSinkWebhookUrlInput = document.getElementById("bot-sink-webhook-url");
+  var botSinkWebhookMethodSelect = document.getElementById("bot-sink-webhook-method");
   var botSinkWebhookIncludeAudioInput = document.getElementById("bot-sink-webhook-include-audio");
   var botSinkWebhookMaxAudioMibInput = document.getElementById("bot-sink-webhook-max-audio-mib");
+  var botSinkWebhookSignInput = document.getElementById("bot-sink-webhook-sign");
+  var botSinkWebhookIncludeBodyInput = document.getElementById("bot-sink-webhook-include-body");
+  var botSinkWebhookHeadersWrap = document.getElementById("bot-sink-webhook-headers");
+  var botSinkWebhookAddHeaderBtn = document.getElementById("bot-sink-webhook-add-header");
+  var botSinkWebhookBodyTemplateInput = document.getElementById("bot-sink-webhook-body-template");
+  var botSinkWebhookTemplateNote = document.getElementById("bot-sink-webhook-template-note");
   var botSaveBtn = document.getElementById("btn-bot-save");
   var botCancelEditBtn = document.getElementById("btn-bot-cancel-edit");
   var botEditingId = null;
@@ -8006,6 +8127,50 @@
     });
   }
 
+  /* ---- webhook sink: custom header rows (name/value pair + remove button) ---- */
+
+  function botAddWebhookHeaderRow(name, value) {
+    var row = el("div", { class: "bot-webhook-header-row" });
+    var nameInput = el("input", { type: "text", class: "bot-webhook-header-name", autocomplete: "off" });
+    nameInput.placeholder = t("bot.form.sinkWebhookHeaderNamePlaceholder");
+    nameInput.value = name || "";
+    var valueInput = el("input", { type: "text", class: "bot-webhook-header-value", autocomplete: "off" });
+    valueInput.placeholder = t("bot.form.sinkWebhookHeaderValuePlaceholder");
+    valueInput.value = value || "";
+    var rm = el("button", { type: "button", class: "chip-remove", "aria-label": t("bot.form.sinkWebhookRemoveHeaderAria") });
+    rm.textContent = "×";
+    rm.addEventListener("click", function () { row.remove(); });
+    row.appendChild(nameInput);
+    row.appendChild(valueInput);
+    row.appendChild(rm);
+    botSinkWebhookHeadersWrap.appendChild(row);
+  }
+
+  function botClearWebhookHeaderRows() {
+    botSinkWebhookHeadersWrap.innerHTML = "";
+  }
+
+  function botWebhookHeaderRows() {
+    return Array.prototype.slice.call(botSinkWebhookHeadersWrap.querySelectorAll(".bot-webhook-header-row"));
+  }
+
+  botSinkWebhookAddHeaderBtn.addEventListener("click", function () { botAddWebhookHeaderRow("", ""); });
+
+  /* When a body template is set, the sink sends the rendered template as-is
+     (see crate::bot::sink::webhook) -- sign/include_body/include_audio/
+     max_audio_bytes are meaningless in that mode, so disable (not hide, so
+     the values aren't lost if the template is cleared again) those inputs
+     and surface a short note. */
+  function botUpdateWebhookTemplateMode() {
+    var templateMode = botSinkWebhookBodyTemplateInput.value.trim() !== "";
+    botSinkWebhookSignInput.disabled = templateMode;
+    botSinkWebhookIncludeBodyInput.disabled = templateMode;
+    botSinkWebhookIncludeAudioInput.disabled = templateMode;
+    botSinkWebhookMaxAudioMibInput.disabled = templateMode;
+    botSinkWebhookTemplateNote.hidden = !templateMode;
+  }
+  botSinkWebhookBodyTemplateInput.addEventListener("input", botUpdateWebhookTemplateMode);
+
   function botApplyVisibility() {
     var isCustom = !BOT_RECIPES[botCurrentRecipe()];
     botSetGroupHidden("custom-source-kind", !isCustom);
@@ -8023,6 +8188,7 @@
 
     botUpdateToggleLabels(isCustom);
     botUpdateTtsVoiceHint();
+    botUpdateWebhookTemplateMode();
   }
 
   function botNextId(recipe) {
@@ -8085,6 +8251,12 @@
     botSetSimplePickerValue(botTranslateTargetLang, botTranslateTargetLangCustom, "ja");
     botSetLangsValue([]);
     botCustomSourceKind.value = "global-articles";
+    botSinkWebhookMethodSelect.value = "POST";
+    botSinkWebhookSignInput.checked = true;
+    botSinkWebhookIncludeBodyInput.checked = false;
+    botSinkWebhookBodyTemplateInput.value = "";
+    botClearWebhookHeaderRows();
+    botUpdateWebhookTemplateMode();
 
     api("config.show", {}).then(function (cfg) { state.config = cfg; }, function () {})
       .then(function () {
@@ -8190,6 +8362,15 @@
       botSinkWebhookUrlInput.value = (webhook && webhook.url) || "";
       botSinkWebhookIncludeAudioInput.checked = !!(webhook && webhook.include_audio);
       botSinkWebhookMaxAudioMibInput.value = (webhook && webhook.max_audio_bytes) ? String(webhook.max_audio_bytes / (1024 * 1024)) : "";
+      botSinkWebhookMethodSelect.value = (webhook && webhook.method) || "POST";
+      botSinkWebhookSignInput.checked = webhook ? webhook.sign !== false : true;
+      botSinkWebhookIncludeBodyInput.checked = !!(webhook && webhook.include_body);
+      botSinkWebhookBodyTemplateInput.value = (webhook && webhook.body_template) || "";
+      botClearWebhookHeaderRows();
+      ((webhook && Array.isArray(webhook.headers)) ? webhook.headers : []).forEach(function (h) {
+        botAddWebhookHeaderRow(h && h.name, h && h.value);
+      });
+      botUpdateWebhookTemplateMode();
 
       botOnRecipeChange();
 
@@ -8288,19 +8469,43 @@
     if (botSinkWebhookEnabled.checked) {
       var webhookUrl = botSinkWebhookUrlInput.value.trim();
       if (!webhookUrl) { showToast(t("bot.form.enterWebhookUrl"), "error"); return; }
-      var maxMibVal = botSinkWebhookMaxAudioMibInput.value.trim();
-      var maxBytes = null;
-      if (maxMibVal !== "") {
-        var maxMib = Number(maxMibVal);
-        if (!isFinite(maxMib)) { showToast(t("bot.form.enterMaxAudio"), "error"); return; }
-        maxBytes = Math.round(maxMib * 1024 * 1024);
+
+      var webhookSink = { kind: "webhook", url: webhookUrl };
+
+      var webhookMethod = botSinkWebhookMethodSelect.value;
+      if (webhookMethod && webhookMethod !== "POST") webhookSink.method = webhookMethod;
+
+      // A non-empty body template puts the sink in "template mode" (the
+      // rendered template is sent as-is, unsigned -- see
+      // botUpdateWebhookTemplateMode) so sign/include_body/include_audio/
+      // max_audio_bytes are meaningless there and omitted entirely rather
+      // than serialized with stale/disabled values.
+      var bodyTemplateRaw = botSinkWebhookBodyTemplateInput.value;
+      if (bodyTemplateRaw.trim() !== "") {
+        webhookSink.body_template = bodyTemplateRaw;
+      } else {
+        var maxMibVal = botSinkWebhookMaxAudioMibInput.value.trim();
+        var maxBytes = null;
+        if (maxMibVal !== "") {
+          var maxMib = Number(maxMibVal);
+          if (!isFinite(maxMib)) { showToast(t("bot.form.enterMaxAudio"), "error"); return; }
+          maxBytes = Math.round(maxMib * 1024 * 1024);
+        }
+        webhookSink.include_audio = botSinkWebhookIncludeAudioInput.checked;
+        webhookSink.max_audio_bytes = maxBytes;
+        webhookSink.sign = botSinkWebhookSignInput.checked;
+        webhookSink.include_body = botSinkWebhookIncludeBodyInput.checked;
       }
-      sinks.push({
-        kind: "webhook",
-        url: webhookUrl,
-        include_audio: botSinkWebhookIncludeAudioInput.checked,
-        max_audio_bytes: maxBytes
-      });
+
+      var webhookHeaders = botWebhookHeaderRows().map(function (row) {
+        return {
+          name: row.querySelector(".bot-webhook-header-name").value.trim(),
+          value: row.querySelector(".bot-webhook-header-value").value.trim()
+        };
+      }).filter(function (h) { return h.name !== ""; });
+      if (webhookHeaders.length) webhookSink.headers = webhookHeaders;
+
+      sinks.push(webhookSink);
     }
     if (!sinks.length) { showToast(t("bot.form.selectSink"), "error"); return; }
 
@@ -9498,21 +9703,52 @@
     pollBotItems();
   }
 
+  /* Defer a scheduled render pass while a panel-switch entrance animation
+     is playing. This never drops the pass and never gates on which panel
+     is active -- it only pushes the pass back by at most ~half a second
+     so it doesn't land in the middle of the 340ms CSS entrance animation
+     and steal main-thread time from it. `pending` is a caller-owned
+     { current: bool } flag used to avoid piling up duplicate deferred
+     calls if several ticks fall inside the same switch window. */
+  function deferForViewSwitch(fn, pending) {
+    var until = window.__mistlViewSwitchUntil || 0;
+    var now = performance.now();
+    if (now >= until) return false;
+    if (pending.current) return true;
+    pending.current = true;
+    setTimeout(function () {
+      pending.current = false;
+      fn();
+    }, (until - now) + 30);
+    return true;
+  }
+
+  var pollAllPending = { current: false };
+
   function startPolling() {
     if (pollTimer) return;
     pollAll();
-    pollTimer = setInterval(pollAll, POLL_INTERVAL_MS);
+    pollTimer = setInterval(function () {
+      if (deferForViewSwitch(pollAll, pollAllPending)) return;
+      pollAll();
+    }, POLL_INTERVAL_MS);
   }
 
   function stopPolling() {
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   }
 
+  var tickPending = { current: false };
+
   function startTicker() {
     if (tickTimer) return;
     tickTimer = setInterval(function () {
-      if (state.daemon) renderDaemonPill();
-      if (state.daemon) renderOverview();
+      var tick = function () {
+        if (state.daemon) renderDaemonPill();
+        if (state.daemon) renderOverview();
+      };
+      if (deferForViewSwitch(tick, tickPending)) return;
+      tick();
     }, 1000);
   }
 
@@ -9587,6 +9823,14 @@
   }
 
   function showPanel(id) {
+    /* poll-driven DOM renders defer until the entrance animation finishes;
+       450ms = --dur 340ms + margin */
+    window.__mistlViewSwitchUntil = performance.now() + 450;
+    /* smooth-scrolling concurrently with the entrance animation caused jank;
+       the outgoing panel is hidden anyway so an instant reset is invisible.
+       Do this before toggling panel classes so the entrance animation plays
+       from the top instead of fighting a scroll animation. */
+    window.scrollTo(0, 0);
     placeTopologyCard(id);
     PANEL_IDS.forEach(function (pid) {
       var p = document.getElementById(pid);
@@ -9603,7 +9847,6 @@
       if (on) a.setAttribute("aria-current", "page");
       else a.removeAttribute("aria-current");
     });
-    window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
   function routeFromHash() { showPanel(panelFromHash()); }
