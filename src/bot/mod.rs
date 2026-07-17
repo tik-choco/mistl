@@ -490,11 +490,35 @@ fn validate_pipeline(config: &Config, pipeline: &PipelineConfig) -> Vec<String> 
                      `mistl config set bot.pipelines <json>`"
                 ));
             }
-            SinkConfig::Webhook { url, .. } if url.trim().is_empty() => {
-                warnings.push(format!(
-                    "{prefix}.sinks[kind=\"webhook\"].url is not set; set it with \
-                     `mistl config set bot.pipelines <json>`"
-                ));
+            SinkConfig::Webhook { url, method, body_template, include_audio, headers, .. } => {
+                if url.trim().is_empty() {
+                    warnings.push(format!(
+                        "{prefix}.sinks[kind=\"webhook\"].url is not set; set it with \
+                         `mistl config set bot.pipelines <json>`"
+                    ));
+                }
+                if let Some(method) = method {
+                    let is_known =
+                        ["post", "put", "patch"].iter().any(|known| method.eq_ignore_ascii_case(known));
+                    if !is_known {
+                        warnings.push(format!(
+                            "{prefix}.sinks[kind=\"webhook\"].method {method:?} is not one of \
+                             post/put/patch; requests will be sent as POST"
+                        ));
+                    }
+                }
+                if headers.iter().any(|header| header.name.trim().is_empty()) {
+                    warnings.push(format!(
+                        "{prefix}.sinks[kind=\"webhook\"].headers has an entry with an empty name; \
+                         it will be skipped"
+                    ));
+                }
+                if body_template.as_deref().is_some_and(|template| !template.trim().is_empty()) && *include_audio {
+                    warnings.push(format!(
+                        "{prefix}.sinks[kind=\"webhook\"].include_audio is ignored because \
+                         body_template is set (template mode never embeds audio)"
+                    ));
+                }
             }
             SinkConfig::ArticlePublish { room } if room.trim().is_empty() => {
                 warnings.push(format!(
@@ -986,9 +1010,73 @@ mod tests {
     fn validate_pipeline_flags_an_unset_webhook_url() {
         let config = configured_ai();
         let mut pipeline = sample_pipeline("p1", "@every 1h");
-        pipeline.sinks = vec![SinkConfig::Webhook { url: String::new(), include_audio: false, max_audio_bytes: None }];
+        pipeline.sinks = vec![SinkConfig::Webhook {
+            url: String::new(),
+            include_audio: false,
+            max_audio_bytes: None,
+            method: None,
+            body_template: None,
+            sign: true,
+            include_body: false,
+            headers: Vec::new(),
+        }];
         let warnings = validate_pipeline(&config, &pipeline);
         assert!(warnings.iter().any(|w| w.contains("sinks") && w.contains("url")));
+    }
+
+    #[test]
+    fn validate_pipeline_flags_an_unknown_webhook_method() {
+        let config = configured_ai();
+        let mut pipeline = sample_pipeline("p1", "@every 1h");
+        pipeline.sinks = vec![SinkConfig::Webhook {
+            url: "https://example.com/hook".to_string(),
+            include_audio: false,
+            max_audio_bytes: None,
+            method: Some("DELETE".to_string()),
+            body_template: None,
+            sign: true,
+            include_body: false,
+            headers: Vec::new(),
+        }];
+        let warnings = validate_pipeline(&config, &pipeline);
+        assert!(warnings.iter().any(|w| w.contains("method")), "got: {warnings:?}");
+    }
+
+    #[test]
+    fn validate_pipeline_accepts_case_insensitive_known_webhook_methods() {
+        let config = configured_ai();
+        let mut pipeline = sample_pipeline("p1", "@every 1h");
+        pipeline.sinks = vec![SinkConfig::Webhook {
+            url: "https://example.com/hook".to_string(),
+            include_audio: false,
+            max_audio_bytes: None,
+            method: Some("put".to_string()),
+            body_template: None,
+            sign: true,
+            include_body: false,
+            headers: Vec::new(),
+        }];
+        let warnings = validate_pipeline(&config, &pipeline);
+        assert!(!warnings.iter().any(|w| w.contains("method")), "got: {warnings:?}");
+    }
+
+    #[test]
+    fn validate_pipeline_flags_empty_header_name_and_body_template_with_include_audio() {
+        let config = configured_ai();
+        let mut pipeline = sample_pipeline("p1", "@every 1h");
+        pipeline.sinks = vec![SinkConfig::Webhook {
+            url: "https://example.com/hook".to_string(),
+            include_audio: true,
+            max_audio_bytes: None,
+            method: None,
+            body_template: Some("{{title}}".to_string()),
+            sign: true,
+            include_body: false,
+            headers: vec![crate::config::WebhookHeader { name: String::new(), value: "v".to_string() }],
+        }];
+        let warnings = validate_pipeline(&config, &pipeline);
+        assert!(warnings.iter().any(|w| w.contains("headers")), "got: {warnings:?}");
+        assert!(warnings.iter().any(|w| w.contains("include_audio")), "got: {warnings:?}");
     }
 
     #[test]

@@ -19,7 +19,7 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use serde_json::{Value, json};
 use tracing::debug;
 
-use crate::config::SinkConfig;
+use crate::config::{SinkConfig, WebhookHeader};
 use crate::daemon::AppState;
 
 use super::persist::{DeliveredItem, SinkOutcome};
@@ -54,7 +54,7 @@ pub(super) async fn deliver(
                     ("chat-post", room.to_string(), chat_post(state, room, article, outcome).await)
                 }
             }
-            SinkConfig::Webhook { url, include_audio, max_audio_bytes } => {
+            SinkConfig::Webhook { url, include_audio, max_audio_bytes, method, body_template, sign, include_body, headers } => {
                 let url = url.trim();
                 if url.is_empty() {
                     (
@@ -69,7 +69,21 @@ pub(super) async fn deliver(
                     (
                         "webhook",
                         url.to_string(),
-                        webhook(state, url, *include_audio, *max_audio_bytes, pipeline_id, article, outcome).await,
+                        webhook(
+                            state,
+                            url,
+                            *include_audio,
+                            *max_audio_bytes,
+                            method.as_deref(),
+                            body_template.as_deref(),
+                            *sign,
+                            *include_body,
+                            headers,
+                            pipeline_id,
+                            article,
+                            outcome,
+                        )
+                        .await,
                     )
                 }
             }
@@ -303,55 +317,196 @@ fn build_webhook_body(pipeline_id: &str, from_id: &str, item: Value) -> Value {
     })
 }
 
+/// [`build_webhook_item`] plus, when `include_body` is set, an `item.body`
+/// field carrying `article.body` verbatim -- shared by [`webhook`]'s default
+/// body and [`render_webhook_template`]'s `{{item_json}}` variable, so both
+/// reflect `include_body` identically.
+fn build_webhook_item_with_body(article: &Article, outcome: &TransformOutcome, include_body: bool) -> Value {
+    let mut item = build_webhook_item(article, outcome);
+    if include_body {
+        item["body"] = json!(article.body);
+    }
+    item
+}
+
+/// Strips the surrounding quotes from `serde_json`'s string encoding of
+/// `value`, giving the JSON-escaped *content* of a string (quotes, newlines,
+/// backslashes, etc. all escaped) without the quote delimiters -- used by
+/// [`render_webhook_template`] so a template like `{"content":"{{title}}"}`
+/// stays valid JSON even when `title` itself contains a `"` or `\n`.
+fn json_escape(value: &str) -> String {
+    let quoted = serde_json::to_string(value).unwrap_or_default();
+    // `serde_json::to_string` on a `&str` always yields a quoted JSON
+    // string (at minimum `""`), so stripping the first/last byte is safe.
+    quoted.get(1..quoted.len().saturating_sub(1)).unwrap_or_default().to_string()
+}
+
+/// Renders a `SinkConfig::Webhook.body_template` by substituting `{{var}}`
+/// tokens -- pure, so it's directly unit-testable. Every variable except
+/// `{{item_json}}` is inserted via [`json_escape`] (escaped, no surrounding
+/// quotes), so it's safe to drop directly inside a JSON string literal in
+/// the template; `{{item_json}}` is inserted raw, since it's already a full
+/// JSON value on its own. Unknown `{{...}}` tokens are left untouched
+/// verbatim. `include_body` mirrors the same flag used for the default body
+/// (via [`build_webhook_item_with_body`]) so `{{item_json}}` reflects it too;
+/// `include_audio`/`max_audio_bytes` have no template equivalent -- template
+/// mode never embeds audio (see `SinkConfig::Webhook`'s doc comment).
+fn render_webhook_template(
+    template: &str,
+    article: &Article,
+    outcome: &TransformOutcome,
+    pipeline_id: &str,
+    from_id: &str,
+    include_body: bool,
+) -> String {
+    let title = preferred_text(outcome.title.as_deref(), &article.title);
+    let published_at = chrono::DateTime::from_timestamp_millis(article.created_at)
+        .map(|t| t.to_rfc3339())
+        .unwrap_or_default();
+    let link = article.source_links.first().map(|link| link.url.as_str()).unwrap_or("");
+    let links: String =
+        article.source_links.iter().map(|link| link.url.as_str()).collect::<Vec<_>>().join("\n");
+    let item_json =
+        serde_json::to_string(&build_webhook_item_with_body(article, outcome, include_body)).unwrap_or_default();
+
+    let mut result = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(start) = rest.find("{{") {
+        result.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let Some(end) = after.find("}}") else {
+            // No closing `}}` -- keep the rest of the template verbatim.
+            result.push_str("{{");
+            result.push_str(after);
+            rest = "";
+            break;
+        };
+        let name = after[..end].trim();
+        let replacement = match name {
+            "id" => Some(json_escape(&article.id)),
+            "title" => Some(json_escape(title)),
+            "excerpt" => Some(json_escape(&article.excerpt)),
+            "body" => Some(json_escape(&article.body)),
+            "author" => Some(json_escape(&article.author_name)),
+            "lang" => Some(json_escape(outcome.lang.as_deref().unwrap_or(""))),
+            "pipeline" => Some(json_escape(pipeline_id)),
+            "from_id" => Some(json_escape(from_id)),
+            "published_at" => Some(json_escape(&published_at)),
+            "link" => Some(json_escape(link)),
+            "links" => Some(json_escape(&links)),
+            "item_json" => Some(item_json.clone()),
+            _ => None,
+        };
+        match replacement {
+            Some(value) => {
+                result.push_str(&value);
+                rest = &after[end + 2..];
+            }
+            None => {
+                // Unknown token: leave the original `{{...}}` untouched.
+                result.push_str("{{");
+                result.push_str(&after[..end + 2]);
+                rest = &after[end + 2..];
+            }
+        }
+    }
+    result.push_str(rest);
+    result
+}
+
+/// Resolves `SinkConfig::Webhook.method` to a `reqwest::Method`:
+/// case-insensitive `post`/`put`/`patch`, defaulting to (and treating any
+/// unrecognized value as) `POST` -- the "not one of post/put/patch" case is
+/// flagged as a config validation warning by `bot::validate_pipeline`, not
+/// re-checked/logged here.
+fn parse_webhook_method(method: Option<&str>) -> reqwest::Method {
+    match method.map(str::trim) {
+        Some(m) if m.eq_ignore_ascii_case("put") => reqwest::Method::PUT,
+        Some(m) if m.eq_ignore_ascii_case("patch") => reqwest::Method::PATCH,
+        _ => reqwest::Method::POST,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn webhook(
     state: &Arc<AppState>,
     url: &str,
     include_audio: bool,
     max_audio_bytes: Option<u64>,
+    method: Option<&str>,
+    body_template: Option<&str>,
+    sign: bool,
+    include_body: bool,
+    headers: &[WebhookHeader],
     pipeline_id: &str,
     article: &Article,
     outcome: &TransformOutcome,
 ) -> Result<()> {
     let identity = crate::identity::current(state).await.context("bot: loading identity")?;
 
-    let mut item = build_webhook_item(article, outcome);
-    if let Some(audio) = &outcome.audio
-        && include_audio
-        && max_audio_bytes.is_none_or(|max| audio.size <= max)
-    {
-        let store = crate::storage::store(state).await.context("bot: opening content store")?;
-        let bytes = store.get(&audio.cid).await.context("bot: resolving audio for webhook inline delivery")?;
-        item["audio"]["b64"] = json!(BASE64_STANDARD.encode(bytes));
-    }
+    let template = body_template.map(str::trim).filter(|template| !template.is_empty());
+    let (body_bytes, signature): (Vec<u8>, Option<String>) = if let Some(template) = template {
+        // Template mode: never wiresigned, and `include_audio` has no
+        // effect (see `SinkConfig::Webhook`'s doc comment).
+        let rendered = render_webhook_template(template, article, outcome, pipeline_id, identity.did(), include_body);
+        (rendered.into_bytes(), None)
+    } else {
+        let mut item = build_webhook_item_with_body(article, outcome, include_body);
+        if let Some(audio) = &outcome.audio
+            && include_audio
+            && max_audio_bytes.is_none_or(|max| audio.size <= max)
+        {
+            let store = crate::storage::store(state).await.context("bot: opening content store")?;
+            let bytes = store.get(&audio.cid).await.context("bot: resolving audio for webhook inline delivery")?;
+            item["audio"]["b64"] = json!(BASE64_STANDARD.encode(bytes));
+        }
 
-    let mut body = build_webhook_body(pipeline_id, identity.did(), item);
-    crate::wiresign::sign_wire(&mut body, &identity)?;
-    let signature = body
-        .get("signature")
-        .and_then(Value::as_str)
-        .context("bot: sign_wire did not produce a signature")?
-        .to_string();
-    let body_bytes = serde_json::to_vec(&body)?;
+        let mut body = build_webhook_body(pipeline_id, identity.did(), item);
+        let signature = if sign {
+            crate::wiresign::sign_wire(&mut body, &identity)?;
+            Some(
+                body.get("signature")
+                    .and_then(Value::as_str)
+                    .context("bot: sign_wire did not produce a signature")?
+                    .to_string(),
+            )
+        } else {
+            None
+        };
+        (serde_json::to_vec(&body)?, signature)
+    };
 
+    let http_method = parse_webhook_method(method);
     let client = reqwest::Client::builder()
         .no_proxy()
         .build()
         .context("bot: building webhook HTTP client")?;
-    let response = client
-        .post(url)
+    let mut request = client
+        .request(http_method.clone(), url)
         .header("Content-Type", "application/json")
-        .header("X-Mistl-Did", identity.did())
-        .header("X-Mistl-Signature", signature)
+        .header("X-Mistl-Did", identity.did());
+    if let Some(signature) = signature {
+        request = request.header("X-Mistl-Signature", signature);
+    }
+    for header in headers {
+        let name = header.name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        request = request.header(name, header.value.as_str());
+    }
+
+    let response = request
         .body(body_bytes)
         .send()
         .await
-        .with_context(|| format!("bot: webhook POST failed: {url}"))?;
+        .with_context(|| format!("bot: webhook {http_method} failed: {url}"))?;
 
     if !response.status().is_success() {
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
         let truncated: String = text.chars().take(500).collect();
-        bail!("bot: webhook POST to {url} returned an error ({status}): {truncated}");
+        bail!("bot: webhook {http_method} to {url} returned an error ({status}): {truncated}");
     }
     Ok(())
 }
@@ -611,6 +766,147 @@ mod tests {
         let mut tampered = body.clone();
         tampered["item"]["title"] = json!("different title");
         assert!(!crate::wiresign::verify_wire(&tampered).unwrap());
+    }
+
+    // -- flexible webhook sink: include_body / template mode / method parsing --
+
+    #[test]
+    fn build_webhook_item_with_body_is_byte_identical_to_the_legacy_item_when_include_body_is_false() {
+        // Pins the WIRE_WEBHOOK_DELIVERY_WIRE-shaped default payload: with
+        // `include_body` unset (false), the item must be exactly what
+        // `build_webhook_item` alone produces.
+        let article = sample_article();
+        let outcome = TransformOutcome::default();
+        let legacy = build_webhook_item(&article, &outcome);
+        let with_flag_off = build_webhook_item_with_body(&article, &outcome, false);
+        assert_eq!(legacy, with_flag_off);
+        assert!(with_flag_off.get("body").is_none());
+    }
+
+    #[test]
+    fn build_webhook_item_with_body_adds_the_article_body_when_true() {
+        let item = build_webhook_item_with_body(&sample_article(), &TransformOutcome::default(), true);
+        assert_eq!(item["body"], json!("本文"));
+        // Everything else must still be present, unchanged.
+        assert_eq!(item["articleId"], json!("article-1"));
+    }
+
+    #[test]
+    fn webhook_body_with_include_body_still_signs_and_verifies() {
+        let identity = crate::identity::for_test();
+        let item = build_webhook_item_with_body(&sample_article(), &TransformOutcome::default(), true);
+        let mut body = build_webhook_body("news-audio", identity.did(), item);
+        assert_eq!(body["item"]["body"], json!("本文"));
+
+        crate::wiresign::sign_wire(&mut body, &identity).expect("a well-formed webhook body must sign");
+        assert!(crate::wiresign::verify_wire(&body).unwrap());
+
+        let mut tampered = body.clone();
+        tampered["item"]["body"] = json!("tampered body");
+        assert!(!crate::wiresign::verify_wire(&tampered).unwrap());
+    }
+
+    #[test]
+    fn render_webhook_template_escapes_quotes_and_newlines_in_substituted_values() {
+        let mut article = sample_article();
+        article.title = "見出し \"引用\" と\n改行".to_string();
+        let rendered = render_webhook_template(
+            r#"{"title":"{{title}}","pipeline":"{{pipeline}}"}"#,
+            &article,
+            &TransformOutcome::default(),
+            "news-audio",
+            "did:key:zBot",
+            false,
+        );
+        // The rendered text must itself be valid JSON, and round-trip the
+        // *unescaped* original value.
+        let parsed: Value = serde_json::from_str(&rendered).expect("rendered template must be valid JSON");
+        assert_eq!(parsed["title"], json!("見出し \"引用\" と\n改行"));
+        assert_eq!(parsed["pipeline"], json!("news-audio"));
+    }
+
+    #[test]
+    fn render_webhook_template_title_prefers_outcome_title_over_article_title() {
+        let mut outcome = TransformOutcome::default();
+        outcome.title = Some("翻訳タイトル".to_string());
+        let rendered =
+            render_webhook_template("{{title}}", &sample_article(), &outcome, "news-audio", "did:key:zBot", false);
+        assert_eq!(rendered, "翻訳タイトル");
+    }
+
+    #[test]
+    fn render_webhook_template_item_json_is_inserted_raw_and_reflects_include_body() {
+        let rendered = render_webhook_template(
+            r#"{"item":{{item_json}}}"#,
+            &sample_article(),
+            &TransformOutcome::default(),
+            "news-audio",
+            "did:key:zBot",
+            true,
+        );
+        let parsed: Value = serde_json::from_str(&rendered).expect("rendered template must be valid JSON");
+        assert_eq!(parsed["item"]["articleId"], json!("article-1"));
+        assert_eq!(parsed["item"]["body"], json!("本文"), "item_json must reflect include_body");
+    }
+
+    #[test]
+    fn render_webhook_template_leaves_unknown_tokens_untouched() {
+        let rendered = render_webhook_template(
+            "hello {{whatever}} world",
+            &sample_article(),
+            &TransformOutcome::default(),
+            "news-audio",
+            "did:key:zBot",
+            false,
+        );
+        assert_eq!(rendered, "hello {{whatever}} world");
+    }
+
+    #[test]
+    fn render_webhook_template_link_and_links_handle_zero_and_multiple_source_links() {
+        let mut no_links = sample_article();
+        no_links.source_links.clear();
+        let rendered = render_webhook_template(
+            "link=[{{link}}] links=[{{links}}]",
+            &no_links,
+            &TransformOutcome::default(),
+            "news-audio",
+            "did:key:zBot",
+            false,
+        );
+        assert_eq!(rendered, "link=[] links=[]");
+
+        let mut two_links = sample_article();
+        two_links.source_links.push(super::super::source::SourceLink {
+            title: "別記事".to_string(),
+            url: "https://example.com/b".to_string(),
+        });
+        let rendered = render_webhook_template(
+            "link=[{{link}}] links=[{{links}}]",
+            &two_links,
+            &TransformOutcome::default(),
+            "news-audio",
+            "did:key:zBot",
+            false,
+        );
+        assert_eq!(rendered, "link=[https://example.com/a] links=[https://example.com/a\\nhttps://example.com/b]");
+    }
+
+    #[test]
+    fn parse_webhook_method_accepts_known_methods_case_insensitively() {
+        assert_eq!(parse_webhook_method(Some("post")), reqwest::Method::POST);
+        assert_eq!(parse_webhook_method(Some("POST")), reqwest::Method::POST);
+        assert_eq!(parse_webhook_method(Some("PUT")), reqwest::Method::PUT);
+        assert_eq!(parse_webhook_method(Some("put")), reqwest::Method::PUT);
+        assert_eq!(parse_webhook_method(Some("PATCH")), reqwest::Method::PATCH);
+        assert_eq!(parse_webhook_method(Some("patch")), reqwest::Method::PATCH);
+    }
+
+    #[test]
+    fn parse_webhook_method_defaults_to_post_for_unset_or_bogus_values() {
+        assert_eq!(parse_webhook_method(None), reqwest::Method::POST);
+        assert_eq!(parse_webhook_method(Some("DELETE")), reqwest::Method::POST);
+        assert_eq!(parse_webhook_method(Some("bogus")), reqwest::Method::POST);
     }
 
     // -- article-publish sink: published body / announce wire --
