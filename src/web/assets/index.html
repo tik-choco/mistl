@@ -1171,6 +1171,229 @@
   .settings-drawer[open] > summary .drawer-chevron { transform: rotate(-180deg); }
   .settings-drawer-body { padding: 4px 14px 12px; }
 
+  /* ---------- ai panel (tc-translate style) ---------- */
+  /* Everything below is scoped under #panel-ai and/or the `ai-` class
+     prefix (per the redesign spec) so it cannot leak into other panels.
+     Tokens only -- no new raw colors -- so light/dark both fall out of the
+     existing :root / [data-theme="dark"] overrides. The file already has a
+     blanket `@media (prefers-reduced-motion: reduce)` catch-all (near the
+     end of <style>) that zeroes all animation/transition durations, so the
+     .pulse keyframe below does not need its own reduced-motion override. */
+
+  #panel-ai .ai-eyebrow {
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+    color: var(--text-dim);
+  }
+
+  /* ---- connection tab: provider/preset card grid (JS-built, see
+     buildAiProvidersPresetsField) ------------------------------------- */
+  #panel-ai .ai-connection-section {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  #panel-ai .ai-cardgrid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 8px;
+  }
+  #panel-ai .ai-card {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+    padding: 10px 12px;
+    border: 1px solid var(--panel-border);
+    border-radius: var(--radius);
+    background: var(--panel);
+    box-shadow: var(--shadow-sm);
+    cursor: pointer;
+    transition: transform var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out);
+  }
+  #panel-ai .ai-card:hover {
+    transform: translateY(-1px);
+    box-shadow: var(--shadow);
+  }
+  #panel-ai .ai-card-label {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    padding-right: 16px; /* clears the top-right remove affordance */
+  }
+  #panel-ai .ai-card-sub {
+    font-size: 12px;
+    color: var(--text-faint);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  #panel-ai .ai-card-remove {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    background: none;
+    color: var(--text-faint);
+    font-size: 13px;
+    line-height: 1;
+    cursor: pointer;
+  }
+  #panel-ai .ai-card-remove:hover { background: var(--err-dim); color: var(--err); }
+
+  /* dashed add-tile that closes each grid */
+  #panel-ai .ai-add-tile {
+    align-items: center;
+    justify-content: center;
+    flex-direction: row;
+    gap: 6px;
+    border: 1px dashed var(--panel-border);
+    color: var(--text-faint);
+    background: transparent;
+    box-shadow: none;
+    font-size: 12.5px;
+    font-weight: 600;
+  }
+  #panel-ai .ai-add-tile:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+    transform: none;
+    box-shadow: none;
+  }
+  #panel-ai .ai-add-tile-icon { font-size: 16px; line-height: 1; flex: none; }
+
+  /* clicking a card (or the add-tile) expands an inline edit form spanning
+     the whole grid; only one open at a time (JS-enforced) */
+  #panel-ai .ai-card.ai-card-editing {
+    grid-column: 1 / -1;
+    cursor: default;
+  }
+  #panel-ai .ai-card.ai-card-editing:hover {
+    transform: none;
+    box-shadow: var(--shadow-sm);
+  }
+  #panel-ai .ai-card-editor {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  #panel-ai .ai-card-editor-row {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  #panel-ai .ai-card-editor .field { min-width: 160px; }
+  #panel-ai .ai-card-editor-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    padding-top: 6px;
+    border-top: 1px solid var(--panel-border);
+  }
+
+  /* small "default" badge on the resolved default preset's card face --
+     reuses the app-wide .badge, just accent-tinted like other active/ok
+     badge variants */
+  #panel-ai .badge.ai-default-badge {
+    background: var(--accent-dim);
+    color: var(--accent);
+    margin-left: 6px;
+  }
+
+  /* ---- network tab: role cards (provide / serve) -------------------- */
+  #panel-ai .ai-role-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 12px;
+  }
+  #panel-ai .ai-role-card {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 14px;
+    border: 1px solid var(--panel-border);
+    border-radius: var(--radius);
+    background: var(--panel);
+    box-shadow: var(--shadow-sm);
+  }
+  #panel-ai .ai-role-card-head {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+  }
+  #panel-ai .ai-role-card-head .ai-status-dot { margin-top: 5px; }
+  #panel-ai .ai-role-card-heading {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+  #panel-ai .ai-role-card-title { font-size: 14px; font-weight: 700; color: var(--text); }
+  #panel-ai .ai-role-card-desc { font-size: 12px; color: var(--text-faint); }
+  #panel-ai .ai-role-card-body {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding-top: 10px;
+    border-top: 1px solid var(--panel-border);
+  }
+  #panel-ai .ai-role-card-foot { display: flex; justify-content: flex-end; }
+
+  /* status dot: idle (--text-faint) / on (--ok) / err (--err); .pulse is an
+     optional modifier for transitional states (e.g. "starting…") */
+  #panel-ai .ai-status-dot {
+    display: inline-block;
+    width: 9px;
+    height: 9px;
+    border-radius: 999px;
+    background: var(--text-faint);
+    flex: none;
+  }
+  #panel-ai .ai-status-dot.on { background: var(--ok); }
+  #panel-ai .ai-status-dot.err { background: var(--err); }
+  #panel-ai .ai-status-dot.pulse { animation: ai-dot-pulse 1.2s ease-in-out infinite; }
+  @keyframes ai-dot-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+  /* ---- network tab: setup-guide empty state (JS-built into
+     #ai-setup-state, hidden entirely once a default preset resolves) --- */
+  #panel-ai .ai-setup-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 8px;
+    padding: 28px 20px;
+    border: 1px dashed var(--accent);
+    border-radius: var(--radius);
+    background: var(--accent-dim);
+  }
+  #panel-ai .ai-setup-icon {
+    width: 40px;
+    height: 40px;
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 999px;
+    font-size: 18px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-dim));
+    color: var(--panel);
+    box-shadow: var(--shadow-sm);
+  }
+  #panel-ai .ai-setup-title { font-size: 15px; font-weight: 700; color: var(--text); }
+  #panel-ai .ai-setup-desc { font-size: 12.5px; color: var(--text-dim); max-width: 420px; }
+  #panel-ai .ai-setup-cta { margin-top: 4px; }
+
   /* ---- topology card fold (collapsible body, reuses .drawer-chevron) --- */
   /* .cascade-card's own flex/gap only had one child once the body moved
      inside <details>; recreate the same column + 10px gap on the fold
@@ -1582,28 +1805,66 @@
       <span class="topo-strip-peers" data-role="peers"></span>
       <a href="#topology-card" data-i18n="topoStrip.viewFull">View full topology</a>
     </div>
-    <div id="ai-hints"></div>
-    <dl class="kv" id="ai-kv"></dl>
-    <div class="row">
-      <button id="btn-ai-provide-toggle" class="primary" data-i18n="ai.startProviding">Start providing</button>
-      <button id="btn-ai-serve-toggle" class="primary" data-i18n="ai.startServe">Start API server</button>
+    <div class="subtabs" role="tablist" data-i18n-aria-label="ai.tabs.groupLabel" aria-label="AI sections">
+      <button type="button" data-subtab-target="connection" data-i18n="ai.tab.connection">Connection</button>
+      <button type="button" data-subtab-target="network" data-i18n="ai.tab.network">AI Network</button>
+      <button type="button" data-subtab-target="chat" data-i18n="ai.tab.chat">Chat</button>
     </div>
-    <div id="ai-models" class="row"></div>
-    <hr class="sep">
-    <div class="chat-log" id="chat-log">
-      <div class="chat-empty" data-i18n="chat.empty">No messages yet.</div>
+    <div class="subtab-page" data-subtab="connection">
+      <div id="ai-connection-editor"></div>
     </div>
-    <form class="inline" id="chat-form">
-      <div class="field" style="flex: 3;">
-        <label for="chat-prompt" data-i18n="chat.promptLabel">Prompt</label>
-        <input type="text" id="chat-prompt" data-i18n-placeholder="chat.promptPlaceholder" placeholder="Ask something&hellip;" autocomplete="off">
+    <div class="subtab-page" data-subtab="network">
+      <div id="ai-setup-state"></div>
+      <div class="ai-role-cards">
+        <div class="ai-role-card" id="ai-card-provide">
+          <div class="ai-role-card-head">
+            <span class="ai-status-dot" id="ai-dot-provide" aria-hidden="true"></span>
+            <div class="ai-role-card-heading">
+              <div class="ai-role-card-title" data-i18n="ai.net.provideTitle">Provide to the network</div>
+              <div class="ai-role-card-desc" data-i18n="ai.net.provideDesc">Answer AI requests from peers using your configured upstream provider.</div>
+            </div>
+          </div>
+          <div class="ai-role-card-body">
+            <dl class="kv" id="ai-kv"></dl>
+            <div id="ai-models" class="row"></div>
+          </div>
+          <div class="ai-role-card-foot">
+            <button id="btn-ai-provide-toggle" class="primary" data-i18n="ai.startProviding">Start providing</button>
+          </div>
+        </div>
+        <div class="ai-role-card" id="ai-card-serve">
+          <div class="ai-role-card-head">
+            <span class="ai-status-dot" id="ai-dot-serve" aria-hidden="true"></span>
+            <div class="ai-role-card-heading">
+              <div class="ai-role-card-title" data-i18n="ai.net.serveTitle">Local API server</div>
+              <div class="ai-role-card-desc" data-i18n="ai.net.serveDesc">Expose an OpenAI-compatible endpoint on this machine, answered by AI providers on the network.</div>
+            </div>
+          </div>
+          <div class="ai-role-card-body">
+            <div id="ai-serve-callout"></div>
+          </div>
+          <div class="ai-role-card-foot">
+            <button id="btn-ai-serve-toggle" class="primary" data-i18n="ai.startServe">Start API server</button>
+          </div>
+        </div>
       </div>
-      <div class="field" style="flex: 1; min-width: 140px;">
-        <label for="chat-model" data-i18n="chat.modelLabel">Model (optional)</label>
-        <select id="chat-model"><option value="" data-i18n="common.default">default</option></select>
+    </div>
+    <div class="subtab-page" data-subtab="chat">
+      <div class="chat-log" id="chat-log">
+        <div class="chat-empty" data-i18n="chat.empty">No messages yet.</div>
       </div>
-      <button type="submit" class="primary" id="btn-chat-send" data-i18n="chat.send">Send</button>
-    </form>
+      <form class="inline" id="chat-form">
+        <div class="field" style="flex: 3;">
+          <label for="chat-prompt" data-i18n="chat.promptLabel">Prompt</label>
+          <input type="text" id="chat-prompt" data-i18n-placeholder="chat.promptPlaceholder" placeholder="Ask something&hellip;" autocomplete="off">
+        </div>
+        <div class="field" style="flex: 1; min-width: 140px;">
+          <label for="chat-model" data-i18n="chat.modelLabel">Model (optional)</label>
+          <select id="chat-model"><option value="" data-i18n="common.default">default</option></select>
+        </div>
+        <button type="submit" class="primary" id="btn-chat-send" data-i18n="chat.send">Send</button>
+      </form>
+    </div>
     <div class="topology-slot" id="topology-slot-ai"></div>
     <details class="settings-drawer" id="settings-drawer-ai">
       <summary>
@@ -2516,6 +2777,22 @@
       "ai.serveStarted": "API server listening at {listen}",
       "ai.serveStopped": "API server stopped.",
       "ai.serveWasNotRunning": "API server was not running.",
+      "ai.tab.connection": "Connection",
+      "ai.tab.network": "AI Network",
+      "ai.tab.chat": "Chat",
+      "ai.net.provideTitle": "Provide to the network",
+      "ai.net.provideDesc": "Answer AI requests from peers using your configured upstream provider.",
+      "ai.net.serveTitle": "Local API server",
+      "ai.net.serveDesc": "Expose an OpenAI-compatible endpoint on this machine, answered by AI providers on the network.",
+      "ai.net.serveIdleHint": "Not running. Start the server to get a local endpoint URL.",
+      "ai.setup.title": "No AI connection yet",
+      "ai.setup.desc": "Add an OpenAI-compatible provider and a model preset to enable AI features.",
+      "ai.setup.cta": "Configure connection",
+      "ai.setup.disabledHint": "Configure a provider and preset first",
+      "ai.editor.save": "Save",
+      "ai.editor.cancel": "Cancel",
+      "ai.editor.defaultBadge": "default",
+      "ai.tabs.groupLabel": "AI sections",
       "chat.promptLabel": "Prompt",
       "chat.promptPlaceholder": "Ask something…",
       "chat.modelLabel": "Model (optional)",
@@ -3171,6 +3448,22 @@
       "ai.serveStarted": "APIサーバーが{listen}で待ち受けを開始しました",
       "ai.serveStopped": "APIサーバーを停止しました。",
       "ai.serveWasNotRunning": "APIサーバーは稼働していませんでした。",
+      "ai.tab.connection": "接続",
+      "ai.tab.network": "AIネットワーク",
+      "ai.tab.chat": "チャット",
+      "ai.net.provideTitle": "ネットワークへの提供",
+      "ai.net.provideDesc": "設定済みのアップストリームプロバイダーを使って、ピアからのAIリクエストに応答します。",
+      "ai.net.serveTitle": "ローカルAPIサーバー",
+      "ai.net.serveDesc": "このマシン上にOpenAI互換のエンドポイントを公開し、ネットワーク上のAIプロバイダーが応答します。",
+      "ai.net.serveIdleHint": "停止しています。サーバーを開始するとローカルのエンドポイントURLを取得できます。",
+      "ai.setup.title": "AI接続はまだありません",
+      "ai.setup.desc": "OpenAI互換のプロバイダーとモデルのプリセットを追加すると、AI機能を利用できるようになります。",
+      "ai.setup.cta": "接続を設定",
+      "ai.setup.disabledHint": "先にプロバイダーとプリセットを設定してください",
+      "ai.editor.save": "保存",
+      "ai.editor.cancel": "キャンセル",
+      "ai.editor.defaultBadge": "デフォルト",
+      "ai.tabs.groupLabel": "AI セクション",
       "chat.promptLabel": "プロンプト",
       "chat.promptPlaceholder": "質問を入力…",
       "chat.modelLabel": "モデル (任意)",
@@ -3826,6 +4119,22 @@
       "ai.serveStarted": "API 服务器已在 {listen} 开始监听",
       "ai.serveStopped": "API 服务器已停止。",
       "ai.serveWasNotRunning": "API 服务器此前未运行。",
+      "ai.tab.connection": "连接",
+      "ai.tab.network": "AI 网络",
+      "ai.tab.chat": "聊天",
+      "ai.net.provideTitle": "为网络提供服务",
+      "ai.net.provideDesc": "使用已配置的上游提供方，响应来自节点的 AI 请求。",
+      "ai.net.serveTitle": "本地 API 服务器",
+      "ai.net.serveDesc": "在本机开放一个 OpenAI 兼容端点，由网络上的 AI 提供方响应。",
+      "ai.net.serveIdleHint": "尚未运行。启动服务器即可获取本地端点 URL。",
+      "ai.setup.title": "尚未建立 AI 连接",
+      "ai.setup.desc": "添加一个 OpenAI 兼容的提供方和模型预设，即可启用 AI 功能。",
+      "ai.setup.cta": "配置连接",
+      "ai.setup.disabledHint": "请先配置提供方和预设",
+      "ai.editor.save": "保存",
+      "ai.editor.cancel": "取消",
+      "ai.editor.defaultBadge": "默认",
+      "ai.tabs.groupLabel": "AI 部分",
       "chat.promptLabel": "提示词",
       "chat.promptPlaceholder": "输入问题…",
       "chat.modelLabel": "模型 (可选)",
@@ -6329,7 +6638,10 @@
 
   var aiKv = document.getElementById("ai-kv");
   var aiModelsBox = document.getElementById("ai-models");
-  var aiHintsBox = document.getElementById("ai-hints");
+  var aiSetupBox = document.getElementById("ai-setup-state");
+  var aiDotProvide = document.getElementById("ai-dot-provide");
+  var aiDotServe = document.getElementById("ai-dot-serve");
+  var aiServeCallout = document.getElementById("ai-serve-callout");
   var btnAiProvideToggle = document.getElementById("btn-ai-provide-toggle");
   var btnAiServeToggle = document.getElementById("btn-ai-serve-toggle");
   var chatModelSelect = document.getElementById("chat-model");
@@ -6350,36 +6662,55 @@
     return providers.some(function (p) { return p.id === preset.provider_id; });
   }
 
+  // Retargeted from the old #ai-hints info-banner to the Network tab's
+  // #ai-setup-state empty state (see the tc-translate-style redesign):
+  // renders the setup-guide card when there's no usable default preset yet
+  // (hidden otherwise), and disables both provide/serve toggle buttons in
+  // that case so there's nothing to click into a guaranteed-failing
+  // ai.provide.start/ai.serve.start. Called after every ai.status poll AND
+  // from saveSetting() (so editing providers/presets in the Connection tab
+  // updates this live) -- must stay a safe no-op before config.show has
+  // ever resolved.
   function refreshAiHints() {
-    if (!aiHintsBox) return;
-    aiHintsBox.innerHTML = "";
+    if (!aiSetupBox) return;
+    aiSetupBox.innerHTML = "";
     var cfg = state.config;
-    var a = state.ai;
-    if (!cfg) return;
+    if (!cfg) {
+      aiSetupBox.style.display = "none";
+      return;
+    }
     var aiCfg = cfg.ai || {};
-    if (!aiDefaultPresetResolves(aiCfg)) {
-      var hint = el("div", { class: "info-hint" });
-      hint.appendChild(el("span", { text: t("ai.upstreamHint") }));
-      var openBtn = el("button", { type: "button", text: t("ai.openSettings") });
-      openBtn.addEventListener("click", function () { focusSettingsField("settings-ai-providers-add"); });
-      hint.appendChild(openBtn);
-      aiHintsBox.appendChild(hint);
-    } else if (a && !a.providing) {
-      var hint2 = el("div", { class: "info-hint neutral" });
-      hint2.appendChild(el("span", { text: t("ai.readyHint") }));
-      aiHintsBox.appendChild(hint2);
+    var configured = aiDefaultPresetResolves(aiCfg);
+    if (configured) {
+      aiSetupBox.style.display = "none";
+    } else {
+      aiSetupBox.style.display = "";
+      var card = el("div", { class: "ai-setup-card" });
+      var icon = el("div", { class: "ai-setup-icon" });
+      // Static trusted markup (not user input) -- matches the line-icon
+      // style already used for e.g. the settings-drawer gear (stroke =
+      // currentColor), just built here instead of inline in the HTML since
+      // #ai-setup-state's contents are entirely JS-authored per the markup
+      // contract.
+      icon.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.6 5.4L19 10l-5.4 1.6L12 17l-1.6-5.4L5 10l5.4-1.6L12 3z"/></svg>';
+      card.appendChild(icon);
+      card.appendChild(el("div", { class: "ai-setup-title", text: t("ai.setup.title") }));
+      card.appendChild(el("div", { class: "ai-setup-desc", text: t("ai.setup.desc") }));
+      var cta = el("button", { type: "button", class: "primary ai-setup-cta" });
+      cta.textContent = t("ai.setup.cta");
+      cta.addEventListener("click", function () {
+        if (subtabActivate["panel-ai"]) subtabActivate["panel-ai"]("connection");
+      });
+      card.appendChild(cta);
+      aiSetupBox.appendChild(card);
     }
-    if (a && a.serving) {
-      var listen = aiCfg.api_listen || (typeof a.serving === "string" ? a.serving : "");
-      if (listen) {
-        var url = "http://" + listen + "/v1";
-        var callout = el("div", { class: "url-callout", title: t("common.clickToCopy") });
-        callout.appendChild(el("span", { class: "url-callout-label", text: t("ai.endpointLabel") }));
-        callout.appendChild(el("span", { class: "url-callout-url mono", text: url }));
-        callout.addEventListener("click", function () { copyToClipboard(url); });
-        aiHintsBox.appendChild(callout);
-      }
-    }
+    var disabledHint = configured ? "" : t("ai.setup.disabledHint");
+    [btnAiProvideToggle, btnAiServeToggle].forEach(function (btn) {
+      if (!btn) return;
+      btn.disabled = !configured;
+      if (disabledHint) btn.title = disabledHint;
+      else btn.removeAttribute("title");
+    });
   }
 
   function setAiToggleButton(btn, active, startKey, stopKey) {
@@ -6395,13 +6726,44 @@
     setAiToggleButton(btnAiServeToggle, !!(a && a.serving), "ai.startServe", "ai.stopServe");
   }
 
+  // Fills the Network tab's "Local API server" role card body: a
+  // click-to-copy url-callout (same markup/behavior as the stream panel's)
+  // while serving, else a short muted idle hint. Split out of renderAi so
+  // both the "no status yet" early-return and the normal path share it.
+  function renderAiServeCallout(a) {
+    if (!aiServeCallout) return;
+    aiServeCallout.innerHTML = "";
+    var aiCfg = (state.config && state.config.ai) || {};
+    if (a && a.serving) {
+      var listen = aiCfg.api_listen || (typeof a.serving === "string" ? a.serving : "");
+      if (listen) {
+        var url = "http://" + listen + "/v1";
+        var callout = el("div", { class: "url-callout", role: "button", tabindex: "0", title: t("common.clickToCopy") });
+        callout.appendChild(el("span", { class: "url-callout-label", text: t("ai.endpointLabel") }));
+        callout.appendChild(el("span", { class: "url-callout-url mono", text: url }));
+        callout.addEventListener("click", function () { copyToClipboard(url); });
+        callout.addEventListener("keydown", function (e) {
+          if (e.key !== "Enter" && e.key !== " " && e.key !== "Spacebar") return;
+          if (e.key !== "Enter") e.preventDefault();
+          copyToClipboard(url);
+        });
+        aiServeCallout.appendChild(callout);
+        return;
+      }
+    }
+    aiServeCallout.appendChild(el("div", { class: "muted", text: t("ai.net.serveIdleHint") }));
+  }
+
   function renderAi() {
     aiKv.innerHTML = "";
     var a = state.ai;
     renderAiToggleButtons(a);
+    if (aiDotProvide) aiDotProvide.classList.toggle("on", !!(a && a.providing));
+    if (aiDotServe) aiDotServe.classList.toggle("on", !!(a && a.serving));
     if (!a) {
       addKv(aiKv, t("ai.statusLabel"), t("stream.statusUnknown"));
       aiModelsBox.innerHTML = "";
+      renderAiServeCallout(a);
       refreshAiHints();
       return;
     }
@@ -6409,7 +6771,8 @@
     addKv(aiKv, t("ai.nodeId"), a.node_id, true);
     addKv(aiKv, t("ai.connectedPeers"), a.connected_peers);
     addKv(aiKv, t("ai.providing"), a.providing ? t("ai.yes") : t("ai.no"));
-    addKv(aiKv, t("ai.servingLabel"), a.serving ? a.serving : t("ai.no"));
+    // Serving now has its own role card (renderAiServeCallout / #ai-dot-serve)
+    // so it's dropped from this kv list -- everything else here is unchanged.
     if (a.remote_provider) {
       addKv(aiKv, t("ai.remoteProvider"), a.remote_provider.node_id, true);
     }
@@ -6441,6 +6804,7 @@
       lastChatModelsKey = modelsKey;
     }
 
+    renderAiServeCallout(a);
     refreshAiHints();
   }
 
@@ -8996,13 +9360,19 @@
      ai.providers/ai.presets/ai.default_preset_id (see config.rs
      AiProviderConfig/AiPresetConfig) aren't flat scalars, so the
      descriptor-driven buildSettingsField above can't render them; this
-     hand-builds the same visual language (.settings-field, .settings-row,
-     restart badges) the way the "list" field type hand-builds a chip
-     editor. Wired into renderSettings for the "ai" section only. config.set
-     always takes the *whole* providers/presets array, so every edit here
-     reads the current array via providers()/presets() (backed by
-     sectionCfg, kept in sync by saveSetting), patches the one entry that
-     changed, and writes the whole array back. */
+     hand-builds a tc-translate-style card grid: one .ai-card tile per
+     provider/preset (label + secondary line, small (x) remove affordance),
+     closed by a dashed "add" tile. Clicking a tile (or the add-tile) swaps
+     it in place for an inline edit form spanning the grid, with an
+     explicit Save/Cancel footer -- edits are staged in the form's inputs
+     and only committed to config.set on Save (Cancel discards them).
+     Wired into renderSettings for the "ai" section only, mounted into
+     #ai-connection-editor (Connection sub-tab of the AI panel) instead of
+     the settings drawer. config.set always takes the *whole*
+     providers/presets array, so Save reads the current array via
+     providers()/presets() (backed by sectionCfg, kept in sync by
+     saveSetting), patches/appends/removes the one entry that changed, and
+     writes the whole array back. */
 
   function aiProviderRefCount(presets, providerId) {
     return presets.filter(function (p) { return p.provider_id === providerId; }).length;
@@ -9028,8 +9398,21 @@
     return id;
   }
 
+  // Best-effort "host" for a card's secondary line -- falls back to the raw
+  // string for anything that doesn't parse (empty, partially-typed, etc.),
+  // so this never throws while a provider's base_url is mid-edit elsewhere.
+  function aiUrlHost(url) {
+    if (!url) return "";
+    try {
+      var host = new URL(url).host;
+      return host || url;
+    } catch (e) {
+      return url;
+    }
+  }
+
   function buildAiProvidersPresetsField(sectionCfg) {
-    var wrap = el("div", {});
+    var wrap = el("div", { class: "ai-connection-section" });
 
     // Cache of fetched upstream model lists, keyed by provider_id. Survives
     // renderAll() re-renders (which happen after every save) for the
@@ -9041,62 +9424,67 @@
     // refresh button clears it for an explicit retry.
     var modelFetchState = {};
 
+    // Which single card (if any) currently has its inline editor open --
+    // { kind: "provider"|"preset", id: <entry id> | null (null = the "add
+    // new" tile), draft: <captured-but-unsaved field values, or null> }.
+    // Only one editor is open at a time across both grids.
+    var editing = null;
+    // The currently-mounted .ai-card.ai-card-editing DOM node (if editing is
+    // set), so an unrelated renderAll() (e.g. a background model-list fetch
+    // settling for a *different* provider) can capture its in-progress,
+    // not-yet-saved field values before the grid it lives in gets rebuilt.
+    var currentEditorForm = null;
+
     function providers() { return Array.isArray(sectionCfg.providers) ? sectionCfg.providers : []; }
     function presets() { return Array.isArray(sectionCfg.presets) ? sectionCfg.presets : []; }
 
+    function openEditor(kind, id) {
+      editing = { kind: kind, id: id, draft: null };
+      renderAll();
+    }
+    function closeEditor() {
+      editing = null;
+      currentEditorForm = null;
+      renderAll();
+    }
+
     /* ---- providers ---- */
     var provField = el("div", { class: "settings-field" });
-    var provLabel = el("label", { class: "settings-label" });
-    provLabel.textContent = t("settings.ai.providers.title");
+    var provLabel = el("label", { class: "ai-eyebrow", text: t("settings.ai.providers.title") });
     provField.appendChild(provLabel);
-    var provDesc = el("div", { class: "desc" });
-    provDesc.textContent = t("settings.ai.providers.desc");
+    var provDesc = el("div", { class: "desc", text: t("settings.ai.providers.desc") });
     provField.appendChild(provDesc);
-    var provList = el("div", { class: "ai-provider-list" });
-    provField.appendChild(provList);
-    var provAddRow = el("div", { class: "settings-row" });
-    var provAddBtn = el("button", { type: "button", id: "settings-ai-providers-add" });
-    provAddBtn.textContent = t("settings.ai.providers.addBtn");
+    var provGrid = el("div", { class: "ai-cardgrid" });
+    provField.appendChild(provGrid);
     var provBadge = el("button", { type: "button", class: "badge restart" });
     provBadge.textContent = t("settings.restartBadge");
     provBadge.title = t("settings.restartBadgeTitle");
     provBadge.style.display = "none";
     provBadge.addEventListener("click", function () { restartDaemon(provBadge); });
-    provAddRow.appendChild(provAddBtn);
-    provAddRow.appendChild(provBadge);
-    provField.appendChild(provAddRow);
+    provField.appendChild(provBadge);
     wrap.appendChild(provField);
 
     /* ---- presets ---- */
     var presetField = el("div", { class: "settings-field" });
-    var presetLabel = el("label", { class: "settings-label" });
-    presetLabel.textContent = t("settings.ai.presets.title");
+    var presetLabel = el("label", { class: "ai-eyebrow", text: t("settings.ai.presets.title") });
     presetField.appendChild(presetLabel);
-    var presetDesc = el("div", { class: "desc" });
-    presetDesc.textContent = t("settings.ai.presets.desc");
+    var presetDesc = el("div", { class: "desc", text: t("settings.ai.presets.desc") });
     presetField.appendChild(presetDesc);
-    var presetList = el("div", { class: "ai-preset-list" });
-    presetField.appendChild(presetList);
-    var presetAddRow = el("div", { class: "settings-row" });
-    var presetAddBtn = el("button", { type: "button", id: "settings-ai-presets-add" });
-    presetAddBtn.textContent = t("settings.ai.presets.addBtn");
+    var presetGrid = el("div", { class: "ai-cardgrid" });
+    presetField.appendChild(presetGrid);
     var presetBadge = el("button", { type: "button", class: "badge restart" });
     presetBadge.textContent = t("settings.restartBadge");
     presetBadge.title = t("settings.restartBadgeTitle");
     presetBadge.style.display = "none";
     presetBadge.addEventListener("click", function () { restartDaemon(presetBadge); });
-    presetAddRow.appendChild(presetAddBtn);
-    presetAddRow.appendChild(presetBadge);
-    presetField.appendChild(presetAddRow);
+    presetField.appendChild(presetBadge);
     wrap.appendChild(presetField);
 
     /* ---- default preset ---- */
     var defField = el("div", { class: "settings-field" });
-    var defLabel = el("label", { class: "settings-label", for: "settings-ai-default_preset_id" });
-    defLabel.textContent = t("settings.ai.defaultPreset.label");
+    var defLabel = el("label", { class: "ai-eyebrow", for: "settings-ai-default_preset_id", text: t("settings.ai.defaultPreset.label") });
     defField.appendChild(defLabel);
-    var defDesc = el("div", { class: "desc" });
-    defDesc.textContent = t("settings.ai.defaultPreset.desc");
+    var defDesc = el("div", { class: "desc", text: t("settings.ai.defaultPreset.desc") });
     defField.appendChild(defDesc);
     var defRow = el("div", { class: "settings-row" });
     var defSelect = el("select", { id: "settings-ai-default_preset_id" });
@@ -9142,14 +9530,14 @@
         function (data) {
           delete modelFetchState[providerId];
           modelListByProvider[providerId] = (data && data.models) || [];
-          renderAll();
+          refreshModelFields();
         },
         function (err) {
           modelFetchState[providerId] = "failed";
           if (toastOnError) {
             showToast(t("settings.ai.presets.fetchModelsError") + ": " + err.message, "error");
           }
-          renderAll();
+          refreshModelFields();
         }
       );
     }
@@ -9167,51 +9555,55 @@
       });
     }
 
-    function buildProviderRow(provider) {
-      var row = el("div", { class: "ai-provider-row settings-row" });
+    // Called when a model list arrives/fails (not when providers/presets
+    // actually change) -- only refreshes the open preset editor's model
+    // field in place, via the closure it registered on its form node.
+    // Deliberately NOT a full renderAll(): providers()/presets() haven't
+    // changed, so card faces need no update, and a full rebuild would tear
+    // down and rebuild whatever editor is currently open, discarding any
+    // in-progress (unsaved) typing in its other fields.
+    function refreshModelFields() {
+      if (editing && editing.kind === "preset" && currentEditorForm && currentEditorForm._rebuildModelField) {
+        currentEditorForm._rebuildModelField();
+      }
+    }
 
-      var labelInput = el("input", { type: "text", autocomplete: "off", placeholder: t("settings.ai.providers.labelPlaceholder") });
-      labelInput.value = provider.label || "";
-      labelInput.addEventListener("blur", function () {
-        if (labelInput.value === (provider.label || "")) return;
-        saveProviders(providers().map(function (p) {
-          return p.id === provider.id ? withField(p, "label", labelInput.value) : p;
-        }));
-      });
-      row.appendChild(labelInput);
+    function buildAddTile(label, onClick) {
+      var tile = el("button", { type: "button", class: "ai-card ai-add-tile" });
+      tile.appendChild(el("span", { class: "ai-add-tile-icon", "aria-hidden": "true", text: "+" }));
+      tile.appendChild(el("span", { text: label }));
+      tile.addEventListener("click", onClick);
+      return tile;
+    }
 
-      var urlInput = el("input", { type: "text", autocomplete: "off", placeholder: t("settings.ai.providers.baseUrlPlaceholder") });
-      urlInput.value = provider.base_url || "";
-      urlInput.addEventListener("blur", function () {
-        if (urlInput.value === (provider.base_url || "")) return;
-        saveProviders(providers().map(function (p) {
-          return p.id === provider.id ? withField(p, "base_url", urlInput.value) : p;
-        }));
-      });
-      row.appendChild(urlInput);
+    // One .field (optionally labeled) for an editor row -- mirrors the
+    // app-wide .field convention used e.g. by the chat prompt form
+    // (label + input stacked, flex-sized by the surrounding row). labelKey
+    // omitted/null renders a bare, unlabeled field (used for the api_key,
+    // provider, and reasoning_effort controls, which have no dedicated
+    // label key in the i18n table -- same as the original row-based editor,
+    // which never labeled those either).
+    function editorField(labelKey, inputEl) {
+      var field = el("div", { class: "field" });
+      if (labelKey) field.appendChild(el("label", { text: t(labelKey) }));
+      field.appendChild(inputEl);
+      return field;
+    }
 
-      // Same "***" placeholder pattern as the flat password field type
-      // above -- config.show masks a set api_key as "***", set_by_path
-      // substitutes it back server-side as long as this provider's id
-      // round-trips unchanged (see substitute_masked_provider_keys).
-      var keyInput = el("input", { type: "password", autocomplete: "off" });
-      keyInput.placeholder = provider.api_key === "***" ? t("settings.passwordSetPlaceholder") : t("settings.passwordNotSet");
-      row.appendChild(keyInput);
-      var keyClearBtn = el("button", { type: "button" });
-      keyClearBtn.textContent = t("settings.clear");
-      keyClearBtn.addEventListener("click", function () {
-        keyInput.value = "";
-        saveProviders(providers().map(function (p) {
-          return p.id === provider.id ? withField(p, "api_key", "") : p;
-        }));
-      });
-      row.appendChild(keyClearBtn);
-      keyInput.addEventListener("blur", function () {
-        if (keyInput.value === "") return;
-        saveProviders(providers().map(function (p) {
-          return p.id === provider.id ? withField(p, "api_key", keyInput.value) : p;
-        }));
-      });
+    // One .ai-card-editor-row (flex, wraps) holding one or more .field /
+    // bare-button children, in the given order.
+    function editorRow() {
+      var row = el("div", { class: "ai-card-editor-row" });
+      for (var i = 0; i < arguments.length; i++) row.appendChild(arguments[i]);
+      return row;
+    }
+
+    function buildProviderCard(provider) {
+      var card = el("div", { class: "ai-card", tabindex: "0", role: "button" });
+      var labelWrap = el("div", { class: "ai-card-label", text: provider.label || provider.id });
+      card.appendChild(labelWrap);
+      var host = aiUrlHost(provider.base_url);
+      card.appendChild(el("div", { class: "ai-card-sub", text: host || t("settings.ai.providers.baseUrlPlaceholder") }));
 
       // Removing a provider that presets still reference leaves those
       // presets pointing at a nonexistent provider_id (resolve_preset then
@@ -9219,140 +9611,309 @@
       // used for the other destructive actions in this file (daemon stop,
       // update apply, sandbox delete) rather than silently breaking presets
       // or forbidding removal outright.
-      var removeBtn = el("button", { type: "button", class: "danger" });
-      removeBtn.textContent = t("settings.ai.providers.removeBtn");
-      removeBtn.addEventListener("click", function () {
+      var rm = el("button", { type: "button", class: "ai-card-remove", "aria-label": t("settings.ai.providers.removeBtn"), title: t("settings.ai.providers.removeBtn") });
+      rm.textContent = "×";
+      rm.addEventListener("click", function (e) {
+        e.stopPropagation();
         var refs = aiProviderRefCount(presets(), provider.id);
         if (refs > 0 && !confirm(t("settings.ai.providers.removeConfirm", { count: refs }))) return;
         saveProviders(providers().filter(function (p) { return p.id !== provider.id; }));
       });
-      row.appendChild(removeBtn);
+      card.appendChild(rm);
 
-      return row;
+      card.addEventListener("click", function () { openEditor("provider", provider.id); });
+      card.addEventListener("keydown", function (e) {
+        if (e.key !== "Enter" && e.key !== " " && e.key !== "Spacebar") return;
+        if (e.key !== "Enter") e.preventDefault();
+        openEditor("provider", provider.id);
+      });
+      return card;
     }
 
-    function buildPresetRow(preset) {
-      var row = el("div", { class: "ai-preset-row settings-row" });
+    function buildPresetCard(preset) {
+      var card = el("div", { class: "ai-card", tabindex: "0", role: "button" });
+      var labelWrap = el("div", { class: "ai-card-label" });
+      labelWrap.appendChild(el("span", { text: preset.label || preset.id }));
+      if (sectionCfg.default_preset_id === preset.id) {
+        labelWrap.appendChild(el("span", { class: "badge ai-default-badge", text: t("ai.editor.defaultBadge") }));
+      }
+      card.appendChild(labelWrap);
+      card.appendChild(el("div", { class: "ai-card-sub", text: preset.model || t("settings.ai.presets.modelPlaceholder") }));
+
+      var rm = el("button", { type: "button", class: "ai-card-remove", "aria-label": t("settings.ai.presets.removeBtn"), title: t("settings.ai.presets.removeBtn") });
+      rm.textContent = "×";
+      rm.addEventListener("click", function (e) {
+        e.stopPropagation();
+        savePresets(presets().filter(function (p) { return p.id !== preset.id; }));
+      });
+      card.appendChild(rm);
+
+      card.addEventListener("click", function () { openEditor("preset", preset.id); });
+      card.addEventListener("keydown", function (e) {
+        if (e.key !== "Enter" && e.key !== " " && e.key !== "Spacebar") return;
+        if (e.key !== "Enter") e.preventDefault();
+        openEditor("preset", preset.id);
+      });
+      return card;
+    }
+
+    function buildProviderEditor(provider, draft) {
+      var isNew = !provider;
+      var card = el("div", { class: "ai-card ai-card-editing" });
+      var form = el("div", { class: "ai-card-editor" });
+      card.appendChild(form);
+
+      var labelInput = el("input", { type: "text", autocomplete: "off", placeholder: t("settings.ai.providers.labelPlaceholder") });
+      labelInput.value = draft ? draft.label : (isNew ? "" : (provider.label || ""));
+      form.appendChild(editorRow(editorField("settings.ai.providers.labelPlaceholder", labelInput)));
+
+      var urlInput = el("input", { type: "text", autocomplete: "off", placeholder: t("settings.ai.providers.baseUrlPlaceholder") });
+      urlInput.value = draft ? draft.base_url : (isNew ? "" : (provider.base_url || ""));
+      form.appendChild(editorRow(editorField("settings.ai.providers.baseUrlPlaceholder", urlInput)));
+
+      // Same "***" placeholder pattern as the flat password field type in
+      // buildSettingsField -- config.show masks a set api_key as "***",
+      // set_by_path substitutes it back server-side as long as this
+      // provider's id round-trips unchanged (see
+      // substitute_masked_provider_keys). Leaving the field untouched keeps
+      // whatever api_key value the entry already had (including "***",
+      // which the server resolves); Clear explicitly stages an empty key.
+      // No dedicated i18n label key exists for "API key" (grepped -- the
+      // original row-based editor never labeled this field either), so this
+      // is left as a bare, unlabeled field relying on the placeholder alone.
+      var keyCleared = draft ? draft.keyCleared : false;
+      var keyInput = el("input", { type: "password", autocomplete: "off" });
+      keyInput.value = draft ? draft.apiKeyValue : "";
+      keyInput.placeholder = (!isNew && provider.api_key === "***" && !keyCleared) ? t("settings.passwordSetPlaceholder") : t("settings.passwordNotSet");
+      keyInput.addEventListener("input", function () { keyCleared = false; });
+      var keyClearBtn = el("button", { type: "button" });
+      keyClearBtn.textContent = t("settings.clear");
+      keyClearBtn.addEventListener("click", function () {
+        keyInput.value = "";
+        keyCleared = true;
+        keyInput.placeholder = t("settings.passwordNotSet");
+      });
+      form.appendChild(editorRow(editorField(null, keyInput), keyClearBtn));
+
+      var footer = el("div", { class: "ai-card-editor-actions" });
+      var saveBtn = el("button", { type: "button", class: "primary" });
+      saveBtn.textContent = t("ai.editor.save");
+      saveBtn.addEventListener("click", function () {
+        var base = isNew
+          ? { id: genAiEntryId("p", providers().map(function (p) { return p.id; })), label: "", base_url: "", api_key: "" }
+          : provider;
+        var next = withField(base, "label", labelInput.value);
+        next = withField(next, "base_url", urlInput.value);
+        if (keyInput.value !== "") {
+          next = withField(next, "api_key", keyInput.value);
+        } else if (isNew || keyCleared) {
+          next = withField(next, "api_key", "");
+        }
+        var list = isNew ? providers().concat([next]) : providers().map(function (p) { return p.id === provider.id ? next : p; });
+        editing = null;
+        currentEditorForm = null;
+        saveProviders(list);
+      });
+      footer.appendChild(saveBtn);
+      var cancelBtn = el("button", { type: "button" });
+      cancelBtn.textContent = t("ai.editor.cancel");
+      cancelBtn.addEventListener("click", closeEditor);
+      footer.appendChild(cancelBtn);
+      form.appendChild(footer);
+
+      card._captureDraft = function () {
+        return { label: labelInput.value, base_url: urlInput.value, apiKeyValue: keyInput.value, keyCleared: keyCleared };
+      };
+      return card;
+    }
+
+    function buildPresetEditor(preset, draft) {
+      var isNew = !preset;
+      var card = el("div", { class: "ai-card ai-card-editing" });
+      var form = el("div", { class: "ai-card-editor" });
+      card.appendChild(form);
 
       var labelInput = el("input", { type: "text", autocomplete: "off", placeholder: t("settings.ai.presets.labelPlaceholder") });
-      labelInput.value = preset.label || "";
-      labelInput.addEventListener("blur", function () {
-        if (labelInput.value === (preset.label || "")) return;
-        savePresets(presets().map(function (p) {
-          return p.id === preset.id ? withField(p, "label", labelInput.value) : p;
-        }));
-      });
-      row.appendChild(labelInput);
+      labelInput.value = draft ? draft.label : (isNew ? "" : (preset.label || ""));
+      form.appendChild(editorRow(editorField("settings.ai.presets.labelPlaceholder", labelInput)));
 
+      // No dedicated i18n label key exists for "Provider" (the original
+      // row-based editor never labeled this select either), so it's a bare,
+      // unlabeled field like api_key/reasoning_effort above.
       var providerSelect = el("select", {});
       providers().forEach(function (provider) {
         providerSelect.appendChild(el("option", { value: provider.id, text: provider.label || provider.id }));
       });
-      providerSelect.value = preset.provider_id || "";
-      providerSelect.addEventListener("change", function () {
-        savePresets(presets().map(function (p) {
-          return p.id === preset.id ? withField(p, "provider_id", providerSelect.value) : p;
-        }));
-      });
-      row.appendChild(providerSelect);
+      providerSelect.value = draft ? draft.provider_id : (isNew ? (providers()[0] ? providers()[0].id : "") : (preset.provider_id || ""));
+      form.appendChild(editorRow(editorField(null, providerSelect)));
 
       // The model list is fetched automatically per provider (see
       // autoFetchModels; browsers never see api_key, so the daemon does the
       // fetch), so the model field is a select as soon as a list is cached
-      // for this preset's provider, and falls back to a free-text input
-      // otherwise -- mirrors tc-mistllm's settings screen.
-      var cachedModels = modelListByProvider[preset.provider_id];
-      var modelEl;
-      if (Array.isArray(cachedModels) && cachedModels.length > 0) {
-        modelEl = el("select", {});
-        var modelOptions = cachedModels.slice();
-        // Never silently drop the currently-saved model even if it's not in
-        // the fetched list (e.g. it was hand-entered, or the upstream since
-        // removed it).
-        if (preset.model && modelOptions.indexOf(preset.model) === -1) {
-          modelOptions = [preset.model].concat(modelOptions);
-        }
-        modelOptions.forEach(function (m) {
-          modelEl.appendChild(el("option", { value: m, text: m }));
-        });
-        modelEl.value = preset.model || "";
-        modelEl.addEventListener("change", function () {
-          savePresets(presets().map(function (p) {
-            return p.id === preset.id ? withField(p, "model", modelEl.value) : p;
-          }));
-        });
-      } else {
-        modelEl = el("input", { type: "text", autocomplete: "off", placeholder: t("settings.ai.presets.modelPlaceholder") });
-        modelEl.value = preset.model || "";
-        modelEl.addEventListener("blur", function () {
-          if (modelEl.value === (preset.model || "")) return;
-          savePresets(presets().map(function (p) {
-            return p.id === preset.id ? withField(p, "model", modelEl.value) : p;
-          }));
-        });
-      }
-      row.appendChild(modelEl);
+      // for the selected provider, and falls back to a free-text input
+      // otherwise -- mirrors tc-mistllm's settings screen. Rebuilt (a) when
+      // the provider select changes, and (b) externally via
+      // _rebuildModelField when a fetch settles (refreshModelFields above),
+      // without touching this form's other fields.
+      var modelRow = editorRow();
+      form.appendChild(modelRow);
+      var modelEl = null;
 
-      // Manual refresh: clears the cache (and any "failed" marker) for this
-      // preset's provider and refetches, with an error toast -- the
-      // automatic fetch stays silent. renderAll() rebuilds this row when the
-      // fetch settles, so no explicit re-enable is needed.
-      var fetchModelsBtn = el("button", { type: "button" });
-      fetchModelsBtn.textContent = t("settings.ai.presets.fetchModels");
-      fetchModelsBtn.disabled = modelFetchState[preset.provider_id] === "loading";
-      fetchModelsBtn.addEventListener("click", function () {
-        fetchModelsBtn.disabled = true;
-        delete modelListByProvider[preset.provider_id];
-        delete modelFetchState[preset.provider_id];
-        fetchModelsFor(preset.provider_id, true);
-      });
-      row.appendChild(fetchModelsBtn);
+      function rebuildModelField(resetValue) {
+        var keepValue = resetValue !== undefined
+          ? resetValue
+          : (modelEl ? modelEl.value : (draft ? draft.model : (isNew ? "" : (preset.model || ""))));
+        modelRow.innerHTML = "";
+        var providerId = providerSelect.value;
+        var cachedModels = modelListByProvider[providerId];
+        if (Array.isArray(cachedModels) && cachedModels.length > 0) {
+          modelEl = el("select", {});
+          var modelOptions = cachedModels.slice();
+          // Never silently drop the currently-typed/saved model even if
+          // it's not in the fetched list (e.g. hand-entered, or the
+          // upstream since removed it).
+          if (keepValue && modelOptions.indexOf(keepValue) === -1) {
+            modelOptions = [keepValue].concat(modelOptions);
+          }
+          modelOptions.forEach(function (m) { modelEl.appendChild(el("option", { value: m, text: m })); });
+          modelEl.value = keepValue;
+        } else {
+          modelEl = el("input", { type: "text", autocomplete: "off", placeholder: t("settings.ai.presets.modelPlaceholder") });
+          modelEl.value = keepValue;
+        }
+        modelRow.appendChild(editorField("settings.ai.presets.modelPlaceholder", modelEl));
+
+        // Manual refresh: clears the cache (and any "failed" marker) for
+        // this provider and refetches, with an error toast -- the
+        // automatic fetch stays silent.
+        var fetchModelsBtn = el("button", { type: "button" });
+        fetchModelsBtn.textContent = t("settings.ai.presets.fetchModels");
+        fetchModelsBtn.disabled = modelFetchState[providerId] === "loading";
+        fetchModelsBtn.addEventListener("click", function () {
+          fetchModelsBtn.disabled = true;
+          delete modelListByProvider[providerId];
+          delete modelFetchState[providerId];
+          fetchModelsFor(providerId, true);
+        });
+        modelRow.appendChild(fetchModelsBtn);
+      }
+      rebuildModelField();
+      // Switching provider mid-edit starts the model field over (against
+      // the new provider's cache/blank) rather than trying to preserve a
+      // value that belonged to a different provider's model list.
+      providerSelect.addEventListener("change", function () { rebuildModelField(""); });
+      form._rebuildModelField = function () { rebuildModelField(); };
 
       var tempInput = el("input", { type: "text", inputmode: "decimal", placeholder: t("settings.ai.presets.temperaturePlaceholder") });
-      tempInput.value = (preset.temperature === null || preset.temperature === undefined) ? "" : String(preset.temperature);
-      tempInput.addEventListener("blur", function () {
-        var v = tempInput.value.trim();
-        if (v === "") {
-          if (preset.temperature === null || preset.temperature === undefined) return;
-          savePresets(presets().map(function (p) { return p.id === preset.id ? withField(p, "temperature", null) : p; }));
-          return;
-        }
-        var num = Number(v);
-        if (!isFinite(num)) { showToast(t("settings.enterNumber", { label: t("settings.ai.presets.temperaturePlaceholder") }), "error"); return; }
-        if (num === preset.temperature) return;
-        savePresets(presets().map(function (p) { return p.id === preset.id ? withField(p, "temperature", num) : p; }));
-      });
-      row.appendChild(tempInput);
+      // New presets start at temperature 0.7 (the README's documented
+      // example default) rather than blank; clearing the field still means
+      // "omit the parameter".
+      tempInput.value = draft ? draft.temperature : (isNew ? "0.7" : ((preset.temperature === null || preset.temperature === undefined) ? "" : String(preset.temperature)));
 
+      // No dedicated i18n label key exists for "Reasoning effort" (the
+      // original row-based editor never labeled this select either), so
+      // it's a bare, unlabeled field -- paired with temperature in the same
+      // row since both are short, secondary preset knobs.
       var effortSelect = el("select", {});
       [["", "settings.optionDefault", true], ["none", "none"], ["minimal", "minimal"], ["low", "low"], ["medium", "medium"], ["high", "high"]].forEach(function (opt) {
         effortSelect.appendChild(el("option", { value: opt[0], text: opt[2] ? t(opt[1]) : opt[1] }));
       });
-      effortSelect.value = preset.reasoning_effort || "";
-      effortSelect.addEventListener("change", function () {
-        var v = effortSelect.value === "" ? null : effortSelect.value;
-        savePresets(presets().map(function (p) { return p.id === preset.id ? withField(p, "reasoning_effort", v) : p; }));
-      });
-      row.appendChild(effortSelect);
+      effortSelect.value = draft ? draft.reasoning_effort : (isNew ? "" : (preset.reasoning_effort || ""));
+      form.appendChild(editorRow(editorField("settings.ai.presets.temperaturePlaceholder", tempInput), editorField(null, effortSelect)));
 
-      var removeBtn = el("button", { type: "button", class: "danger" });
-      removeBtn.textContent = t("settings.ai.presets.removeBtn");
-      removeBtn.addEventListener("click", function () {
-        savePresets(presets().filter(function (p) { return p.id !== preset.id; }));
+      var footer = el("div", { class: "ai-card-editor-actions" });
+      var saveBtn = el("button", { type: "button", class: "primary" });
+      saveBtn.textContent = t("ai.editor.save");
+      saveBtn.addEventListener("click", function () {
+        var tempVal = tempInput.value.trim();
+        var tempNum = null;
+        if (tempVal !== "") {
+          tempNum = Number(tempVal);
+          if (!isFinite(tempNum)) {
+            showToast(t("settings.enterNumber", { label: t("settings.ai.presets.temperaturePlaceholder") }), "error");
+            return;
+          }
+        }
+        var base = isNew
+          ? { id: genAiEntryId("preset", presets().map(function (p) { return p.id; })), label: "", provider_id: providerSelect.value, model: "", temperature: null, reasoning_effort: null }
+          : preset;
+        var next = withField(base, "label", labelInput.value);
+        next = withField(next, "provider_id", providerSelect.value);
+        next = withField(next, "model", modelEl.value);
+        next = withField(next, "temperature", tempNum);
+        next = withField(next, "reasoning_effort", effortSelect.value === "" ? null : effortSelect.value);
+        var list = isNew ? presets().concat([next]) : presets().map(function (p) { return p.id === preset.id ? next : p; });
+        editing = null;
+        currentEditorForm = null;
+        savePresets(list);
       });
-      row.appendChild(removeBtn);
+      footer.appendChild(saveBtn);
+      var cancelBtn = el("button", { type: "button" });
+      cancelBtn.textContent = t("ai.editor.cancel");
+      cancelBtn.addEventListener("click", closeEditor);
+      footer.appendChild(cancelBtn);
+      form.appendChild(footer);
 
-      return row;
+      card._captureDraft = function () {
+        return {
+          label: labelInput.value, provider_id: providerSelect.value, model: modelEl.value,
+          temperature: tempInput.value, reasoning_effort: effortSelect.value
+        };
+      };
+      card._rebuildModelField = form._rebuildModelField;
+      return card;
+    }
+
+    function renderProviderGrid() {
+      if (editing && editing.kind === "provider" && currentEditorForm && currentEditorForm._captureDraft) {
+        editing.draft = currentEditorForm._captureDraft();
+      }
+      provGrid.innerHTML = "";
+      providers().forEach(function (provider) {
+        if (editing && editing.kind === "provider" && editing.id === provider.id) {
+          currentEditorForm = buildProviderEditor(provider, editing.draft);
+          provGrid.appendChild(currentEditorForm);
+        } else {
+          provGrid.appendChild(buildProviderCard(provider));
+        }
+      });
+      if (editing && editing.kind === "provider" && editing.id === null) {
+        currentEditorForm = buildProviderEditor(null, editing.draft);
+        provGrid.appendChild(currentEditorForm);
+      } else {
+        provGrid.appendChild(buildAddTile(t("settings.ai.providers.addBtn"), function () { openEditor("provider", null); }));
+      }
+    }
+
+    function renderPresetGrid() {
+      if (editing && editing.kind === "preset" && currentEditorForm && currentEditorForm._captureDraft) {
+        editing.draft = currentEditorForm._captureDraft();
+      }
+      presetGrid.innerHTML = "";
+      presets().forEach(function (preset) {
+        if (editing && editing.kind === "preset" && editing.id === preset.id) {
+          currentEditorForm = buildPresetEditor(preset, editing.draft);
+          presetGrid.appendChild(currentEditorForm);
+        } else {
+          presetGrid.appendChild(buildPresetCard(preset));
+        }
+      });
+      if (editing && editing.kind === "preset" && editing.id === null) {
+        currentEditorForm = buildPresetEditor(null, editing.draft);
+        presetGrid.appendChild(currentEditorForm);
+      } else {
+        var addTile = buildAddTile(t("settings.ai.presets.addBtn"), function () { openEditor("preset", null); });
+        if (providers().length === 0) {
+          addTile.disabled = true;
+          addTile.title = t("settings.ai.presets.needProvider");
+        }
+        presetGrid.appendChild(addTile);
+      }
     }
 
     function renderAll() {
-      provList.innerHTML = "";
-      providers().forEach(function (provider) { provList.appendChild(buildProviderRow(provider)); });
-
-      presetList.innerHTML = "";
-      presets().forEach(function (preset) { presetList.appendChild(buildPresetRow(preset)); });
-      presetAddBtn.disabled = providers().length === 0;
-      presetAddBtn.title = providers().length === 0 ? t("settings.ai.presets.needProvider") : "";
+      renderProviderGrid();
+      renderPresetGrid();
 
       defSelect.innerHTML = "";
       defSelect.appendChild(el("option", { value: "", text: t("settings.optionDefault") }));
@@ -9364,21 +9925,6 @@
 
       autoFetchModels();
     }
-
-    provAddBtn.addEventListener("click", function () {
-      var id = genAiEntryId("p", providers().map(function (p) { return p.id; }));
-      saveProviders(providers().concat([{ id: id, label: "", base_url: "", api_key: "" }]));
-    });
-    presetAddBtn.addEventListener("click", function () {
-      if (!providers().length) return;
-      var id = genAiEntryId("preset", presets().map(function (p) { return p.id; }));
-      // New presets start at temperature 0.7 (the README's documented
-      // example default) rather than blank; clearing the field still means
-      // "omit the parameter".
-      savePresets(presets().concat([{
-        id: id, label: "", provider_id: providers()[0].id, model: "", temperature: 0.7, reasoning_effort: null
-      }]));
-    });
 
     renderAll();
     return wrap;
@@ -9401,7 +9947,11 @@
       }
       var sectionCfg = cfg ? cfg[grp.section] : null;
       if (grp.section === "ai" && sectionCfg) {
-        sec.appendChild(buildAiProvidersPresetsField(sectionCfg));
+        var aiConnectionEditor = document.getElementById("ai-connection-editor");
+        if (aiConnectionEditor) {
+          aiConnectionEditor.innerHTML = "";
+          aiConnectionEditor.appendChild(buildAiProvidersPresetsField(sectionCfg));
+        }
       }
       var advancedFields = [];
       grp.fields.forEach(function (f) {
