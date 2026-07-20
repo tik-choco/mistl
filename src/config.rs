@@ -87,8 +87,8 @@ pub struct StorageConfig {
     /// Maximum store size in bytes before LRU eviction of remote blocks.
     pub capacity_bytes: u64,
     /// tc-chat rooms the store joins for peer block exchange. Independent of
-    /// `[mailbox] room_id`/`[ai] room_id`/`[stream] relay_room`/`share_room`
-    /// for the same reason those are independent of each other -- the p2p
+    /// `[mailbox] room_id`/`[ai] room_id`/`[stream] room` for the same reason
+    /// those are independent of each other -- the p2p
     /// transport supports multiple simultaneous rooms per process, and here
     /// it's taken further: the store joins *all* listed rooms simultaneously
     /// (mistlib supports multiple rooms per process; see `net::ensure_started`).
@@ -182,15 +182,24 @@ pub struct StreamConfig {
     pub capture_backend: String,
     /// Native backend only: downscale captured frames wider than this.
     pub max_width: u32,
-    /// Room joined by `stream relay` to receive a tc-chat screen share.
+    /// Room joined by both `stream relay` (to receive a tc-chat screen
+    /// share) and `stream share` (to publish this machine's own capture,
+    /// see `stream::share`'s module doc) -- unified into one setting since
+    /// a relay and a share pointed at different rooms would never see each
+    /// other; the common case is one room shared by every participant.
     /// Independent of `[mailbox] room_id` and `[ai] room_id` -- the p2p
     /// transport supports multiple simultaneous rooms per process, so this
-    /// can name its own room, or reuse one of theirs.
+    /// can still name its own room, or reuse one of theirs.
+    pub room: Option<String>,
+    /// Legacy pre-unification field name for `room` (used by `stream
+    /// relay`). Deserializable so old config.toml files keep loading,
+    /// merged into `room` by `migrate_legacy` on first read, then dropped
+    /// from disk for good by `#[serde(skip_serializing)]`.
+    #[serde(skip_serializing)]
     pub relay_room: Option<String>,
-    /// Room joined by `stream share` to publish this machine's own screen
-    /// capture into (see `stream::share`'s module doc). Independent of
-    /// `relay_room`/`[mailbox] room_id`/`[ai] room_id` for the same reason --
-    /// this can name its own room or reuse one of theirs.
+    /// Legacy pre-unification field name for `room` (used by `stream
+    /// share`). See `relay_room`.
+    #[serde(skip_serializing)]
     pub share_room: Option<String>,
     /// Audio codec served over RTSP for relayed shares: "aac" (transcoded
     /// from Opus; what AVPro reliably plays) or "opus" (passthrough).
@@ -213,6 +222,7 @@ impl Default for StreamConfig {
             audio_capture: false,
             capture_backend: "native".into(),
             max_width: 1920,
+            room: None,
             relay_room: None,
             share_room: None,
             audio_codec: "aac".into(),
@@ -702,6 +712,12 @@ pub fn set_by_path(config: &Config, path: &str, value: serde_json::Value) -> Res
             _ => serde_json::json!([]),
         };
         ("storage.room_ids", rooms)
+    } else if path == "stream.relay_room" || path == "stream.share_room" {
+        // Legacy alias: `stream.relay_room`/`stream.share_room` used to be
+        // two separate fields, unified into `stream.room` since a relay and
+        // a share pointed at different rooms would never see each other.
+        // Same value shape (`Option<String>`), so just rewrite the path.
+        ("stream.room", value)
     } else {
         (path, value)
     };
@@ -743,7 +759,7 @@ pub fn applies_when(path: &str) -> &'static str {
         // service start" below (true immediately, since the next `store.*`
         // command *is* its next "start").
         "mailbox.room_id" | "mailbox.chat_rooms" | "mailbox.chat_relay" | "ai.room_id"
-        | "stream.relay_room" | "stream.share_room" => "daemon restart",
+        | "stream.room" | "stream.relay_room" | "stream.share_room" => "daemon restart",
         // The background tick loop is only started once at daemon startup
         // (see `scheduler::spawn_background`); toggling it live would need
         // a way to stop an already-running loop, which isn't implemented.
@@ -786,6 +802,14 @@ impl Config {
         Ok(())
     }
 
+    /// Runs every legacy field migration (`[ai]`'s and `[stream]`'s, below)
+    /// and reports whether either changed anything requiring a save.
+    pub fn migrate_legacy(&mut self) -> bool {
+        let ai_changed = self.migrate_legacy_ai();
+        let stream_changed = self.migrate_legacy_stream_room();
+        ai_changed || stream_changed
+    }
+
     /// Merges legacy `[ai]` fields (`upstream_url`/`upstream_api_key`/
     /// `default_model`/`temperature`) into the `providers`/`presets` shape,
     /// mirroring the shared LLM config contract's migration rule
@@ -801,7 +825,7 @@ impl Config {
     /// non-blank legacy `upstream_url` was present, even if the
     /// provider/preset it maps to already existed -- persisting is still
     /// needed to drop the now-redundant legacy fields from disk.
-    pub fn migrate_legacy(&mut self) -> bool {
+    fn migrate_legacy_ai(&mut self) -> bool {
         let Some(upstream_url) = self
             .ai
             .upstream_url
@@ -851,6 +875,35 @@ impl Config {
 
         true
     }
+
+    /// Merges legacy `[stream]` fields `relay_room`/`share_room` into the
+    /// unified `room` field: never overwrites an existing `room`, and
+    /// prefers `relay_room` over `share_room` when both are set (an
+    /// arbitrary but stable tie-break for the rare config that had them
+    /// pointed at different rooms). See `migrate_legacy_ai`'s doc for why
+    /// this returns `true` (and thus triggers a re-save) whenever either
+    /// legacy field was non-blank, even if `room` was already set: saving
+    /// is what drops the now-redundant legacy fields from disk for good.
+    fn migrate_legacy_stream_room(&mut self) -> bool {
+        let relay_room = self
+            .stream
+            .relay_room
+            .take()
+            .filter(|s| !s.trim().is_empty());
+        let share_room = self
+            .stream
+            .share_room
+            .take()
+            .filter(|s| !s.trim().is_empty());
+        let Some(legacy_room) = relay_room.or(share_room) else {
+            return false;
+        };
+
+        if self.stream.room.is_none() {
+            self.stream.room = Some(legacy_room);
+        }
+        true
+    }
 }
 
 #[cfg(test)]
@@ -870,9 +923,19 @@ mod tests {
     #[test]
     fn set_by_path_clears_option_with_null() {
         let mut config = Config::default();
-        config.stream.relay_room = Some("room".into());
-        let updated = set_by_path(&config, "stream.relay_room", serde_json::Value::Null).unwrap();
-        assert_eq!(updated.stream.relay_room, None);
+        config.stream.room = Some("room".into());
+        let updated = set_by_path(&config, "stream.room", serde_json::Value::Null).unwrap();
+        assert_eq!(updated.stream.room, None);
+    }
+
+    #[test]
+    fn set_by_path_legacy_stream_relay_room_and_share_room_alias_to_room() {
+        let config = Config::default();
+        let updated = set_by_path(&config, "stream.relay_room", json!("my-room")).unwrap();
+        assert_eq!(updated.stream.room, Some("my-room".to_string()));
+
+        let updated = set_by_path(&config, "stream.share_room", json!("my-room")).unwrap();
+        assert_eq!(updated.stream.room, Some("my-room".to_string()));
     }
 
     #[test]
@@ -992,6 +1055,46 @@ mod tests {
         assert!(config.ai.providers.is_empty());
         assert!(config.ai.presets.is_empty());
         assert_eq!(config.ai.default_preset_id, "");
+        assert_eq!(config.stream.room, None);
+    }
+
+    #[test]
+    fn migrate_legacy_merges_stream_relay_room_into_room() {
+        let mut config = Config::default();
+        config.stream.relay_room = Some("my-room".into());
+        assert!(config.migrate_legacy());
+        assert_eq!(config.stream.room, Some("my-room".to_string()));
+        // Legacy field is cleared once merged.
+        assert_eq!(config.stream.relay_room, None);
+        // Idempotent: re-running finds nothing left to migrate.
+        assert!(!config.migrate_legacy());
+    }
+
+    #[test]
+    fn migrate_legacy_merges_stream_share_room_into_room_when_relay_room_unset() {
+        let mut config = Config::default();
+        config.stream.share_room = Some("my-room".into());
+        assert!(config.migrate_legacy());
+        assert_eq!(config.stream.room, Some("my-room".to_string()));
+    }
+
+    #[test]
+    fn migrate_legacy_stream_room_prefers_relay_room_over_share_room() {
+        let mut config = Config::default();
+        config.stream.relay_room = Some("relay-room".into());
+        config.stream.share_room = Some("share-room".into());
+        assert!(config.migrate_legacy());
+        assert_eq!(config.stream.room, Some("relay-room".to_string()));
+    }
+
+    #[test]
+    fn migrate_legacy_never_overwrites_an_existing_stream_room() {
+        let mut config = Config::default();
+        config.stream.room = Some("kept".into());
+        config.stream.relay_room = Some("legacy".into());
+        // Still reports a change so the legacy field gets dropped from disk.
+        assert!(config.migrate_legacy());
+        assert_eq!(config.stream.room, Some("kept".to_string()));
     }
 
     #[test]
@@ -1093,6 +1196,16 @@ mod tests {
         assert_eq!(applies_when("storage.room_ids"), "next service start");
         assert_eq!(applies_when("storage.room_id"), "next service start");
         assert_eq!(applies_when("mailbox.room_id"), "daemon restart");
+    }
+
+    #[test]
+    fn applies_when_stream_room_requires_a_restart() {
+        // Both the current field name and its legacy aliases answer the
+        // same -- see `set_by_path`'s `stream.relay_room`/`stream.share_room`
+        // rewrite to `stream.room`.
+        assert_eq!(applies_when("stream.room"), "daemon restart");
+        assert_eq!(applies_when("stream.relay_room"), "daemon restart");
+        assert_eq!(applies_when("stream.share_room"), "daemon restart");
     }
 
     #[test]

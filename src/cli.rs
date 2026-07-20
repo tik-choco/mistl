@@ -331,11 +331,21 @@ pub enum StoreSandboxAction {
 
 #[derive(Subcommand)]
 pub enum StreamAction {
-    /// Start the RTSP screen-share server (local screen capture)
-    Start,
+    /// Start the RTSP screen-share server (local screen capture). Stays
+    /// purely local unless --room is given, in which case it also publishes
+    /// into that mistlib room -- the same pipeline `stream share` (below)
+    /// uses, just with the room optional. Unlike `stream share`, no
+    /// stream.room config default applies here -- omit --room entirely to
+    /// stay local-only regardless of what's configured.
+    Start {
+        /// mistlib room id to also publish into; omit to stay local-only.
+        /// Native capture only (Windows).
+        #[arg(short, long)]
+        room: Option<String>,
+    },
     /// Relay a tc-chat screen share to VRChat (p2p -> RTSP, video + audio)
     Relay {
-        /// tc-chat room id of the share (default: stream.relay_room)
+        /// tc-chat room id of the share (default: stream.room)
         #[arg(short, long)]
         room: Option<String>,
     },
@@ -362,9 +372,12 @@ pub enum StreamAction {
     /// so any consensus-elected relay in that room -- or a direct viewer --
     /// picks it up like a tc-chat share. Also feeds the local RTSP server
     /// directly, so this node's own VRChat output works even alone in the
-    /// room. Windows only; audio is not shared yet.
+    /// room. Windows only; audio is not shared yet. Equivalent to `stream
+    /// start --room <id>`, except it errors out instead of falling back to
+    /// a local-only start when no room is given (explicitly or via
+    /// stream.room) -- kept as a separate command for that stricter check.
     Share {
-        /// mistlib room id to publish into (default: stream.share_room)
+        /// mistlib room id to publish into (default: stream.room)
         #[arg(short, long)]
         room: Option<String>,
     },
@@ -692,7 +705,22 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             },
         },
         Command::Stream { action } => match action {
-            StreamAction::Start => client_call("stream.start", json!({})),
+            StreamAction::Start { room } => {
+                let response = request("stream.start", json!({ "room": room }))?;
+                println!("{}", serde_json::to_string_pretty(&response)?);
+                if let Some(url) = response.get("rtsp_url").and_then(Value::as_str) {
+                    println!();
+                    if let Some(room) = response.get("room").and_then(Value::as_str) {
+                        println!("  Sharing into room {room}. Your own VRChat video player URL:");
+                    } else {
+                        println!("  Paste this URL into the VRChat video player:");
+                    }
+                    println!();
+                    println!("      {url}");
+                    println!();
+                }
+                Ok(())
+            }
             StreamAction::Relay { room } => {
                 let response = request("stream.relay.start", json!({ "room": room }))?;
                 println!("{}", serde_json::to_string_pretty(&response)?);
