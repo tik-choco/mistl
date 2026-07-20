@@ -1711,11 +1711,20 @@
     </h2>
     <div class="flow-grid">
       <div class="flow-card">
-        <h3 data-i18n="stream.shareTitle">Share this PC&#39;s screen</h3>
-        <p data-i18n="stream.shareDesc">Streams this computer&#39;s desktop directly to an RTSP URL you paste into the VRChat video player.</p>
+        <h3 data-i18n="stream.share.title">Share this PC&#39;s screen</h3>
+        <p data-i18n="stream.share.desc">Streams this computer&#39;s desktop to an RTSP URL you paste into the VRChat video player. Give it a tc-chat room id to also publish the capture there, so any consensus-elected relay &mdash; or a direct viewer &mdash; can pick it up without a browser client.</p>
+        <p class="muted" style="font-size: 11.5px; margin: 0;" data-i18n="stream.share.monitorNote">Captures the primary monitor (monitor selection may come later); audio is not shared yet, and publishing into a room requires native capture (Windows).</p>
+        <form class="inline" id="share-form">
+          <div class="field" style="flex: 2;">
+            <label for="share-room" data-i18n="stream.share.roomLabel">tc-chat room id (optional)</label>
+            <input type="text" id="share-room" data-i18n-placeholder="stream.share.roomPlaceholder" placeholder="room id (optional &mdash; leave blank to stream locally only)" autocomplete="off">
+          </div>
+          <button type="submit" class="primary" id="btn-share-start" data-i18n="stream.share.startBtn">Start sharing</button>
+        </form>
         <div class="row">
-          <button id="btn-stream-start" class="primary" data-i18n="stream.startBtn">Start (this screen)</button>
+          <button id="btn-share-stop" class="danger" data-i18n="stream.share.stopBtn" hidden>Stop sharing</button>
         </div>
+        <div class="share-status" id="share-status"></div>
       </div>
       <div class="flow-card">
         <h3 data-i18n="stream.relayTitle">Relay a tc-chat share</h3>
@@ -1731,25 +1740,6 @@
           <span data-i18n="stream.roomHint.prefix">Type a room id above, or set a default relay room in </span><a href="#panel-settings" id="relay-room-hint-link" data-i18n="stream.roomHint.link">Settings</a><span data-i18n="stream.roomHint.suffix">.</span>
         </div>
         <p class="muted" style="font-size: 11.5px; margin: 0;" data-i18n="stream.relayCascadeHint">Multiple viewers? Each runs mistl stream relay in the same room &mdash; a leader is elected automatically and the sharer only uploads once.</p>
-      </div>
-      <div class="flow-card">
-        <h3 data-i18n="stream.share.title">Share screen to the room</h3>
-        <p data-i18n="stream.share.desc">The daemon captures this PC&#39;s screen and publishes it into the room through mistlib &mdash; no tc-chat client needed.</p>
-        <p class="muted" style="font-size: 11.5px; margin: 0;" data-i18n="stream.share.monitorNote">Captures the primary monitor (monitor selection may come later); audio is not shared yet.</p>
-        <form class="inline" id="share-form">
-          <div class="field" style="flex: 2;">
-            <label for="share-room" data-i18n="stream.roomLabel">tc-chat room id</label>
-            <input type="text" id="share-room" data-i18n-placeholder="stream.roomPlaceholder" placeholder="room id (or set a default in Settings)" autocomplete="off">
-          </div>
-          <button type="submit" class="primary" id="btn-share-start" data-i18n="stream.share.startBtn">Start sharing</button>
-        </form>
-        <div class="info-hint neutral" id="share-room-hint" hidden>
-          <span data-i18n="stream.roomHint.prefix">Type a room id above, or set a default relay room in </span><a href="#panel-settings" id="share-room-hint-link" data-i18n="stream.roomHint.link">Settings</a><span data-i18n="stream.roomHint.suffix">.</span>
-        </div>
-        <div class="row">
-          <button id="btn-share-stop" class="danger" data-i18n="stream.share.stopBtn" hidden>Stop sharing</button>
-        </div>
-        <div class="share-status" id="share-status"></div>
       </div>
     </div>
     <div class="url-callout" id="stream-url-callout" role="button" tabindex="0" hidden data-i18n-title="common.clickToCopy" title="Click to copy">
@@ -2641,9 +2631,6 @@
       "overview.version": "version",
       "overview.uptime": "uptime",
       "stream.title": "Stream",
-      "stream.shareTitle": "Share this PC's screen",
-      "stream.shareDesc": "Streams this computer's desktop directly to an RTSP URL you paste into the VRChat video player.",
-      "stream.startBtn": "Start (this screen)",
       "stream.relayTitle": "Relay a tc-chat share",
       "stream.relayDesc": "Relays a screen already being shared in a tc-chat room, so VRChat viewers can watch it.",
       "stream.roomLabel": "tc-chat room id",
@@ -2665,7 +2652,6 @@
       "stream.uptime": "uptime",
       "stream.stopBtn": "Stop",
       "stream.stopConfirm": "Stop the stream?",
-      "stream.started": "Stream started.",
       "stream.stopped": "Stream stopped.",
       "stream.relayStarted": "Relay started in room {room}.",
       "stream.relayStartedNoRoom": "Relay started.",
@@ -2673,9 +2659,11 @@
       "stream.vrchatHint.link": "Set the RTSP address to 0.0.0.0 in Settings",
       "stream.vrchatHint.suffix": " and restart the stream.",
       "stream.relayCascadeHint": "Multiple viewers? Each runs mistl stream relay in the same room — a leader is elected automatically and the sharer only uploads once.",
-      "stream.share.title": "Share screen to the room",
-      "stream.share.desc": "The daemon captures this PC's screen and publishes it into the room through mistlib — no tc-chat client needed.",
-      "stream.share.monitorNote": "Captures the primary monitor (monitor selection may come later); audio is not shared yet.",
+      "stream.share.title": "Share this PC's screen",
+      "stream.share.desc": "Streams this computer's desktop to an RTSP URL you paste into the VRChat video player. Give it a tc-chat room id to also publish the capture there, so any consensus-elected relay — or a direct viewer — can pick it up without a browser client.",
+      "stream.share.monitorNote": "Captures the primary monitor (monitor selection may come later); audio is not shared yet, and publishing into a room requires native capture (Windows).",
+      "stream.share.roomLabel": "tc-chat room id (optional)",
+      "stream.share.roomPlaceholder": "room id (optional — leave blank to stream locally only)",
       "stream.share.startBtn": "Start sharing",
       "stream.share.stopBtn": "Stop sharing",
       "stream.share.stateSharing": "sharing",
@@ -3174,10 +3162,8 @@
       "settings.field.stream.capture_backend.desc": "Screen capture backend to use.",
       "settings.field.stream.max_width.label": "Max width",
       "settings.field.stream.max_width.desc": "Maximum capture width in pixels; wider input is scaled down.",
-      "settings.field.stream.relay_room.label": "Default relay room",
-      "settings.field.stream.relay_room.desc": "tc-chat room id used by “Relay a tc-chat share” when none is typed.",
-      "settings.field.stream.share_room.label": "Default share room",
-      "settings.field.stream.share_room.desc": "tc-chat room id used by “Share screen to the room” when none is typed. Applies on daemon restart.",
+      "settings.field.stream.room.label": "Default room",
+      "settings.field.stream.room.desc": "tc-chat room id used by both “Relay a tc-chat share” and “Share screen to the room” when none is typed. Applies on daemon restart.",
       "settings.field.stream.audio_codec.label": "Audio codec",
       "settings.field.stream.audio_codec.desc": "Audio codec used for the stream.",
       "settings.field.stream.audio_capture.label": "Capture audio",
@@ -3312,9 +3298,6 @@
       "overview.version": "バージョン",
       "overview.uptime": "稼働時間",
       "stream.title": "ストリーム",
-      "stream.shareTitle": "この画面を共有",
-      "stream.shareDesc": "このPCのデスクトップをRTSP URLとして直接配信します。VRChatの動画プレイヤーに貼り付けて再生できます。",
-      "stream.startBtn": "開始 (この画面)",
       "stream.relayTitle": "tc-chatの画面共有を中継",
       "stream.relayDesc": "tc-chatのルームで共有中の画面をVRChatへ中継し、視聴者が見られるようにします。",
       "stream.roomLabel": "tc-chatルームID",
@@ -3336,7 +3319,6 @@
       "stream.uptime": "稼働時間",
       "stream.stopBtn": "停止",
       "stream.stopConfirm": "ストリームを停止しますか?",
-      "stream.started": "ストリームを開始しました。",
       "stream.stopped": "ストリームを停止しました。",
       "stream.relayStarted": "ルーム{room}で中継を開始しました。",
       "stream.relayStartedNoRoom": "中継を開始しました。",
@@ -3344,9 +3326,11 @@
       "stream.vrchatHint.link": "設定でRTSPアドレスを0.0.0.0に変更",
       "stream.vrchatHint.suffix": "し、ストリームを再起動してください。",
       "stream.relayCascadeHint": "視聴者が複数いる場合は、同じルームで各自が mistl stream relay を実行してください。リーダーが自動的に選出され、共有元は一度のアップロードで済みます。",
-      "stream.share.title": "画面をルームへ共有",
-      "stream.share.desc": "デーモンがこのPCの画面をキャプチャし、mistlib 経由でルームに配信します — tc-chat クライアントは不要です。",
-      "stream.share.monitorNote": "プライマリモニターをキャプチャします（モニター選択は今後対応予定）。音声の共有はまだ対応していません。",
+      "stream.share.title": "この画面を共有",
+      "stream.share.desc": "このPCのデスクトップをRTSP URLとして配信し、VRChatの動画プレイヤーに貼り付けて再生できます。tc-chatルームIDを指定すると、その画面をルームにも配信し、中継ノードやtc-chatクライアントなしで直接視聴する相手からも見られるようになります。",
+      "stream.share.monitorNote": "プライマリモニターをキャプチャします（モニター選択は今後対応予定）。音声の共有はまだ対応していません。ルームへの配信にはネイティブキャプチャ (Windows) が必要です。",
+      "stream.share.roomLabel": "tc-chatルームID (任意)",
+      "stream.share.roomPlaceholder": "ルームID (任意 — 空欄ならローカルのみ配信)",
       "stream.share.startBtn": "共有を開始",
       "stream.share.stopBtn": "共有を停止",
       "stream.share.stateSharing": "共有中",
@@ -3845,10 +3829,8 @@
       "settings.field.stream.capture_backend.desc": "使用する画面キャプチャのバックエンドです。",
       "settings.field.stream.max_width.label": "最大幅",
       "settings.field.stream.max_width.desc": "キャプチャの最大幅 (ピクセル) です。これより広い入力は縮小されます。",
-      "settings.field.stream.relay_room.label": "デフォルトの中継ルーム",
-      "settings.field.stream.relay_room.desc": "「tc-chatの画面共有を中継」でルームIDが未入力のときに使われるtc-chatルームIDです。",
-      "settings.field.stream.share_room.label": "デフォルトの共有ルーム",
-      "settings.field.stream.share_room.desc": "「画面をルームへ共有」でルームIDが未入力のときに使われるtc-chatルームIDです。デーモンの再起動後に適用されます。",
+      "settings.field.stream.room.label": "デフォルトのルーム",
+      "settings.field.stream.room.desc": "「tc-chatの画面共有を中継」と「画面をルームへ共有」の両方で、ルームIDが未入力のときに使われるtc-chatルームIDです。デーモンの再起動後に適用されます。",
       "settings.field.stream.audio_codec.label": "音声コーデック",
       "settings.field.stream.audio_codec.desc": "配信に使用する音声コーデックです。",
       "settings.field.stream.audio_capture.label": "音声キャプチャ",
@@ -3983,9 +3965,6 @@
       "overview.version": "版本",
       "overview.uptime": "运行时间",
       "stream.title": "串流",
-      "stream.shareTitle": "共享此电脑的屏幕",
-      "stream.shareDesc": "将此电脑的桌面直接以 RTSP URL 推流，粘贴到 VRChat 的视频播放器中即可播放。",
-      "stream.startBtn": "开始 (此屏幕)",
       "stream.relayTitle": "中继 tc-chat 共享",
       "stream.relayDesc": "中继已在 tc-chat 房间中共享的屏幕，供 VRChat 观众观看。",
       "stream.roomLabel": "tc-chat 房间 ID",
@@ -4007,7 +3986,6 @@
       "stream.uptime": "运行时间",
       "stream.stopBtn": "停止",
       "stream.stopConfirm": "确定要停止串流吗？",
-      "stream.started": "串流已开始。",
       "stream.stopped": "串流已停止。",
       "stream.relayStarted": "已在房间 {room} 中开始中继。",
       "stream.relayStartedNoRoom": "中继已开始。",
@@ -4015,9 +3993,11 @@
       "stream.vrchatHint.link": "在设置中将 RTSP 地址设为 0.0.0.0",
       "stream.vrchatHint.suffix": "，然后重新启动串流。",
       "stream.relayCascadeHint": "有多个观众？在同一房间中，每个人运行 mistl stream relay，系统会自动选举主节点，共享源只需上传一次。",
-      "stream.share.title": "将屏幕共享到房间",
-      "stream.share.desc": "守护进程捕获本机屏幕，并通过 mistlib 发布到房间 — 无需 tc-chat 客户端。",
-      "stream.share.monitorNote": "捕获主显示器（显示器选择功能后续提供）；暂不支持共享音频。",
+      "stream.share.title": "共享此电脑的屏幕",
+      "stream.share.desc": "将此电脑的桌面推流为 RTSP URL，粘贴到 VRChat 视频播放器中即可播放。填写 tc-chat 房间 ID 还可将画面发布到该房间，让中继节点或直接观看者无需 tc-chat 客户端也能看到。",
+      "stream.share.monitorNote": "捕获主显示器（显示器选择功能后续提供）；暂不支持共享音频，发布到房间还需要原生采集（仅限 Windows）。",
+      "stream.share.roomLabel": "tc-chat 房间 ID（可选）",
+      "stream.share.roomPlaceholder": "房间 ID（可选 — 留空则仅本地推流）",
       "stream.share.startBtn": "开始共享",
       "stream.share.stopBtn": "停止共享",
       "stream.share.stateSharing": "共享中",
@@ -4516,10 +4496,8 @@
       "settings.field.stream.capture_backend.desc": "使用的屏幕采集后端。",
       "settings.field.stream.max_width.label": "最大宽度",
       "settings.field.stream.max_width.desc": "采集的最大宽度 (像素)；超过此宽度的输入将被缩小。",
-      "settings.field.stream.relay_room.label": "默认中继房间",
-      "settings.field.stream.relay_room.desc": "未输入房间 ID 时，“中继 tc-chat 共享”所使用的 tc-chat 房间 ID。",
-      "settings.field.stream.share_room.label": "默认共享房间",
-      "settings.field.stream.share_room.desc": "未输入房间 ID 时，“将屏幕共享到房间”所使用的 tc-chat 房间 ID。需要重启守护进程才能生效。",
+      "settings.field.stream.room.label": "默认房间",
+      "settings.field.stream.room.desc": "未输入房间 ID 时，“中继 tc-chat 共享”和“将屏幕共享到房间”共同使用的 tc-chat 房间 ID。需要重启守护进程才能生效。",
       "settings.field.stream.audio_codec.label": "音频编码",
       "settings.field.stream.audio_codec.desc": "串流使用的音频编码格式。",
       "settings.field.stream.audio_capture.label": "采集音频",
@@ -5018,7 +4996,6 @@
   var streamKv = document.getElementById("stream-kv");
   var streamUrlCallout = document.getElementById("stream-url-callout");
   var streamUrlText = document.getElementById("stream-url-text");
-  var btnStreamStart = document.getElementById("btn-stream-start");
   var btnStreamStop = document.getElementById("btn-stream-stop");
   var relayRoomHint = document.getElementById("relay-room-hint");
   var streamVrchatHint = document.getElementById("stream-vrchat-hint");
@@ -5066,17 +5043,17 @@
     }
   }
 
-  /* Start/Stop are mutually exclusive, mirroring renderShareCard() below:
-     only the button for the action that's currently valid is shown. A
-     running stream may be either backend (native capture or tc-chat relay)
-     -- both report through the same s.running flag, so one check covers
-     both start flows (#btn-stream-start and the relay form). Unknown status
-     (poll failed / not yet loaded, s === null) is treated like "not
-     running": show Start, hide Stop. */
+  /* The Relay form has no start/stop toggle of its own -- it shares this
+     one generic Stop button with every other backend (native/ffmpeg/share/
+     selftest), all of which occupy the same single-pipeline slot (see
+     stream/mod.rs's `Pipeline`). The merged Share card tracks its own
+     active/idle state separately via shareActive() below, but a running
+     share still flips this same button visible, same as any other backend.
+     Unknown status (poll failed / not yet loaded, s === null) is treated
+     like "not running": hide Stop. */
   function renderStreamButtons() {
     var s = state.stream;
     var running = !!(s && s.running);
-    btnStreamStart.hidden = running;
     btnStreamStop.hidden = !running;
   }
 
@@ -5157,13 +5134,6 @@
     withBusy(e.currentTarget, pollStreamViews);
   });
 
-  document.getElementById("btn-stream-start").addEventListener("click", function (e) {
-    runAction(e.currentTarget, "stream.start", {}, function () {
-      showToast(t("stream.started"), "success");
-      pollStreamViews();
-    });
-  });
-
   document.getElementById("btn-stream-stop").addEventListener("click", function (e) {
     if (!confirm(t("stream.stopConfirm"))) return;
     runAction(e.currentTarget, "stream.stop", {}, function () {
@@ -5176,7 +5146,7 @@
     e.preventDefault();
     var roomInput = document.getElementById("relay-room");
     var room = roomInput.value.trim();
-    var configuredDefault = state.config && state.config.stream && state.config.stream.relay_room;
+    var configuredDefault = state.config && state.config.stream && state.config.stream.room;
     if (!room && !configuredDefault) {
       showRelayRoomHint(true);
       roomInput.focus();
@@ -5194,38 +5164,40 @@
     e.preventDefault();
     e.stopPropagation();
     showRelayRoomHint(false);
-    focusSettingsField(settingsFieldId("stream", "relay_room"));
+    focusSettingsField(settingsFieldId("stream", "room"));
   });
 
-  /* ---------- native screen share (stream.share.*) ----------
-     The daemon captures the primary monitor itself (the existing native
-     capture + OpenH264 pipeline) and publishes it into the room via
-     mistlib's publish_local_track -- the browser never touches media, this
-     card just drives daemon commands through the normal /api/call path:
-       stream.share.start {}   stream.share.stop {}
-     Share state comes from stream.status when it carries share fields (a
-     `share` object with a running/active flag is honored if the daemon
-     grows one); until then it's tracked optimistically from the command
-     responses, and any server-side error text is surfaced verbatim via the
-     usual runAction toast. */
+  /* ---------- screen share, local-only or published to a room
+     (stream.start) ----------
+     The merged "Share this PC's screen" card: the daemon captures the
+     primary monitor itself (the existing native capture + OpenH264
+     pipeline) and, only if this form's room field is filled in, also
+     publishes it via mistlib's publish_local_track -- unlike Relay's form
+     below, a blank room here never falls back to a configured default (see
+     stream/mod.rs's `handle` doc for why `stream.start` deliberately skips
+     that fallback); the browser never touches media either way. This card
+     drives:
+       stream.start {room?}   stream.share.stop {}
+     (stream.share.stop is `stream.stop`'s alias, used here so this card's
+     handler doesn't need to know it shares the single-pipeline slot with
+     Relay/Selftest -- see stream/mod.rs's `handle` doc.) Active/idle state
+     comes from stream.status: prefer its `share` sub-object when present
+     (the networked case), else fall back to the plain running+backend
+     check (the local-only case, which never populates `share`), else the
+     optimistic local flag set right after a successful start. */
 
   var btnShareStart = document.getElementById("btn-share-start");
   var btnShareStop = document.getElementById("btn-share-stop");
   var shareStatusLine = document.getElementById("share-status");
   var shareOptimistic = false;
-  var shareRoomHint = document.getElementById("share-room-hint");
-
-  function showShareRoomHint(show) {
-    shareRoomHint.hidden = !show;
-  }
 
   function shareActive() {
     var s = state.stream;
-    /* Prefer whatever stream.status reports once the backend exposes share
-       state; the exact field name isn't fixed yet, so accept the obvious
-       shapes and fall back to our optimistic local flag. */
-    if (s && typeof s.share === "object" && s.share !== null) {
-      return !!(s.share.running || s.share.active);
+    if (s && typeof s.share === "object" && s.share !== null && (s.share.running || s.share.active)) {
+      return true;
+    }
+    if (s && s.running && (s.backend === "native" || s.backend === "ffmpeg" || s.backend === "share")) {
+      return true;
     }
     if (s && typeof s.sharing === "boolean") return s.sharing;
     return shareOptimistic;
@@ -5241,28 +5213,13 @@
 
   document.getElementById("share-form").addEventListener("submit", function (e) {
     e.preventDefault();
-    var shareRoomInput = document.getElementById("share-room");
-    var room = shareRoomInput.value.trim();
-    var configuredDefault = state.config && state.config.stream && state.config.stream.share_room;
-    if (!room && !configuredDefault) {
-      showShareRoomHint(true);
-      shareRoomInput.focus();
-      return;
-    }
-    showShareRoomHint(false);
-    runAction(btnShareStart, "stream.share.start", room ? { room: room } : {}, function () {
+    var room = document.getElementById("share-room").value.trim();
+    runAction(btnShareStart, "stream.start", room ? { room: room } : {}, function () {
       shareOptimistic = true;
       showToast(t("stream.share.started"), "success");
       renderShareCard();
       pollStreamViews();
     });
-  });
-
-  document.getElementById("share-room-hint-link").addEventListener("click", function (e) {
-    e.preventDefault();
-    e.stopPropagation();
-    showShareRoomHint(false);
-    focusSettingsField(settingsFieldId("stream", "share_room"));
   });
 
   btnShareStop.addEventListener("click", function (e) {
@@ -9118,8 +9075,7 @@
       { key: "frame_rate", labelKey: "settings.field.stream.frame_rate.label", descKey: "settings.field.stream.frame_rate.desc", type: "number" },
       { key: "capture_backend", labelKey: "settings.field.stream.capture_backend.label", descKey: "settings.field.stream.capture_backend.desc", type: "select", options: [["", "settings.optionDefault", true], ["native", "native"], ["ffmpeg", "ffmpeg"]], advanced: true },
       { key: "max_width", labelKey: "settings.field.stream.max_width.label", descKey: "settings.field.stream.max_width.desc", type: "number", advanced: true },
-      { key: "relay_room", labelKey: "settings.field.stream.relay_room.label", descKey: "settings.field.stream.relay_room.desc", type: "text" },
-      { key: "share_room", labelKey: "settings.field.stream.share_room.label", descKey: "settings.field.stream.share_room.desc", type: "text" },
+      { key: "room", labelKey: "settings.field.stream.room.label", descKey: "settings.field.stream.room.desc", type: "text" },
       { key: "audio_codec", labelKey: "settings.field.stream.audio_codec.label", descKey: "settings.field.stream.audio_codec.desc", type: "select", options: [["", "settings.optionDefault", true], ["aac", "aac"], ["opus", "opus"]], advanced: true },
       { key: "audio_capture", labelKey: "settings.field.stream.audio_capture.label", descKey: "settings.field.stream.audio_capture.desc", type: "toggle", advanced: true },
       { key: "cascade", labelKey: "settings.field.stream.cascade.label", descKey: "settings.field.stream.cascade.desc", type: "toggle", advanced: true }

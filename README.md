@@ -76,7 +76,7 @@ $ mistl daemon stop
 # Configuration (no config.toml editing needed)
 $ mistl config show           # secrets masked
 $ mistl config set ai.default_preset_id default
-$ mistl config set stream.relay_room my-room
+$ mistl config set stream.room my-room
 
 # Profile / DID keys
 $ mistl key did               # generates a key on first call
@@ -91,6 +91,7 @@ $ mistl store get <cid> --output .\file.bin
 
 # Screen share (VRChat)
 $ mistl stream start          # local screen -> rtsp://<LAN IP>:8554/stream
+$ mistl stream start --room my-room   # ...and also publish it into a mistlib room (native capture, Windows)
 $ mistl stream relay --room my-room   # tc-chat share (video+audio) -> same URL
 $ mistl stream selftest --audio aac   # synthetic video+audio feed for local testing
 $ mistl stream status
@@ -141,8 +142,9 @@ mistl joins the room as a WebRTC peer, receives the share (H264 video + Opus aud
 transcodes the audio to AAC (what AVPro plays over RTSP), and serves both tracks on
 the RTSP URL. Paste the printed URL into any AVPro-based VRChat video player.
 Note: the p2p transport supports multiple simultaneous rooms per process, so
-`stream.relay_room` can name its own room independent of `mailbox.room_id` and
-`ai.room_id` -- or reuse one of them if you'd rather keep everything in one room.
+`stream.room` (shared by both `stream relay` and `stream share`) can name its
+own room independent of `mailbox.room_id` and `ai.room_id` -- or reuse one of
+them if you'd rather keep everything in one room.
 
 **Any number of viewers (mesh + cascade):** VRChat's AVPro can only play a URL,
 not join the p2p swarm, so the scalable and lowest-latency arrangement is for
@@ -202,7 +204,7 @@ frame_rate = 30
 audio_capture = false                        # local capture audio: not implemented yet
 capture_backend = "native"                   # "native" (built-in) or "ffmpeg"
 max_width = 1920                             # native backend: downscale wider screens
-# relay_room = "my-room"                     # tc-chat room for `stream relay`
+# room = "my-room"                           # tc-chat room for `stream relay`/`stream share`
 audio_codec = "aac"                          # relay audio track: "aac" (AVPro) or "opus"
 cascade = true                               # cascade distribution across relay nodes (see below)
 

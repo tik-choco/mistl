@@ -2243,4 +2243,242 @@ mod tests {
         assert!(out.is_empty(), "a failed decode should emit no frames");
         assert_eq!(counters.audio_transcode_errors_total.load(Ordering::Relaxed), 1);
     }
+
+    // --- empirical pitch-conservation audit ---------------------------------
+    //
+    // Three code audits found `OpusToAac` clean, but VRChat playback reportedly
+    // sounds slightly sharp. Rather than re-reading the code a fourth time,
+    // this proves (or disproves) pitch-correctness by *sample-count
+    // conservation*: the Opus decoder and the AAC encoder share the same
+    // 48 kHz clock, so if X input samples/channel produce Y emitted AAC
+    // frames, the implied pitch ratio VRChat would hear is X / (Y * 1024). A
+    // ratio of 1.000 is pitch-perfect; 1024/960 (~1.0667, +469 Hz off a 440 Hz
+    // tone) would indicate an Opus-frame-size vs. AAC-frame-size confusion;
+    // 48000/44100 (~1.0884, +479 Hz) would indicate a sample-rate mismatch.
+    #[test]
+    fn opus_to_aac_conserves_sample_count_10s_stereo_440hz() {
+        let sample_rate = rtp_out::AUDIO_CLOCK_RATE;
+        assert_eq!(sample_rate, 48_000, "test's Hz math assumes the relay's 48kHz clock");
+        let channels = 2usize;
+        let frame_samples = 960usize; // 20ms @ 48kHz -- what browsers send
+        let seconds = 10u32;
+        let total_input_samples = sample_rate * seconds; // 480_000 samples/channel
+        let num_packets = total_input_samples as usize / frame_samples;
+
+        let mut opus_encoder = opus::Encoder::new(sample_rate, opus::Channels::Stereo, opus::Application::Audio)
+            .expect("creating Opus encoder");
+
+        let mut transcoder =
+            OpusToAac::new(Arc::new(RelayCounters::default())).expect("creating Opus->AAC transcoder");
+
+        let start_ts: u32 = 1_000_000;
+        let mut ts = start_ts;
+        let mut emitted: Vec<(Vec<u8>, u32)> = Vec::new();
+
+        for packet_index in 0..num_packets {
+            let mut pcm = vec![0i16; frame_samples * channels];
+            for i in 0..frame_samples {
+                let t = (packet_index * frame_samples + i) as f64 / sample_rate as f64;
+                let sample = (2.0 * std::f64::consts::PI * 440.0 * t).sin() * i16::MAX as f64 * 0.25;
+                pcm[i * channels] = sample as i16;
+                pcm[i * channels + 1] = sample as i16;
+            }
+
+            let mut opus_payload = vec![0u8; 4000];
+            let len = opus_encoder.encode(&pcm, &mut opus_payload).expect("Opus encode");
+            opus_payload.truncate(len);
+
+            for pair in transcoder.push(&opus_payload, ts) {
+                emitted.push(pair);
+            }
+
+            ts = ts.wrapping_add(frame_samples as u32);
+        }
+
+        // --- (b) consecutive rtp_ts must step by exactly AAC_FRAME_SAMPLES ---
+        for pair in emitted.windows(2) {
+            let ts_a = pair[0].1;
+            let ts_b = pair[1].1;
+            assert_eq!(
+                ts_b.wrapping_sub(ts_a),
+                AAC_FRAME_SAMPLES as u32,
+                "consecutive AAC frame timestamps must step by exactly {AAC_FRAME_SAMPLES}"
+            );
+        }
+
+        // --- (a) sample-count conservation == pitch conservation ------------
+        let frames_emitted = emitted.len();
+        let implied_samples = frames_emitted * AAC_FRAME_SAMPLES;
+        let pitch_ratio = implied_samples as f64 / total_input_samples as f64;
+
+        println!("=== OpusToAac sample-count conservation (stereo, {seconds}s @ {sample_rate}Hz) ===");
+        println!("input samples/channel:   {total_input_samples}");
+        println!("opus packets pushed:     {num_packets} ({frame_samples} samples/channel each)");
+        println!("AAC frames emitted:      {frames_emitted} ({AAC_FRAME_SAMPLES} samples/channel each)");
+        println!("implied samples/channel: {implied_samples}");
+        println!("pitch ratio (implied/input): {pitch_ratio:.6}  (1.000000 == pitch-perfect)");
+        println!(
+            "  for reference: 1024/960 = {:.6} (+{:.1}Hz on 440Hz), 48000/44100 = {:.6} (+{:.1}Hz on 440Hz)",
+            1024.0 / 960.0,
+            440.0 * (1024.0 / 960.0 - 1.0),
+            48000.0 / 44100.0,
+            440.0 * (48000.0 / 44100.0 - 1.0)
+        );
+
+        // Tolerance: +/-2 frames for encoder priming delay (fdk-aac's AAC-LC
+        // encoder has ~1 frame of algorithmic delay) and any final partial
+        // ring-buffer remainder that never reaches a full 1024-sample frame.
+        let tolerance_samples = 2 * AAC_FRAME_SAMPLES as i64;
+        let diff = implied_samples as i64 - total_input_samples as i64;
+        assert!(
+            diff.abs() <= tolerance_samples,
+            "sample count not conserved: input={total_input_samples} implied={implied_samples} \
+             diff={diff} (tolerance +/-{tolerance_samples}) -- pitch ratio {pitch_ratio:.6} is NOT 1.0"
+        );
+
+        // --- (5) BONUS: decode the emitted AAC back to PCM and measure the
+        // dominant frequency by zero-crossing count over the middle 5s. -----
+        let asc_info = transcoder.encoder.info().expect("reading AAC encoder ASC info");
+        let asc = asc_info.confBuf[..asc_info.confSize as usize].to_vec();
+        assert!(!asc.is_empty(), "encoder should have produced a non-empty AudioSpecificConfig");
+
+        let mut aac_decoder = fdk_aac::dec::Decoder::new(fdk_aac::dec::Transport::Raw);
+        aac_decoder.config_raw(&asc).expect("configuring AAC decoder with encoder's ASC");
+
+        let mut decoded_pcm: Vec<i16> = Vec::new();
+        for (frame, _ts) in &emitted {
+            aac_decoder.fill(frame).expect("feeding AAC decoder");
+            let mut out = vec![0i16; 2048 * channels];
+            match aac_decoder.decode_frame(&mut out) {
+                Ok(()) => {
+                    let frame_size = aac_decoder.decoded_frame_size();
+                    out.truncate(frame_size);
+                    decoded_pcm.extend_from_slice(&out);
+                }
+                Err(error) => {
+                    panic!("AAC decode of our own encoder's output failed: {error}");
+                }
+            }
+        }
+
+        let decoded_samples_per_channel = decoded_pcm.len() / channels;
+        println!("decoded PCM samples/channel (incl. encoder priming delay): {decoded_samples_per_channel}");
+
+        // fdk-aac's AAC-LC encoder inserts one frame (1024 samples) of
+        // priming delay at the start of the encoded stream; skip it before
+        // measuring frequency so the analysis window is clean signal.
+        let priming_samples = AAC_FRAME_SAMPLES.min(decoded_samples_per_channel);
+        let analysis_start = priming_samples;
+        let analysis_seconds = 5.0f64;
+        let analysis_len = ((analysis_seconds * sample_rate as f64) as usize)
+            .min(decoded_samples_per_channel.saturating_sub(analysis_start));
+        // Center the 5s analysis window in the middle of the signal.
+        let usable_after_start = decoded_samples_per_channel.saturating_sub(analysis_start);
+        let center_offset = usable_after_start.saturating_sub(analysis_len) / 2;
+        let window_start = analysis_start + center_offset;
+        let window_end = (window_start + analysis_len).min(decoded_samples_per_channel);
+
+        let mut zero_crossings = 0u64;
+        let mut prev = decoded_pcm[window_start * channels]; // left channel
+        for i in (window_start + 1)..window_end {
+            let cur = decoded_pcm[i * channels];
+            if (prev < 0) != (cur < 0) && !(prev == 0 && cur == 0) {
+                zero_crossings += 1;
+            }
+            prev = cur;
+        }
+        let window_duration_s = (window_end - window_start) as f64 / sample_rate as f64;
+        // A full sine cycle produces 2 zero crossings.
+        let measured_hz = (zero_crossings as f64 / 2.0) / window_duration_s;
+
+        println!(
+            "zero-crossing analysis window: samples [{window_start}, {window_end}) = {window_duration_s:.3}s"
+        );
+        println!("zero crossings: {zero_crossings}");
+        println!("measured dominant frequency: {measured_hz:.3} Hz (input tone: 440.000 Hz)");
+        println!(
+            "  for reference: 1024/960 bug would measure ~{:.1}Hz, 48k/44.1k bug would measure ~{:.1}Hz",
+            440.0 * (1024.0 / 960.0),
+            440.0 * (48000.0 / 44100.0)
+        );
+
+        assert!(
+            (measured_hz - 440.0).abs() < 2.0,
+            "measured frequency {measured_hz:.3}Hz deviates from input 440Hz by more than 2Hz -- pitch is NOT conserved"
+        );
+    }
+
+    // --- mono Opus stream through the (stereo-decoding) OpusToAac -----------
+    //
+    // Browsers commonly send mono Opus for a single mic/share track. `OpusToAac`
+    // always constructs its `opus::Decoder` as `Channels::Stereo` (see `new`
+    // above); this checks that decoding a genuinely mono-encoded Opus stream
+    // through that stereo decoder still conserves sample count end-to-end.
+    #[test]
+    fn opus_to_aac_conserves_sample_count_for_mono_opus_source() {
+        let sample_rate = rtp_out::AUDIO_CLOCK_RATE;
+        let frame_samples = 960usize; // 20ms @ 48kHz
+        let seconds = 10u32;
+        let total_input_samples = sample_rate * seconds;
+        let num_packets = total_input_samples as usize / frame_samples;
+
+        // Mono encoder: one channel of samples per Opus frame.
+        let mut opus_encoder = opus::Encoder::new(sample_rate, opus::Channels::Mono, opus::Application::Audio)
+            .expect("creating mono Opus encoder");
+
+        let mut transcoder =
+            OpusToAac::new(Arc::new(RelayCounters::default())).expect("creating Opus->AAC transcoder");
+
+        let start_ts: u32 = 500_000;
+        let mut ts = start_ts;
+        let mut emitted: Vec<(Vec<u8>, u32)> = Vec::new();
+
+        for packet_index in 0..num_packets {
+            let mut pcm = vec![0i16; frame_samples]; // mono: 1 sample per frame index
+            for (i, sample_slot) in pcm.iter_mut().enumerate() {
+                let t = (packet_index * frame_samples + i) as f64 / sample_rate as f64;
+                let sample = (2.0 * std::f64::consts::PI * 440.0 * t).sin() * i16::MAX as f64 * 0.25;
+                *sample_slot = sample as i16;
+            }
+
+            let mut opus_payload = vec![0u8; 4000];
+            let len = opus_encoder.encode(&pcm, &mut opus_payload).expect("mono Opus encode");
+            opus_payload.truncate(len);
+
+            for pair in transcoder.push(&opus_payload, ts) {
+                emitted.push(pair);
+            }
+
+            ts = ts.wrapping_add(frame_samples as u32);
+        }
+
+        for pair in emitted.windows(2) {
+            let ts_a = pair[0].1;
+            let ts_b = pair[1].1;
+            assert_eq!(
+                ts_b.wrapping_sub(ts_a),
+                AAC_FRAME_SAMPLES as u32,
+                "mono-source: consecutive AAC frame timestamps must step by exactly {AAC_FRAME_SAMPLES}"
+            );
+        }
+
+        let frames_emitted = emitted.len();
+        let implied_samples = frames_emitted * AAC_FRAME_SAMPLES;
+        let pitch_ratio = implied_samples as f64 / total_input_samples as f64;
+
+        println!("=== OpusToAac sample-count conservation (MONO opus source -> stereo decoder, {seconds}s) ===");
+        println!("input samples/channel:   {total_input_samples}");
+        println!("opus packets pushed:     {num_packets} ({frame_samples} samples/channel each, mono-encoded)");
+        println!("AAC frames emitted:      {frames_emitted} ({AAC_FRAME_SAMPLES} samples/channel each)");
+        println!("implied samples/channel: {implied_samples}");
+        println!("pitch ratio (implied/input): {pitch_ratio:.6}  (1.000000 == pitch-perfect)");
+
+        let tolerance_samples = 2 * AAC_FRAME_SAMPLES as i64;
+        let diff = implied_samples as i64 - total_input_samples as i64;
+        assert!(
+            diff.abs() <= tolerance_samples,
+            "mono-source sample count not conserved: input={total_input_samples} implied={implied_samples} \
+             diff={diff} (tolerance +/-{tolerance_samples}) -- pitch ratio {pitch_ratio:.6} is NOT 1.0"
+        );
+    }
 }

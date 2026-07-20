@@ -17,6 +17,14 @@
 //! Both backends feed the same [`rtsp::RtspServer`], which packetizes into
 //! RTP and serves it with a dummy SPS/PPS/NALU keepalive while no real video
 //! is flowing yet.
+//!
+//! Giving `stream.start` an explicit room layers a third thing on top of
+//! the same local RTSP serving: it also publishes the capture into that
+//! mistlib room, reusing the native backend's pipeline regardless of
+//! `stream.capture_backend` (Windows only) -- see `share.rs`'s module doc.
+//! Unlike `relay`/`share`, `start` never falls back to the `stream.room`
+//! config default for this -- it's the generic entry point, so staying
+//! local has to be the outcome whenever nothing was asked for explicitly.
 
 mod capture;
 mod ingest;
@@ -142,11 +150,21 @@ fn pipeline() -> &'static Mutex<Option<Pipeline>> {
 }
 
 /// Handle `stream.*` IPC commands:
-/// - `stream.start` `{}` -> `{rtsp_url}` (idempotent: returns existing URL)
-/// - `stream.relay.start` `{room?}` -> `{rtsp_url, room}` (tc-chat share relay)
-/// - `stream.share.start` `{room?}` -> `{rtsp_url, room}` (publish this
-///   machine's own screen capture into a mistlib room -- see `share.rs`'s
+/// - `stream.start` `{room?}` -> `{rtsp_url, room?}` (local screen capture,
+///   idempotent: returns the existing URL if already running. Deliberately
+///   does *not* fall back to `stream.room` like `relay`/`share` below do --
+///   this is the generic entry point, so an explicit `room` is required to
+///   opt into publishing; omit it (there is no config-driven way to) and it
+///   always stays purely local, using whichever backend
+///   `stream.capture_backend` names. Given a room, it also publishes the
+///   capture into that mistlib room via the same native-capture pipeline
+///   `stream.share.start` below uses, so any consensus-elected relay in
+///   that room -- or a direct viewer -- can pick it up. See `share.rs`'s
 ///   module doc, especially its "Loopback" section)
+/// - `stream.relay.start` `{room?}` -> `{rtsp_url, room}` (tc-chat share relay)
+/// - `stream.share.start` `{room?}` -> `{rtsp_url, room}` (back-compat alias
+///   for `stream.start` that, unlike it, falls back to `stream.room` and
+///   errors instead of starting local-only when neither is given)
 /// - `stream.share.stop` `{}` -> `{stopped: bool}` (identical to `stream.stop`;
 ///   named separately so a share-specific caller doesn't need to know it
 ///   shares the single-pipeline slot with every other backend)
@@ -159,18 +177,24 @@ fn pipeline() -> &'static Mutex<Option<Pipeline>> {
 pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Value> {
     match cmd {
         "stream.start" => {
-            let backend = CaptureBackend::parse(&state.config().stream.capture_backend)?;
-            start(state, backend, None, None).await
+            let room = args.get("room").and_then(Value::as_str).map(str::to_string);
+            match room {
+                Some(room) => start(state, CaptureBackend::Share, Some(room), None).await,
+                None => {
+                    let backend = CaptureBackend::parse(&state.config().stream.capture_backend)?;
+                    start(state, backend, None, None).await
+                }
+            }
         }
         "stream.relay.start" => {
             let room = args
                 .get("room")
                 .and_then(Value::as_str)
                 .map(str::to_string)
-                .or_else(|| state.config().stream.relay_room.clone());
+                .or_else(|| state.config().stream.room.clone());
             let Some(room) = room else {
                 bail!(
-                    "no relay room: pass --room or set stream.relay_room to the \
+                    "no relay room: pass --room or set stream.room to the \
                      tc-chat room id of the screen share"
                 );
             };
@@ -185,9 +209,9 @@ pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Val
                 .get("room")
                 .and_then(Value::as_str)
                 .map(str::to_string)
-                .or_else(|| state.config().stream.share_room.clone());
+                .or_else(|| state.config().stream.room.clone());
             let Some(room) = room else {
-                bail!("share requires a room: pass --room or set stream.share_room");
+                bail!("share requires a room: pass --room or set stream.room");
             };
             start(state, CaptureBackend::Share, Some(room), None).await
         }
