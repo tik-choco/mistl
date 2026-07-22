@@ -22,6 +22,14 @@
 //!   the (percent-encoded, sandbox-relative) path to a temp file and streams
 //!   it back the same way `/api/store/download` does, or 404 JSON error if
 //!   the path is unknown/outside the sandbox.
+//! - `GET /api/dev/instance` -> 200 JSON `{"instance": "<hex>"}`, a random
+//!   nonce picked once per process start. In debug builds the dashboard HTML
+//!   ([`index_html_body`]) carries an extra script that polls this and
+//!   reloads the page when the value changes, so a tab left open across a
+//!   `just watch` rebuild+restart picks up the new daemon on its own instead
+//!   of needing a manual refresh. Release builds serve the plain embedded
+//!   HTML (no poll), but the route itself stays cheap and harmless either
+//!   way (a per-process random number, nothing sensitive).
 //! - anything else -> 404 JSON error
 //!
 //! Security (no auth token; loopback bind):
@@ -91,6 +99,11 @@ pub async fn serve(state: Arc<AppState>, listen: &str) -> Result<WebServer> {
         .with_context(|| format!("binding web dashboard to {listen}"))?;
     let listen = listen.to_string();
 
+    // Per-process nonce for the live-reload poll (see `/api/dev/instance`
+    // above): a fresh value every time the daemon (re)starts, which is what
+    // an open browser tab uses to notice `just watch` restarted it.
+    let instance_id = format!("{:016x}", rand::random::<u64>());
+
     let handle = tokio::spawn(async move {
         loop {
             let (socket, _peer) = match listener.accept().await {
@@ -101,8 +114,9 @@ pub async fn serve(state: Arc<AppState>, listen: &str) -> Result<WebServer> {
                 }
             };
             let state = state.clone();
+            let instance_id = instance_id.clone();
             tokio::spawn(async move {
-                handle_connection(socket, state).await;
+                handle_connection(socket, state, instance_id).await;
             });
         }
     });
@@ -243,9 +257,57 @@ async fn read_body_to_file(
     file.flush().await
 }
 
-/// Whether `host` (the raw `Host` header value) is one of the accepted
-/// loopback forms, optionally with a `:port` suffix (DNS-rebinding guard).
-fn host_is_allowed(host: &str) -> bool {
+/// The dashboard HTML to serve for `GET /`. In debug builds this is
+/// [`super::INDEX_HTML`] with [`LIVE_RELOAD_SCRIPT`] spliced in before
+/// `</body>`; release builds get the embedded HTML unmodified.
+fn index_html_body() -> std::borrow::Cow<'static, str> {
+    if cfg!(debug_assertions) {
+        std::borrow::Cow::Owned(super::INDEX_HTML.replacen("</body>", LIVE_RELOAD_SCRIPT, 1))
+    } else {
+        std::borrow::Cow::Borrowed(super::INDEX_HTML)
+    }
+}
+
+/// Debug-only live-reload poll: fetches the per-process `/api/dev/instance`
+/// nonce every second and reloads the page the first time it changes,
+/// which happens whenever `just watch` rebuilds and restarts the daemon. A
+/// poll that fails outright (daemon down mid-rebuild) is swallowed and just
+/// retried on the next tick.
+const LIVE_RELOAD_SCRIPT: &str = r#"<script>
+(function () {
+  var lastInstance = null;
+  function poll() {
+    fetch("/api/dev/instance", { cache: "no-store" })
+      .then(function (r) { return r.json(); })
+      .then(function (json) {
+        var id = json && json.data && json.data.instance;
+        if (!id) return;
+        if (lastInstance === null) { lastInstance = id; return; }
+        if (id !== lastInstance) { location.reload(); }
+      })
+      .catch(function () { /* daemon rebuilding; retry next tick */ });
+  }
+  setInterval(poll, 1000);
+})();
+</script>
+</body>"#;
+
+/// Whether `host` (the raw `Host` header value) is acceptable for a
+/// connection that was actually accepted on `local_addr` (DNS-rebinding
+/// guard).
+///
+/// The loopback names (`127.0.0.1`, `localhost`, `[::1]`) are always
+/// accepted, regardless of what the dashboard is bound to -- loopback is
+/// reachable no matter which interface `ui.listen` picked. On top of that,
+/// a `Host` naming the literal IP `local_addr` was accepted on is also
+/// accepted: this is what lets `ui.listen`/`--host` bind to `0.0.0.0` (or a
+/// specific LAN IP) and be reached from another device without every
+/// `/api/call` 403ing. It doesn't weaken the guard -- a hostile page can
+/// only make a browser send a `Host` claiming an address the browser
+/// actually opened the TCP connection to (`local_addr` is the real accepted
+/// socket, not something the client can spoof), so an attacker's own origin
+/// still can't rebind their way past this check.
+fn host_is_allowed(host: &str, local_addr: &std::net::SocketAddr) -> bool {
     let host = host.trim();
     if host.is_empty() {
         return false;
@@ -258,13 +320,35 @@ fn host_is_allowed(host: &str) -> bool {
         let addr = &rest[..end];
         let after = &rest[end + 1..];
         let port_ok = after.is_empty() || (after.starts_with(':') && is_valid_port(&after[1..]));
-        return addr == "::1" && port_ok;
+        if !port_ok {
+            return false;
+        }
+        return addr == "::1" || matches_local_addr(addr, None, local_addr);
     }
-    let name = match host.rsplit_once(':') {
-        Some((name, port)) if is_valid_port(port) => name,
-        _ => host,
+    let (name, port) = match host.rsplit_once(':') {
+        Some((name, port)) if is_valid_port(port) => (name, Some(port)),
+        _ => (host, None),
     };
-    name.eq_ignore_ascii_case("127.0.0.1") || name.eq_ignore_ascii_case("localhost")
+    if name.eq_ignore_ascii_case("127.0.0.1") || name.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    matches_local_addr(name, port, local_addr)
+}
+
+/// Whether `name` (an IP literal) and optional `port` match `local_addr` --
+/// i.e. the `Host` header claims exactly the address the connection was
+/// actually accepted on.
+fn matches_local_addr(name: &str, port: Option<&str>, local_addr: &std::net::SocketAddr) -> bool {
+    let Ok(ip) = name.parse::<std::net::IpAddr>() else {
+        return false;
+    };
+    if ip != local_addr.ip() {
+        return false;
+    }
+    match port {
+        Some(port) => port.parse::<u16>() == Ok(local_addr.port()),
+        None => true,
+    }
 }
 
 fn is_valid_port(port: &str) -> bool {
@@ -403,13 +487,17 @@ struct CallRequestBody {
     args: Option<Value>,
 }
 
-async fn handle_connection(mut stream: TcpStream, state: Arc<AppState>) {
-    if let Err(error) = handle_connection_inner(&mut stream, state).await {
+async fn handle_connection(mut stream: TcpStream, state: Arc<AppState>, instance_id: String) {
+    if let Err(error) = handle_connection_inner(&mut stream, state, &instance_id).await {
         debug!(%error, "web dashboard connection ended with error");
     }
 }
 
-async fn handle_connection_inner(stream: &mut TcpStream, state: Arc<AppState>) -> io::Result<()> {
+async fn handle_connection_inner(
+    stream: &mut TcpStream,
+    state: Arc<AppState>,
+    instance_id: &str,
+) -> io::Result<()> {
     let (head, leftover) = match read_request_head(stream).await {
         Ok(Some(pair)) => pair,
         Ok(None) => return Ok(()),
@@ -420,9 +508,14 @@ async fn handle_connection_inner(stream: &mut TcpStream, state: Arc<AppState>) -
     let path = head.path.split('?').next().unwrap_or("").to_string();
 
     match (method.as_str(), path.as_str()) {
-        ("GET", "/") | ("GET", "/index.html") => write_html_response(stream, 200, "OK", super::INDEX_HTML).await,
+        ("GET", "/") | ("GET", "/index.html") => {
+            write_html_response(stream, 200, "OK", index_html_body().as_ref()).await
+        }
         ("GET", "/favicon.png") => {
             write_binary_response(stream, 200, "OK", "image/png", super::FAVICON_PNG).await
+        }
+        ("GET", "/api/dev/instance") => {
+            write_json_response(stream, 200, "OK", &json!({"ok": true, "data": {"instance": instance_id}})).await
         }
         ("POST", "/api/call") => handle_api_call(stream, &head, leftover, state).await,
         ("POST", "/api/store/upload") => handle_store_upload(stream, &head, leftover, state).await,
@@ -448,9 +541,11 @@ async fn handle_api_call(
     if head.header("x-mistl-ui").is_none() {
         return write_error(stream, 403, "Forbidden", "forbidden").await;
     }
-    // DNS-rebinding guard: only accept requests that addressed us by a
-    // loopback name, regardless of which interface the socket is on.
-    if !host_is_allowed(head.header("host").unwrap_or("")) {
+    // DNS-rebinding guard: only accept requests whose Host names either a
+    // loopback address or the literal address this connection was accepted
+    // on (see `host_is_allowed`).
+    let local_addr = stream.local_addr()?;
+    if !host_is_allowed(head.header("host").unwrap_or(""), &local_addr) {
         return write_error(stream, 403, "Forbidden", "forbidden").await;
     }
 
@@ -503,7 +598,8 @@ async fn handle_store_upload(
     if head.header("x-mistl-ui").is_none() {
         return write_error(stream, 403, "Forbidden", "forbidden").await;
     }
-    if !host_is_allowed(head.header("host").unwrap_or("")) {
+    let local_addr = stream.local_addr()?;
+    if !host_is_allowed(head.header("host").unwrap_or(""), &local_addr) {
         return write_error(stream, 403, "Forbidden", "forbidden").await;
     }
 
@@ -586,7 +682,8 @@ async fn handle_store_upload_body(
 /// response bytes back into its own JavaScript. Only the Host allowlist
 /// (DNS-rebinding guard) applies here.
 async fn handle_store_download(stream: &mut TcpStream, head: &RequestHead, state: Arc<AppState>) -> io::Result<()> {
-    if !host_is_allowed(head.header("host").unwrap_or("")) {
+    let local_addr = stream.local_addr()?;
+    if !host_is_allowed(head.header("host").unwrap_or(""), &local_addr) {
         return write_error(stream, 403, "Forbidden", "forbidden").await;
     }
 
@@ -671,7 +768,8 @@ async fn handle_store_sandbox_upload(
     if head.header("x-mistl-ui").is_none() {
         return write_error(stream, 403, "Forbidden", "forbidden").await;
     }
-    if !host_is_allowed(head.header("host").unwrap_or("")) {
+    let local_addr = stream.local_addr()?;
+    if !host_is_allowed(head.header("host").unwrap_or(""), &local_addr) {
         return write_error(stream, 403, "Forbidden", "forbidden").await;
     }
 
@@ -762,7 +860,8 @@ async fn handle_store_sandbox_download(
     head: &RequestHead,
     state: Arc<AppState>,
 ) -> io::Result<()> {
-    if !host_is_allowed(head.header("host").unwrap_or("")) {
+    let local_addr = stream.local_addr()?;
+    if !host_is_allowed(head.header("host").unwrap_or(""), &local_addr) {
         return write_error(stream, 403, "Forbidden", "forbidden").await;
     }
 
@@ -885,30 +984,56 @@ mod tests {
 
     // -- host_is_allowed ------------------------------------------------------
 
+    fn addr(s: &str) -> std::net::SocketAddr {
+        s.parse().unwrap()
+    }
+
     #[test]
     fn host_allows_loopback_v4_with_and_without_port() {
-        assert!(host_is_allowed("127.0.0.1"));
-        assert!(host_is_allowed("127.0.0.1:8080"));
+        let local = addr("127.0.0.1:6480");
+        assert!(host_is_allowed("127.0.0.1", &local));
+        assert!(host_is_allowed("127.0.0.1:8080", &local));
     }
 
     #[test]
     fn host_allows_localhost_case_insensitive_with_port() {
-        assert!(host_is_allowed("localhost"));
-        assert!(host_is_allowed("LOCALHOST:3000"));
+        let local = addr("127.0.0.1:6480");
+        assert!(host_is_allowed("localhost", &local));
+        assert!(host_is_allowed("LOCALHOST:3000", &local));
     }
 
     #[test]
     fn host_allows_ipv6_loopback_with_and_without_port() {
-        assert!(host_is_allowed("[::1]"));
-        assert!(host_is_allowed("[::1]:8080"));
+        let local = addr("127.0.0.1:6480");
+        assert!(host_is_allowed("[::1]", &local));
+        assert!(host_is_allowed("[::1]:8080", &local));
     }
 
     #[test]
     fn host_rejects_non_loopback_names() {
-        assert!(!host_is_allowed("evil.com"));
-        assert!(!host_is_allowed("127.0.0.1.evil.com"));
-        assert!(!host_is_allowed("[::2]"));
-        assert!(!host_is_allowed(""));
+        let local = addr("127.0.0.1:6480");
+        assert!(!host_is_allowed("evil.com", &local));
+        assert!(!host_is_allowed("127.0.0.1.evil.com", &local));
+        assert!(!host_is_allowed("[::2]", &local));
+        assert!(!host_is_allowed("", &local));
+    }
+
+    #[test]
+    fn host_allows_literal_match_of_local_addr_for_lan_binds() {
+        // `ui.listen`/`--host` bound to 0.0.0.0 (or a specific LAN IP): the
+        // accepted connection's local_addr is the concrete interface IP a
+        // client actually reached, and a Host header naming that same IP
+        // (with or without the matching port) is accepted.
+        let local = addr("192.168.1.50:6480");
+        assert!(host_is_allowed("192.168.1.50:6480", &local));
+        assert!(host_is_allowed("192.168.1.50", &local));
+    }
+
+    #[test]
+    fn host_rejects_mismatched_ip_or_port_against_local_addr() {
+        let local = addr("192.168.1.50:6480");
+        assert!(!host_is_allowed("10.0.0.5:6480", &local));
+        assert!(!host_is_allowed("192.168.1.50:9999", &local));
     }
 
     // -- response framing -----------------------------------------------------

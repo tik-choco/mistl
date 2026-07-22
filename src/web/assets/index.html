@@ -1394,6 +1394,27 @@
   #panel-ai .ai-setup-desc { font-size: 12.5px; color: var(--text-dim); max-width: 420px; }
   #panel-ai .ai-setup-cta { margin-top: 4px; }
 
+  /* ---- ai settings drawer: advertised-models checkbox list (see
+     buildAiModelCheckList) -- tc-translate-style checked selection instead
+     of free-text entry ------------------------------------------------- */
+  #panel-ai .ai-model-checklist { display: flex; flex-direction: column; gap: 8px; flex: 1; min-width: 220px; }
+  #panel-ai .ai-model-checklist-head { display: flex; align-items: center; gap: 10px; }
+  #panel-ai .ai-model-checklist-status { flex: 1; font-size: 12px; }
+  #panel-ai .ai-model-checklist-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: 220px;
+    overflow-y: auto;
+    padding: 6px 8px;
+    border: 1px solid var(--panel-border);
+    border-radius: var(--radius);
+    background: var(--panel);
+  }
+  #panel-ai .ai-model-check-item { display: flex; align-items: center; gap: 8px; padding: 3px 0; font-size: 13px; cursor: pointer; }
+  #panel-ai .ai-model-check-name { word-break: break-all; }
+  #panel-ai .ai-model-checklist-add { margin-top: 2px; }
+
   /* ---- topology card fold (collapsible body, reuses .drawer-chevron) --- */
   /* .cascade-card's own flex/gap only had one child once the body moved
      inside <details>; recreate the same column + 10px gap on the fold
@@ -3226,7 +3247,10 @@
       "settings.field.storage.blocks_dir.label": "Blocks directory",
       "settings.field.storage.blocks_dir.desc": "Directory for content-addressed blocks. Leave empty to use the default, <data_dir>/blocks.",
       "settings.field.ai.advertised_models.label": "Advertised models",
-      "settings.field.ai.advertised_models.desc": "Models advertised in provider_hello. Leave empty to fetch the list from the resolved preset's provider (GET /models) when providing starts."
+      "settings.field.ai.advertised_models.desc": "Which models to advertise in provider_hello when providing to the network. Fetched from the default preset's provider -- check the ones to share.",
+      "settings.field.ai.advertised_models.noPreset": "Set a default preset above to fetch its available models.",
+      "settings.field.ai.advertised_models.empty": "No models found for this provider.",
+      "settings.field.ai.advertised_models.customBadge": "custom"
     },
     ja: {
       "pageTitle": "MISTL ダッシュボード",
@@ -3893,7 +3917,10 @@
       "settings.field.storage.blocks_dir.label": "ブロックディレクトリ",
       "settings.field.storage.blocks_dir.desc": "コンテンツアドレス方式のブロックを保存するディレクトリです。空欄の場合はデフォルトの <data_dir>/blocks が使われます。",
       "settings.field.ai.advertised_models.label": "公開するモデル",
-      "settings.field.ai.advertised_models.desc": "provider_helloで公開するモデルです。空欄の場合、提供開始時に解決されたプリセットのプロバイダーから (GET /models) 一覧を取得します。"
+      "settings.field.ai.advertised_models.desc": "ネットワークへの提供時に provider_hello で公開するモデルです。デフォルトプリセットのプロバイダーから取得した一覧から、共有するものにチェックを入れてください。",
+      "settings.field.ai.advertised_models.noPreset": "モデル一覧を取得するには、上でデフォルトプリセットを設定してください。",
+      "settings.field.ai.advertised_models.empty": "このプロバイダーのモデルが見つかりませんでした。",
+      "settings.field.ai.advertised_models.customBadge": "カスタム"
     },
     zh: {
       "pageTitle": "MISTL 仪表盘",
@@ -4560,7 +4587,10 @@
       "settings.field.storage.blocks_dir.label": "区块目录",
       "settings.field.storage.blocks_dir.desc": "存放内容寻址区块的目录。留空则使用默认值 <data_dir>/blocks。",
       "settings.field.ai.advertised_models.label": "公开的模型",
-      "settings.field.ai.advertised_models.desc": "在 provider_hello 中公开的模型列表。留空则在开始提供服务时，从解析出的预设对应的提供方 (GET /models) 获取列表。"
+      "settings.field.ai.advertised_models.desc": "在向网络提供服务时，于 provider_hello 中公开哪些模型。列表取自默认预设对应的提供方，请勾选需要共享的模型。",
+      "settings.field.ai.advertised_models.noPreset": "请先在上方设置默认预设，以获取其可用模型列表。",
+      "settings.field.ai.advertised_models.empty": "未找到此提供方的模型。",
+      "settings.field.ai.advertised_models.customBadge": "自定义"
     }
   };
 
@@ -9090,7 +9120,7 @@
       { key: "room_id", labelKey: "settings.field.ai.room_id.label", descKey: "settings.field.ai.room_id.desc", type: "text", advanced: true },
       { key: "request_timeout_secs", labelKey: "settings.field.ai.request_timeout_secs.label", descKey: "settings.field.ai.request_timeout_secs.desc", type: "number", advanced: true },
       { key: "api_listen", labelKey: "settings.field.ai.api_listen.label", descKey: "settings.field.ai.api_listen.desc", type: "text", advanced: true },
-      { key: "advertised_models", labelKey: "settings.field.ai.advertised_models.label", descKey: "settings.field.ai.advertised_models.desc", type: "list", advanced: true }
+      { key: "advertised_models", labelKey: "settings.field.ai.advertised_models.label", descKey: "settings.field.ai.advertised_models.desc", type: "modelCheckList" }
     ] },
     { section: "scheduler", titleKey: "settings.section.scheduler", container: "settings-drawer-body-scheduler", fields: [
       { key: "enabled", labelKey: "settings.field.scheduler.enabled.label", descKey: "settings.field.scheduler.enabled.desc", type: "toggle" }
@@ -9297,6 +9327,8 @@
       listWrap.appendChild(addRow);
 
       row.appendChild(listWrap);
+    } else if (f.type === "modelCheckList") {
+      row.appendChild(buildAiModelCheckList(path, current, sectionCfg, f.key, badge));
     } else {
       input = el("input", { type: "text", id: id, autocomplete: "off" });
       input.value = current === null || current === undefined ? "" : String(current);
@@ -9309,6 +9341,127 @@
 
     row.appendChild(badge);
     wrap.appendChild(row);
+    return wrap;
+  }
+
+  /* ---------- ai.advertised_models: tc-translate-style checkbox list -----
+     Unlike the generic "list" chip editor (free-text entries), this fetches
+     the resolved default preset's provider model list (GET /models, via the
+     existing `ai.upstream_models` IPC command -- the same one the Connection
+     tab's preset editor uses) and renders one checkbox per model, mirroring
+     tc-translate's network-share-list (SettingsModal.tsx): check a model to
+     advertise it in provider_hello, uncheck to stop. Already-selected models
+     that the fetch didn't return (stale/manual entries, or a fetch that
+     hasn't completed/failed) still render -- tagged with a "custom" badge --
+     so toggling them off is always possible and config never silently loses
+     an entry the user isn't looking at right now. A manual add-row covers
+     upstreams that don't expose GET /models at all. */
+  function buildAiModelCheckList(path, current, sectionCfg, key, badge) {
+    var wrap = el("div", { class: "ai-model-checklist" });
+    var items = Array.isArray(current) ? current.slice() : [];
+    var fetchedModels = null; // null = not fetched (yet)
+    var fetchState = null; // "loading" | "failed" | null
+
+    var statusEl = el("div", { class: "ai-model-checklist-status muted" });
+    var refreshBtn = el("button", { type: "button" });
+    refreshBtn.textContent = t("settings.ai.presets.fetchModels");
+    var listEl = el("div", { class: "ai-model-checklist-list" });
+
+    function resolvedProviderId() {
+      var presets = Array.isArray(sectionCfg.presets) ? sectionCfg.presets : [];
+      var wanted = sectionCfg.default_preset_id;
+      var preset = presets.filter(function (p) { return p.id === wanted; })[0];
+      return preset ? preset.provider_id : null;
+    }
+
+    function commit(next) {
+      items = next;
+      saveSetting(path, items, sectionCfg, key, badge).then(renderList);
+    }
+    function toggle(model, checked) {
+      commit(checked
+        ? (items.indexOf(model) === -1 ? items.concat([model]) : items)
+        : items.filter(function (m) { return m !== model; }));
+    }
+    function addCustom(name) {
+      var v = name.trim();
+      if (!v || items.indexOf(v) !== -1) return;
+      commit(items.concat([v]));
+    }
+
+    function renderList() {
+      var providerId = resolvedProviderId();
+      refreshBtn.disabled = !providerId || fetchState === "loading";
+      if (!providerId) {
+        statusEl.textContent = t("settings.field.ai.advertised_models.noPreset");
+      } else if (fetchState === "loading") {
+        statusEl.textContent = t("settings.ai.presets.fetchModels") + "…";
+      } else if (fetchState === "failed") {
+        statusEl.textContent = t("settings.ai.presets.fetchModelsError");
+      } else {
+        statusEl.textContent = "";
+      }
+
+      var known = fetchedModels || [];
+      var names = known.slice();
+      items.forEach(function (m) { if (names.indexOf(m) === -1) names.push(m); });
+
+      listEl.innerHTML = "";
+      if (names.length === 0) {
+        listEl.appendChild(el("div", { class: "muted", text: t("settings.field.ai.advertised_models.empty") }));
+      }
+      names.forEach(function (model) {
+        var row = el("label", { class: "ai-model-check-item" });
+        var cb = el("input", { type: "checkbox" });
+        cb.checked = items.indexOf(model) !== -1;
+        cb.addEventListener("change", function () { toggle(model, cb.checked); });
+        row.appendChild(cb);
+        row.appendChild(el("span", { class: "ai-model-check-name mono", text: model }));
+        if (known.indexOf(model) === -1) {
+          row.appendChild(el("span", { class: "badge", text: t("settings.field.ai.advertised_models.customBadge") }));
+        }
+        listEl.appendChild(row);
+      });
+    }
+
+    function fetchModels() {
+      var providerId = resolvedProviderId();
+      if (!providerId) { renderList(); return; }
+      fetchState = "loading";
+      renderList();
+      api("ai.upstream_models", { provider_id: providerId }).then(function (data) {
+        fetchState = null;
+        fetchedModels = (data && data.models) || [];
+        renderList();
+      }, function () {
+        fetchState = "failed";
+        renderList();
+      });
+    }
+    refreshBtn.addEventListener("click", fetchModels);
+
+    var head = el("div", { class: "ai-model-checklist-head" });
+    head.appendChild(statusEl);
+    head.appendChild(refreshBtn);
+    wrap.appendChild(head);
+    wrap.appendChild(listEl);
+
+    var addRow = el("div", { class: "chip-add-row ai-model-checklist-add" });
+    var addInput = el("input", { type: "text", autocomplete: "off" });
+    addInput.placeholder = t("settings.list.addPlaceholder");
+    var addBtn = el("button", { type: "button" });
+    addBtn.textContent = t("settings.list.addBtn");
+    function addFromInput() { addCustom(addInput.value); addInput.value = ""; }
+    addBtn.addEventListener("click", addFromInput);
+    addInput.addEventListener("keydown", function (e) {
+      if (e.key === "Enter") { e.preventDefault(); addFromInput(); }
+    });
+    addRow.appendChild(addInput);
+    addRow.appendChild(addBtn);
+    wrap.appendChild(addRow);
+
+    renderList();
+    fetchModels();
     return wrap;
   }
 

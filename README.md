@@ -54,6 +54,22 @@ whenever you want to update to the latest `MISTLIB_REF`; the clone in
 `.mistlib-src/` is a normal git checkout, so you can also edit, branch, and
 push mistlib changes from there while developing against it.
 
+### Building a Linux binary from Windows
+
+```console
+$ just release-linux           # builds via WSL2, packages to dist/mistl-linux-x86_64
+```
+
+This runs `cargo build` inside WSL2 against the same checkout rather than
+true host cross-compiling, since mistlib links several C libraries
+(openh264/opus via cmake, fdk-aac via cc, OpenSSL for reqwest's native-tls)
+that need a real Linux toolchain/sysroot. Requires WSL2 with a distro that
+has a Rust toolchain plus `build-essential cmake pkg-config libssl-dev`
+(Ubuntu: `sudo apt install build-essential cmake pkg-config libssl-dev` and
+[rustup](https://rustup.rs/)). The Linux build lands in
+`target/x86_64-unknown-linux-gnu/release/`, kept separate from the Windows
+build's `target/release/`.
+
 ## Quick start
 
 Double-click `mistl.exe` (or run `mistl` with no arguments): the daemon starts in
@@ -70,6 +86,7 @@ Client commands start the daemon automatically if it isn't running.
 # Daemon management
 $ mistl status                # combined overview (daemon, stream, ai)
 $ mistl daemon start          # start in the background (also happens automatically)
+$ mistl daemon start --host 0.0.0.0  # also bind the dashboard for other devices on the LAN
 $ mistl daemon status
 $ mistl daemon stop
 

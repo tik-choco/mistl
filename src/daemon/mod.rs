@@ -53,12 +53,15 @@ impl AppState {
 }
 
 /// Run the daemon in the foreground until Ctrl-C or a `daemon.stop` request.
-pub fn run_foreground() -> Result<()> {
+/// `host_override`, if set, replaces just the host part of the configured
+/// `ui.listen` for this run (e.g. `--host 0.0.0.0` to reach the dashboard
+/// from another device on the LAN) without touching the persisted config.
+pub fn run_foreground(host_override: Option<String>) -> Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
-    runtime.block_on(daemon_main())
+    runtime.block_on(daemon_main(host_override))
 }
 
-async fn daemon_main() -> Result<()> {
+async fn daemon_main(host_override: Option<String>) -> Result<()> {
     let config = Config::load()?;
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     let state = Arc::new(AppState {
@@ -72,8 +75,12 @@ async fn daemon_main() -> Result<()> {
     info!(port = server.port(), "mistl daemon ready");
 
     let ui_config = state.config().ui;
+    let listen = match &host_override {
+        Some(host) => override_listen_host(&ui_config.listen, host),
+        None => ui_config.listen.clone(),
+    };
     let web = if ui_config.enabled {
-        match crate::web::serve(state.clone(), &ui_config.listen).await {
+        match crate::web::serve(state.clone(), &listen).await {
             Ok(web) => {
                 info!(url = %web.url(), "web dashboard ready");
                 Some(web)
@@ -122,10 +129,14 @@ async fn daemon_main() -> Result<()> {
     }
     server.close().await;
 
-    // A self-update applied with `--restart` asks us to come back up on the
-    // new binary. The sockets are now released, so relaunch is safe.
+    // A self-update applied with `--restart`, or a `daemon.restart` IPC call,
+    // asks us to come back up. The sockets are now released, so relaunch is
+    // safe. Forward the same `--host` override this run used -- otherwise a
+    // daemon started with `--host 0.0.0.0` for LAN access would come back
+    // bound to the configured (typically loopback-only) `ui.listen` host,
+    // silently dropping external devices with connection-refused.
     if state.wants_restart() {
-        match spawn_detached_daemon() {
+        match spawn_detached_daemon(host_override.as_deref()) {
             Ok(()) => info!("relaunched daemon on the updated binary"),
             Err(error) => tracing::warn!(%error, "failed to relaunch daemon after update"),
         }
@@ -133,11 +144,22 @@ async fn daemon_main() -> Result<()> {
     Ok(())
 }
 
+/// Substitutes `host` for the host part of `listen` (a `"host:port"`
+/// string), keeping the configured port. Backs `--host`: it overrides only
+/// the bind address for this run, not the port, and never touches the
+/// persisted `ui.listen` config value.
+fn override_listen_host(listen: &str, host: &str) -> String {
+    let port = listen.rsplit_once(':').map(|(_, port)| port).unwrap_or("6480");
+    format!("{host}:{port}")
+}
+
 /// Relaunch the daemon from the current executable path, detached. The path
 /// is unchanged by a self-update (the bytes at it are swapped in place), so
 /// this starts the freshly-updated binary. Called from [`daemon_main`] once
-/// the IPC/web sockets have been released.
-fn spawn_detached_daemon() -> Result<()> {
+/// the IPC/web sockets have been released. `host`, if the daemon that's
+/// restarting was itself started with `--host`, is re-forwarded so the
+/// relaunched process keeps the same dashboard bind address.
+fn spawn_detached_daemon(host: Option<&str>) -> Result<()> {
     let exe = std::env::current_exe().context("resolving current executable")?;
     let log_path = config::data_dir()?.join("daemon.log");
     let log = std::fs::OpenOptions::new()
@@ -147,8 +169,11 @@ fn spawn_detached_daemon() -> Result<()> {
         .with_context(|| format!("opening {}", log_path.display()))?;
 
     let mut command = std::process::Command::new(exe);
+    command.args(["daemon", "run"]);
+    if let Some(host) = host {
+        command.args(["--host", host]);
+    }
     command
-        .args(["daemon", "run"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::from(log));
@@ -172,18 +197,19 @@ fn spawn_detached_daemon() -> Result<()> {
 }
 
 /// Spawn `mistl daemon run` as a detached background process and wait for it
-/// to become reachable, printing its status.
-pub fn start_background() -> Result<()> {
-    start_background_impl(false)
+/// to become reachable, printing its status. `host` is forwarded as
+/// `daemon run --host <host>` -- see [`run_foreground`].
+pub fn start_background(host: Option<String>) -> Result<()> {
+    start_background_impl(false, host.as_deref())
 }
 
-/// [`start_background`] without output, for transparent auto-start on
-/// client commands.
+/// [`start_background`] without output or a host override, for transparent
+/// auto-start on client commands.
 pub fn start_background_quiet() -> Result<()> {
-    start_background_impl(true)
+    start_background_impl(true, None)
 }
 
-fn start_background_impl(quiet: bool) -> Result<()> {
+fn start_background_impl(quiet: bool, host: Option<&str>) -> Result<()> {
     if let Ok(status) = ipc::client_request("daemon.status", json!({})) {
         if quiet {
             return Ok(());
@@ -200,8 +226,11 @@ fn start_background_impl(quiet: bool) -> Result<()> {
         .with_context(|| format!("creating {}", log_path.display()))?;
 
     let mut command = std::process::Command::new(exe);
+    command.args(["daemon", "run"]);
+    if let Some(host) = host {
+        command.args(["--host", host]);
+    }
     command
-        .args(["daemon", "run"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::from(log));
