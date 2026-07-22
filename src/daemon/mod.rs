@@ -322,6 +322,24 @@ pub async fn dispatch(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<V
             let updated = config::set_by_path(&state.config(), path, value)?;
             updated.save()?;
             state.set_config(updated);
+            // These paths feed the running AI provider (see
+            // `ai::build_provider`); reloading it live -- instead of making
+            // the user stop/start providing, let alone restart the daemon
+            // -- so a preset/model edit is just... immediately true. Fired
+            // fire-and-forget (it may hit the network re-fetching upstream
+            // models) so this response isn't held up waiting on it.
+            if matches!(
+                path,
+                "ai.providers"
+                    | "ai.presets"
+                    | "ai.default_preset_id"
+                    | "ai.tts_preset_id"
+                    | "ai.stt_preset_id"
+                    | "ai.advertised_models"
+            ) {
+                let state = state.clone();
+                tokio::spawn(async move { crate::ai::reload_provider_if_running(&state).await });
+            }
             Ok(json!({ "saved": true, "applies": config::applies_when(path) }))
         }
         _ => match cmd.split_once('.').map(|(ns, _)| ns) {

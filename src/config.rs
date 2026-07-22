@@ -295,6 +295,18 @@ pub struct AiPresetConfig {
     /// speech. Meaningless for a chat-completion preset; left unset there.
     #[serde(default)]
     pub voice: Option<String>,
+    /// What this preset is for: `"chat"` | `"tts"` | `"stt"`. Purely a UI
+    /// categorization hint (which single checkbox a preset gets in the
+    /// dashboard's AI Network "what to provide" checklist, and which config
+    /// path -- `ai.advertised_models` / `ai.tts_preset_id` / `ai.stt_preset_id`
+    /// -- toggling it writes to); has no effect on request routing, which
+    /// is always driven by those three fields directly, not by this one.
+    /// `""` (e.g. an old config.toml predating this field) is treated the
+    /// same as `"chat"`, mirroring the `default_preset_id`-style "empty
+    /// string = fall back to the default" convention used elsewhere in this
+    /// struct's sibling configs.
+    #[serde(default)]
+    pub kind: String,
 }
 
 /// Normalizes a base URL for provider-equality comparisons during legacy
@@ -392,6 +404,17 @@ pub struct AiConfig {
     /// (see `resolve_preset`). "" = unset. Mirrors the shared LLM config
     /// contract's `defaultPresetId`.
     pub default_preset_id: String,
+    /// Which `presets` entry answers inbound `tts_request`s when providing
+    /// to the network (see `resolve_preset`). "" = TTS not offered --
+    /// `provider_hello.services` omits `"tts"` and voice requests get an
+    /// immediate `voice_error` (see `crate::ai::provider`). Unlike
+    /// `default_preset_id`, an empty value here is never defaulted away by
+    /// `resolve_preset` -- callers must check for "" themselves before
+    /// resolving, since falling back to the chat default preset would
+    /// silently opt a node into serving TTS it never configured.
+    pub tts_preset_id: String,
+    /// Same as `tts_preset_id`, for inbound `stt_request`s.
+    pub stt_preset_id: String,
     /// Named upstream connections ("where to connect"). See
     /// [`AiProviderConfig`].
     pub providers: Vec<AiProviderConfig>,
@@ -412,6 +435,8 @@ impl Default for AiConfig {
             api_listen: "127.0.0.1:6478".into(), // 6478 = "MIST" on a phone keypad
             request_timeout_secs: 120,
             default_preset_id: String::new(),
+            tts_preset_id: String::new(),
+            stt_preset_id: String::new(),
             providers: Vec::new(),
             presets: Vec::new(),
         }
@@ -770,6 +795,14 @@ pub fn applies_when(path: &str) -> &'static str {
         // tick (see `crate::bot::spawn_background`), so pipeline
         // add/edit/remove takes effect on the very next tick, not a restart.
         "bot.enabled" => "daemon restart",
+        // These feed the running AI provider's upstream/model resolution.
+        // `daemon::dispatch`'s `config.set` handler reloads it live right
+        // after a save (see `ai::reload_provider_if_running`) when one is
+        // already running, so -- unlike the "next service start" paths
+        // below, which need an explicit stop/start of *something* -- there
+        // is nothing left for the user to do at all.
+        "ai.providers" | "ai.presets" | "ai.default_preset_id" | "ai.tts_preset_id"
+        | "ai.stt_preset_id" | "ai.advertised_models" => "applied immediately",
         _ => "next service start",
     }
 }
@@ -866,6 +899,7 @@ impl Config {
                 temperature: self.ai.temperature,
                 reasoning_effort: None,
                 voice: None,
+                kind: "chat".to_string(),
             });
         }
 
@@ -1032,6 +1066,7 @@ mod tests {
             temperature: None,
             reasoning_effort: None,
             voice: None,
+            kind: "chat".to_string(),
         });
         config.ai.default_preset_id = "other".to_string();
 
@@ -1176,6 +1211,23 @@ mod tests {
     fn applies_when_mailbox_chat_relay_settings_require_a_restart() {
         assert_eq!(applies_when("mailbox.chat_rooms"), "daemon restart");
         assert_eq!(applies_when("mailbox.chat_relay"), "daemon restart");
+    }
+
+    #[test]
+    fn applies_when_ai_provider_settings_apply_immediately() {
+        // These feed reload_provider_if_running (ai::mod), unlike
+        // ai.room_id which still needs a restart (joins its room once).
+        for path in [
+            "ai.providers",
+            "ai.presets",
+            "ai.default_preset_id",
+            "ai.tts_preset_id",
+            "ai.stt_preset_id",
+            "ai.advertised_models",
+        ] {
+            assert_eq!(applies_when(path), "applied immediately", "path: {path}");
+        }
+        assert_eq!(applies_when("ai.room_id"), "daemon restart");
     }
 
     #[test]
@@ -1588,6 +1640,7 @@ mod tests {
             temperature: None,
             reasoning_effort: None,
             voice: Some("alloy".to_string()),
+            kind: "tts".to_string(),
         });
         let text = toml::to_string_pretty(&config).unwrap();
         let reloaded: Config = toml::from_str(&text).unwrap();
@@ -1595,5 +1648,58 @@ mod tests {
 
         let resolved = resolve_preset(&reloaded.ai, Some("tts-default")).unwrap();
         assert_eq!(resolved.voice.as_deref(), Some("alloy"));
+    }
+
+    #[test]
+    fn ai_tts_stt_preset_id_round_trips_and_resolves() {
+        let mut config = Config::default();
+        config.ai.providers.push(AiProviderConfig {
+            id: "openai".to_string(),
+            label: "OpenAI".to_string(),
+            base_url: "https://api.openai.com/v1".to_string(),
+            api_key: "sk-test".to_string(),
+        });
+        config.ai.presets.push(AiPresetConfig {
+            id: "tts-default".to_string(),
+            label: "TTS".to_string(),
+            provider_id: "openai".to_string(),
+            model: "tts-1".to_string(),
+            temperature: None,
+            reasoning_effort: None,
+            voice: Some("alloy".to_string()),
+            kind: "tts".to_string(),
+        });
+        config.ai.presets.push(AiPresetConfig {
+            id: "stt-default".to_string(),
+            label: "STT".to_string(),
+            provider_id: "openai".to_string(),
+            model: "whisper-1".to_string(),
+            temperature: None,
+            reasoning_effort: None,
+            voice: None,
+            kind: "stt".to_string(),
+        });
+        config.ai.tts_preset_id = "tts-default".to_string();
+        config.ai.stt_preset_id = "stt-default".to_string();
+
+        let text = toml::to_string_pretty(&config).unwrap();
+        let reloaded: Config = toml::from_str(&text).unwrap();
+        assert_eq!(reloaded.ai.tts_preset_id, "tts-default");
+        assert_eq!(reloaded.ai.stt_preset_id, "stt-default");
+
+        let tts = resolve_preset(&reloaded.ai, Some(&reloaded.ai.tts_preset_id)).unwrap();
+        assert_eq!(tts.model, "tts-1");
+        assert_eq!(tts.voice.as_deref(), Some("alloy"));
+        let stt = resolve_preset(&reloaded.ai, Some(&reloaded.ai.stt_preset_id)).unwrap();
+        assert_eq!(stt.model, "whisper-1");
+
+        // An unset id must not silently fall back to default_preset_id at
+        // the config layer -- resolve_preset() itself *would* fall back
+        // (see its doc comment), so callers (ai::mod's provide_start) are
+        // responsible for checking for "" before ever calling it. This
+        // test just documents that default_preset_id and tts/stt_preset_id
+        // are independent fields.
+        assert_eq!(Config::default().ai.tts_preset_id, "");
+        assert_eq!(Config::default().ai.stt_preset_id, "");
     }
 }

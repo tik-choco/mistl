@@ -139,6 +139,12 @@ pub enum ProtocolMessage {
 /// [`advertises_service`]).
 pub const SERVICE_CHAT: &str = "chat";
 
+/// Known `services` value for text-to-speech capability (mistai v0.4.0).
+pub const SERVICE_TTS: &str = "tts";
+
+/// Known `services` value for speech-to-text capability (mistai v0.4.0).
+pub const SERVICE_STT: &str = "stt";
+
 /// Known `code` value meaning "provider does not offer this service at
 /// all" (as opposed to a per-request upstream failure, which omits `code`).
 pub const CODE_UNSUPPORTED_SERVICE: &str = "unsupported_service";

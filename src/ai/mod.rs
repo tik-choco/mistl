@@ -8,8 +8,9 @@
 //!   forward inbound `llm_request`s to the resolved default preset's
 //!   upstream (`[ai] default_preset_id` -> `[[ai.presets]]` ->
 //!   `[[ai.providers]]`, see `crate::config::resolve_preset`), streaming
-//!   deltas back as chunks. This
-//!   provider is LLM chat only: it does not implement voice, so inbound
+//!   deltas back as chunks. TTS/STT are served the same way when
+//!   `[ai] tts_preset_id`/`stt_preset_id` name a preset (independent of the
+//!   chat preset, possibly a different provider) -- otherwise inbound
 //!   `tts_request`/`stt_request`s get an immediate `voice_error` reply
 //!   instead of silently going unanswered (see `provider.rs`).
 //! - **serve** (`ai serve start`): run a local OpenAI-compatible HTTP API
@@ -36,6 +37,7 @@ pub(crate) mod openai;
 /// needs `ChatMessage` to build a `stream_chat_completion` request.
 pub(crate) mod protocol;
 mod provider;
+mod stt;
 pub mod tts;
 
 use std::future::Future;
@@ -55,7 +57,7 @@ use api_server::ApiServer;
 use consumer::Consumer;
 use openai::UpstreamConfig;
 use protocol::{ChatMessage, ProtocolMessage};
-use provider::Provider;
+use provider::{Provider, SttCallFn, TtsCallFn};
 
 /// Ordered, fire-and-forget wire send: `(to_node_id, message)`. The
 /// service backs this with a single queue-draining task, so call order is
@@ -325,7 +327,7 @@ async fn status(service: &Arc<AiService>) -> Result<Value> {
         "connected_peers": crate::net::connected_nodes().await.len(),
         "providing": provider.is_some(),
         "models": provider.as_ref().map(|p| p.models()),
-        "services": provider.as_ref().map(|_| vec![protocol::SERVICE_CHAT]),
+        "services": provider.as_ref().map(|p| p.services()),
         "recent_requests": provider.as_ref().map(|p| {
             p.logs().into_iter().take(5).collect::<Vec<_>>()
         }),
@@ -367,7 +369,58 @@ async fn provide_start(service: &Arc<AiService>, state: &Arc<AppState>) -> Resul
     }
 
     let cfg = state.config().ai;
-    let resolved = crate::config::resolve_preset(&cfg, None).context(
+    let built = build_provider(service, &cfg).await?;
+    *service.provider.write().expect("ai provider lock") = Some(built.provider.clone());
+    service.broadcast(built.provider.hello()).await;
+
+    Ok(json!({
+        "providing": true,
+        "upstream": built.upstream_base_url,
+        "models": built.models,
+    }))
+}
+
+/// Silently rebuilds the running provider from the *current* config and
+/// re-broadcasts `provider_hello` (same connections, no leave/rejoin), so
+/// dashboard/CLI edits to `ai.providers`/`ai.presets`/`ai.default_preset_id`/
+/// `ai.tts_preset_id`/`ai.stt_preset_id`/`ai.advertised_models` take effect
+/// live -- the user never needs to stop/start providing, let alone restart
+/// the daemon, for a preset/model change to apply. A no-op if the `ai`
+/// service was never started, or isn't currently providing (nothing to
+/// reload). Called fire-and-forget from `daemon::handle`'s `config.set`
+/// after a matching path saves successfully; failures are logged and leave
+/// the previous (still-valid) provider running rather than tearing it down.
+pub async fn reload_provider_if_running(state: &Arc<AppState>) {
+    let Some(service) = SERVICE.get() else {
+        return;
+    };
+    if service.local_provider().is_none() {
+        return;
+    }
+    let cfg = state.config().ai;
+    match build_provider(service, &cfg).await {
+        Ok(built) => {
+            *service.provider.write().expect("ai provider lock") = Some(built.provider.clone());
+            service.broadcast(built.provider.hello()).await;
+        }
+        Err(err) => {
+            warn!(%err, "ai: failed to reload provider after a config change; the previous provider keeps running");
+        }
+    }
+}
+
+struct BuiltProvider {
+    provider: Arc<Provider>,
+    upstream_base_url: String,
+    models: Vec<String>,
+}
+
+/// Resolves `cfg`'s default/tts/stt presets and constructs a fresh
+/// [`Provider`] from them -- the shared core of [`provide_start`] (first
+/// build) and [`reload_provider_if_running`] (rebuild after a config
+/// change). Does not touch `service.provider`; callers install the result.
+async fn build_provider(service: &Arc<AiService>, cfg: &crate::config::AiConfig) -> Result<BuiltProvider> {
+    let resolved = crate::config::resolve_preset(cfg, None).context(
         "ai: no default LLM preset configured; set it up in the dashboard's \
          Settings panel, or with `mistl config set ai.providers <json>`, \
          `ai.presets <json>`, and `ai.default_preset_id <id>`",
@@ -407,15 +460,69 @@ async fn provide_start(service: &Arc<AiService>, state: &Arc<AppState>) -> Resul
         })
     };
 
-    let provider = Provider::new(service.send.clone(), call, models.clone());
-    *service.provider.write().expect("ai provider lock") = Some(provider.clone());
-    service.broadcast(provider.hello()).await;
+    let tts_call = voice_preset_provider(cfg, &cfg.tts_preset_id).map(|(provider, resolved)| {
+        let call: TtsCallFn = Arc::new(move |text, model, voice| {
+            let provider = provider.clone();
+            let req = tts::TtsParams {
+                model: model.unwrap_or_else(|| resolved.model.clone()),
+                voice: voice
+                    .or_else(|| resolved.voice.clone())
+                    .unwrap_or_default(),
+                input: text,
+                format: None,
+                speed: None,
+            };
+            Box::pin(async move { tts::synthesize(&provider, req).await })
+        });
+        call
+    });
+    let stt_call = voice_preset_provider(cfg, &cfg.stt_preset_id).map(|(provider, resolved)| {
+        let call: SttCallFn = Arc::new(move |audio, mime, model, file_name| {
+            let provider = provider.clone();
+            let req = stt::SttParams {
+                model: model.unwrap_or_else(|| resolved.model.clone()),
+                audio,
+                mime,
+                file_name,
+            };
+            Box::pin(async move { stt::transcribe(&provider, req).await })
+        });
+        call
+    });
 
-    Ok(json!({
-        "providing": true,
-        "upstream": upstream.base_url,
-        "models": models,
-    }))
+    let provider = Provider::new_with_voice(service.send.clone(), call, models.clone(), tts_call, stt_call);
+    Ok(BuiltProvider {
+        provider,
+        upstream_base_url: upstream.base_url,
+        models,
+    })
+}
+
+/// Resolves `preset_id` (an `ai.tts_preset_id`/`ai.stt_preset_id` value)
+/// into an ad hoc `AiProviderConfig` (base_url/api_key only -- built from
+/// `resolve_preset`, not looked up by provider id) plus the full resolved
+/// preset (for its `model`/`voice` defaults). Returns `None` when
+/// `preset_id` is blank ("not configured") or when it doesn't resolve to a
+/// known preset/provider -- unlike `resolve_preset` itself, a blank id is
+/// *not* defaulted to `ai.default_preset_id` here: an explicitly empty
+/// tts/stt preset id means "don't offer this service", and silently
+/// borrowing the chat preset would opt a node into serving voice it never
+/// configured.
+fn voice_preset_provider(
+    cfg: &crate::config::AiConfig,
+    preset_id: &str,
+) -> Option<(crate::config::AiProviderConfig, crate::config::ResolvedAiPreset)> {
+    if preset_id.trim().is_empty() {
+        return None;
+    }
+    let resolved = crate::config::resolve_preset(cfg, Some(preset_id))?;
+    let provider = crate::config::AiProviderConfig {
+        id: String::new(),
+        label: String::new(),
+        base_url: resolved.base_url.clone(),
+        api_key: resolved.api_key.clone(),
+    };
+    Some((provider, resolved))
 }
 
 async fn serve_start(service: &Arc<AiService>, state: &Arc<AppState>) -> Result<Value> {

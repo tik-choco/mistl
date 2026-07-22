@@ -812,6 +812,7 @@ mod tests {
             temperature: None,
             reasoning_effort: None,
             voice: None,
+            kind: "chat".to_string(),
         });
         config.ai.presets.push(AiPresetConfig {
             id: "tts-default".to_string(),
@@ -821,6 +822,7 @@ mod tests {
             temperature: None,
             reasoning_effort: None,
             voice: Some("alloy".to_string()),
+            kind: "tts".to_string(),
         });
         config
     }

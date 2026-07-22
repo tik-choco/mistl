@@ -232,6 +232,8 @@ serve_as_bot = true                          # hold deposits for other peers
 [ai]
 # room_id = "my-llm-room"                   # default: the mailbox room (see note)
 # default_preset_id = "default"             # which [[ai.presets]] entry `ai provide`/`ai serve` use by default
+# tts_preset_id = "tts-default"             # which preset answers inbound tts_request; unset = TTS not offered
+# stt_preset_id = "stt-default"             # which preset answers inbound stt_request; unset = STT not offered
 # advertised_models = ["llama3"]            # default: fetched from the resolved preset's provider /models
 api_listen = "127.0.0.1:6478"                # local OpenAI-compatible API (serve)
 request_timeout_secs = 120                   # p2p inactivity timeout (resets per chunk)
@@ -249,6 +251,7 @@ request_timeout_secs = 120                   # p2p inactivity timeout (resets pe
 # model = "llama3"
 # temperature = 0.7
 # reasoning_effort = "medium"               # optional: "none" | "minimal" | "low" | "medium" | "high"
+# voice = "alloy"                           # only meaningful for a preset referenced by tts_preset_id
 
 [ui]
 enabled = true                               # serve the dashboard from the daemon
@@ -350,8 +353,9 @@ mistl <subcommand>  --(JSON over loopback TCP)-->  mistl daemon run
   tracks either; it relies on either already being connected to the new leader's
   re-publish or receiving a fresh negotiation
 - No bot capability advertisement (every connected peer is treated as a bot candidate)
-- `ai` implements the LLM part of the mistai protocol; voice (tts/stt) messages are
-  decoded but not served, and `raft_message` scheduling is passed through untouched
+- `ai` implements the mistai protocol's chat, and TTS/STT once `tts_preset_id`/
+  `stt_preset_id` are configured (otherwise voice requests get an immediate
+  `voice_error`); `raft_message` scheduling is passed through untouched
 - The local API server (`ai serve`) has no auth; keep `api_listen` on loopback unless
   the network is trusted
 - The web dashboard has no login; it rejects cross-origin and non-localhost requests,

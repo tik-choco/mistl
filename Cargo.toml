@@ -59,8 +59,10 @@ base64 = "0.22"
 # directly here so `storage::folder_share` can use it.
 p256 = { version = "0.13", features = ["ecdh"] }
 
-# ai (p2p LLM network, mistai wire-compatible; upstream OpenAI-compatible client)
-reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls"] }
+# ai (p2p LLM network, mistai wire-compatible; upstream OpenAI-compatible client).
+# "multipart" backs the STT upstream client (src/ai/stt.rs), which POSTs
+# audio bytes to /audio/transcriptions as multipart/form-data.
+reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls", "multipart"] }
 
 # stream (RTSP server + MPEG-TS ingest, VRChat/AVPro compatible)
 rtsp-types = "0.1"
