@@ -1,0 +1,4 @@
+# Shell scripts run under a real Unix sh/bash (Linux, WSL, macOS, CI); a CRLF
+# checkout there breaks on the shebang/`set -eu` line ("Illegal option --").
+# Force LF on checkout regardless of core.autocrlf.
+*.sh text eol=lf

@@ -147,9 +147,19 @@ pub enum ConfigAction {
 #[derive(Subcommand)]
 pub enum DaemonAction {
     /// Run the daemon in the foreground
-    Run,
+    Run {
+        /// Override the dashboard bind host for this run only, e.g. `0.0.0.0`
+        /// to reach it from another device on the LAN (keeps the port from
+        /// `ui.listen`). Not persisted -- omit to use the configured value.
+        #[arg(long)]
+        host: Option<String>,
+    },
     /// Start the daemon in the background
-    Start,
+    Start {
+        /// Same as `daemon run --host`, forwarded to the background process.
+        #[arg(long)]
+        host: Option<String>,
+    },
     /// Stop the running daemon
     Stop,
     /// Restart the running daemon (e.g. after a settings change that needs one)
@@ -578,8 +588,8 @@ pub fn dispatch(cli: Cli) -> Result<()> {
     };
     match command {
         Command::Daemon { action } => match action {
-            DaemonAction::Run => daemon::run_foreground(),
-            DaemonAction::Start => daemon::start_background(),
+            DaemonAction::Run { host } => daemon::run_foreground(host),
+            DaemonAction::Start { host } => daemon::start_background(host),
             DaemonAction::Stop => client_call("daemon.stop", json!({})),
             DaemonAction::Restart => client_call("daemon.restart", json!({})),
             DaemonAction::Status => client_call("daemon.status", json!({})),
@@ -993,25 +1003,43 @@ fn open_dashboard() -> Result<()> {
         bail!("the web dashboard is disabled ([ui] enabled = false in config.toml)");
     }
     if daemon::ipc::client_request("daemon.status", json!({})).is_err() {
-        daemon::start_background()?;
+        daemon::start_background(None)?;
     }
     let url = format!("http://{}/", config.ui.listen);
+
+    // Headless/minimal environments (containers, WSL without a registered
+    // browser, servers) have no opener at all -- xdg-open in particular
+    // shell-probes a chain of text browsers (www-browser, links2, elinks,
+    // links, lynx, w3m) and prints a "not found" line for each before giving
+    // up. That's harmless (we already fall back to printing the URL below)
+    // but reads like a wall of errors, so the child's stdout/stderr are
+    // dropped rather than inherited.
+    use std::process::Stdio;
 
     #[cfg(windows)]
     let opened = std::process::Command::new("cmd")
         .args(["/c", "start", "", &url])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
     #[cfg(target_os = "macos")]
     let opened = std::process::Command::new("open")
         .arg(&url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
     #[cfg(all(unix, not(target_os = "macos")))]
     let opened = std::process::Command::new("xdg-open")
         .arg(&url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .map(|s| s.success())
         .unwrap_or(false);

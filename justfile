@@ -105,6 +105,34 @@ _copy-exe:
     cp "target/release/{{bin}}" "dist/"
     @echo "packaged: dist/{{bin}}"
 
+# --- cross build: Linux binary via WSL --------------------------------------
+
+# Build a native Linux release binary by running cargo inside WSL2 against
+# this same checkout, rather than a true host cross-compile. mistlib links
+# several C libraries (openh264/opus built via cmake, fdk-aac via cc, OpenSSL
+# for reqwest's native-tls), which need a real Linux toolchain/sysroot to
+# link against -- running inside WSL sidesteps setting one up on Windows.
+# `wsl --cd <path>` accepts an absolute Windows path directly, so no
+# `wslpath` translation is needed; `just fetch-mistlib fetch-mistlib-consensus`
+# runs its [unix] variant automatically once inside WSL's Linux shell.
+# Requires WSL2 with a distro that has: rustup (with `cargo`), gcc, cmake,
+# pkg-config, and libssl-dev -- e.g. on Ubuntu:
+#   sudo apt install build-essential cmake pkg-config libssl-dev
+#   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+# Uses --target explicitly so the Linux build lands in
+# target/x86_64-unknown-linux-gnu/release, kept separate from the Windows
+# build's target/release.
+[windows]
+release-linux:
+    wsl --cd "{{justfile_directory()}}" -- bash -lc "just fetch-mistlib fetch-mistlib-consensus && cargo build --release --target x86_64-unknown-linux-gnu"
+    just _copy-linux-exe
+
+[windows]
+_copy-linux-exe:
+    New-Item -ItemType Directory -Force dist | Out-Null
+    Copy-Item "target/x86_64-unknown-linux-gnu/release/{{bin}}" "dist/{{bin}}-linux-x86_64" -Force
+    Write-Host "packaged: dist/{{bin}}-linux-x86_64"
+
 # --- dev -------------------------------------------------------------------
 
 # Debug build
@@ -122,6 +150,19 @@ check: _ensure-mistlib _ensure-mistlib-consensus
 # Run the test suite
 test: _ensure-mistlib _ensure-mistlib-consensus
     cargo test
+
+# Rebuild (debug) and restart the daemon on every src/ change; the dashboard
+# HTML gets a debug-only live-reload poll (src/web/server.rs) so a browser
+# tab left open on it reloads itself once the new daemon is back up --
+# no need to close/reopen the tab between edits. Ctrl+C stops the rebuild
+# loop but leaves the last-built daemon running (same as `just release`).
+[windows]
+watch: _ensure-mistlib _ensure-mistlib-consensus
+    powershell -NoProfile -ExecutionPolicy Bypass -File scripts/watch.ps1
+
+[unix]
+watch: _ensure-mistlib _ensure-mistlib-consensus
+    sh scripts/watch.sh
 
 # --- quality ---------------------------------------------------------------
 
