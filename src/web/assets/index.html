@@ -525,30 +525,6 @@
     vertical-align: bottom;
   }
 
-  .chat-log {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    max-height: 320px;
-    overflow-y: auto;
-    padding: 8px;
-    background: var(--bg-alt);
-    border-radius: 8px;
-    border: 1px solid var(--panel-border);
-  }
-  .chat-msg { display: flex; flex-direction: column; gap: 2px; }
-  .chat-msg .role { font-size: 11px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.04em; }
-  .chat-msg .bubble {
-    padding: 8px 10px;
-    border-radius: 8px;
-    background: var(--panel);
-    white-space: pre-wrap;
-    word-break: break-word;
-  }
-  .chat-msg.user .bubble { background: var(--accent-dim); color: var(--text); }
-  .chat-msg.error .bubble { background: var(--err-dim); color: var(--err); }
-  .chat-empty { color: var(--text-faint); font-size: 12.5px; padding: 4px; }
-
   .url-callout {
     display: flex;
     flex-direction: column;
@@ -1394,26 +1370,23 @@
   #panel-ai .ai-setup-desc { font-size: 12.5px; color: var(--text-dim); max-width: 420px; }
   #panel-ai .ai-setup-cta { margin-top: 4px; }
 
-  /* ---- ai settings drawer: advertised-models checkbox list (see
-     buildAiModelCheckList) -- tc-translate-style checked selection instead
-     of free-text entry ------------------------------------------------- */
-  #panel-ai .ai-model-checklist { display: flex; flex-direction: column; gap: 8px; flex: 1; min-width: 220px; }
-  #panel-ai .ai-model-checklist-head { display: flex; align-items: center; gap: 10px; }
-  #panel-ai .ai-model-checklist-status { flex: 1; font-size: 12px; }
-  #panel-ai .ai-model-checklist-list {
+  /* ---- AI Network tab: provide checklist (buildAiProvideChecklist) -- one
+     row per configured preset, with Chat/TTS/STT checkboxes deciding what
+     this node advertises/serves when providing to the network ---------- */
+  #panel-ai .ai-provide-checklist { display: flex; flex-direction: column; gap: 6px; width: 100%; }
+  #panel-ai .ai-provide-row {
     display: flex;
-    flex-direction: column;
-    gap: 4px;
-    max-height: 220px;
-    overflow-y: auto;
+    align-items: center;
+    gap: 14px;
+    flex-wrap: wrap;
     padding: 6px 8px;
     border: 1px solid var(--panel-border);
     border-radius: var(--radius);
     background: var(--panel);
   }
-  #panel-ai .ai-model-check-item { display: flex; align-items: center; gap: 8px; padding: 3px 0; font-size: 13px; cursor: pointer; }
-  #panel-ai .ai-model-check-name { word-break: break-all; }
-  #panel-ai .ai-model-checklist-add { margin-top: 2px; }
+  #panel-ai .ai-provide-row-label { flex: 1; min-width: 140px; font-size: 13px; }
+  #panel-ai .ai-provide-row-model { color: var(--text-faint); font-size: 11.5px; margin-left: 6px; }
+  #panel-ai .ai-provide-check { display: flex; align-items: center; gap: 5px; font-size: 12.5px; cursor: pointer; white-space: nowrap; }
 
   /* ---- topology card fold (collapsible body, reuses .drawer-chevron) --- */
   /* .cascade-card's own flex/gap only had one child once the body moved
@@ -1819,7 +1792,6 @@
     <div class="subtabs" role="tablist" data-i18n-aria-label="ai.tabs.groupLabel" aria-label="AI sections">
       <button type="button" data-subtab-target="connection" data-i18n="ai.tab.connection">Connection</button>
       <button type="button" data-subtab-target="network" data-i18n="ai.tab.network">AI Network</button>
-      <button type="button" data-subtab-target="chat" data-i18n="ai.tab.chat">Chat</button>
     </div>
     <div class="subtab-page" data-subtab="connection">
       <div id="ai-connection-editor"></div>
@@ -1859,22 +1831,6 @@
           </div>
         </div>
       </div>
-    </div>
-    <div class="subtab-page" data-subtab="chat">
-      <div class="chat-log" id="chat-log">
-        <div class="chat-empty" data-i18n="chat.empty">No messages yet.</div>
-      </div>
-      <form class="inline" id="chat-form">
-        <div class="field" style="flex: 3;">
-          <label for="chat-prompt" data-i18n="chat.promptLabel">Prompt</label>
-          <input type="text" id="chat-prompt" data-i18n-placeholder="chat.promptPlaceholder" placeholder="Ask something&hellip;" autocomplete="off">
-        </div>
-        <div class="field" style="flex: 1; min-width: 140px;">
-          <label for="chat-model" data-i18n="chat.modelLabel">Model (optional)</label>
-          <select id="chat-model"><option value="" data-i18n="common.default">default</option></select>
-        </div>
-        <button type="submit" class="primary" id="btn-chat-send" data-i18n="chat.send">Send</button>
-      </form>
     </div>
     <div class="topology-slot" id="topology-slot-ai"></div>
     <details class="settings-drawer" id="settings-drawer-ai">
@@ -2788,7 +2744,6 @@
       "ai.serveWasNotRunning": "API server was not running.",
       "ai.tab.connection": "Connection",
       "ai.tab.network": "AI Network",
-      "ai.tab.chat": "Chat",
       "ai.net.provideTitle": "Provide to the network",
       "ai.net.provideDesc": "Answer AI requests from peers using your configured upstream provider.",
       "ai.net.serveTitle": "Local API server",
@@ -2801,16 +2756,8 @@
       "ai.editor.save": "Save",
       "ai.editor.cancel": "Cancel",
       "ai.editor.defaultBadge": "default",
+      "ai.editor.kindLabel": "Provides",
       "ai.tabs.groupLabel": "AI sections",
-      "chat.promptLabel": "Prompt",
-      "chat.promptPlaceholder": "Ask something…",
-      "chat.modelLabel": "Model (optional)",
-      "chat.send": "Send",
-      "chat.empty": "No messages yet.",
-      "chat.you": "you",
-      "chat.error": "error",
-      "chat.assistant": "assistant",
-      "chat.noProviderError": "No provider reachable — start providing locally or wait for a p2p provider.",
       "mailbox.tabs.groupLabel": "Mailbox sections",
       "mailbox.tabs.messages": "Messages",
       "mailbox.tabs.chatlog": "tc-chat relay log",
@@ -3142,6 +3089,7 @@
       "settings.restartBadgeTitle": "Click to restart the daemon now",
       "settings.savedRestart": "Saved. Restart the daemon to apply.",
       "settings.savedNextStart": "Saved. Applies next time this service starts.",
+      "settings.savedLive": "Saved. Already applied.",
       "settings.enterGib": "Enter a number of GiB for {label}.",
       "settings.enterNumber": "Enter a number for {label}.",
       "settings.gibUnit": "GiB",
@@ -3219,11 +3167,15 @@
       "settings.ai.presets.needProvider": "Add a provider first",
       "settings.ai.presets.labelPlaceholder": "Label",
       "settings.ai.presets.modelPlaceholder": "Model name",
-      "settings.ai.presets.fetchModels": "Fetch models",
       "settings.ai.presets.fetchModelsError": "Failed to fetch model list",
       "settings.ai.presets.temperaturePlaceholder": "Temperature",
       "settings.ai.defaultPreset.label": "Default preset",
       "settings.ai.defaultPreset.desc": "Which preset \"ai provide\"/\"ai serve\" use when a request doesn't name one.",
+      "ai.net.provideChat": "Chat",
+      "ai.net.provideTts": "TTS",
+      "ai.net.provideStt": "STT",
+      "ai.net.provideCheckbox": "Provide",
+      "ai.net.provideNoPresets": "Add a preset in the Connection tab first.",
       "settings.field.ui.listen.label": "Listen address",
       "settings.field.ui.listen.desc": "Address:port this dashboard binds to.",
       "settings.field.ui.enabled.label": "Enabled",
@@ -3246,11 +3198,6 @@
       "settings.field.update.repo.desc": "owner/name of the GitHub repository releases are published to.",
       "settings.field.storage.blocks_dir.label": "Blocks directory",
       "settings.field.storage.blocks_dir.desc": "Directory for content-addressed blocks. Leave empty to use the default, <data_dir>/blocks.",
-      "settings.field.ai.advertised_models.label": "Advertised models",
-      "settings.field.ai.advertised_models.desc": "Which models to advertise in provider_hello when providing to the network. Fetched from the default preset's provider -- check the ones to share.",
-      "settings.field.ai.advertised_models.noPreset": "Set a default preset above to fetch its available models.",
-      "settings.field.ai.advertised_models.empty": "No models found for this provider.",
-      "settings.field.ai.advertised_models.customBadge": "custom"
     },
     ja: {
       "pageTitle": "MISTL ダッシュボード",
@@ -3458,7 +3405,6 @@
       "ai.serveWasNotRunning": "APIサーバーは稼働していませんでした。",
       "ai.tab.connection": "接続",
       "ai.tab.network": "AIネットワーク",
-      "ai.tab.chat": "チャット",
       "ai.net.provideTitle": "ネットワークへの提供",
       "ai.net.provideDesc": "設定済みのアップストリームプロバイダーを使って、ピアからのAIリクエストに応答します。",
       "ai.net.serveTitle": "ローカルAPIサーバー",
@@ -3471,16 +3417,8 @@
       "ai.editor.save": "保存",
       "ai.editor.cancel": "キャンセル",
       "ai.editor.defaultBadge": "デフォルト",
+      "ai.editor.kindLabel": "提供内容",
       "ai.tabs.groupLabel": "AI セクション",
-      "chat.promptLabel": "プロンプト",
-      "chat.promptPlaceholder": "質問を入力…",
-      "chat.modelLabel": "モデル (任意)",
-      "chat.send": "送信",
-      "chat.empty": "まだメッセージはありません。",
-      "chat.you": "あなた",
-      "chat.error": "エラー",
-      "chat.assistant": "アシスタント",
-      "chat.noProviderError": "利用可能なプロバイダーがありません。ローカルで提供を開始するか、p2pプロバイダーが見つかるまでお待ちください。",
       "mailbox.tabs.groupLabel": "メールボックスのセクション",
       "mailbox.tabs.messages": "メッセージ",
       "mailbox.tabs.chatlog": "tc-chatリレーログ",
@@ -3812,6 +3750,7 @@
       "settings.restartBadgeTitle": "クリックして今すぐデーモンを再起動",
       "settings.savedRestart": "保存しました。適用にはデーモンの再起動が必要です。",
       "settings.savedNextStart": "保存しました。次回起動時に適用されます。",
+      "settings.savedLive": "保存しました。すでに適用されています。",
       "settings.enterGib": "{label} にはGiB単位の数値を入力してください。",
       "settings.enterNumber": "{label} には数値を入力してください。",
       "settings.gibUnit": "GiB",
@@ -3889,11 +3828,15 @@
       "settings.ai.presets.needProvider": "先にプロバイダーを追加してください",
       "settings.ai.presets.labelPlaceholder": "ラベル",
       "settings.ai.presets.modelPlaceholder": "モデル名",
-      "settings.ai.presets.fetchModels": "モデル一覧を取得",
       "settings.ai.presets.fetchModelsError": "モデル一覧の取得に失敗しました",
       "settings.ai.presets.temperaturePlaceholder": "Temperature",
       "settings.ai.defaultPreset.label": "デフォルトプリセット",
       "settings.ai.defaultPreset.desc": "リクエストでプリセットが指定されなかった場合に「ai provide」「ai serve」が使用するプリセットです。",
+      "ai.net.provideChat": "チャット",
+      "ai.net.provideTts": "TTS",
+      "ai.net.provideStt": "STT",
+      "ai.net.provideCheckbox": "提供する",
+      "ai.net.provideNoPresets": "先にConnectionタブでプリセットを追加してください。",
       "settings.field.ui.listen.label": "待ち受けアドレス",
       "settings.field.ui.listen.desc": "このダッシュボードが待ち受けるアドレス:ポートです。",
       "settings.field.ui.enabled.label": "有効化",
@@ -3916,11 +3859,6 @@
       "settings.field.update.repo.desc": "リリースの公開元となるGitHubリポジトリの owner/name です。",
       "settings.field.storage.blocks_dir.label": "ブロックディレクトリ",
       "settings.field.storage.blocks_dir.desc": "コンテンツアドレス方式のブロックを保存するディレクトリです。空欄の場合はデフォルトの <data_dir>/blocks が使われます。",
-      "settings.field.ai.advertised_models.label": "公開するモデル",
-      "settings.field.ai.advertised_models.desc": "ネットワークへの提供時に provider_hello で公開するモデルです。デフォルトプリセットのプロバイダーから取得した一覧から、共有するものにチェックを入れてください。",
-      "settings.field.ai.advertised_models.noPreset": "モデル一覧を取得するには、上でデフォルトプリセットを設定してください。",
-      "settings.field.ai.advertised_models.empty": "このプロバイダーのモデルが見つかりませんでした。",
-      "settings.field.ai.advertised_models.customBadge": "カスタム"
     },
     zh: {
       "pageTitle": "MISTL 仪表盘",
@@ -4128,7 +4066,6 @@
       "ai.serveWasNotRunning": "API 服务器此前未运行。",
       "ai.tab.connection": "连接",
       "ai.tab.network": "AI 网络",
-      "ai.tab.chat": "聊天",
       "ai.net.provideTitle": "为网络提供服务",
       "ai.net.provideDesc": "使用已配置的上游提供方，响应来自节点的 AI 请求。",
       "ai.net.serveTitle": "本地 API 服务器",
@@ -4141,16 +4078,8 @@
       "ai.editor.save": "保存",
       "ai.editor.cancel": "取消",
       "ai.editor.defaultBadge": "默认",
+      "ai.editor.kindLabel": "提供内容",
       "ai.tabs.groupLabel": "AI 部分",
-      "chat.promptLabel": "提示词",
-      "chat.promptPlaceholder": "输入问题…",
-      "chat.modelLabel": "模型 (可选)",
-      "chat.send": "发送",
-      "chat.empty": "暂无消息。",
-      "chat.you": "你",
-      "chat.error": "错误",
-      "chat.assistant": "助手",
-      "chat.noProviderError": "没有可用的提供方 — 请在本地开始提供服务，或等待 p2p 提供方出现。",
       "mailbox.tabs.groupLabel": "邮箱部分",
       "mailbox.tabs.messages": "消息",
       "mailbox.tabs.chatlog": "tc-chat 中继日志",
@@ -4482,6 +4411,7 @@
       "settings.restartBadgeTitle": "点击立即重启守护进程",
       "settings.savedRestart": "已保存。需要重启守护进程才能生效。",
       "settings.savedNextStart": "已保存。将在此服务下次启动时生效。",
+      "settings.savedLive": "已保存，已立即生效。",
       "settings.enterGib": "请为{label}输入以 GiB 为单位的数值。",
       "settings.enterNumber": "请为{label}输入一个数值。",
       "settings.gibUnit": "GiB",
@@ -4559,11 +4489,15 @@
       "settings.ai.presets.needProvider": "请先添加一个提供方",
       "settings.ai.presets.labelPlaceholder": "标签",
       "settings.ai.presets.modelPlaceholder": "模型名称",
-      "settings.ai.presets.fetchModels": "获取模型列表",
       "settings.ai.presets.fetchModelsError": "获取模型列表失败",
       "settings.ai.presets.temperaturePlaceholder": "Temperature",
       "settings.ai.defaultPreset.label": "默认预设",
       "settings.ai.defaultPreset.desc": "当请求未指定预设时，“ai provide”/“ai serve” 使用的预设。",
+      "ai.net.provideChat": "聊天",
+      "ai.net.provideTts": "TTS",
+      "ai.net.provideStt": "STT",
+      "ai.net.provideCheckbox": "提供",
+      "ai.net.provideNoPresets": "请先在“Connection”标签页中添加一个预设。",
       "settings.field.ui.listen.label": "监听地址",
       "settings.field.ui.listen.desc": "此仪表盘绑定的地址:端口。",
       "settings.field.ui.enabled.label": "启用",
@@ -4586,11 +4520,6 @@
       "settings.field.update.repo.desc": "发布版本所在的 GitHub 仓库，格式为 owner/name。",
       "settings.field.storage.blocks_dir.label": "区块目录",
       "settings.field.storage.blocks_dir.desc": "存放内容寻址区块的目录。留空则使用默认值 <data_dir>/blocks。",
-      "settings.field.ai.advertised_models.label": "公开的模型",
-      "settings.field.ai.advertised_models.desc": "在向网络提供服务时，于 provider_hello 中公开哪些模型。列表取自默认预设对应的提供方，请勾选需要共享的模型。",
-      "settings.field.ai.advertised_models.noPreset": "请先在上方设置默认预设，以获取其可用模型列表。",
-      "settings.field.ai.advertised_models.empty": "未找到此提供方的模型。",
-      "settings.field.ai.advertised_models.customBadge": "自定义"
     }
   };
 
@@ -4859,7 +4788,6 @@
     topology: null,
     ai: null,
     config: null,
-    chatHistory: [],
     mailboxHeldItems: [],
     mailboxFetchItems: [],
     mailboxChatRooms: null,
@@ -4879,7 +4807,6 @@
     renderStream();
     renderTopology();
     renderAi();
-    renderChat();
     renderMailboxHeld(state.mailboxHeldItems);
     renderMailboxFetch(state.mailboxFetchItems);
     renderMailboxChatRooms(state.mailboxChatRooms);
@@ -6631,10 +6558,6 @@
   var aiServeCallout = document.getElementById("ai-serve-callout");
   var btnAiProvideToggle = document.getElementById("btn-ai-provide-toggle");
   var btnAiServeToggle = document.getElementById("btn-ai-serve-toggle");
-  var chatModelSelect = document.getElementById("chat-model");
-  /* signature (lang + model list) of the options currently in #chat-model,
-     so the 5s poll doesn't rebuild the select and close it under the user */
-  var lastChatModelsKey = null;
 
   // Mirrors resolve_preset (config.rs): true once ai.default_preset_id
   // names an existing preset whose provider_id names an existing provider
@@ -6749,7 +6672,6 @@
     if (aiDotServe) aiDotServe.classList.toggle("on", !!(a && a.serving));
     if (!a) {
       addKv(aiKv, t("ai.statusLabel"), t("stream.statusUnknown"));
-      aiModelsBox.innerHTML = "";
       renderAiServeCallout(a);
       refreshAiHints();
       return;
@@ -6760,35 +6682,12 @@
     addKv(aiKv, t("ai.providing"), a.providing ? t("ai.yes") : t("ai.no"));
     // Serving now has its own role card (renderAiServeCallout / #ai-dot-serve)
     // so it's dropped from this kv list -- everything else here is unchanged.
+    // #ai-models (once a read-only badge list of a.models) is now owned by
+    // buildAiProvidersPresetsField's renderProvideChecklist -- an editable
+    // checklist driven by config, not this status poll -- so it's untouched
+    // here.
     if (a.remote_provider) {
       addKv(aiKv, t("ai.remoteProvider"), a.remote_provider.node_id, true);
-    }
-
-    aiModelsBox.innerHTML = "";
-    var models = a.models || (a.remote_provider && a.remote_provider.models) || [];
-    if (models.length) {
-      aiModelsBox.appendChild(el("span", { class: "muted", text: t("ai.modelsLabel") }));
-      models.forEach(function (m) {
-        aiModelsBox.appendChild(el("span", { class: "badge", text: m }));
-      });
-    }
-
-    /* rebuilding the select closes it if the user has it open, so skip when
-       the rendered options are already current (the language is part of the
-       signature because the "Default" option text is localized) or while the
-       select has focus; a change skipped while focused is picked up on the
-       next poll once focus moves away */
-    var modelsKey = currentLang + "|" + models.join("\n");
-    if (modelsKey !== lastChatModelsKey && document.activeElement !== chatModelSelect) {
-      var prevSelected = chatModelSelect.value;
-      chatModelSelect.innerHTML = "";
-      chatModelSelect.appendChild(el("option", { value: "", text: t("common.default") }));
-      models.forEach(function (m) {
-        var opt = el("option", { value: m, text: m });
-        chatModelSelect.appendChild(opt);
-      });
-      if (models.indexOf(prevSelected) !== -1) chatModelSelect.value = prevSelected;
-      lastChatModelsKey = modelsKey;
     }
 
     renderAiServeCallout(a);
@@ -6838,62 +6737,6 @@
         pollAiStatus();
       });
     }
-  });
-
-  /* ---------- chat ---------- */
-
-  var chatLog = document.getElementById("chat-log");
-  var chatForm = document.getElementById("chat-form");
-  var chatPromptInput = document.getElementById("chat-prompt");
-  var btnChatSend = document.getElementById("btn-chat-send");
-
-  function renderChat() {
-    chatLog.innerHTML = "";
-    if (!state.chatHistory.length) {
-      chatLog.appendChild(el("div", { class: "chat-empty", text: t("chat.empty") }));
-      return;
-    }
-    state.chatHistory.forEach(function (msg) {
-      var wrap = el("div", { class: "chat-msg " + msg.role });
-      var roleLabel = msg.role === "user" ? t("chat.you") : (msg.role === "error" ? t("chat.error") : (msg.via ? msg.via : t("chat.assistant")));
-      wrap.appendChild(el("div", { class: "role", text: roleLabel }));
-      var bubble = el("div", { class: "bubble" });
-      bubble.textContent = msg.text;
-      wrap.appendChild(bubble);
-      chatLog.appendChild(wrap);
-    });
-    chatLog.scrollTop = chatLog.scrollHeight;
-  }
-
-  function friendlyChatError(msg) {
-    if (/no provider/i.test(msg)) {
-      return t("chat.noProviderError");
-    }
-    return msg;
-  }
-
-  chatForm.addEventListener("submit", function (e) {
-    e.preventDefault();
-    var prompt = chatPromptInput.value.trim();
-    if (!prompt) return;
-    var model = chatModelSelect.value || undefined;
-    state.chatHistory.push({ role: "user", text: prompt });
-    renderChat();
-    chatPromptInput.value = "";
-    var args = { prompt: prompt };
-    if (model) args.model = model;
-    withBusy(btnChatSend, function () { return api("ai.chat", args); }).then(
-      function (data) {
-        state.chatHistory.push({ role: "assistant", via: data.via, text: data.content });
-        renderChat();
-      },
-      function (err) {
-        var msg = friendlyChatError(err.message || String(err));
-        state.chatHistory.push({ role: "error", text: msg });
-        renderChat();
-        showToast("ai.chat: " + msg, "error");
-      }
-    );
   });
 
   /* ---------- mailbox ---------- */
@@ -6990,7 +6833,7 @@
   var mailboxChatLogEmpty = document.getElementById("mailbox-chat-log-empty");
   /* signature (lang + room list) of the options currently in the room
      select, so a poll doesn't rebuild it (and lose the user's selection)
-     unless something actually changed -- same idea as chatModelSelect above */
+     unless something actually changed */
   var lastMailboxChatRoomsKey = null;
 
   function chatLogKindLabel(item) {
@@ -9119,8 +8962,7 @@
     { section: "ai", titleKey: "settings.section.ai", container: "settings-drawer-body-ai", fields: [
       { key: "room_id", labelKey: "settings.field.ai.room_id.label", descKey: "settings.field.ai.room_id.desc", type: "text", advanced: true },
       { key: "request_timeout_secs", labelKey: "settings.field.ai.request_timeout_secs.label", descKey: "settings.field.ai.request_timeout_secs.desc", type: "number", advanced: true },
-      { key: "api_listen", labelKey: "settings.field.ai.api_listen.label", descKey: "settings.field.ai.api_listen.desc", type: "text", advanced: true },
-      { key: "advertised_models", labelKey: "settings.field.ai.advertised_models.label", descKey: "settings.field.ai.advertised_models.desc", type: "modelCheckList" }
+      { key: "api_listen", labelKey: "settings.field.ai.api_listen.label", descKey: "settings.field.ai.api_listen.desc", type: "text", advanced: true }
     ] },
     { section: "scheduler", titleKey: "settings.section.scheduler", container: "settings-drawer-body-scheduler", fields: [
       { key: "enabled", labelKey: "settings.field.scheduler.enabled.label", descKey: "settings.field.scheduler.enabled.desc", type: "toggle" }
@@ -9176,9 +9018,15 @@
   function saveSetting(path, value, sectionCfg, key, badge) {
     return api("config.set", { path: path, value: value }).then(function (data) {
       if (sectionCfg) sectionCfg[key] = value;
-      var applies = data && data.applies === "daemon restart";
-      badge.style.display = applies ? "inline-block" : "none";
-      showToast(applies ? t("settings.savedRestart") : t("settings.savedNextStart"), "success");
+      var applies = data && data.applies;
+      badge.style.display = applies === "daemon restart" ? "inline-block" : "none";
+      // "applied immediately": the daemon already reloaded whatever was
+      // running (see ai::reload_provider_if_running) -- no badge, no
+      // "next start" wording, just confirmation that it's live now.
+      var toastKey = applies === "daemon restart" ? "settings.savedRestart"
+        : applies === "applied immediately" ? "settings.savedLive"
+        : "settings.savedNextStart";
+      showToast(t(toastKey), "success");
       refreshAiHints();
     }, function (err) {
       showToast("config.set " + path + ": " + (err.message || err), "error");
@@ -9327,8 +9175,6 @@
       listWrap.appendChild(addRow);
 
       row.appendChild(listWrap);
-    } else if (f.type === "modelCheckList") {
-      row.appendChild(buildAiModelCheckList(path, current, sectionCfg, f.key, badge));
     } else {
       input = el("input", { type: "text", id: id, autocomplete: "off" });
       input.value = current === null || current === undefined ? "" : String(current);
@@ -9341,127 +9187,6 @@
 
     row.appendChild(badge);
     wrap.appendChild(row);
-    return wrap;
-  }
-
-  /* ---------- ai.advertised_models: tc-translate-style checkbox list -----
-     Unlike the generic "list" chip editor (free-text entries), this fetches
-     the resolved default preset's provider model list (GET /models, via the
-     existing `ai.upstream_models` IPC command -- the same one the Connection
-     tab's preset editor uses) and renders one checkbox per model, mirroring
-     tc-translate's network-share-list (SettingsModal.tsx): check a model to
-     advertise it in provider_hello, uncheck to stop. Already-selected models
-     that the fetch didn't return (stale/manual entries, or a fetch that
-     hasn't completed/failed) still render -- tagged with a "custom" badge --
-     so toggling them off is always possible and config never silently loses
-     an entry the user isn't looking at right now. A manual add-row covers
-     upstreams that don't expose GET /models at all. */
-  function buildAiModelCheckList(path, current, sectionCfg, key, badge) {
-    var wrap = el("div", { class: "ai-model-checklist" });
-    var items = Array.isArray(current) ? current.slice() : [];
-    var fetchedModels = null; // null = not fetched (yet)
-    var fetchState = null; // "loading" | "failed" | null
-
-    var statusEl = el("div", { class: "ai-model-checklist-status muted" });
-    var refreshBtn = el("button", { type: "button" });
-    refreshBtn.textContent = t("settings.ai.presets.fetchModels");
-    var listEl = el("div", { class: "ai-model-checklist-list" });
-
-    function resolvedProviderId() {
-      var presets = Array.isArray(sectionCfg.presets) ? sectionCfg.presets : [];
-      var wanted = sectionCfg.default_preset_id;
-      var preset = presets.filter(function (p) { return p.id === wanted; })[0];
-      return preset ? preset.provider_id : null;
-    }
-
-    function commit(next) {
-      items = next;
-      saveSetting(path, items, sectionCfg, key, badge).then(renderList);
-    }
-    function toggle(model, checked) {
-      commit(checked
-        ? (items.indexOf(model) === -1 ? items.concat([model]) : items)
-        : items.filter(function (m) { return m !== model; }));
-    }
-    function addCustom(name) {
-      var v = name.trim();
-      if (!v || items.indexOf(v) !== -1) return;
-      commit(items.concat([v]));
-    }
-
-    function renderList() {
-      var providerId = resolvedProviderId();
-      refreshBtn.disabled = !providerId || fetchState === "loading";
-      if (!providerId) {
-        statusEl.textContent = t("settings.field.ai.advertised_models.noPreset");
-      } else if (fetchState === "loading") {
-        statusEl.textContent = t("settings.ai.presets.fetchModels") + "…";
-      } else if (fetchState === "failed") {
-        statusEl.textContent = t("settings.ai.presets.fetchModelsError");
-      } else {
-        statusEl.textContent = "";
-      }
-
-      var known = fetchedModels || [];
-      var names = known.slice();
-      items.forEach(function (m) { if (names.indexOf(m) === -1) names.push(m); });
-
-      listEl.innerHTML = "";
-      if (names.length === 0) {
-        listEl.appendChild(el("div", { class: "muted", text: t("settings.field.ai.advertised_models.empty") }));
-      }
-      names.forEach(function (model) {
-        var row = el("label", { class: "ai-model-check-item" });
-        var cb = el("input", { type: "checkbox" });
-        cb.checked = items.indexOf(model) !== -1;
-        cb.addEventListener("change", function () { toggle(model, cb.checked); });
-        row.appendChild(cb);
-        row.appendChild(el("span", { class: "ai-model-check-name mono", text: model }));
-        if (known.indexOf(model) === -1) {
-          row.appendChild(el("span", { class: "badge", text: t("settings.field.ai.advertised_models.customBadge") }));
-        }
-        listEl.appendChild(row);
-      });
-    }
-
-    function fetchModels() {
-      var providerId = resolvedProviderId();
-      if (!providerId) { renderList(); return; }
-      fetchState = "loading";
-      renderList();
-      api("ai.upstream_models", { provider_id: providerId }).then(function (data) {
-        fetchState = null;
-        fetchedModels = (data && data.models) || [];
-        renderList();
-      }, function () {
-        fetchState = "failed";
-        renderList();
-      });
-    }
-    refreshBtn.addEventListener("click", fetchModels);
-
-    var head = el("div", { class: "ai-model-checklist-head" });
-    head.appendChild(statusEl);
-    head.appendChild(refreshBtn);
-    wrap.appendChild(head);
-    wrap.appendChild(listEl);
-
-    var addRow = el("div", { class: "chip-add-row ai-model-checklist-add" });
-    var addInput = el("input", { type: "text", autocomplete: "off" });
-    addInput.placeholder = t("settings.list.addPlaceholder");
-    var addBtn = el("button", { type: "button" });
-    addBtn.textContent = t("settings.list.addBtn");
-    function addFromInput() { addCustom(addInput.value); addInput.value = ""; }
-    addBtn.addEventListener("click", addFromInput);
-    addInput.addEventListener("keydown", function (e) {
-      if (e.key === "Enter") { e.preventDefault(); addFromInput(); }
-    });
-    addRow.appendChild(addInput);
-    addRow.appendChild(addBtn);
-    wrap.appendChild(addRow);
-
-    renderList();
-    fetchModels();
     return wrap;
   }
 
@@ -9746,6 +9471,11 @@
       if (sectionCfg.default_preset_id === preset.id) {
         labelWrap.appendChild(el("span", { class: "badge ai-default-badge", text: t("ai.editor.defaultBadge") }));
       }
+      if (preset.kind === "tts") {
+        labelWrap.appendChild(el("span", { class: "badge", text: t("ai.net.provideTts") }));
+      } else if (preset.kind === "stt") {
+        labelWrap.appendChild(el("span", { class: "badge", text: t("ai.net.provideStt") }));
+      }
       card.appendChild(labelWrap);
       card.appendChild(el("div", { class: "ai-card-sub", text: preset.model || t("settings.ai.presets.modelPlaceholder") }));
 
@@ -9846,6 +9576,19 @@
       labelInput.value = draft ? draft.label : (isNew ? "" : (preset.label || ""));
       form.appendChild(editorRow(editorField("settings.ai.presets.labelPlaceholder", labelInput)));
 
+      // Which single checkbox this preset gets in the AI Network tab's
+      // "what to provide" checklist (see renderProvideChecklist), and which
+      // config path toggling it writes to -- ai.advertised_models /
+      // ai.tts_preset_id / ai.stt_preset_id. Purely a UI categorization; the
+      // daemon's actual request routing only ever looks at those three
+      // fields directly, never at this one.
+      var kindSelect = el("select", {});
+      [["chat", "ai.net.provideChat"], ["tts", "ai.net.provideTts"], ["stt", "ai.net.provideStt"]].forEach(function (opt) {
+        kindSelect.appendChild(el("option", { value: opt[0], text: t(opt[1]) }));
+      });
+      kindSelect.value = draft ? draft.kind : (isNew ? "chat" : (preset.kind || "chat"));
+      form.appendChild(editorRow(editorField("ai.editor.kindLabel", kindSelect)));
+
       // No dedicated i18n label key exists for "Provider" (the original
       // row-based editor never labeled this select either), so it's a bare,
       // unlabeled field like api_key/reasoning_effort above.
@@ -9891,20 +9634,6 @@
           modelEl.value = keepValue;
         }
         modelRow.appendChild(editorField("settings.ai.presets.modelPlaceholder", modelEl));
-
-        // Manual refresh: clears the cache (and any "failed" marker) for
-        // this provider and refetches, with an error toast -- the
-        // automatic fetch stays silent.
-        var fetchModelsBtn = el("button", { type: "button" });
-        fetchModelsBtn.textContent = t("settings.ai.presets.fetchModels");
-        fetchModelsBtn.disabled = modelFetchState[providerId] === "loading";
-        fetchModelsBtn.addEventListener("click", function () {
-          fetchModelsBtn.disabled = true;
-          delete modelListByProvider[providerId];
-          delete modelFetchState[providerId];
-          fetchModelsFor(providerId, true);
-        });
-        modelRow.appendChild(fetchModelsBtn);
       }
       rebuildModelField();
       // Switching provider mid-edit starts the model field over (against
@@ -9944,13 +9673,14 @@
           }
         }
         var base = isNew
-          ? { id: genAiEntryId("preset", presets().map(function (p) { return p.id; })), label: "", provider_id: providerSelect.value, model: "", temperature: null, reasoning_effort: null }
+          ? { id: genAiEntryId("preset", presets().map(function (p) { return p.id; })), label: "", provider_id: providerSelect.value, model: "", temperature: null, reasoning_effort: null, kind: "chat" }
           : preset;
         var next = withField(base, "label", labelInput.value);
         next = withField(next, "provider_id", providerSelect.value);
         next = withField(next, "model", modelEl.value);
         next = withField(next, "temperature", tempNum);
         next = withField(next, "reasoning_effort", effortSelect.value === "" ? null : effortSelect.value);
+        next = withField(next, "kind", kindSelect.value);
         var list = isNew ? presets().concat([next]) : presets().map(function (p) { return p.id === preset.id ? next : p; });
         editing = null;
         currentEditorForm = null;
@@ -9966,7 +9696,7 @@
       card._captureDraft = function () {
         return {
           label: labelInput.value, provider_id: providerSelect.value, model: modelEl.value,
-          temperature: tempInput.value, reasoning_effort: effortSelect.value
+          temperature: tempInput.value, reasoning_effort: effortSelect.value, kind: kindSelect.value
         };
       };
       card._rebuildModelField = form._rebuildModelField;
@@ -10032,7 +9762,86 @@
       var wantDefault = sectionCfg.default_preset_id || "";
       defSelect.value = presets().some(function (p) { return p.id === wantDefault; }) ? wantDefault : "";
 
+      renderProvideChecklist();
       autoFetchModels();
+    }
+
+    /* ---- AI Network tab: what to provide -------------------------------
+       One row per configured preset, one checkbox: provide it or not (see
+       ai.editor.kindLabel on the preset editor -- a preset's `kind`
+       ("chat"|"tts"|"stt") is decided once, there, not here). Checking the
+       box writes to whichever single config field that kind maps to:
+       chat -> add/remove the preset's model in ai.advertised_models
+       (provider_hello.models, multi-select); tts/stt -> assign/clear
+       ai.tts_preset_id/stt_preset_id to this preset's id (single-select --
+       checking one tts-kind row and re-rendering naturally unchecks any
+       other tts-kind row, since both read the same ai.tts_preset_id).
+       Mounted into the "Provide to the network" role card's #ai-models slot
+       (replaces the old read-only model-badges renderAi() used to put
+       there). */
+    function renderProvideChecklist() {
+      if (!aiModelsBox) return;
+      aiModelsBox.innerHTML = "";
+      var list = presets();
+      if (list.length === 0) {
+        aiModelsBox.appendChild(el("div", { class: "muted", text: t("ai.net.provideNoPresets") }));
+        return;
+      }
+
+      // saveSetting always wants a badge element to toggle, but these paths
+      // (ai.tts_preset_id/stt_preset_id/advertised_models) always resolve to
+      // "applied immediately" (config.rs's applies_when), never "daemon
+      // restart" -- so this one is a detached, never-shown placeholder, not
+      // a real restart affordance like provBadge/presetBadge above.
+      var provideBadge = el("span", {});
+      provideBadge.style.display = "none";
+
+      var checklist = el("div", { class: "ai-provide-checklist" });
+      list.forEach(function (preset) {
+        var kind = preset.kind || "chat";
+        var row = el("div", { class: "ai-provide-row" });
+        var label = el("div", { class: "ai-provide-row-label" });
+        label.appendChild(document.createTextNode(preset.label || preset.id));
+        if (preset.model) label.appendChild(el("span", { class: "ai-provide-row-model", text: preset.model }));
+        row.appendChild(label);
+        row.appendChild(el("span", {
+          class: "badge",
+          text: kind === "tts" ? t("ai.net.provideTts") : kind === "stt" ? t("ai.net.provideStt") : t("ai.net.provideChat")
+        }));
+
+        var checked, onChange;
+        if (kind === "tts") {
+          checked = sectionCfg.tts_preset_id === preset.id;
+          onChange = function (isChecked) {
+            saveSetting("ai.tts_preset_id", isChecked ? preset.id : "", sectionCfg, "tts_preset_id", provideBadge).then(renderProvideChecklist);
+          };
+        } else if (kind === "stt") {
+          checked = sectionCfg.stt_preset_id === preset.id;
+          onChange = function (isChecked) {
+            saveSetting("ai.stt_preset_id", isChecked ? preset.id : "", sectionCfg, "stt_preset_id", provideBadge).then(renderProvideChecklist);
+          };
+        } else {
+          var advertised = Array.isArray(sectionCfg.advertised_models) ? sectionCfg.advertised_models : [];
+          checked = !!preset.model && advertised.indexOf(preset.model) !== -1;
+          onChange = function (isChecked) {
+            var next = isChecked
+              ? (preset.model && advertised.indexOf(preset.model) === -1 ? advertised.concat([preset.model]) : advertised)
+              : advertised.filter(function (m) { return m !== preset.model; });
+            saveSetting("ai.advertised_models", next, sectionCfg, "advertised_models", provideBadge).then(renderProvideChecklist);
+          };
+        }
+
+        var checkLabel = el("label", { class: "ai-provide-check" });
+        var cb = el("input", { type: "checkbox" });
+        cb.checked = checked;
+        cb.addEventListener("change", function () { onChange(cb.checked); });
+        checkLabel.appendChild(cb);
+        checkLabel.appendChild(document.createTextNode(t("ai.net.provideCheckbox")));
+        row.appendChild(checkLabel);
+
+        checklist.appendChild(row);
+      });
+      aiModelsBox.appendChild(checklist);
     }
 
     renderAll();
@@ -10604,7 +10413,6 @@
   applyStaticI18n();
   updateLangButtons();
   updateThemeToggle();
-  renderChat();
   initSubTabs();
   routeFromHash();
   startPolling();

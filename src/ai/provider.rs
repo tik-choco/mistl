@@ -1,40 +1,105 @@
 //! Provider side of the AI network, ported from mistai's `provider.ts`.
 //!
-//! This provider serves **LLM chat only**. Unlike mistai's reference
-//! implementation (which pairs `ProviderService` with a separate
-//! `VoiceProviderService` for `tts_request`/`stt_request`), this port never
-//! calls out to a TTS/STT upstream: voice requests are rejected immediately
-//! with `voice_error` (see below) rather than silently ignored, so a peer's
-//! `ConsumerClient.requestTts`/`requestStt` gets a clear, prompt error
-//! instead of hanging until its own client-side timeout.
+//! Chat (`llm_request`) is always served once this `Provider` exists (see
+//! `super::provide_start`). TTS/STT are served only when a `tts`/`stt`
+//! closure was supplied at construction time ([`Provider::new_with_voice`],
+//! wired from `ai.tts_preset_id`/`ai.stt_preset_id` in `super::provide_start`);
+//! when the corresponding closure is absent, voice requests get an
+//! immediate `voice_error` reply instead of silently going unanswered, so a
+//! peer's `ConsumerClient.requestTts`/`requestStt` gets a clear, prompt
+//! error instead of hanging until its own client-side timeout.
 //!
-//! Handles inbound `llm_request`s by forwarding them to the injected
-//! upstream call ([`super::LlmCallFn`], normally
-//! `openai::stream_chat_completion`) and streaming the result back:
+//! Handles inbound messages:
 //!
-//! - Each upstream delta is sent immediately as
-//!   `llm_response_chunk { id, delta, seq }` with a per-request `seq`
-//!   counter starting at 0 (one chunk per delta, no batching).
-//! - On success: `llm_response_done { id, content: Some(full) }`.
-//! - On failure: `llm_error { id, message }`.
+//! - `llm_request`: forwarded to the injected upstream call
+//!   ([`super::LlmCallFn`], normally `openai::stream_chat_completion`),
+//!   streaming the result back:
+//!   - Each upstream delta is sent immediately as
+//!     `llm_response_chunk { id, delta, seq }` with a per-request `seq`
+//!     counter starting at 0 (one chunk per delta, no batching).
+//!   - On success: `llm_response_done { id, content: Some(full) }`.
+//!   - On failure: `llm_error { id, message }`.
 //! - `consumer_hello` -> reply [`Provider::hello`] directly to the sender.
-//! - `tts_request` / `stt_request` -> reply `voice_error { id, message }`
-//!   directly to the sender; this provider has no voice upstream.
+//! - `tts_request` (single message: `id, text, model?, voice?`) -> when a
+//!   TTS closure is configured, synthesize and reply with one or more
+//!   `tts_response { id, seq, data (base64), last, mime }` chunks
+//!   ([`TTS_CHUNK_RAW_BYTES`] raw bytes per chunk before base64, comfortably
+//!   under mist's message size ceiling once inflated); on upstream failure,
+//!   `voice_error { id, message }` (no `code`: this provider does support
+//!   TTS, the upstream call itself just failed). Otherwise, immediate
+//!   `voice_error { code: "unsupported_service" }`.
+//! - `stt_request` (chunked: `id, seq, data (base64), last, mime, model?,
+//!   fileName?`, one or more messages sharing `id`) -> when an STT closure
+//!   is configured, chunks are reassembled per `id` (capped at
+//!   [`STT_MAX_BUFFERED_BYTES`], beyond which the buffer is dropped and a
+//!   `voice_error` sent) until `last == true`, then transcribed and replied
+//!   as `stt_response { id, text }` (or `voice_error` on upstream failure).
+//!   Otherwise, immediate `voice_error { code: "unsupported_service" }`,
+//!   without ever buffering.
+//!
+//! `services` advertised in [`Provider::hello`] always includes `"chat"`
+//! and additionally `"tts"`/`"stt"` exactly when the corresponding closure
+//! is configured.
 //!
 //! Keeps a ring buffer of request logs (default cap 50, oldest dropped;
 //! re-logging an id replaces the previous entry): status progresses
 //! `started` -> `streaming` (with cumulative char count) -> `done` /
-//! `error` (with detail).
+//! `error` (with detail). Voice requests are not logged (the `RequestLog`
+//! shape is chat-specific -- `model` there means the *chat* model).
 
-use std::sync::Mutex;
+use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 
 use super::protocol::ProtocolMessage;
+use super::tts::TtsAudio;
 use super::{LlmCallFn, SendFn};
 
 /// Maximum number of log entries retained; oldest are dropped first.
 const DEFAULT_MAX_LOG_ENTRIES: usize = 50;
+
+/// Raw (pre-base64) bytes per `tts_response` chunk. Chosen so the
+/// base64-encoded chunk (~4/3 inflation) plus the small JSON envelope stays
+/// comfortably under mist's ~16KB per-message safe limit, mirroring
+/// tc-translate's oai-tunnel chunk sizing (12KB base64 ~= 9KB raw).
+const TTS_CHUNK_RAW_BYTES: usize = 9 * 1024;
+
+/// Maximum total bytes buffered while reassembling one `stt_request`
+/// stream (across all its chunks) before giving up and replying
+/// `voice_error`. Guards against a misbehaving/malicious peer growing
+/// memory unboundedly by never sending `last: true`.
+const STT_MAX_BUFFERED_BYTES: usize = 25 * 1024 * 1024;
+
+/// Boxed future returned by a voice call closure.
+type VoiceFuture<T> = Pin<Box<dyn Future<Output = anyhow::Result<T>> + Send>>;
+
+/// Synthesizes speech: `(text, model_override, voice_override)` -> audio.
+/// Built in `super::provide_start` from the resolved `ai.tts_preset_id`
+/// preset (which supplies the default model/voice when the request omits
+/// them); `None` on [`Provider`] means this node doesn't offer TTS.
+pub type TtsCallFn =
+    Arc<dyn Fn(String, Option<String>, Option<String>) -> VoiceFuture<TtsAudio> + Send + Sync>;
+
+/// Transcribes speech: `(audio_bytes, mime, model_override, file_name)` ->
+/// text. Built in `super::provide_start` from the resolved
+/// `ai.stt_preset_id` preset; `None` on [`Provider`] means this node
+/// doesn't offer STT.
+pub type SttCallFn = Arc<
+    dyn Fn(Vec<u8>, String, Option<String>, Option<String>) -> VoiceFuture<String> + Send + Sync,
+>;
+
+/// In-progress reassembly of one chunked `stt_request` stream, keyed by its
+/// `id`. `mime`/`model`/`file_name` are captured from the first chunk only
+/// (peers are not required to repeat them on every chunk).
+struct SttBuffer {
+    mime: String,
+    model: Option<String>,
+    file_name: Option<String>,
+    bytes: Vec<u8>,
+}
 
 /// One entry in the provider's request log (newest first from [`Provider::logs`]).
 #[derive(Debug, Clone, Serialize)]
@@ -52,20 +117,37 @@ pub struct RequestLog {
     pub detail: Option<String>,
 }
 
-/// Provider state: send fn, upstream call, advertised models, logs.
+/// Provider state: send fn, upstream call, advertised models, optional
+/// voice calls, logs.
 pub struct Provider {
     send: SendFn,
     call: LlmCallFn,
     models: Vec<String>,
+    tts: Option<TtsCallFn>,
+    stt: Option<SttCallFn>,
+    stt_buffers: Mutex<HashMap<String, SttBuffer>>,
     logs: Mutex<Vec<RequestLog>>,
 }
 
 impl Provider {
-    pub fn new(send: SendFn, call: LlmCallFn, models: Vec<String>) -> std::sync::Arc<Self> {
-        std::sync::Arc::new(Self {
+    /// Constructs a provider, optionally wiring TTS/STT upstream calls (see
+    /// the module doc and [`TtsCallFn`]/[`SttCallFn`]); pass `None, None`
+    /// for a chat-only provider, where `tts_request`/`stt_request` always
+    /// get an immediate `voice_error`.
+    pub fn new_with_voice(
+        send: SendFn,
+        call: LlmCallFn,
+        models: Vec<String>,
+        tts: Option<TtsCallFn>,
+        stt: Option<SttCallFn>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
             send,
             call,
             models,
+            tts,
+            stt,
+            stt_buffers: Mutex::new(HashMap::new()),
             logs: Mutex::new(Vec::new()),
         })
     }
@@ -75,13 +157,27 @@ impl Provider {
         self.models.clone()
     }
 
+    /// Services this provider actually offers right now: always `"chat"`,
+    /// plus `"tts"`/`"stt"` exactly when the corresponding closure is
+    /// configured. Backs both [`Provider::hello`] (the wire announcement)
+    /// and `super::status`'s `services` field, so the dashboard reflects
+    /// the same capability set peers see in `provider_hello`.
+    pub fn services(&self) -> Vec<String> {
+        let mut services = vec![super::protocol::SERVICE_CHAT.to_string()];
+        if self.tts.is_some() {
+            services.push(super::protocol::SERVICE_TTS.to_string());
+        }
+        if self.stt.is_some() {
+            services.push(super::protocol::SERVICE_STT.to_string());
+        }
+        services
+    }
+
     /// The `provider_hello` announcement: `models` field included only
-    /// when the list is non-empty (mistai omits it otherwise). `services`
-    /// always advertises `["chat"]` -- this port is a chat-only provider
-    /// (see the module doc), so it always sets `services` explicitly
-    /// rather than relying on the wire spec's "missing == chat only"
-    /// default; this makes the advertisement self-describing to
-    /// `services`-aware peers even though the two are equivalent today.
+    /// when the list is non-empty (mistai omits it otherwise); `services`
+    /// is always present (rather than relying on the wire spec's "missing
+    /// == chat only" default), self-describing this provider's actual
+    /// capabilities to `services`-aware peers -- see [`Provider::services`].
     pub fn hello(&self) -> ProtocolMessage {
         let models = if self.models.is_empty() {
             None
@@ -90,7 +186,7 @@ impl Provider {
         };
         ProtocolMessage::ProviderHello {
             models,
-            services: Some(vec![super::protocol::SERVICE_CHAT.to_string()]),
+            services: Some(self.services()),
         }
     }
 
@@ -98,7 +194,7 @@ impl Provider {
     /// / `tts_request` / `stt_request`; everything else ignored). Runs the
     /// upstream call inline (callers spawn this future per message, so
     /// concurrent requests don't block each other).
-    pub async fn handle_message(self: std::sync::Arc<Self>, from: String, msg: ProtocolMessage) {
+    pub async fn handle_message(self: Arc<Self>, from: String, msg: ProtocolMessage) {
         match msg {
             ProtocolMessage::ConsumerHello => {
                 (self.send)(&from, self.hello());
@@ -106,18 +202,22 @@ impl Provider {
             ProtocolMessage::LlmRequest { id, messages, model } => {
                 self.handle_llm_request(from, id, messages, model).await;
             }
-            ProtocolMessage::TtsRequest { id, .. } | ProtocolMessage::SttRequest { id, .. } => {
-                self.reject_voice_request(&from, id);
+            ProtocolMessage::TtsRequest { id, text, model, voice } => {
+                self.handle_tts_request(from, id, text, model, voice).await;
+            }
+            ProtocolMessage::SttRequest { id, seq, data, last, mime, model, file_name } => {
+                self.handle_stt_request(from, id, seq, data, last, mime, model, file_name)
+                    .await;
             }
             _ => {}
         }
     }
 
-    /// This provider has no TTS/STT upstream, so voice requests are
-    /// answered with an immediate `voice_error` instead of being dropped
-    /// (which would otherwise leave the requester's `ConsumerClient` waiting
-    /// until its own client-side voice timeout, e.g. mistai's 120s default).
-    /// Sent through the same `send` fn (and thus the same ordered queue) as
+    /// No TTS/STT upstream configured, so the voice request is answered
+    /// with an immediate `voice_error` instead of being dropped (which
+    /// would otherwise leave the requester's `ConsumerClient` waiting until
+    /// its own client-side voice timeout, e.g. mistai's 120s default). Sent
+    /// through the same `send` fn (and thus the same ordered queue) as
     /// every other reply.
     fn reject_voice_request(&self, from: &str, id: String) {
         (self.send)(
@@ -128,6 +228,173 @@ impl Provider {
                 code: Some(super::protocol::CODE_UNSUPPORTED_SERVICE.to_string()),
             },
         );
+    }
+
+    /// Synthesizes `text` via the configured TTS closure and replies with
+    /// one or more `tts_response` chunks; `voice_error` (no `code`) on an
+    /// upstream failure, or the usual `unsupported_service` rejection when
+    /// no TTS closure is configured.
+    async fn handle_tts_request(
+        &self,
+        from: String,
+        id: String,
+        text: String,
+        model: Option<String>,
+        voice: Option<String>,
+    ) {
+        let Some(tts) = &self.tts else {
+            self.reject_voice_request(&from, id);
+            return;
+        };
+        match tts(text, model, voice).await {
+            Ok(audio) => self.send_tts_response(&from, id, audio),
+            Err(err) => {
+                (self.send)(
+                    &from,
+                    ProtocolMessage::VoiceError {
+                        id,
+                        message: err.to_string(),
+                        code: None,
+                    },
+                );
+            }
+        }
+    }
+
+    /// Splits `audio.bytes` into [`TTS_CHUNK_RAW_BYTES`]-sized chunks and
+    /// sends one `tts_response` per chunk (`last: true` on the final one --
+    /// a single chunk, possibly empty, if the audio is small).
+    fn send_tts_response(&self, from: &str, id: String, audio: TtsAudio) {
+        use base64::Engine as _;
+        let engine = base64::engine::general_purpose::STANDARD;
+        let chunks: Vec<&[u8]> = audio.bytes.chunks(TTS_CHUNK_RAW_BYTES).collect();
+        if chunks.is_empty() {
+            (self.send)(
+                from,
+                ProtocolMessage::TtsResponse {
+                    id,
+                    seq: 0,
+                    data: String::new(),
+                    last: true,
+                    mime: audio.mime,
+                },
+            );
+            return;
+        }
+        let last_idx = chunks.len() - 1;
+        for (seq, chunk) in chunks.into_iter().enumerate() {
+            (self.send)(
+                from,
+                ProtocolMessage::TtsResponse {
+                    id: id.clone(),
+                    seq: seq as u64,
+                    data: engine.encode(chunk),
+                    last: seq == last_idx,
+                    mime: audio.mime.clone(),
+                },
+            );
+        }
+    }
+
+    /// Reassembles one chunk of an `stt_request` stream (keyed by `id`)
+    /// into `stt_buffers`; once a chunk with `last == true` arrives,
+    /// transcribes the full buffer via the configured STT closure and
+    /// replies `stt_response` (or `voice_error` on upstream failure /
+    /// buffer overflow). `seq` is not used for reordering: chunks for one
+    /// `id` arrive from a single sender through mist's ordered per-room
+    /// delivery, mirrored by this provider's own single-writer `SendFn`
+    /// queue on the reply side.
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_stt_request(
+        &self,
+        from: String,
+        id: String,
+        seq: u64,
+        data: String,
+        last: bool,
+        mime: String,
+        model: Option<String>,
+        file_name: Option<String>,
+    ) {
+        let _ = seq;
+        let Some(stt) = self.stt.clone() else {
+            self.reject_voice_request(&from, id);
+            return;
+        };
+
+        use base64::Engine as _;
+        let decoded = match base64::engine::general_purpose::STANDARD.decode(&data) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                self.stt_buffers
+                    .lock()
+                    .expect("ai stt buffer lock")
+                    .remove(&id);
+                (self.send)(
+                    &from,
+                    ProtocolMessage::VoiceError {
+                        id,
+                        message: format!("ai: invalid stt_request chunk encoding: {err}"),
+                        code: None,
+                    },
+                );
+                return;
+            }
+        };
+
+        enum ChunkOutcome {
+            Waiting,
+            Overflowed,
+            Ready(SttBuffer),
+        }
+        let outcome = {
+            let mut buffers = self.stt_buffers.lock().expect("ai stt buffer lock");
+            let buffer = buffers.entry(id.clone()).or_insert_with(|| SttBuffer {
+                mime,
+                model,
+                file_name,
+                bytes: Vec::new(),
+            });
+            buffer.bytes.extend_from_slice(&decoded);
+            if buffer.bytes.len() > STT_MAX_BUFFERED_BYTES {
+                buffers.remove(&id);
+                ChunkOutcome::Overflowed
+            } else if last {
+                ChunkOutcome::Ready(buffers.remove(&id).expect("just inserted above"))
+            } else {
+                ChunkOutcome::Waiting
+            }
+        };
+
+        let buffer = match outcome {
+            ChunkOutcome::Waiting => return,
+            ChunkOutcome::Overflowed => {
+                (self.send)(
+                    &from,
+                    ProtocolMessage::VoiceError {
+                        id,
+                        message: "ai: stt audio exceeded the maximum buffered size".to_string(),
+                        code: None,
+                    },
+                );
+                return;
+            }
+            ChunkOutcome::Ready(buffer) => buffer,
+        };
+
+        match stt(buffer.bytes, buffer.mime, buffer.model, buffer.file_name).await {
+            Ok(text) => (self.send)(&from, ProtocolMessage::SttResponse { id, text }),
+            Err(err) => {
+                (self.send)(
+                    &from,
+                    ProtocolMessage::VoiceError {
+                        id,
+                        message: err.to_string(),
+                        code: None,
+                    },
+                );
+            }
+        }
     }
 
     async fn handle_llm_request(
@@ -306,7 +573,6 @@ impl Provider {
 mod tests {
     use super::*;
     use crate::ai::protocol::ChatMessage;
-    use std::sync::Arc;
 
     type Sent = Arc<Mutex<Vec<(String, ProtocolMessage)>>>;
 
@@ -351,7 +617,7 @@ mod tests {
     async fn happy_path_emits_chunks_then_done() {
         let (send, sent) = fake_send();
         let call = fake_call_success(vec!["Hel", "lo"], "Hello");
-        let provider = Provider::new(send, call, vec![]);
+        let provider = Provider::new_with_voice(send, call, vec![], None, None);
 
         provider
             .clone()
@@ -404,7 +670,7 @@ mod tests {
     async fn error_path_emits_llm_error() {
         let (send, sent) = fake_send();
         let call = fake_call_error("upstream boom");
-        let provider = Provider::new(send, call, vec![]);
+        let provider = Provider::new_with_voice(send, call, vec![], None, None);
 
         provider
             .clone()
@@ -440,7 +706,7 @@ mod tests {
     fn hello_omits_models_when_empty() {
         let (send, _sent) = fake_send();
         let call = fake_call_success(vec![], "");
-        let provider = Provider::new(send, call, vec![]);
+        let provider = Provider::new_with_voice(send, call, vec![], None, None);
         assert_eq!(
             provider.hello(),
             ProtocolMessage::ProviderHello {
@@ -454,7 +720,8 @@ mod tests {
     fn hello_includes_models_when_present() {
         let (send, _sent) = fake_send();
         let call = fake_call_success(vec![], "");
-        let provider = Provider::new(send, call, vec!["gpt-4o".into(), "gpt-4o-mini".into()]);
+        let provider =
+            Provider::new_with_voice(send, call, vec!["gpt-4o".into(), "gpt-4o-mini".into()], None, None);
         assert_eq!(
             provider.hello(),
             ProtocolMessage::ProviderHello {
@@ -468,7 +735,7 @@ mod tests {
     fn hello_always_advertises_chat_service() {
         let (send, _sent) = fake_send();
         let call = fake_call_success(vec![], "");
-        let provider = Provider::new(send, call, vec![]);
+        let provider = Provider::new_with_voice(send, call, vec![], None, None);
         match provider.hello() {
             ProtocolMessage::ProviderHello { services, .. } => {
                 assert_eq!(services, Some(vec!["chat".to_string()]));
@@ -481,7 +748,7 @@ mod tests {
     async fn consumer_hello_gets_hello_reply() {
         let (send, sent) = fake_send();
         let call = fake_call_success(vec![], "");
-        let provider = Provider::new(send, call, vec!["m1".into()]);
+        let provider = Provider::new_with_voice(send, call, vec!["m1".into()], None, None);
 
         provider
             .clone()
@@ -498,7 +765,7 @@ mod tests {
     async fn log_status_transitions() {
         let (send, _sent) = fake_send();
         let call = fake_call_success(vec!["a", "b"], "ab");
-        let provider = Provider::new(send, call, vec![]);
+        let provider = Provider::new_with_voice(send, call, vec![], None, None);
 
         provider
             .clone()
@@ -529,7 +796,7 @@ mod tests {
     async fn log_ring_buffer_caps_and_orders_newest_first() {
         let (send, _sent) = fake_send();
         let call = fake_call_success(vec![], "ok");
-        let provider = Provider::new(send, call, vec![]);
+        let provider = Provider::new_with_voice(send, call, vec![], None, None);
 
         for i in 0..(DEFAULT_MAX_LOG_ENTRIES + 5) {
             provider
@@ -561,7 +828,7 @@ mod tests {
         // streaming x N -> done) for the *same* request id; the log length
         // must stay at 1.
         let call = fake_call_success(vec!["a", "b", "c"], "abc");
-        let provider = Provider::new(send, call, vec![]);
+        let provider = Provider::new_with_voice(send, call, vec![], None, None);
 
         provider
             .clone()
@@ -583,7 +850,7 @@ mod tests {
     async fn tts_request_gets_voice_error_reply() {
         let (send, sent) = fake_send();
         let call = fake_call_success(vec![], "");
-        let provider = Provider::new(send, call, vec![]);
+        let provider = Provider::new_with_voice(send, call, vec![], None, None);
 
         provider
             .clone()
@@ -615,7 +882,7 @@ mod tests {
     async fn stt_request_gets_voice_error_reply() {
         let (send, sent) = fake_send();
         let call = fake_call_success(vec![], "");
-        let provider = Provider::new(send, call, vec![]);
+        let provider = Provider::new_with_voice(send, call, vec![], None, None);
 
         provider
             .clone()
@@ -652,7 +919,7 @@ mod tests {
         // must not touch the provider's llm_request logging/response path.
         let (send, sent) = fake_send();
         let call = fake_call_success(vec!["Hel", "lo"], "Hello");
-        let provider = Provider::new(send, call, vec![]);
+        let provider = Provider::new_with_voice(send, call, vec![], None, None);
 
         provider
             .clone()
@@ -696,7 +963,7 @@ mod tests {
     async fn call_upstream_bypasses_network() {
         let (send, sent) = fake_send();
         let call = fake_call_success(vec!["x"], "x");
-        let provider = Provider::new(send, call, vec![]);
+        let provider = Provider::new_with_voice(send, call, vec![], None, None);
 
         let (delta_tx, mut delta_rx) = tokio::sync::mpsc::unbounded_channel();
         let content = provider
@@ -707,5 +974,305 @@ mod tests {
         assert_eq!(content, "x");
         assert_eq!(delta_rx.try_recv().unwrap(), "x");
         assert!(sent.lock().unwrap().is_empty(), "call_upstream must not touch the network");
+    }
+
+    fn fake_tts_success(bytes: Vec<u8>, mime: &'static str) -> TtsCallFn {
+        Arc::new(move |_text, _model, _voice| {
+            let bytes = bytes.clone();
+            Box::pin(async move {
+                Ok(TtsAudio {
+                    bytes,
+                    mime: mime.to_string(),
+                })
+            })
+        })
+    }
+
+    fn fake_tts_error(message: &'static str) -> TtsCallFn {
+        Arc::new(move |_text, _model, _voice| Box::pin(async move { anyhow::bail!(message) }))
+    }
+
+    type SttCallArgs = (Vec<u8>, String, Option<String>, Option<String>);
+
+    fn fake_stt_success(
+        text: &'static str,
+        captured: Arc<Mutex<Option<SttCallArgs>>>,
+    ) -> SttCallFn {
+        Arc::new(move |audio, mime, model, file_name| {
+            let text = text.to_string();
+            let captured = captured.clone();
+            Box::pin(async move {
+                *captured.lock().unwrap() = Some((audio, mime, model, file_name));
+                Ok(text)
+            })
+        })
+    }
+
+    fn fake_stt_error(message: &'static str) -> SttCallFn {
+        Arc::new(move |_audio, _mime, _model, _file_name| {
+            Box::pin(async move { anyhow::bail!(message) })
+        })
+    }
+
+    #[test]
+    fn hello_advertises_tts_and_stt_when_configured() {
+        let (send, _sent) = fake_send();
+        let call = fake_call_success(vec![], "");
+        let provider = Provider::new_with_voice(
+            send,
+            call,
+            vec![],
+            Some(fake_tts_success(vec![1, 2, 3], "audio/mpeg")),
+            Some(fake_stt_success("hi", Arc::new(Mutex::new(None)))),
+        );
+        match provider.hello() {
+            ProtocolMessage::ProviderHello { services, .. } => {
+                assert_eq!(
+                    services,
+                    Some(vec!["chat".to_string(), "tts".to_string(), "stt".to_string()])
+                );
+            }
+            other => panic!("expected ProviderHello, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn tts_request_with_configured_tts_synthesizes_and_replies_in_chunks() {
+        use base64::Engine as _;
+        let engine = base64::engine::general_purpose::STANDARD;
+
+        // Spans 3 chunks: 2 full TTS_CHUNK_RAW_BYTES chunks + one partial.
+        let audio_bytes: Vec<u8> = (0..(TTS_CHUNK_RAW_BYTES * 2 + 10))
+            .map(|i| (i % 256) as u8)
+            .collect();
+        let (send, sent) = fake_send();
+        let call = fake_call_success(vec![], "");
+        let provider = Provider::new_with_voice(
+            send,
+            call,
+            vec![],
+            Some(fake_tts_success(audio_bytes.clone(), "audio/mpeg")),
+            None,
+        );
+
+        provider
+            .clone()
+            .handle_message(
+                "consumer1".into(),
+                ProtocolMessage::TtsRequest {
+                    id: "tts1".into(),
+                    text: "read this".into(),
+                    model: None,
+                    voice: None,
+                },
+            )
+            .await;
+
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.len(), 3, "expected 3 chunks, got: {sent:?}");
+        let mut reassembled = Vec::new();
+        for (i, (to, msg)) in sent.iter().enumerate() {
+            assert_eq!(to, "consumer1");
+            match msg {
+                ProtocolMessage::TtsResponse { id, seq, data, last, mime } => {
+                    assert_eq!(id, "tts1");
+                    assert_eq!(*seq, i as u64);
+                    assert_eq!(mime, "audio/mpeg");
+                    assert_eq!(*last, i == 2);
+                    reassembled.extend(engine.decode(data).unwrap());
+                }
+                other => panic!("expected a tts_response chunk, got: {other:?}"),
+            }
+        }
+        assert_eq!(reassembled, audio_bytes);
+    }
+
+    #[tokio::test]
+    async fn tts_request_upstream_failure_sends_voice_error_without_code() {
+        let (send, sent) = fake_send();
+        let call = fake_call_success(vec![], "");
+        let provider =
+            Provider::new_with_voice(send, call, vec![], Some(fake_tts_error("tts boom")), None);
+
+        provider
+            .clone()
+            .handle_message(
+                "consumer1".into(),
+                ProtocolMessage::TtsRequest {
+                    id: "tts1".into(),
+                    text: "read this".into(),
+                    model: None,
+                    voice: None,
+                },
+            )
+            .await;
+
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        match &sent[0] {
+            (to, ProtocolMessage::VoiceError { id, message, code }) => {
+                assert_eq!(to, "consumer1");
+                assert_eq!(id, "tts1");
+                assert_eq!(message, "tts boom");
+                assert_eq!(*code, None, "an upstream failure should not carry a code");
+            }
+            other => panic!("expected a voice_error reply, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn stt_request_reassembles_chunks_and_replies_with_text() {
+        use base64::Engine as _;
+        let engine = base64::engine::general_purpose::STANDARD;
+
+        let captured: Arc<Mutex<Option<SttCallArgs>>> = Arc::new(Mutex::new(None));
+        let (send, sent) = fake_send();
+        let call = fake_call_success(vec![], "");
+        let provider = Provider::new_with_voice(
+            send,
+            call,
+            vec![],
+            None,
+            Some(fake_stt_success("hello world", captured.clone())),
+        );
+
+        provider
+            .clone()
+            .handle_message(
+                "consumer1".into(),
+                ProtocolMessage::SttRequest {
+                    id: "stt1".into(),
+                    seq: 0,
+                    data: engine.encode(b"hello "),
+                    last: false,
+                    mime: "audio/wav".into(),
+                    model: Some("whisper-1".into()),
+                    file_name: Some("clip.wav".into()),
+                },
+            )
+            .await;
+        // No reply yet -- still waiting for the last chunk.
+        assert!(sent.lock().unwrap().is_empty());
+
+        provider
+            .clone()
+            .handle_message(
+                "consumer1".into(),
+                ProtocolMessage::SttRequest {
+                    id: "stt1".into(),
+                    seq: 1,
+                    data: engine.encode(b"world"),
+                    last: true,
+                    // A second chunk's model/fileName must not override the
+                    // first chunk's -- only the first chunk's fields are
+                    // captured (see the module doc).
+                    mime: "audio/wav".into(),
+                    model: None,
+                    file_name: None,
+                },
+            )
+            .await;
+
+        let (audio, mime, model, file_name) = captured.lock().unwrap().clone().unwrap();
+        assert_eq!(audio, b"hello world");
+        assert_eq!(mime, "audio/wav");
+        assert_eq!(model.as_deref(), Some("whisper-1"));
+        assert_eq!(file_name.as_deref(), Some("clip.wav"));
+
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        match &sent[0] {
+            (to, ProtocolMessage::SttResponse { id, text }) => {
+                assert_eq!(to, "consumer1");
+                assert_eq!(id, "stt1");
+                assert_eq!(text, "hello world");
+            }
+            other => panic!("expected an stt_response reply, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn stt_request_upstream_failure_sends_voice_error_without_code() {
+        use base64::Engine as _;
+        let engine = base64::engine::general_purpose::STANDARD;
+
+        let (send, sent) = fake_send();
+        let call = fake_call_success(vec![], "");
+        let provider =
+            Provider::new_with_voice(send, call, vec![], None, Some(fake_stt_error("stt boom")));
+
+        provider
+            .clone()
+            .handle_message(
+                "consumer1".into(),
+                ProtocolMessage::SttRequest {
+                    id: "stt1".into(),
+                    seq: 0,
+                    data: engine.encode(b"audio"),
+                    last: true,
+                    mime: "audio/wav".into(),
+                    model: None,
+                    file_name: None,
+                },
+            )
+            .await;
+
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        match &sent[0] {
+            (to, ProtocolMessage::VoiceError { id, message, code }) => {
+                assert_eq!(to, "consumer1");
+                assert_eq!(id, "stt1");
+                assert_eq!(message, "stt boom");
+                assert_eq!(*code, None, "an upstream failure should not carry a code");
+            }
+            other => panic!("expected a voice_error reply, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn stt_request_buffer_overflow_sends_voice_error_and_skips_upstream_call() {
+        let captured: Arc<Mutex<Option<SttCallArgs>>> = Arc::new(Mutex::new(None));
+        let (send, sent) = fake_send();
+        let call = fake_call_success(vec![], "");
+        let provider = Provider::new_with_voice(
+            send,
+            call,
+            vec![],
+            None,
+            Some(fake_stt_success("should not be reached", captured.clone())),
+        );
+
+        use base64::Engine as _;
+        let engine = base64::engine::general_purpose::STANDARD;
+        let oversized = vec![0u8; STT_MAX_BUFFERED_BYTES + 1];
+        provider
+            .clone()
+            .handle_message(
+                "consumer1".into(),
+                ProtocolMessage::SttRequest {
+                    id: "stt1".into(),
+                    seq: 0,
+                    data: engine.encode(&oversized),
+                    last: false,
+                    mime: "audio/wav".into(),
+                    model: None,
+                    file_name: None,
+                },
+            )
+            .await;
+
+        assert!(captured.lock().unwrap().is_none(), "stt upstream must not be called");
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        match &sent[0] {
+            (to, ProtocolMessage::VoiceError { id, message, code }) => {
+                assert_eq!(to, "consumer1");
+                assert_eq!(id, "stt1");
+                assert!(message.contains("maximum buffered size"));
+                assert_eq!(*code, None);
+            }
+            other => panic!("expected a voice_error reply, got: {other:?}"),
+        }
     }
 }
