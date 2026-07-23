@@ -36,6 +36,7 @@ pub(crate) mod openai;
 /// Opened to `pub(crate)` for the same reason as [`openai`]: `crate::bot`
 /// needs `ChatMessage` to build a `stream_chat_completion` request.
 pub(crate) mod protocol;
+mod provide_state;
 mod provider;
 mod stt;
 pub mod tts;
@@ -292,6 +293,12 @@ pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Val
                 .expect("ai provider lock")
                 .take()
                 .is_some();
+            // Explicit stop always clears the persisted intent, regardless
+            // of `stopped` (idempotent: calling stop when already stopped
+            // still means "don't auto-resume next time"). See
+            // `provide_state`'s module doc for why this lives in its own
+            // state file rather than `config.toml`.
+            persist_provide_state(false);
             Ok(json!({ "providing": false, "was_running": stopped }))
         }
         "ai.serve.start" => serve_start(&service, state).await,
@@ -373,11 +380,86 @@ async fn provide_start(service: &Arc<AiService>, state: &Arc<AppState>) -> Resul
     *service.provider.write().expect("ai provider lock") = Some(built.provider.clone());
     service.broadcast(built.provider.hello()).await;
 
+    // Only persisted on a successful start -- a failed `?` above (e.g. no
+    // default preset configured yet) leaves the previous persisted intent
+    // untouched, exactly like the manual command that failed didn't change
+    // anything either.
+    persist_provide_state(true);
+
     Ok(json!({
         "providing": true,
         "upstream": built.upstream_base_url,
         "models": built.models,
     }))
+}
+
+/// Writes `enabled` to `<data_dir>/ai-provide-state.json` (see
+/// `provide_state`'s module doc), logging a `warn!` instead of failing the
+/// caller if the write itself fails (e.g. disk full, permissions) -- losing
+/// the persisted intent is a real problem (the daemon won't auto-resume/
+/// auto-stay-stopped correctly next restart) but it must never turn a
+/// successful `ai provide start`/`stop` into a failed IPC call over a
+/// bookkeeping write.
+fn persist_provide_state(enabled: bool) {
+    let result = crate::config::data_dir()
+        .context("ai: resolving the data directory")
+        .and_then(|dir| provide_state::write_state(&dir, provide_state::ProvideState { enabled }));
+    if let Err(err) = result {
+        warn!(%err, enabled, "ai: failed to persist the provide-enabled state; a daemon restart will not correctly auto-resume/stay-stopped");
+    }
+}
+
+/// Auto-resumes network `provide` at daemon startup if it was left enabled
+/// on a previous run (persisted by [`persist_provide_state`] from
+/// `provide_start`/`ai.provide.stop`, including via the dashboard toggle --
+/// both go through the same `ai.provide.start`/`ai.provide.stop` IPC
+/// commands, see `provide_state`'s module doc). Spawned eagerly from
+/// `daemon::daemon_main`, the same way as `mailbox::chat_relay`'s and
+/// `storage::folder_owner`'s background tasks, rather than waited on lazily
+/// like the rest of the `ai` service (which only starts on the first
+/// `ai.*` IPC call) -- the whole point is providing coming back up without
+/// any client ever having to ask.
+///
+/// Never fails daemon startup: any problem here (data dir unreadable,
+/// corrupt state file, network room join failure, or a config problem such
+/// as a dangling preset caught by [`build_provider`]) is logged via `warn!`
+/// and simply leaves providing off, exactly as if `ai provide start` had
+/// been run by hand and failed -- the daemon keeps running either way.
+/// Success is always logged via `info!` so "is it providing after a
+/// restart, and why (not)" has a concrete answer in the log without having
+/// to poll `ai.status`.
+pub fn spawn_provide_autoresume(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        let data_dir = match crate::config::data_dir() {
+            Ok(dir) => dir,
+            Err(err) => {
+                warn!(%err, "ai: provide auto-resume skipped -- could not resolve the data directory");
+                return;
+            }
+        };
+        let persisted = match provide_state::read_state(&data_dir) {
+            Ok(state) => state,
+            Err(err) => {
+                warn!(%err, "ai: provide auto-resume skipped -- could not read the persisted provide state");
+                return;
+            }
+        };
+        if !persisted.enabled {
+            debug!("ai: provide was not left enabled on the previous run; not auto-resuming");
+            return;
+        }
+        let service = match ensure_started(&state).await {
+            Ok(service) => service,
+            Err(err) => {
+                warn!(%err, "ai: provide was left enabled on the previous run, but the ai network service failed to start; providing is off until `ai provide start` succeeds");
+                return;
+            }
+        };
+        match provide_start(&service, &state).await {
+            Ok(result) => info!(%result, "ai: provide auto-resumed from persisted state"),
+            Err(err) => warn!(%err, "ai: provide was left enabled on the previous run, but auto-resume failed (likely an incomplete ai config, e.g. a dangling preset); providing is off until `ai provide start` succeeds"),
+        }
+    });
 }
 
 /// Silently rebuilds the running provider from the *current* config and
@@ -462,7 +544,7 @@ async fn build_provider(service: &Arc<AiService>, cfg: &crate::config::AiConfig)
 
     let tts_preset = voice_preset_provider(cfg, &cfg.tts_preset_id);
     let advertised_voices = resolve_advertised_voices(tts_preset.as_ref()).await;
-    log_tts_preset_diagnostics(cfg, tts_preset.as_ref().map(|(_, resolved)| resolved));
+    log_voice_preset_diagnostics(cfg, "tts", &cfg.tts_preset_id, tts_preset.as_ref().map(|(_, resolved)| resolved));
     let tts_call = tts_preset.map(|(provider, resolved)| {
         let fallback_voice = advertised_voices.first().cloned();
         let call: TtsCallFn = Arc::new(move |text, model, voice| {
@@ -479,7 +561,9 @@ async fn build_provider(service: &Arc<AiService>, cfg: &crate::config::AiConfig)
         });
         call
     });
-    let stt_call = voice_preset_provider(cfg, &cfg.stt_preset_id).map(|(provider, resolved)| {
+    let stt_preset = voice_preset_provider(cfg, &cfg.stt_preset_id);
+    log_voice_preset_diagnostics(cfg, "stt", &cfg.stt_preset_id, stt_preset.as_ref().map(|(_, resolved)| resolved));
+    let stt_call = stt_preset.map(|(provider, resolved)| {
         let call: SttCallFn = Arc::new(move |audio, mime, model, file_name| {
             let provider = provider.clone();
             let req = stt::SttParams {
@@ -651,60 +735,121 @@ fn resolve_voice_call_model(
     }
 }
 
-/// Logs the resolved state of `cfg.tts_preset_id` at every provider
-/// (re)build (`provide start`, and every live config reload -- see
-/// `reload_provider_if_running`), so an operator debugging "TTS isn't
-/// working"/"no voices advertised" on a real device has something concrete
-/// to check in `mistl`'s own logs before ever reproducing a failing
-/// request. Three cases, each logged once and clearly:
-///  - `tts_preset_id` unset: TTS isn't offered at all (expected/quiet, not
-///    a warning).
-///  - it's set but doesn't resolve to a real preset (dangling id, or that
-///    preset's own provider got removed): also not offered, but this is
-///    worth a `warn!` since it usually means a preset assignment silently
-///    went stale.
-///  - it resolves: logs whether a voice catalog will be advertised, and
-///    `warn!`s when the resolved preset's own `kind` (the dashboard's
-///    "Provides" categorization, see `AiPresetConfig::kind`) isn't `"tts"`
-///    -- `kind` has zero effect on routing (see its doc comment), so this
-///    can't be *prevented* here, but a preset whose own author labeled it
-///    "chat"/"stt" being wired up as the TTS preset is a strong signal of
-///    an accidental assignment (e.g. via `mistl config set
-///    ai.tts_preset_id` naming the wrong id) worth flagging loudly.
-fn log_tts_preset_diagnostics(cfg: &crate::config::AiConfig, resolved: Option<&crate::config::ResolvedAiPreset>) {
-    let preset_id = cfg.tts_preset_id.trim();
+/// Pure classification behind [`log_voice_preset_diagnostics`] -- split out
+/// so the dangling-id and kind-mismatch detection (shared byte-for-byte
+/// between `ai.tts_preset_id` and `ai.stt_preset_id`, see
+/// [`voice_preset_provider`]'s doc comment) is unit-testable directly,
+/// rather than only observable via `tracing` log output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum VoicePresetDiagnostic {
+    /// The preset id is blank: this service isn't offered at all, which is
+    /// expected/quiet, not a warning.
+    Unconfigured,
+    /// The preset id is set but doesn't resolve to a live preset+provider
+    /// (deleted/renamed preset, or its provider was removed).
+    Dangling,
+    /// Resolves fine, but the preset's own "Provides" `kind` (dashboard
+    /// categorization, see `AiPresetConfig::kind`) doesn't match the
+    /// service it's wired up as (e.g. a "chat"-kind preset assigned to
+    /// `stt_preset_id`) -- a strong signal of an accidental assignment.
+    /// Carries the mismatched kind actually found, for the log message.
+    KindMismatch { actual: String },
+    /// Resolves fine and its `kind` matches (or the preset predates `kind`
+    /// entirely, which defaults to `"chat"` -- see that field's doc).
+    Ok,
+}
+
+/// Classifies `preset_id` (an `ai.tts_preset_id`/`ai.stt_preset_id` value,
+/// already resolved by the caller via [`voice_preset_provider`] into
+/// `resolved`) against `expected_kind` (`"tts"`|`"stt"`). Pure: no I/O, no
+/// logging -- see [`log_voice_preset_diagnostics`] for the logging wrapper
+/// callers actually use.
+fn diagnose_voice_preset(
+    cfg: &crate::config::AiConfig,
+    preset_id: &str,
+    resolved: Option<&crate::config::ResolvedAiPreset>,
+    expected_kind: &str,
+) -> VoicePresetDiagnostic {
+    let preset_id = preset_id.trim();
     if preset_id.is_empty() {
-        debug!("ai: ai.tts_preset_id is unset - this provider will not offer \"tts\" (tts_request gets an immediate voice_error)");
-        return;
+        return VoicePresetDiagnostic::Unconfigured;
     }
-    let Some(resolved) = resolved else {
-        warn!(
-            %preset_id,
-            "ai: ai.tts_preset_id does not resolve to a configured preset+provider (deleted/renamed preset, or its provider was removed) - this provider will NOT offer \"tts\", it does not fall back to the default preset"
-        );
-        return;
-    };
+    if resolved.is_none() {
+        return VoicePresetDiagnostic::Dangling;
+    }
     let kind = cfg
         .presets
         .iter()
         .find(|p| p.id == preset_id)
         .map(|p| if p.kind.is_empty() { "chat" } else { p.kind.as_str() })
         .unwrap_or("chat");
-    if kind != "tts" {
-        warn!(
-            %preset_id,
-            kind,
-            "ai: ai.tts_preset_id points at a preset whose dashboard \"Provides\" kind is not \"tts\" - likely a chat/stt preset assigned to TTS by mistake (its model/provider probably don't speak /audio/speech); double-check the preset's \"Provides\" dropdown, or reassign ai.tts_preset_id"
-        );
+    if kind == expected_kind {
+        VoicePresetDiagnostic::Ok
+    } else {
+        VoicePresetDiagnostic::KindMismatch { actual: kind.to_string() }
     }
-    // The preset's own `voice` (if set) is only the *fallback* default now --
-    // the catalog actually advertised in `provider_hello.voices` is built in
-    // `build_provider` from the upstream `fetch_voices` result first, this
-    // `voice` second (see that function's comment); this just logs whether
-    // that fallback exists, not the final advertised list.
-    match resolved.voice.as_deref() {
-        Some(voice) => debug!(%preset_id, %voice, "ai: tts preset resolved; falls back to this voice if upstream voice discovery returns nothing"),
-        None => debug!(%preset_id, "ai: tts preset resolved but has no \"voice\" set - if upstream voice discovery also returns nothing, provider_hello will omit the voices catalog entirely"),
+}
+
+/// Logs the resolved state of `ai.tts_preset_id`/`ai.stt_preset_id`
+/// (`kind` selects which -- `"tts"` or `"stt"`) at every provider
+/// (re)build (`provide start`, and every live config reload -- see
+/// `reload_provider_if_running`), so an operator debugging "TTS/STT isn't
+/// working"/"no voices advertised" on a real device has something concrete
+/// to check in `mistl`'s own logs before ever reproducing a failing
+/// request. Built on [`diagnose_voice_preset`]'s three failure-relevant
+/// cases (`Unconfigured`/`Dangling`/`KindMismatch`, each logged once and
+/// clearly) plus one kind-specific note logged only when it resolves
+/// (`Ok` or `KindMismatch` both still resolved to a real preset+provider):
+/// for `"tts"`, whether a fallback `voice` is configured (mirrors the
+/// pre-refactor TTS-only diagnostics exactly); for `"stt"`, a plain
+/// confirmation that inbound `stt_request`s will be forwarded upstream
+/// (STT has no `voice` concept to report on).
+fn log_voice_preset_diagnostics(
+    cfg: &crate::config::AiConfig,
+    kind: &'static str,
+    preset_id: &str,
+    resolved: Option<&crate::config::ResolvedAiPreset>,
+) {
+    let trimmed = preset_id.trim();
+    match diagnose_voice_preset(cfg, preset_id, resolved, kind) {
+        VoicePresetDiagnostic::Unconfigured => {
+            debug!(kind, "ai: preset id for this service is unset - this provider will not offer it (request gets an immediate error reply instead of silently going unanswered)");
+            return;
+        }
+        VoicePresetDiagnostic::Dangling => {
+            warn!(
+                preset_id = trimmed,
+                kind,
+                "ai: preset id does not resolve to a configured preset+provider (deleted/renamed preset, or its provider was removed) - this provider will NOT offer this service, it does not fall back to the default preset"
+            );
+            return;
+        }
+        VoicePresetDiagnostic::KindMismatch { actual } => {
+            warn!(
+                preset_id = trimmed,
+                expected_kind = kind,
+                actual_kind = %actual,
+                "ai: preset id points at a preset whose dashboard \"Provides\" kind does not match this service - likely assigned by mistake (its model/provider probably don't speak the matching endpoint); double-check the preset's \"Provides\" dropdown, or reassign the preset id"
+            );
+        }
+        VoicePresetDiagnostic::Ok => {}
+    }
+    let Some(resolved) = resolved else {
+        return;
+    };
+    if kind == "tts" {
+        // The preset's own `voice` (if set) is only the *fallback* default
+        // now -- the catalog actually advertised in `provider_hello.voices`
+        // is built in `build_provider` from the upstream `fetch_voices`
+        // result first, this `voice` second (see that function's comment);
+        // this just logs whether that fallback exists, not the final
+        // advertised list.
+        match resolved.voice.as_deref() {
+            Some(voice) => debug!(preset_id = trimmed, %voice, "ai: tts preset resolved; falls back to this voice if upstream voice discovery returns nothing"),
+            None => debug!(preset_id = trimmed, "ai: tts preset resolved but has no \"voice\" set - if upstream voice discovery also returns nothing, provider_hello will omit the voices catalog entirely"),
+        }
+    } else {
+        debug!(preset_id = trimmed, "ai: stt preset resolved; inbound stt_requests will be forwarded to its upstream transcription endpoint");
     }
 }
 
@@ -762,7 +907,7 @@ async fn serve_start(service: &Arc<AiService>, state: &Arc<AppState>) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AiConfig, AiPresetConfig, AiProviderConfig};
+    use crate::config::{AiConfig, AiPresetConfig, AiProviderConfig, resolve_preset};
 
     #[test]
     fn provider_upstream_maps_base_url_and_api_key_for_a_known_provider() {
@@ -851,7 +996,7 @@ mod tests {
     /// That fallback would silently start serving the room's *chat* default
     /// preset (here: "chat-default", provider p1, no voice) as "tts",
     /// exactly the confusing real-device failure this module's diagnostics
-    /// exist to catch (see `log_tts_preset_diagnostics`).
+    /// exist to catch (see `log_voice_preset_diagnostics`).
     #[test]
     fn voice_preset_provider_does_not_fall_back_to_default_preset_for_a_dangling_id() {
         let ai = ai_with_chat_default_and_tts_preset();
@@ -872,6 +1017,92 @@ mod tests {
             kind: "tts".to_string(),
         });
         assert!(voice_preset_provider(&ai, "orphaned").is_none());
+    }
+
+    // -- diagnose_voice_preset: pure tts/stt diagnostic classification ----
+
+    #[test]
+    fn diagnose_voice_preset_unconfigured_for_a_blank_id() {
+        let ai = ai_with_chat_default_and_tts_preset();
+        assert_eq!(diagnose_voice_preset(&ai, "", None, "tts"), VoicePresetDiagnostic::Unconfigured);
+        assert_eq!(diagnose_voice_preset(&ai, "   ", None, "stt"), VoicePresetDiagnostic::Unconfigured);
+    }
+
+    #[test]
+    fn diagnose_voice_preset_dangling_for_a_nonblank_id_that_did_not_resolve() {
+        // `resolved: None` here stands in for what `voice_preset_provider`
+        // returns for a dangling/orphaned id -- `diagnose_voice_preset`
+        // itself never re-resolves, it just classifies what the caller
+        // already found (or didn't).
+        let ai = ai_with_chat_default_and_tts_preset();
+        assert_eq!(
+            diagnose_voice_preset(&ai, "deleted-preset-id", None, "tts"),
+            VoicePresetDiagnostic::Dangling
+        );
+        assert_eq!(
+            diagnose_voice_preset(&ai, "deleted-preset-id", None, "stt"),
+            VoicePresetDiagnostic::Dangling
+        );
+    }
+
+    #[test]
+    fn diagnose_voice_preset_ok_when_resolved_and_kind_matches() {
+        let ai = ai_with_chat_default_and_tts_preset();
+        let resolved = resolve_preset(&ai, Some("tts-real")).unwrap();
+        assert_eq!(
+            diagnose_voice_preset(&ai, "tts-real", Some(&resolved), "tts"),
+            VoicePresetDiagnostic::Ok
+        );
+    }
+
+    #[test]
+    fn diagnose_voice_preset_kind_mismatch_when_resolved_preset_is_labeled_differently() {
+        // "chat-default" is kind "chat" but is being checked against "stt" --
+        // the exact real-device failure mode `ai.stt_preset_id`/`ai.tts_preset_id`
+        // diagnostics exist to flag (see `log_voice_preset_diagnostics`).
+        let ai = ai_with_chat_default_and_tts_preset();
+        let resolved = resolve_preset(&ai, Some("chat-default")).unwrap();
+        assert_eq!(
+            diagnose_voice_preset(&ai, "chat-default", Some(&resolved), "stt"),
+            VoicePresetDiagnostic::KindMismatch { actual: "chat".to_string() }
+        );
+        // Same preset checked against "tts" also mismatches (it's "chat").
+        assert_eq!(
+            diagnose_voice_preset(&ai, "chat-default", Some(&resolved), "tts"),
+            VoicePresetDiagnostic::KindMismatch { actual: "chat".to_string() }
+        );
+        // And a "tts"-kind preset checked against "stt" mismatches too.
+        let tts_resolved = resolve_preset(&ai, Some("tts-real")).unwrap();
+        assert_eq!(
+            diagnose_voice_preset(&ai, "tts-real", Some(&tts_resolved), "stt"),
+            VoicePresetDiagnostic::KindMismatch { actual: "tts".to_string() }
+        );
+    }
+
+    #[test]
+    fn diagnose_voice_preset_treats_an_empty_kind_field_as_chat() {
+        // A preset predating `AiPresetConfig::kind` (old config.toml) has
+        // `kind == ""`, which the doc comment says must behave like "chat".
+        let mut ai = ai_with_chat_default_and_tts_preset();
+        ai.presets.push(AiPresetConfig {
+            id: "legacy".to_string(),
+            label: "Legacy".to_string(),
+            provider_id: "p1".to_string(),
+            model: "gpt-4o".to_string(),
+            temperature: None,
+            reasoning_effort: None,
+            voice: None,
+            kind: String::new(),
+        });
+        let resolved = resolve_preset(&ai, Some("legacy")).unwrap();
+        assert_eq!(
+            diagnose_voice_preset(&ai, "legacy", Some(&resolved), "chat"),
+            VoicePresetDiagnostic::Ok
+        );
+        assert_eq!(
+            diagnose_voice_preset(&ai, "legacy", Some(&resolved), "tts"),
+            VoicePresetDiagnostic::KindMismatch { actual: "chat".to_string() }
+        );
     }
 
     // -- resolve_tts_voice: pure fallback-order tests -------------------

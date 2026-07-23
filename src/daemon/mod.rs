@@ -119,6 +119,15 @@ async fn daemon_main(host_override: Option<String>) -> Result<()> {
     // `[bot] enabled = false`.
     crate::bot::spawn_background(state.clone());
 
+    // AI network `provide`: if `ai provide start` (CLI or the dashboard
+    // toggle) was left enabled on a previous run, resume it automatically
+    // instead of coming back up silently not providing (see
+    // `crate::ai::spawn_provide_autoresume`'s doc comment -- this is the fix
+    // for a real "rebuild -> restart -> providing was off and nobody
+    // noticed" confusion). A no-op (quiet debug log) when it was never
+    // enabled, and never fails daemon startup on its own.
+    crate::ai::spawn_provide_autoresume(state.clone());
+
     tokio::select! {
         _ = tokio::signal::ctrl_c() => info!("interrupted, shutting down"),
         _ = shutdown_rx.wait_for(|&stop| stop) => info!("stop requested, shutting down"),
