@@ -31,6 +31,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
+use tracing::debug;
 
 use super::protocol::ChatMessage;
 
@@ -255,6 +256,80 @@ pub async fn fetch_models(config: &UpstreamConfig) -> Result<Vec<String>> {
     Ok(ids)
 }
 
+/// Parses a voices response body, tolerating the same shapes as mistai's
+/// `parseVoicesBody`: the body itself is the list, or it's wrapped as
+/// `{"voices": [...]}` / `{"data": [...]}`; each entry is either a bare
+/// string or an object with an `id`/`name`/`voice` string field (checked in
+/// that order). Pure (no I/O) so shape variations can be unit-tested
+/// directly. Empty/non-string ids are filtered out.
+fn parse_voices_body(body: &Value) -> Vec<String> {
+    let empty: Vec<Value> = Vec::new();
+    let raw_list: &[Value] = body
+        .as_array()
+        .or_else(|| body.get("voices").and_then(Value::as_array))
+        .or_else(|| body.get("data").and_then(Value::as_array))
+        .unwrap_or(&empty);
+
+    raw_list
+        .iter()
+        .filter_map(|entry| {
+            if let Some(s) = entry.as_str() {
+                return (!s.is_empty()).then(|| s.to_string());
+            }
+            ["id", "name", "voice"]
+                .into_iter()
+                .find_map(|key| entry.get(key).and_then(Value::as_str))
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+        })
+        .collect()
+}
+
+/// Tries one candidate voices endpoint; returns `None` (never an error) so
+/// [`fetch_voices`] can fall through to the next candidate on *any* failure
+/// (network error, non-2xx, unparseable JSON, or a parseable-but-empty
+/// catalog) -- mirrors mistai's `tryVoicesEndpoint`.
+async fn try_voices_endpoint(url: &str, api_key: &str) -> Option<Vec<String>> {
+    let client = build_client().ok()?;
+    let mut request = client.get(url);
+    if !api_key.is_empty() {
+        request = request.header("Authorization", format!("Bearer {api_key}"));
+    }
+    let response = request.send().await.ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let text = response.text().await.ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    let voices = parse_voices_body(&value);
+    (!voices.is_empty()).then_some(voices)
+}
+
+/// `GET {base_url}/audio/voices`, falling back to `GET {base_url}/voices` if
+/// that doesn't return a usable (non-empty, parseable) list. Unlike
+/// [`fetch_models`], this never errors: OpenAI's own API has no
+/// voices-listing endpoint at all, so "can't determine the list" is a common,
+/// expected outcome -- callers advertise nothing (or fall back to a preset's
+/// single configured voice) rather than treat this as a hard failure.
+/// `Authorization` is sent only when `api_key` is non-empty (mirrors
+/// mistai's `fetchVoices`, unlike this module's other requests which always
+/// send the header). Ported from `mistai/src/openai.ts`'s `fetchVoices`.
+pub async fn fetch_voices(base_url: &str, api_key: &str) -> Vec<String> {
+    let base = strip_trailing_slash(base_url);
+    for path in ["/audio/voices", "/voices"] {
+        let url = format!("{base}{path}");
+        if let Some(voices) = try_voices_endpoint(&url, api_key).await {
+            return voices;
+        }
+    }
+    debug!(
+        %base,
+        "ai: no TTS voice catalog found upstream (both /audio/voices and /voices failed \
+         or returned nothing usable) -- advertising none from this fetch"
+    );
+    Vec::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,6 +435,36 @@ mod tests {
             body.len()
         );
         vec![resp.into_bytes()]
+    }
+
+    /// Like [`mock_server`] but accepts one connection per entry in
+    /// `responses`, in order, closing each before accepting the next --
+    /// needed to test [`fetch_voices`]'s two-endpoint fallback, which makes
+    /// up to two sequential requests (potentially to the same host:port).
+    /// Returns the raw request bytes captured for each accepted connection,
+    /// in accept order.
+    async fn mock_sequential_server(responses: Vec<Vec<Vec<u8>>>) -> (String, JoinHandle<Vec<Vec<u8>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let mut captured = Vec::new();
+            for writes in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let request = read_request(&mut socket).await;
+                for w in writes {
+                    socket.write_all(&w).await.unwrap();
+                    socket.flush().await.unwrap();
+                }
+                let _ = socket.shutdown().await;
+                captured.push(request);
+            }
+            captured
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    fn request_line(raw: &[u8]) -> String {
+        split_request(raw).0.lines().next().unwrap_or_default().to_string()
     }
 
     fn cfg(base_url: String, model: Option<&str>, temperature: Option<f64>) -> UpstreamConfig {
@@ -669,6 +774,168 @@ mod tests {
         assert!(
             request_line.contains("/chat/completions") && !request_line.contains("//chat"),
             "unexpected request line: {request_line}"
+        );
+    }
+
+    // -- parse_voices_body: pure shape-variation tests -----------------
+
+    #[test]
+    fn parse_voices_body_accepts_bare_array_of_strings() {
+        let body: Value = serde_json::from_str(r#"["alloy","echo"]"#).unwrap();
+        assert_eq!(parse_voices_body(&body), vec!["alloy".to_string(), "echo".to_string()]);
+    }
+
+    #[test]
+    fn parse_voices_body_accepts_voices_wrapper() {
+        let body: Value = serde_json::from_str(r#"{"voices":["alloy","echo"]}"#).unwrap();
+        assert_eq!(parse_voices_body(&body), vec!["alloy".to_string(), "echo".to_string()]);
+    }
+
+    #[test]
+    fn parse_voices_body_accepts_data_wrapper() {
+        let body: Value = serde_json::from_str(r#"{"data":["alloy","echo"]}"#).unwrap();
+        assert_eq!(parse_voices_body(&body), vec!["alloy".to_string(), "echo".to_string()]);
+    }
+
+    #[test]
+    fn parse_voices_body_prefers_id_then_name_then_voice_on_object_entries() {
+        let body: Value = serde_json::from_str(
+            r#"[{"id":"v-id"},{"name":"v-name"},{"voice":"v-voice"},{"id":"i","name":"n"}]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            parse_voices_body(&body),
+            vec!["v-id".to_string(), "v-name".to_string(), "v-voice".to_string(), "i".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_voices_body_filters_empty_and_unrecognized_entries() {
+        let body: Value =
+            serde_json::from_str(r#"["alloy","",{"notavoice":1},42,null,{"id":""}]"#).unwrap();
+        assert_eq!(parse_voices_body(&body), vec!["alloy".to_string()]);
+    }
+
+    #[test]
+    fn parse_voices_body_returns_empty_for_unrecognized_shapes() {
+        assert_eq!(parse_voices_body(&json!({"unexpected": "shape"})), Vec::<String>::new());
+        assert_eq!(parse_voices_body(&json!(null)), Vec::<String>::new());
+        assert_eq!(parse_voices_body(&json!("not-a-list")), Vec::<String>::new());
+    }
+
+    // -- fetch_voices: endpoint selection / fallback / never-errors ----
+
+    fn voices_ok_body(voices: &str) -> Vec<Vec<u8>> {
+        json_response(200, "OK", &format!(r#"{{"voices":{voices}}}"#))
+    }
+
+    #[tokio::test]
+    async fn fetch_voices_uses_audio_voices_when_it_succeeds() {
+        let (base_url, server) =
+            mock_server(voices_ok_body(r#"["alloy","echo"]"#), Duration::ZERO).await;
+
+        let voices = fetch_voices(&base_url, "key").await;
+        assert_eq!(voices, vec!["alloy".to_string(), "echo".to_string()]);
+
+        let raw = server.await.unwrap();
+        assert!(
+            request_line(&raw).contains("/audio/voices"),
+            "expected the /audio/voices endpoint to be tried first: {}",
+            request_line(&raw)
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_voices_falls_back_to_plain_voices_when_audio_voices_fails() {
+        let responses = vec![
+            text_response(404, "Not Found", "no such route"),
+            voices_ok_body(r#"["nova"]"#),
+        ];
+        let (base_url, server) = mock_sequential_server(responses).await;
+
+        let voices = fetch_voices(&base_url, "key").await;
+        assert_eq!(voices, vec!["nova".to_string()]);
+
+        let raw = server.await.unwrap();
+        assert_eq!(raw.len(), 2, "both candidate endpoints should have been tried");
+        assert!(request_line(&raw[0]).contains("/audio/voices"));
+        assert!(
+            request_line(&raw[1]).contains("/voices") && !request_line(&raw[1]).contains("/audio/voices"),
+            "unexpected second request line: {}",
+            request_line(&raw[1])
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_voices_falls_back_when_audio_voices_parses_but_is_empty() {
+        // A 200 response with a parseable-but-empty catalog must still fall
+        // through to the next candidate, not be treated as "found".
+        let responses = vec![voices_ok_body("[]"), voices_ok_body(r#"["nova"]"#)];
+        let (base_url, server) = mock_sequential_server(responses).await;
+
+        let voices = fetch_voices(&base_url, "key").await;
+        assert_eq!(voices, vec!["nova".to_string()]);
+
+        let raw = server.await.unwrap();
+        assert_eq!(raw.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn fetch_voices_returns_empty_without_erroring_when_both_endpoints_fail() {
+        let responses = vec![
+            text_response(404, "Not Found", "nope"),
+            text_response(500, "Internal Server Error", "nope"),
+        ];
+        let (base_url, server) = mock_sequential_server(responses).await;
+
+        let voices = fetch_voices(&base_url, "key").await;
+        assert_eq!(voices, Vec::<String>::new());
+
+        let raw = server.await.unwrap();
+        assert_eq!(raw.len(), 2, "both candidate endpoints should have been tried");
+    }
+
+    #[tokio::test]
+    async fn fetch_voices_returns_empty_for_unreachable_host_without_erroring() {
+        // Nothing listening on this port: connection should fail fast and
+        // fetch_voices must still resolve to `[]` rather than propagating
+        // an error (its whole contract is "never throws").
+        let voices = fetch_voices("http://127.0.0.1:1", "key").await;
+        assert_eq!(voices, Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn fetch_voices_sends_authorization_only_when_api_key_is_non_empty() {
+        let (base_url, server) =
+            mock_server(voices_ok_body(r#"["alloy"]"#), Duration::ZERO).await;
+        fetch_voices(&base_url, "sk-test-voices").await;
+        let raw = server.await.unwrap();
+        let (headers, _body) = split_request(&raw);
+        assert!(
+            headers.to_lowercase().contains("authorization: bearer sk-test-voices"),
+            "expected Authorization header, got: {headers}"
+        );
+
+        let (base_url, server) = mock_server(voices_ok_body(r#"["alloy"]"#), Duration::ZERO).await;
+        fetch_voices(&base_url, "").await;
+        let raw = server.await.unwrap();
+        let (headers, _body) = split_request(&raw);
+        assert!(
+            !headers.to_lowercase().contains("authorization"),
+            "no Authorization header should be sent with an empty api_key: {headers}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_voices_strips_trailing_slash_from_base_url() {
+        let (base_url, server) =
+            mock_server(voices_ok_body(r#"["alloy"]"#), Duration::ZERO).await;
+        fetch_voices(&format!("{base_url}///"), "key").await;
+        let raw = server.await.unwrap();
+        assert!(
+            request_line(&raw).contains("/audio/voices") && !request_line(&raw).contains("///"),
+            "unexpected request line: {}",
+            request_line(&raw)
         );
     }
 }
