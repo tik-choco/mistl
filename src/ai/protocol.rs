@@ -10,13 +10,17 @@
 //! - Not JSON / not an object / `v != 1` / unknown `type` -> `None`.
 //! - Unknown extra fields are ignored, never rejected.
 //! - "non-empty string" below means `String` with `len > 0`.
-//! - `provider_hello`: `models`/`services` optional; present but not an
-//!   array -> the field is dropped (message still valid); non-string /
-//!   empty-string array elements are filtered out. `services` missing
-//!   entirely means "advertises chat only" per the wire spec, but that
-//!   default is a *consumer-side* interpretation -- `decode` itself
-//!   preserves `None` and leaves defaulting to callers (see
-//!   `ProviderHello::effective_services`).
+//! - `provider_hello`: `models`/`services`/`voices` optional; present but
+//!   not an array -> the field is dropped (message still valid); non-string
+//!   / empty-string array elements are filtered out (`voices` follows the
+//!   exact same rule as `models`). `services` missing entirely means
+//!   "advertises chat only" per the wire spec, but that default is a
+//!   *consumer-side* interpretation -- `decode` itself preserves `None` and
+//!   leaves defaulting to callers (see `ProviderHello::effective_services`).
+//!   `voices` carries no such default: it is only meaningful alongside a
+//!   `"tts"` service advertisement, and its absence just means "unknown /
+//!   not advertised" (see [`SERVICE_TTS`] and the module-level wire spec
+//!   doc `tts-voice-selection-v1.md` §2.1).
 //! - `consumer_hello`: no fields.
 //! - `llm_request`: `id` non-empty; `messages` array with >= 1 element,
 //!   each `{role: "system"|"user"|"assistant", content: string}`; `model`
@@ -73,6 +77,14 @@ pub enum ProtocolMessage {
         /// that default (see [`advertises_service`] for the defaulted
         /// view).
         services: Option<Vec<String>>,
+        /// TTS voice catalog advertisement (tts-voice-selection-v1 §2.1).
+        /// Only meaningful when `services` includes `"tts"`; each element
+        /// is an opaque, upstream-real voice id passed through as-is on
+        /// `tts_request.voice` (unlike model names, no label/id
+        /// translation). `None` means the field was absent, not "no
+        /// voices" -- a provider that offers TTS but couldn't resolve a
+        /// voice list simply omits the field rather than sending `[]`.
+        voices: Option<Vec<String>>,
     },
     ConsumerHello,
     LlmRequest {
@@ -164,7 +176,7 @@ pub fn encode(msg: &ProtocolMessage) -> Vec<u8> {
     use serde_json::{json, Map, Value};
 
     let value: Value = match msg {
-        ProtocolMessage::ProviderHello { models, services } => {
+        ProtocolMessage::ProviderHello { models, services, voices } => {
             let mut map = Map::new();
             map.insert("v".into(), json!(1));
             map.insert("type".into(), json!("provider_hello"));
@@ -173,6 +185,9 @@ pub fn encode(msg: &ProtocolMessage) -> Vec<u8> {
             }
             if let Some(services) = services {
                 map.insert("services".into(), json!(services));
+            }
+            if let Some(voices) = voices {
+                map.insert("voices".into(), json!(voices));
             }
             Value::Object(map)
         }
@@ -373,7 +388,11 @@ pub fn decode(bytes: &[u8]) -> Option<ProtocolMessage> {
                 None => None,
                 Some(v) => str_array_non_empty(v),
             };
-            Some(ProtocolMessage::ProviderHello { models, services })
+            let voices = match obj.get("voices") {
+                None => None,
+                Some(v) => str_array_non_empty(v),
+            };
+            Some(ProtocolMessage::ProviderHello { models, services, voices })
         }
         "consumer_hello" => Some(ProtocolMessage::ConsumerHello),
         "llm_request" => {
@@ -509,6 +528,7 @@ mod tests {
         let bytes = encode(&ProtocolMessage::ProviderHello {
             models: Some(vec!["gpt-4o".to_string()]),
             services: None,
+            voices: None,
         });
         let v = parsed(&bytes);
         assert_eq!(v["v"], json!(1));
@@ -522,7 +542,11 @@ mod tests {
 
     #[test]
     fn encode_provider_hello_without_models_omits_field() {
-        let bytes = encode(&ProtocolMessage::ProviderHello { models: None, services: None });
+        let bytes = encode(&ProtocolMessage::ProviderHello {
+            models: None,
+            services: None,
+            voices: None,
+        });
         assert_eq!(
             keys(&bytes),
             BTreeSet::from(["v".into(), "type".into()])
@@ -536,6 +560,7 @@ mod tests {
         let bytes = encode(&ProtocolMessage::ProviderHello {
             models: None,
             services: Some(vec!["chat".to_string()]),
+            voices: None,
         });
         let v = parsed(&bytes);
         assert_eq!(v["services"], json!(["chat"]));
@@ -550,9 +575,36 @@ mod tests {
         let bytes = encode(&ProtocolMessage::ProviderHello {
             models: Some(vec!["gpt-4o".into()]),
             services: None,
+            voices: None,
         });
         let v = parsed(&bytes);
         assert!(v.get("services").is_none());
+    }
+
+    #[test]
+    fn encode_provider_hello_with_voices() {
+        let bytes = encode(&ProtocolMessage::ProviderHello {
+            models: None,
+            services: Some(vec!["chat".to_string(), "tts".to_string()]),
+            voices: Some(vec!["alloy".to_string(), "kokoro-1".to_string()]),
+        });
+        let v = parsed(&bytes);
+        assert_eq!(v["voices"], json!(["alloy", "kokoro-1"]));
+        assert_eq!(
+            keys(&bytes),
+            BTreeSet::from(["v".into(), "type".into(), "services".into(), "voices".into()])
+        );
+    }
+
+    #[test]
+    fn encode_provider_hello_without_voices_omits_field() {
+        let bytes = encode(&ProtocolMessage::ProviderHello {
+            models: None,
+            services: Some(vec!["chat".to_string()]),
+            voices: None,
+        });
+        let v = parsed(&bytes);
+        assert!(v.get("voices").is_none());
     }
 
     #[test]
@@ -863,6 +915,7 @@ mod tests {
             Some(ProtocolMessage::ProviderHello {
                 models: Some(vec!["gpt-4o".to_string()]),
                 services: None,
+                voices: None,
             })
         );
     }
@@ -876,6 +929,20 @@ mod tests {
             Some(ProtocolMessage::ProviderHello {
                 models: Some(vec!["gpt-4o".to_string()]),
                 services: Some(vec!["chat".to_string(), "tts".to_string()]),
+                voices: None,
+            })
+        );
+    }
+
+    #[test]
+    fn decode_doc_example_provider_hello_with_voices() {
+        let bytes = br#"{"v":1,"type":"provider_hello","services":["chat","tts"],"voices":["alloy","echo"]}"#;
+        assert_eq!(
+            decode(bytes),
+            Some(ProtocolMessage::ProviderHello {
+                models: None,
+                services: Some(vec!["chat".to_string(), "tts".to_string()]),
+                voices: Some(vec!["alloy".to_string(), "echo".to_string()]),
             })
         );
     }
@@ -921,11 +988,22 @@ mod tests {
         assert_roundtrip(ProtocolMessage::ProviderHello {
             models: Some(vec!["a".into(), "b".into()]),
             services: None,
+            voices: None,
         });
-        assert_roundtrip(ProtocolMessage::ProviderHello { models: None, services: None });
+        assert_roundtrip(ProtocolMessage::ProviderHello {
+            models: None,
+            services: None,
+            voices: None,
+        });
         assert_roundtrip(ProtocolMessage::ProviderHello {
             models: None,
             services: Some(vec!["chat".into(), "tts".into()]),
+            voices: None,
+        });
+        assert_roundtrip(ProtocolMessage::ProviderHello {
+            models: None,
+            services: Some(vec!["chat".into(), "tts".into()]),
+            voices: Some(vec!["alloy".into(), "kokoro-1".into()]),
         });
         assert_roundtrip(ProtocolMessage::ConsumerHello);
         assert_roundtrip(ProtocolMessage::LlmRequest {
@@ -1123,7 +1201,7 @@ mod tests {
         let bytes = br#"{"v":1,"type":"provider_hello","models":"not-an-array"}"#;
         assert_eq!(
             decode(bytes),
-            Some(ProtocolMessage::ProviderHello { models: None, services: None })
+            Some(ProtocolMessage::ProviderHello { models: None, services: None, voices: None })
         );
     }
 
@@ -1135,6 +1213,7 @@ mod tests {
             Some(ProtocolMessage::ProviderHello {
                 models: Some(vec!["gpt-4o".to_string(), "claude".to_string()]),
                 services: None,
+                voices: None,
             })
         );
     }
@@ -1151,6 +1230,7 @@ mod tests {
             Some(ProtocolMessage::ProviderHello {
                 models: Some(vec!["gpt-4o".to_string(), "claude".to_string()]),
                 services: None,
+                voices: None,
             })
         );
     }
@@ -1160,7 +1240,7 @@ mod tests {
         let bytes = br#"{"v":1,"type":"provider_hello","services":42}"#;
         assert_eq!(
             decode(bytes),
-            Some(ProtocolMessage::ProviderHello { models: None, services: None })
+            Some(ProtocolMessage::ProviderHello { models: None, services: None, voices: None })
         );
     }
 
@@ -1173,6 +1253,7 @@ mod tests {
             Some(ProtocolMessage::ProviderHello {
                 models: None,
                 services: Some(vec!["chat".to_string(), "tts".to_string()]),
+                voices: None,
             })
         );
     }
@@ -1187,6 +1268,7 @@ mod tests {
             Some(ProtocolMessage::ProviderHello {
                 models: None,
                 services: Some(vec!["chat".to_string(), "future-service".to_string()]),
+                voices: None,
             })
         );
     }
@@ -1196,7 +1278,47 @@ mod tests {
         let bytes = br#"{"v":1,"type":"provider_hello"}"#;
         assert_eq!(
             decode(bytes),
-            Some(ProtocolMessage::ProviderHello { models: None, services: None })
+            Some(ProtocolMessage::ProviderHello { models: None, services: None, voices: None })
+        );
+    }
+
+    #[test]
+    fn decode_provider_hello_non_array_voices_degrades_but_keeps_message() {
+        let bytes =
+            br#"{"v":1,"type":"provider_hello","services":["chat","tts"],"voices":"not-an-array"}"#;
+        assert_eq!(
+            decode(bytes),
+            Some(ProtocolMessage::ProviderHello {
+                models: None,
+                services: Some(vec!["chat".to_string(), "tts".to_string()]),
+                voices: None,
+            })
+        );
+    }
+
+    #[test]
+    fn decode_provider_hello_filters_non_string_and_empty_voices() {
+        let bytes = br#"{"v":1,"type":"provider_hello","services":["chat","tts"],"voices":["alloy",42,null,"","echo"]}"#;
+        assert_eq!(
+            decode(bytes),
+            Some(ProtocolMessage::ProviderHello {
+                models: None,
+                services: Some(vec!["chat".to_string(), "tts".to_string()]),
+                voices: Some(vec!["alloy".to_string(), "echo".to_string()]),
+            })
+        );
+    }
+
+    #[test]
+    fn decode_provider_hello_voices_absent_is_none() {
+        let bytes = br#"{"v":1,"type":"provider_hello","services":["chat","tts"]}"#;
+        assert_eq!(
+            decode(bytes),
+            Some(ProtocolMessage::ProviderHello {
+                models: None,
+                services: Some(vec!["chat".to_string(), "tts".to_string()]),
+                voices: None,
+            })
         );
     }
 

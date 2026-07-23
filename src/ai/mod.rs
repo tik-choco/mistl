@@ -460,7 +460,16 @@ async fn build_provider(service: &Arc<AiService>, cfg: &crate::config::AiConfig)
         })
     };
 
-    let tts_call = voice_preset_provider(cfg, &cfg.tts_preset_id).map(|(provider, resolved)| {
+    let tts_preset = voice_preset_provider(cfg, &cfg.tts_preset_id);
+    // Minimal voice catalog advertisement (tts-voice-selection-v1 §2.1/§3.5):
+    // the resolved tts preset's single configured `voice`, if any. Upstream
+    // `/audio/voices` discovery is a v2 follow-up (see the draft's §2.5).
+    let advertised_voices: Vec<String> = tts_preset
+        .as_ref()
+        .and_then(|(_, resolved)| resolved.voice.clone())
+        .into_iter()
+        .collect();
+    let tts_call = tts_preset.map(|(provider, resolved)| {
         let call: TtsCallFn = Arc::new(move |text, model, voice| {
             let provider = provider.clone();
             let req = tts::TtsParams {
@@ -490,7 +499,14 @@ async fn build_provider(service: &Arc<AiService>, cfg: &crate::config::AiConfig)
         call
     });
 
-    let provider = Provider::new_with_voice(service.send.clone(), call, models.clone(), tts_call, stt_call);
+    let provider = Provider::new_with_voice(
+        service.send.clone(),
+        call,
+        models.clone(),
+        tts_call,
+        stt_call,
+        advertised_voices,
+    );
     Ok(BuiltProvider {
         provider,
         upstream_base_url: upstream.base_url,

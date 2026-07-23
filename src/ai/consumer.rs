@@ -77,6 +77,13 @@ pub struct ProviderInfo {
     /// callers can distinguish an explicit `["chat"]` advertisement from a
     /// pre-`services` peer that omitted the field entirely.
     pub services: Option<Vec<String>>,
+    /// Raw `voices` from the provider's latest `provider_hello`, as decoded
+    /// (`None` if absent/invalid). This consumer never issues
+    /// `tts_request`s itself (see the module doc's Discovery section, which
+    /// only covers `llm_request`/chat) -- kept as-received purely so
+    /// callers inspecting `ProviderInfo` (e.g. a status/dashboard surface)
+    /// can see what the locked-in provider advertises, same as `services`.
+    pub voices: Option<Vec<String>>,
 }
 
 /// Internal events routed to an in-flight [`Consumer::request`] call.
@@ -120,7 +127,7 @@ impl Consumer {
     /// at all -- see the module doc's "Discovery" section.
     pub fn handle_message(&self, from: &str, msg: &ProtocolMessage) {
         match msg {
-            ProtocolMessage::ProviderHello { models, services } => {
+            ProtocolMessage::ProviderHello { models, services, voices } => {
                 if !protocol::advertises_service(services, protocol::SERVICE_CHAT) {
                     debug!(
                         %from,
@@ -136,6 +143,7 @@ impl Consumer {
                             node_id: from.to_string(),
                             models: models.clone().unwrap_or_default(),
                             services: services.clone(),
+                            voices: voices.clone(),
                         });
                         locked_in = true;
                         true
@@ -143,6 +151,7 @@ impl Consumer {
                     Some(info) if info.node_id == from => {
                         info.models = models.clone().unwrap_or_default();
                         info.services = services.clone();
+                        info.voices = voices.clone();
                         true
                     }
                     Some(_) => false,
@@ -761,6 +770,7 @@ mod tests {
             &ProtocolMessage::ProviderHello {
                 models: Some(vec!["gpt-4o".into()]),
                 services: None,
+                voices: None,
             },
         );
 
@@ -786,6 +796,7 @@ mod tests {
             &ProtocolMessage::ProviderHello {
                 models: Some(vec!["gpt-4o".into()]),
                 services: None,
+                voices: None,
             },
         );
         consumer.handle_message(
@@ -793,6 +804,7 @@ mod tests {
             &ProtocolMessage::ProviderHello {
                 models: Some(vec!["gpt-4o".into(), "gpt-4o-mini".into()]),
                 services: None,
+                voices: None,
             },
         );
 
@@ -820,11 +832,13 @@ mod tests {
             &ProtocolMessage::ProviderHello {
                 models: Some(vec!["gpt-4o".into()]),
                 services: Some(vec!["chat".into(), "tts".into()]),
+                voices: Some(vec!["alloy".into()]),
             },
         );
 
         let info = consumer.provider().expect("should be locked in");
         assert_eq!(info.services, Some(vec!["chat".to_string(), "tts".to_string()]));
+        assert_eq!(info.voices, Some(vec!["alloy".to_string()]));
     }
 
     #[tokio::test]
@@ -841,6 +855,7 @@ mod tests {
             &ProtocolMessage::ProviderHello {
                 models: None,
                 services: Some(vec!["tts".into(), "stt".into()]),
+                voices: None,
             },
         );
 
@@ -864,6 +879,7 @@ mod tests {
             &ProtocolMessage::ProviderHello {
                 models: None,
                 services: Some(vec!["tts".into()]),
+                voices: None,
             },
         );
         consumer.handle_message(
@@ -871,6 +887,7 @@ mod tests {
             &ProtocolMessage::ProviderHello {
                 models: Some(vec!["gpt-4o".into()]),
                 services: Some(vec!["chat".into()]),
+                voices: None,
             },
         );
 
@@ -896,7 +913,7 @@ mod tests {
 
         consumer.handle_message(
             "legacy-provider",
-            &ProtocolMessage::ProviderHello { models: None, services: None },
+            &ProtocolMessage::ProviderHello { models: None, services: None, voices: None },
         );
 
         let info = consumer.provider().expect("should be locked in");
@@ -910,13 +927,14 @@ mod tests {
 
         consumer.handle_message(
             "p1",
-            &ProtocolMessage::ProviderHello { models: None, services: None },
+            &ProtocolMessage::ProviderHello { models: None, services: None, voices: None },
         );
         consumer.handle_message(
             "p2",
             &ProtocolMessage::ProviderHello {
                 models: Some(vec!["other-model".into()]),
                 services: None,
+                voices: None,
             },
         );
 
@@ -933,7 +951,7 @@ mod tests {
         let consumer = Consumer::new(send);
         consumer.handle_message(
             "p1",
-            &ProtocolMessage::ProviderHello { models: None, services: None },
+            &ProtocolMessage::ProviderHello { models: None, services: None, voices: None },
         );
         assert!(consumer.provider().is_some());
 
@@ -958,7 +976,7 @@ mod tests {
         let consumer = Consumer::new(send);
         consumer.handle_message(
             "p1",
-            &ProtocolMessage::ProviderHello { models: None, services: None },
+            &ProtocolMessage::ProviderHello { models: None, services: None, voices: None },
         );
 
         consumer.on_peer_disconnected("someone-else");
@@ -979,6 +997,7 @@ mod tests {
             &ProtocolMessage::ProviderHello {
                 models: Some(vec!["m1".into()]),
                 services: None,
+                voices: None,
             },
         );
 

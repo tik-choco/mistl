@@ -117,6 +117,13 @@ pub struct RequestLog {
     pub detail: Option<String>,
 }
 
+/// Maximum number of voice ids advertised in `provider_hello.voices`
+/// (tts-voice-selection-v1 §2.1): keeps the hello payload well under mist's
+/// ~16KB safe message limit even if an upstream catalog is huge. Extra
+/// entries are silently truncated; per the spec this truncation is not
+/// surfaced anywhere (a known v1 limitation).
+const MAX_ADVERTISED_VOICES: usize = 64;
+
 /// Provider state: send fn, upstream call, advertised models, optional
 /// voice calls, logs.
 pub struct Provider {
@@ -125,6 +132,11 @@ pub struct Provider {
     models: Vec<String>,
     tts: Option<TtsCallFn>,
     stt: Option<SttCallFn>,
+    /// TTS voice catalog to advertise in `provider_hello.voices`
+    /// (tts-voice-selection-v1 §2.1/§3.5); only ever surfaced by
+    /// [`Provider::hello`] when `tts` is also configured, regardless of
+    /// whether this list is non-empty (see [`Provider::hello`]).
+    voices: Vec<String>,
     stt_buffers: Mutex<HashMap<String, SttBuffer>>,
     logs: Mutex<Vec<RequestLog>>,
 }
@@ -133,13 +145,16 @@ impl Provider {
     /// Constructs a provider, optionally wiring TTS/STT upstream calls (see
     /// the module doc and [`TtsCallFn`]/[`SttCallFn`]); pass `None, None`
     /// for a chat-only provider, where `tts_request`/`stt_request` always
-    /// get an immediate `voice_error`.
+    /// get an immediate `voice_error`. `voices` is the TTS voice catalog to
+    /// advertise (see [`Provider::hello`]); pass an empty vec when unknown
+    /// or when `tts` is `None`.
     pub fn new_with_voice(
         send: SendFn,
         call: LlmCallFn,
         models: Vec<String>,
         tts: Option<TtsCallFn>,
         stt: Option<SttCallFn>,
+        voices: Vec<String>,
     ) -> Arc<Self> {
         Arc::new(Self {
             send,
@@ -147,6 +162,7 @@ impl Provider {
             models,
             tts,
             stt,
+            voices,
             stt_buffers: Mutex::new(HashMap::new()),
             logs: Mutex::new(Vec::new()),
         })
@@ -178,15 +194,26 @@ impl Provider {
     /// is always present (rather than relying on the wire spec's "missing
     /// == chat only" default), self-describing this provider's actual
     /// capabilities to `services`-aware peers -- see [`Provider::services`].
+    /// `voices` is included only when this provider actually offers TTS
+    /// (`tts` configured) *and* has a non-empty catalog to advertise
+    /// (tts-voice-selection-v1 §2.1: "`services` に `tts` を広告する
+    /// provider のみが `voices` を広告してよい"); the list is truncated to
+    /// [`MAX_ADVERTISED_VOICES`] entries.
     pub fn hello(&self) -> ProtocolMessage {
         let models = if self.models.is_empty() {
             None
         } else {
             Some(self.models.clone())
         };
+        let voices = if self.tts.is_some() && !self.voices.is_empty() {
+            Some(self.voices.iter().take(MAX_ADVERTISED_VOICES).cloned().collect())
+        } else {
+            None
+        };
         ProtocolMessage::ProviderHello {
             models,
             services: Some(self.services()),
+            voices,
         }
     }
 
@@ -617,7 +644,7 @@ mod tests {
     async fn happy_path_emits_chunks_then_done() {
         let (send, sent) = fake_send();
         let call = fake_call_success(vec!["Hel", "lo"], "Hello");
-        let provider = Provider::new_with_voice(send, call, vec![], None, None);
+        let provider = Provider::new_with_voice(send, call, vec![], None, None, vec![]);
 
         provider
             .clone()
@@ -670,7 +697,7 @@ mod tests {
     async fn error_path_emits_llm_error() {
         let (send, sent) = fake_send();
         let call = fake_call_error("upstream boom");
-        let provider = Provider::new_with_voice(send, call, vec![], None, None);
+        let provider = Provider::new_with_voice(send, call, vec![], None, None, vec![]);
 
         provider
             .clone()
@@ -706,12 +733,13 @@ mod tests {
     fn hello_omits_models_when_empty() {
         let (send, _sent) = fake_send();
         let call = fake_call_success(vec![], "");
-        let provider = Provider::new_with_voice(send, call, vec![], None, None);
+        let provider = Provider::new_with_voice(send, call, vec![], None, None, vec![]);
         assert_eq!(
             provider.hello(),
             ProtocolMessage::ProviderHello {
                 models: None,
                 services: Some(vec!["chat".into()]),
+                voices: None,
             }
         );
     }
@@ -720,13 +748,20 @@ mod tests {
     fn hello_includes_models_when_present() {
         let (send, _sent) = fake_send();
         let call = fake_call_success(vec![], "");
-        let provider =
-            Provider::new_with_voice(send, call, vec!["gpt-4o".into(), "gpt-4o-mini".into()], None, None);
+        let provider = Provider::new_with_voice(
+            send,
+            call,
+            vec!["gpt-4o".into(), "gpt-4o-mini".into()],
+            None,
+            None,
+            vec![],
+        );
         assert_eq!(
             provider.hello(),
             ProtocolMessage::ProviderHello {
                 models: Some(vec!["gpt-4o".into(), "gpt-4o-mini".into()]),
                 services: Some(vec!["chat".into()]),
+                voices: None,
             }
         );
     }
@@ -735,7 +770,7 @@ mod tests {
     fn hello_always_advertises_chat_service() {
         let (send, _sent) = fake_send();
         let call = fake_call_success(vec![], "");
-        let provider = Provider::new_with_voice(send, call, vec![], None, None);
+        let provider = Provider::new_with_voice(send, call, vec![], None, None, vec![]);
         match provider.hello() {
             ProtocolMessage::ProviderHello { services, .. } => {
                 assert_eq!(services, Some(vec!["chat".to_string()]));
@@ -748,7 +783,7 @@ mod tests {
     async fn consumer_hello_gets_hello_reply() {
         let (send, sent) = fake_send();
         let call = fake_call_success(vec![], "");
-        let provider = Provider::new_with_voice(send, call, vec!["m1".into()], None, None);
+        let provider = Provider::new_with_voice(send, call, vec!["m1".into()], None, None, vec![]);
 
         provider
             .clone()
@@ -765,7 +800,7 @@ mod tests {
     async fn log_status_transitions() {
         let (send, _sent) = fake_send();
         let call = fake_call_success(vec!["a", "b"], "ab");
-        let provider = Provider::new_with_voice(send, call, vec![], None, None);
+        let provider = Provider::new_with_voice(send, call, vec![], None, None, vec![]);
 
         provider
             .clone()
@@ -796,7 +831,7 @@ mod tests {
     async fn log_ring_buffer_caps_and_orders_newest_first() {
         let (send, _sent) = fake_send();
         let call = fake_call_success(vec![], "ok");
-        let provider = Provider::new_with_voice(send, call, vec![], None, None);
+        let provider = Provider::new_with_voice(send, call, vec![], None, None, vec![]);
 
         for i in 0..(DEFAULT_MAX_LOG_ENTRIES + 5) {
             provider
@@ -828,7 +863,7 @@ mod tests {
         // streaming x N -> done) for the *same* request id; the log length
         // must stay at 1.
         let call = fake_call_success(vec!["a", "b", "c"], "abc");
-        let provider = Provider::new_with_voice(send, call, vec![], None, None);
+        let provider = Provider::new_with_voice(send, call, vec![], None, None, vec![]);
 
         provider
             .clone()
@@ -850,7 +885,7 @@ mod tests {
     async fn tts_request_gets_voice_error_reply() {
         let (send, sent) = fake_send();
         let call = fake_call_success(vec![], "");
-        let provider = Provider::new_with_voice(send, call, vec![], None, None);
+        let provider = Provider::new_with_voice(send, call, vec![], None, None, vec![]);
 
         provider
             .clone()
@@ -882,7 +917,7 @@ mod tests {
     async fn stt_request_gets_voice_error_reply() {
         let (send, sent) = fake_send();
         let call = fake_call_success(vec![], "");
-        let provider = Provider::new_with_voice(send, call, vec![], None, None);
+        let provider = Provider::new_with_voice(send, call, vec![], None, None, vec![]);
 
         provider
             .clone()
@@ -919,7 +954,7 @@ mod tests {
         // must not touch the provider's llm_request logging/response path.
         let (send, sent) = fake_send();
         let call = fake_call_success(vec!["Hel", "lo"], "Hello");
-        let provider = Provider::new_with_voice(send, call, vec![], None, None);
+        let provider = Provider::new_with_voice(send, call, vec![], None, None, vec![]);
 
         provider
             .clone()
@@ -963,7 +998,7 @@ mod tests {
     async fn call_upstream_bypasses_network() {
         let (send, sent) = fake_send();
         let call = fake_call_success(vec!["x"], "x");
-        let provider = Provider::new_with_voice(send, call, vec![], None, None);
+        let provider = Provider::new_with_voice(send, call, vec![], None, None, vec![]);
 
         let (delta_tx, mut delta_rx) = tokio::sync::mpsc::unbounded_channel();
         let content = provider
@@ -1024,6 +1059,7 @@ mod tests {
             vec![],
             Some(fake_tts_success(vec![1, 2, 3], "audio/mpeg")),
             Some(fake_stt_success("hi", Arc::new(Mutex::new(None)))),
+            vec![],
         );
         match provider.hello() {
             ProtocolMessage::ProviderHello { services, .. } => {
@@ -1033,6 +1069,92 @@ mod tests {
                 );
             }
             other => panic!("expected ProviderHello, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hello_advertises_voices_when_tts_configured_with_a_voice_catalog() {
+        // Mirrors mod.rs's build_provider wiring: a tts_preset_id whose
+        // resolved preset has a `voice` set produces a one-element
+        // `voices` catalog (tts-voice-selection-v1 §2.1/§3.5 minimal
+        // implementation).
+        let (send, _sent) = fake_send();
+        let call = fake_call_success(vec![], "");
+        let provider = Provider::new_with_voice(
+            send,
+            call,
+            vec![],
+            Some(fake_tts_success(vec![1, 2, 3], "audio/mpeg")),
+            None,
+            vec!["alloy".to_string()],
+        );
+        assert_eq!(
+            provider.hello(),
+            ProtocolMessage::ProviderHello {
+                models: None,
+                services: Some(vec!["chat".to_string(), "tts".to_string()]),
+                voices: Some(vec!["alloy".to_string()]),
+            }
+        );
+    }
+
+    #[test]
+    fn hello_omits_voices_when_tts_not_configured() {
+        // Even if a `voices` list were somehow passed in, it must not be
+        // advertised unless this provider actually offers "tts" -- the
+        // wire spec's advertising condition (§2.1: "services に tts を広告
+        // する provider のみが voices を広告してよい").
+        let (send, _sent) = fake_send();
+        let call = fake_call_success(vec![], "");
+        let provider =
+            Provider::new_with_voice(send, call, vec![], None, None, vec!["alloy".to_string()]);
+        match provider.hello() {
+            ProtocolMessage::ProviderHello { voices, .. } => {
+                assert_eq!(voices, None);
+            }
+            other => panic!("expected ProviderHello, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hello_omits_voices_when_catalog_empty() {
+        let (send, _sent) = fake_send();
+        let call = fake_call_success(vec![], "");
+        let provider = Provider::new_with_voice(
+            send,
+            call,
+            vec![],
+            Some(fake_tts_success(vec![1, 2, 3], "audio/mpeg")),
+            None,
+            vec![],
+        );
+        match provider.hello() {
+            ProtocolMessage::ProviderHello { voices, .. } => {
+                assert_eq!(voices, None);
+            }
+            other => panic!("expected ProviderHello, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hello_truncates_voices_to_max_advertised() {
+        let (send, _sent) = fake_send();
+        let call = fake_call_success(vec![], "");
+        let many_voices: Vec<String> = (0..100).map(|i| format!("voice-{i}")).collect();
+        let provider = Provider::new_with_voice(
+            send,
+            call,
+            vec![],
+            Some(fake_tts_success(vec![1, 2, 3], "audio/mpeg")),
+            None,
+            many_voices.clone(),
+        );
+        match provider.hello() {
+            ProtocolMessage::ProviderHello { voices: Some(voices), .. } => {
+                assert_eq!(voices.len(), MAX_ADVERTISED_VOICES);
+                assert_eq!(voices, many_voices[..MAX_ADVERTISED_VOICES].to_vec());
+            }
+            other => panic!("expected ProviderHello with voices, got {other:?}"),
         }
     }
 
@@ -1053,6 +1175,7 @@ mod tests {
             vec![],
             Some(fake_tts_success(audio_bytes.clone(), "audio/mpeg")),
             None,
+            vec![],
         );
 
         provider
@@ -1091,8 +1214,14 @@ mod tests {
     async fn tts_request_upstream_failure_sends_voice_error_without_code() {
         let (send, sent) = fake_send();
         let call = fake_call_success(vec![], "");
-        let provider =
-            Provider::new_with_voice(send, call, vec![], Some(fake_tts_error("tts boom")), None);
+        let provider = Provider::new_with_voice(
+            send,
+            call,
+            vec![],
+            Some(fake_tts_error("tts boom")),
+            None,
+            vec![],
+        );
 
         provider
             .clone()
@@ -1134,6 +1263,7 @@ mod tests {
             vec![],
             None,
             Some(fake_stt_success("hello world", captured.clone())),
+            vec![],
         );
 
         provider
@@ -1198,8 +1328,14 @@ mod tests {
 
         let (send, sent) = fake_send();
         let call = fake_call_success(vec![], "");
-        let provider =
-            Provider::new_with_voice(send, call, vec![], None, Some(fake_stt_error("stt boom")));
+        let provider = Provider::new_with_voice(
+            send,
+            call,
+            vec![],
+            None,
+            Some(fake_stt_error("stt boom")),
+            vec![],
+        );
 
         provider
             .clone()
@@ -1241,6 +1377,7 @@ mod tests {
             vec![],
             None,
             Some(fake_stt_success("should not be reached", captured.clone())),
+            vec![],
         );
 
         use base64::Engine as _;
