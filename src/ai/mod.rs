@@ -469,7 +469,7 @@ async fn build_provider(service: &Arc<AiService>, cfg: &crate::config::AiConfig)
             let provider = provider.clone();
             let effective_voice = resolve_tts_voice(voice, &resolved.voice, &fallback_voice);
             let req = tts::TtsParams {
-                model: model.unwrap_or_else(|| resolved.model.clone()),
+                model: resolve_voice_call_model(model, &resolved.model, "tts"),
                 voice: effective_voice.unwrap_or_default(),
                 input: text,
                 format: None,
@@ -483,7 +483,7 @@ async fn build_provider(service: &Arc<AiService>, cfg: &crate::config::AiConfig)
         let call: SttCallFn = Arc::new(move |audio, mime, model, file_name| {
             let provider = provider.clone();
             let req = stt::SttParams {
-                model: model.unwrap_or_else(|| resolved.model.clone()),
+                model: resolve_voice_call_model(model, &resolved.model, "stt"),
                 audio,
                 mime,
                 file_name,
@@ -613,6 +613,42 @@ fn resolve_tts_voice(
          using the first voice from the advertised catalog"
     );
     Some(voice)
+}
+
+/// Resolves the effective `model` for one `tts_request`/`stt_request`
+/// against `preset_model` (the tts/stt preset's own configured model), per
+/// mistllm-wire's "provider の voice/model 尊重規則": unlike `voice`, the
+/// request's `model` is only ever honored when it *exactly matches*
+/// `preset_model` -- otherwise (mismatch, or omitted entirely) this
+/// provider's own configured model is used instead. This is a fallback, not
+/// a rejection: a mismatched model never fails the request, it's silently
+/// replaced. The mismatch case matters because consumers may echo back an
+/// advertised *label* (e.g. a chat preset's display name such as `"TTS"`)
+/// as `model` rather than a real upstream model id -- sending that straight
+/// to `/audio/speech`/`/audio/transcriptions` would otherwise fail upstream
+/// (see `tc-translate`'s `useNetworkProvider.ts`:
+/// `model === ownTtsModel ? model : ownTtsModel` for the reference
+/// implementation this mirrors). `kind` ("tts"/"stt") is only used to label
+/// the mismatch debug log.
+fn resolve_voice_call_model(
+    request_model: Option<String>,
+    preset_model: &str,
+    kind: &'static str,
+) -> String {
+    match request_model {
+        Some(model) if model == preset_model => model,
+        Some(mismatched) => {
+            debug!(
+                kind,
+                requested = %mismatched,
+                configured = %preset_model,
+                "ai: voice request model did not match this provider's configured model; \
+                 falling back to the configured model instead of forwarding the request's value upstream"
+            );
+            preset_model.to_string()
+        }
+        None => preset_model.to_string(),
+    }
 }
 
 /// Logs the resolved state of `cfg.tts_preset_id` at every provider
@@ -872,6 +908,47 @@ mod tests {
     #[test]
     fn resolve_tts_voice_none_when_all_three_are_absent() {
         assert_eq!(resolve_tts_voice(None, &None, &None), None);
+    }
+
+    // -- resolve_voice_call_model: request model vs. preset model ---------
+
+    #[test]
+    fn resolve_voice_call_model_honors_a_matching_request_model_tts() {
+        let model = resolve_voice_call_model(Some("irodori-tts".to_string()), "irodori-tts", "tts");
+        assert_eq!(model, "irodori-tts");
+    }
+
+    #[test]
+    fn resolve_voice_call_model_falls_back_on_a_mismatched_request_model_tts() {
+        // The regression this guards: a consumer selecting an advertised ad
+        // card can echo back its *label* (e.g. "TTS") as `model` rather than
+        // a real upstream model id -- that must never be forwarded as-is.
+        let model = resolve_voice_call_model(Some("TTS".to_string()), "irodori-tts", "tts");
+        assert_eq!(model, "irodori-tts");
+    }
+
+    #[test]
+    fn resolve_voice_call_model_falls_back_when_omitted_tts() {
+        let model = resolve_voice_call_model(None, "irodori-tts", "tts");
+        assert_eq!(model, "irodori-tts");
+    }
+
+    #[test]
+    fn resolve_voice_call_model_honors_a_matching_request_model_stt() {
+        let model = resolve_voice_call_model(Some("whisper-1".to_string()), "whisper-1", "stt");
+        assert_eq!(model, "whisper-1");
+    }
+
+    #[test]
+    fn resolve_voice_call_model_falls_back_on_a_mismatched_request_model_stt() {
+        let model = resolve_voice_call_model(Some("STT".to_string()), "whisper-1", "stt");
+        assert_eq!(model, "whisper-1");
+    }
+
+    #[test]
+    fn resolve_voice_call_model_falls_back_when_omitted_stt() {
+        let model = resolve_voice_call_model(None, "whisper-1", "stt");
+        assert_eq!(model, "whisper-1");
     }
 
     // -- resolve_advertised_voices: fallback order against a mock upstream --
