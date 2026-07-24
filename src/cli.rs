@@ -1007,42 +1007,7 @@ fn open_dashboard() -> Result<()> {
     }
     let url = format!("http://{}/", config.ui.listen);
 
-    // Headless/minimal environments (containers, WSL without a registered
-    // browser, servers) have no opener at all -- xdg-open in particular
-    // shell-probes a chain of text browsers (www-browser, links2, elinks,
-    // links, lynx, w3m) and prints a "not found" line for each before giving
-    // up. That's harmless (we already fall back to printing the URL below)
-    // but reads like a wall of errors, so the child's stdout/stderr are
-    // dropped rather than inherited.
-    use std::process::Stdio;
-
-    #[cfg(windows)]
-    let opened = std::process::Command::new("cmd")
-        .args(["/c", "start", "", &url])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    #[cfg(target_os = "macos")]
-    let opened = std::process::Command::new("open")
-        .arg(&url)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let opened = std::process::Command::new("xdg-open")
-        .arg(&url)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+    let opened = crate::web::browser::open_in_browser(&url);
 
     if opened {
         println!("dashboard: {url}");
