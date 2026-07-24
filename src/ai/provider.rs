@@ -20,8 +20,8 @@
 //!   - On success: `llm_response_done { id, content: Some(full) }`.
 //!   - On failure: `llm_error { id, message }`.
 //! - `consumer_hello` -> reply [`Provider::hello`] directly to the sender.
-//! - `tts_request` (single message: `id, text, model?, voice?`) -> when a
-//!   TTS closure is configured, synthesize and reply with one or more
+//! - `tts_request` (single message: `id, text, model?, voice?, lang?`) ->
+//!   when a TTS closure is configured, synthesize and reply with one or more
 //!   `tts_response { id, seq, data (base64), last, mime }` chunks
 //!   ([`TTS_CHUNK_RAW_BYTES`] raw bytes per chunk before base64, comfortably
 //!   under mist's message size ceiling once inflated); on upstream failure,
@@ -54,9 +54,12 @@ use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 
+use crate::config::ResolvedAiPreset;
+
+use super::openai::{self, UpstreamConfig};
 use super::protocol::ProtocolMessage;
 use super::tts::TtsAudio;
-use super::{LlmCallFn, SendFn};
+use super::{LlmCallFn, LlmCallFuture, SendFn};
 
 /// Maximum number of log entries retained; oldest are dropped first.
 const DEFAULT_MAX_LOG_ENTRIES: usize = 50;
@@ -76,12 +79,20 @@ const STT_MAX_BUFFERED_BYTES: usize = 25 * 1024 * 1024;
 /// Boxed future returned by a voice call closure.
 type VoiceFuture<T> = Pin<Box<dyn Future<Output = anyhow::Result<T>> + Send>>;
 
-/// Synthesizes speech: `(text, model_override, voice_override)` -> audio.
-/// Built in `super::provide_start` from the resolved `ai.tts_preset_id`
-/// preset (which supplies the default model/voice when the request omits
-/// them); `None` on [`Provider`] means this node doesn't offer TTS.
-pub type TtsCallFn =
-    Arc<dyn Fn(String, Option<String>, Option<String>) -> VoiceFuture<TtsAudio> + Send + Sync>;
+/// Synthesizes speech: `(text, model_override, voice_override, lang_hint)`
+/// -> audio. Built in `super::provide_start` from the resolved
+/// `ai.tts_preset_id` preset (which supplies the default model/voice, and
+/// per-language voice overrides, when the request omits them -- see
+/// `super::resolve_tts_voice`); `None` on [`Provider`] means this node
+/// doesn't offer TTS. `lang_hint` is the `tts_request.lang` BCP-47 tag
+/// (mistllm-wire tts-lang-hint-v1), passed through unchanged for the
+/// closure to resolve a voice from; it never overrides an explicit
+/// `voice_override`.
+pub type TtsCallFn = Arc<
+    dyn Fn(String, Option<String>, Option<String>, Option<String>) -> VoiceFuture<TtsAudio>
+        + Send
+        + Sync,
+>;
 
 /// Transcribes speech: `(audio_bytes, mime, model_override, file_name)` ->
 /// text. Built in `super::provide_start` from the resolved
@@ -99,6 +110,22 @@ struct SttBuffer {
     model: Option<String>,
     file_name: Option<String>,
     bytes: Vec<u8>,
+}
+
+/// Outcome of [`Provider::resolve_llm_call`]: which upstream (if any)
+/// should serve one `llm_request`.
+enum LlmCallResolution {
+    /// Use the default injected `call` closure, unchanged: either no
+    /// `model` was requested, or this provider has no advertised list at
+    /// all (legacy pass-through: any `model` is forwarded to `call`
+    /// verbatim, unchecked).
+    Default,
+    /// The requested `model` named a preset in [`Provider::advertised`] --
+    /// call that preset's own upstream directly instead of `call`.
+    Resolved(ResolvedAiPreset),
+    /// A `model` was requested, an advertised list *is* configured, but it
+    /// matched none of it.
+    Reject,
 }
 
 /// One entry in the provider's request log (newest first from [`Provider::logs`]).
@@ -124,12 +151,27 @@ pub struct RequestLog {
 /// surfaced anywhere (a known v1 limitation).
 const MAX_ADVERTISED_VOICES: usize = 64;
 
+/// Message returned to a peer whose `llm_request.model` named neither
+/// nothing nor one of this provider's advertised names, when an advertised
+/// list *is* configured (see [`Provider::resolve_llm_call`]).
+const MODEL_NOT_SHARED_MESSAGE: &str = "The requested model is not shared by this provider.";
+
 /// Provider state: send fn, upstream call, advertised models, optional
 /// voice calls, logs.
 pub struct Provider {
     send: SendFn,
     call: LlmCallFn,
     models: Vec<String>,
+    /// Advertised-name -> resolved preset (base_url/api_key/model/
+    /// temperature/reasoning_effort), used by [`Provider::resolve_llm_call`]
+    /// to route an `llm_request` whose `model` names one of `models` to
+    /// *that preset's own* upstream, rather than always going through the
+    /// single default `call` closure (whose upstream is fixed to the
+    /// default preset's, and can't speak for a different preset that
+    /// happens to point at a different provider). Empty means "no
+    /// advertised list configured" -- the legacy pass-through mode where
+    /// any `model` (or none) always goes through `call` verbatim, unchecked.
+    advertised: HashMap<String, ResolvedAiPreset>,
     tts: Option<TtsCallFn>,
     stt: Option<SttCallFn>,
     /// TTS voice catalog to advertise in `provider_hello.voices`
@@ -148,6 +190,7 @@ impl Provider {
     /// get an immediate `voice_error`. `voices` is the TTS voice catalog to
     /// advertise (see [`Provider::hello`]); pass an empty vec when unknown
     /// or when `tts` is `None`.
+    #[allow(dead_code)] // retained for this module's own tests (empty advertised-table convenience)
     pub fn new_with_voice(
         send: SendFn,
         call: LlmCallFn,
@@ -156,10 +199,28 @@ impl Provider {
         stt: Option<SttCallFn>,
         voices: Vec<String>,
     ) -> Arc<Self> {
+        Self::new(send, call, models, HashMap::new(), tts, stt, voices)
+    }
+
+    /// Full constructor, additionally taking the advertised-name ->
+    /// resolved-preset routing table (see [`Provider::advertised`] and
+    /// [`Provider::resolve_llm_call`]). Prefer [`Provider::new_with_voice`]
+    /// (an empty table -- legacy pass-through mode) when that routing isn't
+    /// needed, as most of this module's own tests do.
+    pub fn new(
+        send: SendFn,
+        call: LlmCallFn,
+        models: Vec<String>,
+        advertised: HashMap<String, ResolvedAiPreset>,
+        tts: Option<TtsCallFn>,
+        stt: Option<SttCallFn>,
+        voices: Vec<String>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             send,
             call,
             models,
+            advertised,
             tts,
             stt,
             voices,
@@ -229,8 +290,8 @@ impl Provider {
             ProtocolMessage::LlmRequest { id, messages, model } => {
                 self.handle_llm_request(from, id, messages, model).await;
             }
-            ProtocolMessage::TtsRequest { id, text, model, voice } => {
-                self.handle_tts_request(from, id, text, model, voice).await;
+            ProtocolMessage::TtsRequest { id, text, model, voice, lang } => {
+                self.handle_tts_request(from, id, text, model, voice, lang).await;
             }
             ProtocolMessage::SttRequest { id, seq, data, last, mime, model, file_name } => {
                 self.handle_stt_request(from, id, seq, data, last, mime, model, file_name)
@@ -261,6 +322,7 @@ impl Provider {
     /// one or more `tts_response` chunks; `voice_error` (no `code`) on an
     /// upstream failure, or the usual `unsupported_service` rejection when
     /// no TTS closure is configured.
+    #[allow(clippy::too_many_arguments)]
     async fn handle_tts_request(
         &self,
         from: String,
@@ -268,12 +330,13 @@ impl Provider {
         text: String,
         model: Option<String>,
         voice: Option<String>,
+        lang: Option<String>,
     ) {
         let Some(tts) = &self.tts else {
             self.reject_voice_request(&from, id);
             return;
         };
-        match tts(text, model, voice).await {
+        match tts(text, model, voice, lang).await {
             Ok(audio) => self.send_tts_response(&from, id, audio),
             Err(err) => {
                 (self.send)(
@@ -424,6 +487,30 @@ impl Provider {
         }
     }
 
+    /// Which upstream (if any) should serve one `llm_request.model`, per
+    /// mistllm-wire's "advertised name = preset label" contract: a bare
+    /// `model` mismatch never falls back to the default preset, it's
+    /// rejected outright, so a peer can't accidentally get an unrelated
+    /// preset's answer under a name it didn't ask for.
+    fn resolve_llm_call(&self, model: &Option<String>) -> LlmCallResolution {
+        let Some(name) = model else {
+            // No model requested: always the default preset's upstream,
+            // whether or not an advertised list is configured.
+            return LlmCallResolution::Default;
+        };
+        if self.advertised.is_empty() {
+            // Legacy pass-through mode: no advertised list configured at
+            // all, so there is nothing to check the name against -- forward
+            // it to the default upstream verbatim, unchanged from before
+            // this routing table existed.
+            return LlmCallResolution::Default;
+        }
+        match self.advertised.get(name) {
+            Some(resolved) => LlmCallResolution::Resolved(resolved.clone()),
+            None => LlmCallResolution::Reject,
+        }
+    }
+
     async fn handle_llm_request(
         &self,
         from: String,
@@ -442,8 +529,52 @@ impl Provider {
             detail: None,
         });
 
+        let resolution = self.resolve_llm_call(&model);
+        if matches!(resolution, LlmCallResolution::Reject) {
+            let message = MODEL_NOT_SHARED_MESSAGE.to_string();
+            (self.send)(
+                &from,
+                ProtocolMessage::LlmError {
+                    id: id.clone(),
+                    message: message.clone(),
+                    code: Some(super::protocol::CODE_MODEL_NOT_SHARED.to_string()),
+                },
+            );
+            self.push_log(RequestLog {
+                id,
+                from,
+                model,
+                status: "error".into(),
+                started_at,
+                char_count: 0,
+                detail: Some(message),
+            });
+            return;
+        }
+
         let (delta_tx, mut delta_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-        let call_fut = (self.call)(messages, model.clone(), Some(delta_tx));
+        let call_fut: LlmCallFuture = match resolution {
+            LlmCallResolution::Resolved(resolved) => {
+                // A named preset may point at a *different* provider than
+                // the default preset's `call` closure was built from, so
+                // this calls the upstream directly against the resolved
+                // preset's own connection info instead of reusing `call`.
+                let call_model = resolved.model.clone();
+                let upstream = UpstreamConfig {
+                    base_url: resolved.base_url,
+                    api_key: resolved.api_key,
+                    model: Some(resolved.model),
+                    temperature: resolved.temperature,
+                    reasoning_effort: resolved.reasoning_effort,
+                };
+                Box::pin(async move {
+                    openai::stream_chat_completion(&upstream, &messages, Some(&call_model), Some(delta_tx))
+                        .await
+                })
+            }
+            LlmCallResolution::Default => (self.call)(messages, model.clone(), Some(delta_tx)),
+            LlmCallResolution::Reject => unreachable!("handled and returned above"),
+        };
         tokio::pin!(call_fut);
 
         let mut seq: u64 = 0;
@@ -896,6 +1027,7 @@ mod tests {
                     text: "hello there".into(),
                     model: None,
                     voice: None,
+                    lang: None,
                 },
             )
             .await;
@@ -965,6 +1097,7 @@ mod tests {
                     text: "hi".into(),
                     model: None,
                     voice: None,
+                    lang: None,
                 },
             )
             .await;
@@ -1011,8 +1144,217 @@ mod tests {
         assert!(sent.lock().unwrap().is_empty(), "call_upstream must not touch the network");
     }
 
+    fn sample_resolved_preset() -> ResolvedAiPreset {
+        ResolvedAiPreset {
+            base_url: "http://upstream.invalid/v1".to_string(),
+            api_key: "sk-test".to_string(),
+            model: "gpt-4o".to_string(),
+            temperature: None,
+            reasoning_effort: None,
+            voice: None,
+            lang_voices: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn resolve_llm_call_is_default_when_no_model_requested() {
+        let (send, _sent) = fake_send();
+        let call = fake_call_success(vec![], "");
+        let mut advertised = HashMap::new();
+        advertised.insert("Chat".to_string(), sample_resolved_preset());
+        let provider = Provider::new(send, call, vec!["Chat".into()], advertised, None, None, vec![]);
+        assert!(matches!(provider.resolve_llm_call(&None), LlmCallResolution::Default));
+    }
+
+    #[test]
+    fn resolve_llm_call_is_default_in_legacy_mode_with_no_advertised_table() {
+        // No advertised list configured at all: any model (even one that
+        // matches nothing) is passed straight through, unchecked -- the
+        // pre-existing legacy pass-through behavior.
+        let (send, _sent) = fake_send();
+        let call = fake_call_success(vec![], "");
+        let provider = Provider::new_with_voice(send, call, vec![], None, None, vec![]);
+        assert!(matches!(
+            provider.resolve_llm_call(&Some("anything".to_string())),
+            LlmCallResolution::Default
+        ));
+    }
+
+    #[test]
+    fn resolve_llm_call_resolves_a_matching_advertised_name() {
+        let (send, _sent) = fake_send();
+        let call = fake_call_success(vec![], "");
+        let mut advertised = HashMap::new();
+        advertised.insert("Chat".to_string(), sample_resolved_preset());
+        let provider = Provider::new(send, call, vec!["Chat".into()], advertised, None, None, vec![]);
+        match provider.resolve_llm_call(&Some("Chat".to_string())) {
+            LlmCallResolution::Resolved(resolved) => assert_eq!(resolved.model, "gpt-4o"),
+            _ => panic!("expected Resolved"),
+        }
+    }
+
+    #[test]
+    fn resolve_llm_call_rejects_an_unmatched_name_when_advertised_table_is_non_empty() {
+        let (send, _sent) = fake_send();
+        let call = fake_call_success(vec![], "");
+        let mut advertised = HashMap::new();
+        advertised.insert("Chat".to_string(), sample_resolved_preset());
+        let provider = Provider::new(send, call, vec!["Chat".into()], advertised, None, None, vec![]);
+        assert!(matches!(
+            provider.resolve_llm_call(&Some("not-advertised".to_string())),
+            LlmCallResolution::Reject
+        ));
+    }
+
+    #[tokio::test]
+    async fn llm_request_named_but_unshared_model_is_rejected_without_calling_upstream() {
+        let (send, sent) = fake_send();
+        // This closure must never run: a rejected request must short-circuit
+        // before reaching either the default closure or any upstream call.
+        let call = fake_call_error("default closure must not be used for a rejected model");
+        let mut advertised = HashMap::new();
+        advertised.insert("Chat".to_string(), sample_resolved_preset());
+        let provider = Provider::new(send, call, vec!["Chat".into()], advertised, None, None, vec![]);
+
+        provider
+            .clone()
+            .handle_message(
+                "consumer1".into(),
+                ProtocolMessage::LlmRequest {
+                    id: "req1".into(),
+                    messages: messages(),
+                    model: Some("not-advertised".into()),
+                },
+            )
+            .await;
+
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.len(), 1, "expected exactly one reply, got: {sent:?}");
+        match &sent[0] {
+            (to, ProtocolMessage::LlmError { id, message, code }) => {
+                assert_eq!(to, "consumer1");
+                assert_eq!(id, "req1");
+                assert_eq!(message, "The requested model is not shared by this provider.");
+                assert_eq!(code.as_deref(), Some("model_not_shared"));
+            }
+            other => panic!("expected an llm_error reply, got: {other:?}"),
+        }
+
+        let logs = provider.logs();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].status, "error");
+    }
+
+    /// End-to-end: a matching advertised name routes to *that preset's own*
+    /// upstream (a real HTTP call against a mock server bound to a
+    /// different address than any "default" closure would use), proving
+    /// `handle_llm_request` bypasses the injected `call` closure entirely
+    /// for the `Resolved` case rather than only ever using its fixed
+    /// upstream. Also asserts the *real* model id (not the advertised
+    /// label) is what actually reaches the upstream request body.
+    #[tokio::test]
+    async fn llm_request_with_a_matching_advertised_name_calls_that_presets_own_upstream() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        async fn read_request(socket: &mut tokio::net::TcpStream) -> Vec<u8> {
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 4096];
+            loop {
+                let n = socket.read(&mut tmp).await.unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+                if let Some(header_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&buf[..header_end]).to_string();
+                    let content_length: usize = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.trim()
+                                .eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse().ok())
+                                .flatten()
+                        })
+                        .unwrap_or(0);
+                    if buf.len() - (header_end + 4) >= content_length {
+                        break;
+                    }
+                }
+            }
+            buf
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_request(&mut socket).await;
+            let body = r#"{"choices":[{"message":{"content":"hi from resolved preset"}}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            let _ = socket.shutdown().await;
+            request
+        });
+
+        let (send, sent) = fake_send();
+        let call = fake_call_error("default closure must not be used for a resolved advertised model");
+        let mut advertised = HashMap::new();
+        advertised.insert(
+            "Chat".to_string(),
+            ResolvedAiPreset {
+                base_url: format!("http://{addr}"),
+                api_key: "sk-resolved".to_string(),
+                model: "real-upstream-model".to_string(),
+                temperature: None,
+                reasoning_effort: None,
+                voice: None,
+                lang_voices: HashMap::new(),
+            },
+        );
+        let provider = Provider::new(send, call, vec!["Chat".into()], advertised, None, None, vec![]);
+
+        provider
+            .clone()
+            .handle_message(
+                "consumer1".into(),
+                ProtocolMessage::LlmRequest {
+                    id: "req1".into(),
+                    messages: messages(),
+                    model: Some("Chat".into()),
+                },
+            )
+            .await;
+
+        let raw_request = server.await.unwrap();
+        let request_text = String::from_utf8_lossy(&raw_request);
+        assert!(
+            request_text.contains("real-upstream-model"),
+            "the resolved preset's own model id must reach the upstream body: {request_text}"
+        );
+        assert!(
+            !request_text.contains("\"Chat\""),
+            "the advertised *label* must never reach the upstream body: {request_text}"
+        );
+
+        let sent = sent.lock().unwrap();
+        match sent.last().unwrap() {
+            (to, ProtocolMessage::LlmResponseDone { id, content }) => {
+                assert_eq!(to, "consumer1");
+                assert_eq!(id, "req1");
+                assert_eq!(content.as_deref(), Some("hi from resolved preset"));
+            }
+            other => panic!("expected llm_response_done, got: {other:?}"),
+        }
+    }
+
     fn fake_tts_success(bytes: Vec<u8>, mime: &'static str) -> TtsCallFn {
-        Arc::new(move |_text, _model, _voice| {
+        Arc::new(move |_text, _model, _voice, _lang| {
             let bytes = bytes.clone();
             Box::pin(async move {
                 Ok(TtsAudio {
@@ -1024,7 +1366,27 @@ mod tests {
     }
 
     fn fake_tts_error(message: &'static str) -> TtsCallFn {
-        Arc::new(move |_text, _model, _voice| Box::pin(async move { anyhow::bail!(message) }))
+        Arc::new(move |_text, _model, _voice, _lang| Box::pin(async move { anyhow::bail!(message) }))
+    }
+
+    type TtsCallArgs = (String, Option<String>, Option<String>, Option<String>);
+
+    /// Records the exact `(text, model, voice, lang)` tuple `handle_message`
+    /// hands to the TTS closure, so dispatch-level plumbing of the new
+    /// `lang` hint (voice *resolution* itself lives in `super::mod.rs` and
+    /// is tested there against `resolve_tts_voice` directly) can be
+    /// asserted end to end through `Provider::handle_message`.
+    fn fake_tts_capturing(captured: Arc<Mutex<Option<TtsCallArgs>>>) -> TtsCallFn {
+        Arc::new(move |text, model, voice, lang| {
+            let captured = captured.clone();
+            Box::pin(async move {
+                *captured.lock().unwrap() = Some((text, model, voice, lang));
+                Ok(TtsAudio {
+                    bytes: vec![],
+                    mime: "audio/mpeg".to_string(),
+                })
+            })
+        })
     }
 
     type SttCallArgs = (Vec<u8>, String, Option<String>, Option<String>);
@@ -1187,6 +1549,7 @@ mod tests {
                     text: "read this".into(),
                     model: None,
                     voice: None,
+                    lang: None,
                 },
             )
             .await;
@@ -1211,6 +1574,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tts_request_lang_hint_is_forwarded_to_the_tts_closure() {
+        let captured: Arc<Mutex<Option<TtsCallArgs>>> = Arc::new(Mutex::new(None));
+        let (send, _sent) = fake_send();
+        let call = fake_call_success(vec![], "");
+        let provider = Provider::new_with_voice(
+            send,
+            call,
+            vec![],
+            Some(fake_tts_capturing(captured.clone())),
+            None,
+            vec![],
+        );
+
+        provider
+            .clone()
+            .handle_message(
+                "consumer1".into(),
+                ProtocolMessage::TtsRequest {
+                    id: "tts1".into(),
+                    text: "read this".into(),
+                    model: None,
+                    voice: None,
+                    lang: Some("ja-JP".into()),
+                },
+            )
+            .await;
+
+        let (text, model, voice, lang) = captured.lock().unwrap().clone().expect("tts closure was called");
+        assert_eq!(text, "read this");
+        assert_eq!(model, None);
+        assert_eq!(voice, None);
+        assert_eq!(lang.as_deref(), Some("ja-JP"));
+    }
+
+    #[tokio::test]
     async fn tts_request_upstream_failure_sends_voice_error_without_code() {
         let (send, sent) = fake_send();
         let call = fake_call_success(vec![], "");
@@ -1232,6 +1630,7 @@ mod tests {
                     text: "read this".into(),
                     model: None,
                     voice: None,
+                    lang: None,
                 },
             )
             .await;

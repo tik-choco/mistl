@@ -1,7 +1,9 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -295,6 +297,21 @@ pub struct AiPresetConfig {
     /// speech. Meaningless for a chat-completion preset; left unset there.
     #[serde(default)]
     pub voice: Option<String>,
+    /// Per-language TTS voice overrides (mistllm-wire tts-lang-hint-v1):
+    /// key is a BCP-47 *primary* language subtag (e.g. `"en"`, `"ja"` --
+    /// not a full tag like `"en-US"`), matched case-insensitively; value is
+    /// a real upstream voice id, exactly like [`AiPresetConfig::voice`].
+    /// Consulted by `crate::ai::resolve_tts_voice` when an inbound
+    /// `tts_request` carries a `lang` hint and doesn't itself specify
+    /// `voice` (an explicit request `voice` always wins over `lang`).
+    /// Empty (the default -- absent from an old config.toml deserializes
+    /// the same way) means "no per-language overrides configured"; `voice`
+    /// above remains the language-agnostic fallback either way. Meaningless
+    /// for a chat-completion preset, same as `voice`. `skip_serializing_if`
+    /// keeps an unconfigured (empty) map from cluttering every preset's
+    /// serialized `config.toml` entry with an empty `[..lang_voices]` table.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub lang_voices: HashMap<String, String>,
     /// What this preset is for: `"chat"` | `"tts"` | `"stt"`. Purely a UI
     /// categorization hint (which single checkbox a preset gets in the
     /// dashboard's AI Network "what to provide" checklist, and which config
@@ -345,6 +362,8 @@ pub struct ResolvedAiPreset {
     pub reasoning_effort: Option<String>,
     /// See [`AiPresetConfig::voice`].
     pub voice: Option<String>,
+    /// See [`AiPresetConfig::lang_voices`].
+    pub lang_voices: HashMap<String, String>,
 }
 
 /// Mirrors the shared LLM config contract's `resolvePreset(config,
@@ -365,6 +384,7 @@ pub fn resolve_preset(ai: &AiConfig, preset_id: Option<&str>) -> Option<Resolved
         temperature: preset.temperature,
         reasoning_effort: preset.reasoning_effort.clone(),
         voice: preset.voice.clone(),
+        lang_voices: preset.lang_voices.clone(),
     })
 }
 
@@ -393,8 +413,28 @@ pub struct AiConfig {
     /// Legacy pre-provider/preset temperature. See `upstream_url`.
     #[serde(skip_serializing)]
     pub temperature: Option<f64>,
-    /// Models advertised in provider_hello. Empty = fetch from the resolved
-    /// preset's provider `GET /models` at provide start.
+    /// Which `presets` entries (by **preset id**, not raw upstream model
+    /// id) are advertised in `provider_hello.models` when this node
+    /// provides -- mistllm-wire's "advertised name = preset label"
+    /// contract: each selected preset's advertised name is its
+    /// `label.trim()` when non-empty, else its `model`
+    /// (`crate::ai::build_provider`'s `resolve_advertised_models`), and an
+    /// inbound `llm_request.model` naming one of those advertised names is
+    /// routed to *that preset's own* upstream (base_url/api_key/model),
+    /// not forwarded to the default preset's upstream verbatim (see
+    /// `crate::ai::provider::Provider::resolve_llm_call`).
+    ///
+    /// Empty means the legacy pass-through mode: `provider_hello` omits
+    /// `models` entirely (no upstream `GET /models` fallback -- removed),
+    /// and any inbound `model` is forwarded to the default preset's
+    /// upstream as-is, unchecked.
+    ///
+    /// Old config.toml files (or direct `mistl config set
+    /// ai.advertised_models` calls) may still contain raw model ids from
+    /// before this field meant "preset id"; `Config::load` normalizes them
+    /// via `migrate_advertised_models` on first read (id already valid ->
+    /// unchanged; matches some preset's `model` -> rewritten to that
+    /// preset's id; matches neither -> dropped).
     pub advertised_models: Vec<String>,
     /// Listen address of the local OpenAI-compatible API server (`ai serve`).
     pub api_listen: String,
@@ -839,8 +879,14 @@ impl Config {
     /// and reports whether either changed anything requiring a save.
     pub fn migrate_legacy(&mut self) -> bool {
         let ai_changed = self.migrate_legacy_ai();
+        // Runs after `migrate_legacy_ai` so a config that predates both the
+        // provider/preset split *and* the advertised-name contract (raw
+        // `upstream_url`/`default_model` fields only) gets its freshly
+        // synthesized "default" preset in place before this tries to match
+        // `advertised_models` entries against `presets`.
+        let advertised_changed = self.migrate_advertised_models();
         let stream_changed = self.migrate_legacy_stream_room();
-        ai_changed || stream_changed
+        ai_changed || advertised_changed || stream_changed
     }
 
     /// Merges legacy `[ai]` fields (`upstream_url`/`upstream_api_key`/
@@ -899,6 +945,7 @@ impl Config {
                 temperature: self.ai.temperature,
                 reasoning_effort: None,
                 voice: None,
+                lang_voices: HashMap::new(),
                 kind: "chat".to_string(),
             });
         }
@@ -908,6 +955,62 @@ impl Config {
         }
 
         true
+    }
+
+    /// Normalizes `ai.advertised_models` from a flat list of raw upstream
+    /// model ids (its pre-`advertised-name-contract` shape) into a list of
+    /// **preset ids**, per `AiConfig::advertised_models`'s current doc
+    /// comment. Runs on every `Config::load`, not just once on an old
+    /// config -- unlike `migrate_legacy_ai`/`migrate_legacy_stream_room`
+    /// this isn't a one-shot "drop the legacy field for good" migration
+    /// (there is no separate legacy field here to retire; `advertised_models`
+    /// keeps its name and TOML key), it just keeps re-normalizing the same
+    /// field, which is why it must stay idempotent.
+    ///
+    /// For each entry, checked against the *current* `presets` (including
+    /// any preset `migrate_legacy_ai` just synthesized):
+    /// - Already names a known preset id -> left as-is.
+    /// - Doesn't name a preset id, but matches some preset's `model` ->
+    ///   rewritten to that preset's id (first configured match wins when
+    ///   more than one preset shares the same `model`), with a `warn!`.
+    /// - Matches neither -> dropped, with a `warn!`.
+    ///
+    /// Returns whether anything changed (and thus whether the caller should
+    /// persist). Idempotent: a config whose `advertised_models` already only
+    /// contains valid preset ids returns `false`.
+    fn migrate_advertised_models(&mut self) -> bool {
+        if self.ai.advertised_models.is_empty() {
+            return false;
+        }
+        // Cloned up front so the lookups below don't borrow `self.ai`
+        // immutably while `self.ai.advertised_models` is rebuilt.
+        let presets = self.ai.presets.clone();
+        let mut changed = false;
+        let mut next = Vec::with_capacity(self.ai.advertised_models.len());
+        for entry in &self.ai.advertised_models {
+            if presets.iter().any(|p| &p.id == entry) {
+                next.push(entry.clone());
+            } else if let Some(preset) = presets.iter().find(|p| &p.model == entry) {
+                warn!(
+                    old = %entry,
+                    new = %preset.id,
+                    "ai: advertised_models entry names a raw upstream model id, not a preset id; \
+                     rewriting to the matching preset's id"
+                );
+                next.push(preset.id.clone());
+                changed = true;
+            } else {
+                warn!(
+                    entry = %entry,
+                    "ai: advertised_models entry doesn't match any configured preset id or model; dropping it"
+                );
+                changed = true;
+            }
+        }
+        if changed {
+            self.ai.advertised_models = next;
+        }
+        changed
     }
 
     /// Merges legacy `[stream]` fields `relay_room`/`share_room` into the
@@ -1066,6 +1169,7 @@ mod tests {
             temperature: None,
             reasoning_effort: None,
             voice: None,
+            lang_voices: HashMap::new(),
             kind: "chat".to_string(),
         });
         config.ai.default_preset_id = "other".to_string();
@@ -1091,6 +1195,126 @@ mod tests {
         assert!(config.ai.presets.is_empty());
         assert_eq!(config.ai.default_preset_id, "");
         assert_eq!(config.stream.room, None);
+    }
+
+    #[test]
+    fn migrate_advertised_models_leaves_valid_preset_ids_untouched() {
+        let mut config = Config::default();
+        config.ai.presets.push(AiPresetConfig {
+            id: "chat-a".to_string(),
+            label: "Chat A".to_string(),
+            provider_id: "p1".to_string(),
+            model: "gpt-4o".to_string(),
+            temperature: None,
+            reasoning_effort: None,
+            voice: None,
+            lang_voices: HashMap::new(),
+            kind: "chat".to_string(),
+        });
+        config.ai.advertised_models = vec!["chat-a".to_string()];
+
+        assert!(
+            !config.migrate_legacy(),
+            "already-valid preset ids need no rewrite"
+        );
+        assert_eq!(config.ai.advertised_models, vec!["chat-a".to_string()]);
+    }
+
+    #[test]
+    fn migrate_advertised_models_rewrites_a_raw_model_id_to_its_preset_id() {
+        let mut config = Config::default();
+        config.ai.presets.push(AiPresetConfig {
+            id: "chat-a".to_string(),
+            label: "Chat A".to_string(),
+            provider_id: "p1".to_string(),
+            model: "gpt-4o".to_string(),
+            temperature: None,
+            reasoning_effort: None,
+            voice: None,
+            lang_voices: HashMap::new(),
+            kind: "chat".to_string(),
+        });
+        config.ai.advertised_models = vec!["gpt-4o".to_string()];
+
+        assert!(config.migrate_legacy());
+        assert_eq!(config.ai.advertised_models, vec!["chat-a".to_string()]);
+        // Idempotent: the second run sees only the already-rewritten id.
+        assert!(!config.migrate_legacy());
+        assert_eq!(config.ai.advertised_models, vec!["chat-a".to_string()]);
+    }
+
+    #[test]
+    fn migrate_advertised_models_prefers_the_first_configured_preset_when_several_share_a_model() {
+        let mut config = Config::default();
+        config.ai.presets.push(AiPresetConfig {
+            id: "first".to_string(),
+            label: "First".to_string(),
+            provider_id: "p1".to_string(),
+            model: "gpt-4o".to_string(),
+            temperature: None,
+            reasoning_effort: None,
+            voice: None,
+            lang_voices: HashMap::new(),
+            kind: "chat".to_string(),
+        });
+        config.ai.presets.push(AiPresetConfig {
+            id: "second".to_string(),
+            label: "Second".to_string(),
+            provider_id: "p2".to_string(),
+            model: "gpt-4o".to_string(),
+            temperature: None,
+            reasoning_effort: None,
+            voice: None,
+            lang_voices: HashMap::new(),
+            kind: "chat".to_string(),
+        });
+        config.ai.advertised_models = vec!["gpt-4o".to_string()];
+
+        assert!(config.migrate_legacy());
+        assert_eq!(config.ai.advertised_models, vec!["first".to_string()]);
+    }
+
+    #[test]
+    fn migrate_advertised_models_drops_an_entry_matching_no_preset() {
+        let mut config = Config::default();
+        config.ai.presets.push(AiPresetConfig {
+            id: "chat-a".to_string(),
+            label: "Chat A".to_string(),
+            provider_id: "p1".to_string(),
+            model: "gpt-4o".to_string(),
+            temperature: None,
+            reasoning_effort: None,
+            voice: None,
+            lang_voices: HashMap::new(),
+            kind: "chat".to_string(),
+        });
+        config.ai.advertised_models = vec!["chat-a".to_string(), "ghost-model".to_string()];
+
+        assert!(config.migrate_legacy());
+        assert_eq!(config.ai.advertised_models, vec!["chat-a".to_string()]);
+    }
+
+    #[test]
+    fn migrate_advertised_models_is_a_noop_when_empty() {
+        let mut config = Config::default();
+        assert!(!config.migrate_legacy());
+        assert!(config.ai.advertised_models.is_empty());
+    }
+
+    #[test]
+    fn migrate_legacy_ai_synthesized_default_preset_satisfies_a_matching_advertised_entry() {
+        // A config predating both the provider/preset split *and* the
+        // advertised-name contract: legacy upstream fields plus a raw model
+        // id in advertised_models. migrate_legacy_ai must run first so the
+        // "default" preset it synthesizes is available for this rewrite in
+        // the very same migrate_legacy() call.
+        let mut config = Config::default();
+        config.ai.upstream_url = Some("http://127.0.0.1:11434/v1".to_string());
+        config.ai.default_model = Some("llama3".to_string());
+        config.ai.advertised_models = vec!["llama3".to_string()];
+
+        assert!(config.migrate_legacy());
+        assert_eq!(config.ai.advertised_models, vec!["default".to_string()]);
     }
 
     #[test]
@@ -1640,6 +1864,7 @@ mod tests {
             temperature: None,
             reasoning_effort: None,
             voice: Some("alloy".to_string()),
+            lang_voices: HashMap::new(),
             kind: "tts".to_string(),
         });
         let text = toml::to_string_pretty(&config).unwrap();
@@ -1648,6 +1873,82 @@ mod tests {
 
         let resolved = resolve_preset(&reloaded.ai, Some("tts-default")).unwrap();
         assert_eq!(resolved.voice.as_deref(), Some("alloy"));
+    }
+
+    #[test]
+    fn ai_preset_config_lang_voices_round_trips_through_toml() {
+        let mut config = Config::default();
+        config.ai.providers.push(AiProviderConfig {
+            id: "openai".to_string(),
+            label: "OpenAI".to_string(),
+            base_url: "https://api.openai.com/v1".to_string(),
+            api_key: "sk-test".to_string(),
+        });
+        let mut lang_voices = HashMap::new();
+        lang_voices.insert("en".to_string(), "af_heart".to_string());
+        lang_voices.insert("ja".to_string(), "jf_alpha".to_string());
+        config.ai.presets.push(AiPresetConfig {
+            id: "tts-default".to_string(),
+            label: "TTS".to_string(),
+            provider_id: "openai".to_string(),
+            model: "tts-1".to_string(),
+            temperature: None,
+            reasoning_effort: None,
+            voice: Some("alloy".to_string()),
+            lang_voices,
+            kind: "tts".to_string(),
+        });
+
+        let text = toml::to_string_pretty(&config).unwrap();
+        let reloaded: Config = toml::from_str(&text).unwrap();
+        assert_eq!(
+            reloaded.ai.presets[0].lang_voices.get("en").map(String::as_str),
+            Some("af_heart")
+        );
+        assert_eq!(
+            reloaded.ai.presets[0].lang_voices.get("ja").map(String::as_str),
+            Some("jf_alpha")
+        );
+
+        let resolved = resolve_preset(&reloaded.ai, Some("tts-default")).unwrap();
+        assert_eq!(resolved.lang_voices.get("en").map(String::as_str), Some("af_heart"));
+        // `voice` remains the language-agnostic fallback, independent of
+        // `lang_voices`.
+        assert_eq!(resolved.voice.as_deref(), Some("alloy"));
+    }
+
+    #[test]
+    fn ai_preset_config_lang_voices_absent_defaults_to_empty() {
+        // An old config.toml predating this field must still deserialize:
+        // `#[serde(default)]` gives an empty map, not a parse error.
+        let mut config = Config::default();
+        config.ai.providers.push(AiProviderConfig {
+            id: "openai".to_string(),
+            label: "OpenAI".to_string(),
+            base_url: "https://api.openai.com/v1".to_string(),
+            api_key: "sk-test".to_string(),
+        });
+        config.ai.presets.push(AiPresetConfig {
+            id: "tts-default".to_string(),
+            label: "TTS".to_string(),
+            provider_id: "openai".to_string(),
+            model: "tts-1".to_string(),
+            temperature: None,
+            reasoning_effort: None,
+            voice: Some("alloy".to_string()),
+            lang_voices: HashMap::new(),
+            kind: "tts".to_string(),
+        });
+        let mut text = toml::to_string_pretty(&config).unwrap();
+        // Simulate a pre-`lang_voices` config.toml by stripping any (empty,
+        // in this case, but be defensive) serialized lang_voices section.
+        assert!(
+            !text.contains("[ai.presets.lang_voices]"),
+            "an empty map must not even be serialized: {text}"
+        );
+        text.push('\n'); // no-op, just documents there's nothing to strip
+        let reloaded: Config = toml::from_str(&text).unwrap();
+        assert!(reloaded.ai.presets[0].lang_voices.is_empty());
     }
 
     #[test]
@@ -1667,6 +1968,7 @@ mod tests {
             temperature: None,
             reasoning_effort: None,
             voice: Some("alloy".to_string()),
+            lang_voices: HashMap::new(),
             kind: "tts".to_string(),
         });
         config.ai.presets.push(AiPresetConfig {
@@ -1677,6 +1979,7 @@ mod tests {
             temperature: None,
             reasoning_effort: None,
             voice: None,
+            lang_voices: HashMap::new(),
             kind: "stt".to_string(),
         });
         config.ai.tts_preset_id = "tts-default".to_string();

@@ -252,6 +252,9 @@ request_timeout_secs = 120                   # p2p inactivity timeout (resets pe
 # temperature = 0.7
 # reasoning_effort = "medium"               # optional: "none" | "minimal" | "low" | "medium" | "high"
 # voice = "alloy"                           # only meaningful for a preset referenced by tts_preset_id
+# [ai.presets.lang_voices]                  # optional per-language voice overrides (tts_request.lang hint)
+# en = "af_heart"                           # key: BCP-47 primary subtag, lowercase (matched case-insensitively)
+# ja = "jf_alpha"                           # value: a real upstream voice id, same namespace as `voice` above
 
 [ui]
 enabled = true                               # serve the dashboard from the daemon

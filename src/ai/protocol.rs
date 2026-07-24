@@ -33,8 +33,16 @@
 //!   (present but non-string -> field dropped, message still valid, same
 //!   as `models`/`services`).
 //! - `raft_message`: `payload` non-empty string (opaque; passed through).
-//! - `tts_request`: `id` non-empty; `text` string; `model`/`voice`
-//!   optional strings.
+//! - `tts_request`: `id` non-empty; `text` string; `model`/`voice` optional
+//!   strings (present but non-string -> whole message invalid); `lang`
+//!   optional string, BCP-47 language tag hint (mistllm-wire
+//!   tts-lang-hint-v1, e.g. `"en"`, `"ja-JP"`) a consumer may attach so a
+//!   provider whose tts preset has no single fixed `voice` can pick one
+//!   matching the request's language -- it never overrides an explicit
+//!   `voice`. Unlike `model`/`voice`, `lang` uses the same defensive rule
+//!   as `code` (present but non-string -> field dropped, message still
+//!   valid): it's a best-effort hint a provider may ignore entirely, so a
+//!   malformed value must not invalidate an otherwise well-formed request.
 //! - `tts_response` / `stt_request`: `id` non-empty; `seq` required
 //!   integer >= 0; `data` string; `last` bool; `mime` non-empty string;
 //!   `stt_request` additionally has optional `model` / `fileName` strings.
@@ -117,6 +125,9 @@ pub enum ProtocolMessage {
         text: String,
         model: Option<String>,
         voice: Option<String>,
+        /// BCP-47 language tag hint (mistllm-wire tts-lang-hint-v1). See the
+        /// module header's `tts_request` decode rules.
+        lang: Option<String>,
     },
     TtsResponse {
         id: String,
@@ -160,6 +171,14 @@ pub const SERVICE_STT: &str = "stt";
 /// Known `code` value meaning "provider does not offer this service at
 /// all" (as opposed to a per-request upstream failure, which omits `code`).
 pub const CODE_UNSUPPORTED_SERVICE: &str = "unsupported_service";
+
+/// Known `llm_error.code` value meaning "this provider does have an
+/// advertised model list, but the requested `model` doesn't name one of
+/// its entries" (`crate::ai::provider::Provider::resolve_llm_call`) -- as
+/// opposed to a per-request upstream failure, which omits `code`. Distinct
+/// from [`CODE_UNSUPPORTED_SERVICE`]: this provider does support chat,
+/// just not under the name the request asked for.
+pub const CODE_MODEL_NOT_SHARED: &str = "model_not_shared";
 
 /// Whether a `provider_hello.services` value (already decoded, `None` if
 /// the field was absent/invalid) advertises `service`. Applies the wire
@@ -240,7 +259,7 @@ pub fn encode(msg: &ProtocolMessage) -> Vec<u8> {
         ProtocolMessage::RaftMessage { payload } => {
             json!({"v": 1, "type": "raft_message", "payload": payload})
         }
-        ProtocolMessage::TtsRequest { id, text, model, voice } => {
+        ProtocolMessage::TtsRequest { id, text, model, voice, lang } => {
             let mut map = Map::new();
             map.insert("v".into(), json!(1));
             map.insert("type".into(), json!("tts_request"));
@@ -251,6 +270,9 @@ pub fn encode(msg: &ProtocolMessage) -> Vec<u8> {
             }
             if let Some(voice) = voice {
                 map.insert("voice".into(), json!(voice));
+            }
+            if let Some(lang) = lang {
+                map.insert("lang".into(), json!(lang));
             }
             Value::Object(map)
         }
@@ -446,7 +468,14 @@ pub fn decode(bytes: &[u8]) -> Option<ProtocolMessage> {
             let text = any_str(obj, "text")?;
             let model = opt_str(obj, "model")?;
             let voice = opt_str(obj, "voice")?;
-            Some(ProtocolMessage::TtsRequest { id, text, model, voice })
+            // Unlike `model`/`voice` (whole message rejected on a type
+            // mismatch), a non-string `lang` only drops the field -- same
+            // defensive rule as `code` (see `dropped_opt_str`). `lang` is a
+            // best-effort hint a provider may ignore entirely, so a
+            // malformed value degrades gracefully instead of invalidating
+            // an otherwise well-formed `tts_request`.
+            let lang = dropped_opt_str(obj, "lang");
+            Some(ProtocolMessage::TtsRequest { id, text, model, voice, lang })
         }
         "tts_response" => {
             let id = non_empty_str(obj, "id")?;
@@ -757,6 +786,7 @@ mod tests {
             text: "hi".into(),
             model: Some("m".into()),
             voice: Some("v".into()),
+            lang: Some("en".into()),
         });
         assert_eq!(
             keys(&full),
@@ -766,7 +796,8 @@ mod tests {
                 "id".into(),
                 "text".into(),
                 "model".into(),
-                "voice".into()
+                "voice".into(),
+                "lang".into()
             ])
         );
 
@@ -775,6 +806,7 @@ mod tests {
             text: "hi".into(),
             model: None,
             voice: None,
+            lang: None,
         });
         assert_eq!(
             keys(&minimal),
@@ -976,6 +1008,73 @@ mod tests {
         );
     }
 
+    #[test]
+    fn decode_tts_request_with_lang() {
+        let bytes = br#"{"v":1,"type":"tts_request","id":"a1","text":"hi","lang":"ja-JP"}"#;
+        assert_eq!(
+            decode(bytes),
+            Some(ProtocolMessage::TtsRequest {
+                id: "a1".into(),
+                text: "hi".into(),
+                model: None,
+                voice: None,
+                lang: Some("ja-JP".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn decode_tts_request_lang_absent_is_none() {
+        let bytes = br#"{"v":1,"type":"tts_request","id":"a1","text":"hi"}"#;
+        assert_eq!(
+            decode(bytes),
+            Some(ProtocolMessage::TtsRequest {
+                id: "a1".into(),
+                text: "hi".into(),
+                model: None,
+                voice: None,
+                lang: None,
+            })
+        );
+    }
+
+    #[test]
+    fn decode_tts_request_non_string_lang_drops_field_only() {
+        // Unlike `model`/`voice`, a non-string `lang` must not invalidate an
+        // otherwise well-formed `tts_request` -- same defensive rule as
+        // `llm_error.code` / `voice_error.code`.
+        let bytes = br#"{"v":1,"type":"tts_request","id":"a1","text":"hi","lang":42}"#;
+        assert_eq!(
+            decode(bytes),
+            Some(ProtocolMessage::TtsRequest {
+                id: "a1".into(),
+                text: "hi".into(),
+                model: None,
+                voice: None,
+                lang: None,
+            })
+        );
+    }
+
+    #[test]
+    fn decode_tts_request_voice_and_lang_together() {
+        // Both may be present at once; decode preserves both independently
+        // (voice-vs-lang precedence is a resolver-layer concern, not
+        // decode's).
+        let bytes =
+            br#"{"v":1,"type":"tts_request","id":"a1","text":"hi","voice":"alloy","lang":"en"}"#;
+        assert_eq!(
+            decode(bytes),
+            Some(ProtocolMessage::TtsRequest {
+                id: "a1".into(),
+                text: "hi".into(),
+                model: None,
+                voice: Some("alloy".into()),
+                lang: Some("en".into()),
+            })
+        );
+    }
+
     // ---- roundtrip: every variant --------------------------------------
 
     fn assert_roundtrip(msg: ProtocolMessage) {
@@ -1064,12 +1163,14 @@ mod tests {
             text: "speak this".into(),
             model: Some("tts-1".into()),
             voice: Some("alloy".into()),
+            lang: Some("en-US".into()),
         });
         assert_roundtrip(ProtocolMessage::TtsRequest {
             id: "id1".into(),
             text: "speak this".into(),
             model: None,
             voice: None,
+            lang: None,
         });
         assert_roundtrip(ProtocolMessage::TtsResponse {
             id: "id1".into(),
