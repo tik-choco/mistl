@@ -41,6 +41,7 @@ mod provider;
 mod stt;
 pub mod tts;
 
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
@@ -497,6 +498,66 @@ struct BuiltProvider {
     models: Vec<String>,
 }
 
+/// Builds `(models, advertised)` for [`build_provider`]/[`Provider::hello`]
+/// from `cfg.advertised_models` (a set of **preset ids**, see that field's
+/// doc comment on `AiConfig`) and `cfg.presets`:
+///
+/// - Iterates `cfg.presets` in their *configured* order (not
+///   `advertised_models`'s own order, which the dashboard's "what to
+///   provide" checklist can reorder independent of preset definition
+///   order -- see `renderProvideChecklist` in `web/assets/index.html`),
+///   filtering down to those whose `id` appears in `advertised_models`.
+/// - Each selected preset's advertised *name* is `label.trim()` when
+///   non-empty, else `model` -- mistllm-wire's "advertised name = preset
+///   label" contract.
+/// - Two selected presets that resolve to the same advertised name: the
+///   first configured one wins the name; the rest are dropped entirely,
+///   from both `models` and `advertised` (a known v1 limitation -- an
+///   `llm_request` naming that model can only ever reach the first
+///   preset).
+/// - A selected preset whose `provider_id` doesn't resolve to a configured
+///   provider is skipped with a `warn!` (dangling reference, same
+///   defensive posture as `voice_preset_provider`).
+///
+/// `cfg.advertised_models` empty -> both returned collections are empty:
+/// per mistllm-wire this means `provider_hello` omits `models` entirely
+/// (`Provider::hello`) -- the previous fallback of fetching and advertising
+/// every upstream `GET /models` result has been removed, since an inbound
+/// `model` is no longer name-checked against anything in that mode (see
+/// `Provider::resolve_llm_call`) and blanket-advertising an unchecked
+/// upstream catalog was never actually meaningful under that contract.
+fn resolve_advertised_models(
+    cfg: &crate::config::AiConfig,
+) -> (Vec<String>, HashMap<String, crate::config::ResolvedAiPreset>) {
+    let mut models = Vec::new();
+    let mut advertised: HashMap<String, crate::config::ResolvedAiPreset> = HashMap::new();
+    if cfg.advertised_models.is_empty() {
+        return (models, advertised);
+    }
+    let wanted: HashSet<&str> = cfg.advertised_models.iter().map(String::as_str).collect();
+    for preset in cfg.presets.iter().filter(|p| wanted.contains(p.id.as_str())) {
+        let label = preset.label.trim();
+        let name = if !label.is_empty() {
+            label.to_string()
+        } else {
+            preset.model.clone()
+        };
+        if advertised.contains_key(&name) {
+            continue;
+        }
+        let Some(resolved) = crate::config::resolve_preset(cfg, Some(&preset.id)) else {
+            warn!(
+                preset_id = %preset.id,
+                "ai: advertised preset's provider is not configured; skipping it"
+            );
+            continue;
+        };
+        models.push(name.clone());
+        advertised.insert(name, resolved);
+    }
+    (models, advertised)
+}
+
 /// Resolves `cfg`'s default/tts/stt presets and constructs a fresh
 /// [`Provider`] from them -- the shared core of [`provide_start`] (first
 /// build) and [`reload_provider_if_running`] (rebuild after a config
@@ -515,20 +576,19 @@ async fn build_provider(service: &Arc<AiService>, cfg: &crate::config::AiConfig)
         reasoning_effort: resolved.reasoning_effort,
     };
 
-    let models = if !cfg.advertised_models.is_empty() {
-        cfg.advertised_models.clone()
-    } else {
-        match openai::fetch_models(&upstream).await {
-            Ok(models) => models,
-            Err(err) => {
-                warn!(%err, "ai: could not fetch upstream model list; advertising none");
-                Vec::new()
-            }
-        }
-    };
-    // Requests without an explicit model fall back to the first known one.
+    let (models, advertised) = resolve_advertised_models(cfg);
+    // Requests without an explicit model fall back to the first advertised
+    // preset's own resolved model (mirrors the pre-advertised-name-contract
+    // "models.first()" fallback, just resolved against the preset table
+    // instead of a flat raw-model-id list -- see
+    // `resolve_advertised_models`'s doc comment). Empty `advertised_models`
+    // (or a default preset with its own non-blank `model`, the common
+    // case) leaves this `None`, unchanged from before.
     if upstream.model.is_none() {
-        upstream.model = models.first().cloned();
+        upstream.model = models
+            .first()
+            .and_then(|name| advertised.get(name))
+            .map(|resolved| resolved.model.clone());
     }
 
     let call: LlmCallFn = {
@@ -546,10 +606,16 @@ async fn build_provider(service: &Arc<AiService>, cfg: &crate::config::AiConfig)
     let advertised_voices = resolve_advertised_voices(tts_preset.as_ref()).await;
     log_voice_preset_diagnostics(cfg, "tts", &cfg.tts_preset_id, tts_preset.as_ref().map(|(_, resolved)| resolved));
     let tts_call = tts_preset.map(|(provider, resolved)| {
-        let fallback_voice = advertised_voices.first().cloned();
-        let call: TtsCallFn = Arc::new(move |text, model, voice| {
+        let catalog = advertised_voices.clone();
+        let call: TtsCallFn = Arc::new(move |text, model, voice, lang| {
             let provider = provider.clone();
-            let effective_voice = resolve_tts_voice(voice, &resolved.voice, &fallback_voice);
+            let effective_voice = resolve_tts_voice(
+                voice,
+                lang.as_deref(),
+                &resolved.lang_voices,
+                &catalog,
+                &resolved.voice,
+            );
             let req = tts::TtsParams {
                 model: resolve_voice_call_model(model, &resolved.model, "tts"),
                 voice: effective_voice.unwrap_or_default(),
@@ -577,10 +643,11 @@ async fn build_provider(service: &Arc<AiService>, cfg: &crate::config::AiConfig)
         call
     });
 
-    let provider = Provider::new_with_voice(
+    let provider = Provider::new(
         service.send.clone(),
         call,
         models.clone(),
+        advertised,
         tts_call,
         stt_call,
         advertised_voices,
@@ -669,28 +736,139 @@ async fn resolve_advertised_voices(
     }
 }
 
-/// Resolves the effective voice for one `tts_request`, in fallback order:
-/// the request's own `voice`, then the tts preset's configured `voice`,
-/// then (new -- previously a `tts_request` with neither would error
-/// immediately) the first entry of the advertised voice catalog built by
-/// [`resolve_advertised_voices`], logged via `info!` since it means
-/// synthesis is proceeding with a voice nobody explicitly chose. `None`
-/// only when all three are unavailable; the caller's `tts::synthesize` call
-/// then still surfaces its pre-existing `"ai: tts requires a voice"` error,
-/// unchanged from before this fallback existed. Pure aside from that one log
-/// call, so the fallback order itself can be unit-tested directly.
+/// Extracts the BCP-47 *primary* subtag from a language tag, lowercased
+/// (e.g. `"en-US"` -> `"en"`, `"JA"` -> `"ja"`, `"en"` -> `"en"`). Used by
+/// both [`resolve_tts_voice`]'s `lang_voices` lookup and its kokoro-style
+/// catalog heuristic, so `"en-US"` and `"en-GB"` both match an `"en"` entry
+/// / prefix without requiring the config or the catalog to enumerate every
+/// regional variant.
+fn lang_primary_subtag(lang: &str) -> String {
+    lang.split('-').next().unwrap_or("").trim().to_ascii_lowercase()
+}
+
+/// Case-insensitive `lang_voices` lookup by primary subtag (mistllm-wire
+/// tts-lang-hint-v1): config authors are asked to use lowercase keys (see
+/// `AiPresetConfig::lang_voices`'s doc comment and the README example), but
+/// this looks up case-insensitively anyway so a stray uppercase key in a
+/// hand-edited `config.toml` still works rather than silently never
+/// matching.
+fn lookup_lang_voice(lang_voices: &HashMap<String, String>, primary: &str) -> Option<String> {
+    lang_voices
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(primary))
+        .map(|(_, voice)| voice.clone())
+}
+
+/// Kokoro's single-letter language-prefix convention (e.g. `af_heart` = "a"
+/// (American English) + "f" (female) + "_heart"): first letter names the
+/// language/locale, second letter names the voice's gender (`f`/`m`), then
+/// an underscore-separated name. Maps a BCP-47 primary subtag to the
+/// kokoro prefix letter(s) that speak it; `None` for languages kokoro
+/// doesn't have a documented prefix for, in which case the heuristic in
+/// [`kokoro_style_lang_voice`] never applies regardless of catalog shape.
+fn kokoro_prefix_letters(primary: &str) -> Option<&'static [char]> {
+    match primary {
+        "en" => Some(&['a', 'b']),
+        "ja" => Some(&['j']),
+        "zh" => Some(&['z']),
+        "es" => Some(&['e']),
+        "fr" => Some(&['f']),
+        "hi" => Some(&['h']),
+        "it" => Some(&['i']),
+        "pt" => Some(&['p']),
+        _ => None,
+    }
+}
+
+/// Whether `voice` looks like a kokoro-style id: `^[a-z][fm]_` (one lowercase
+/// letter naming the language, then `f`/`m` naming gender, then an
+/// underscore), e.g. `"af_heart"`, `"jf_alpha"`, `"bm_george"`. Deliberately
+/// narrow -- this is a heuristic over an *opaque* upstream voice id (mistl
+/// has no other way to know a catalog is kokoro's), so it only fires on ids
+/// that unambiguously fit the pattern.
+fn is_kokoro_style_voice(voice: &str) -> bool {
+    let mut chars = voice.chars();
+    let Some(c0) = chars.next() else { return false };
+    let Some(c1) = chars.next() else { return false };
+    let Some(c2) = chars.next() else { return false };
+    c0.is_ascii_lowercase() && (c1 == 'f' || c1 == 'm') && c2 == '_'
+}
+
+/// Step 3 of [`resolve_tts_voice`]'s fallback order: when `lang_voices` had
+/// no entry for `primary`, and *every* voice in `catalog` fits
+/// [`is_kokoro_style_voice`] (a non-empty catalog required -- an empty one
+/// can't be "uniformly" anything), picks the first catalog voice whose
+/// prefix letter matches `primary` per [`kokoro_prefix_letters`]. Returns
+/// `None` (never guesses) when the catalog is empty, isn't uniformly
+/// kokoro-shaped, `primary` has no known kokoro prefix, or no catalog entry
+/// actually starts with one of that language's prefix letters -- callers
+/// then fall through to the preset/catalog-first fallback, same as if no
+/// `lang` had been given at all.
+fn kokoro_style_lang_voice(primary: &str, catalog: &[String]) -> Option<String> {
+    if catalog.is_empty() || !catalog.iter().all(|v| is_kokoro_style_voice(v)) {
+        return None;
+    }
+    let prefixes = kokoro_prefix_letters(primary)?;
+    catalog
+        .iter()
+        .find(|v| v.chars().next().is_some_and(|c| prefixes.contains(&c)))
+        .cloned()
+}
+
+/// Resolves the effective voice for one `tts_request` (mistllm-wire
+/// tts-lang-hint-v1), in fallback order:
+///
+/// 1. the request's own `voice` -- always wins unconditionally; `lang`
+///    never overrides an explicit `voice`.
+/// 2. if `lang` is present: [`lookup_lang_voice`] against the tts preset's
+///    `lang_voices` map, by primary subtag ([`lang_primary_subtag`],
+///    case-insensitive).
+/// 3. if `lang` is present and step 2 found nothing:
+///    [`kokoro_style_lang_voice`] -- only applies when the advertised
+///    catalog is uniformly kokoro-shaped, a deliberately conservative
+///    heuristic (see its own doc comment); logged via `info!` when it
+///    fires, since it's a guess rather than something the operator
+///    configured.
+/// 4. the tts preset's configured `voice`.
+/// 5. (previously a `tts_request` with neither would error immediately)
+///    the first entry of the advertised voice catalog built by
+///    [`resolve_advertised_voices`], logged via `info!` since it means
+///    synthesis is proceeding with a voice nobody explicitly chose.
+///
+/// `None` only when all of the above are unavailable; the caller's
+/// `tts::synthesize` call then still surfaces its pre-existing `"ai: tts
+/// requires a voice"` error, unchanged from before any of this fallback
+/// existed. Pure aside from the two `info!` calls, so the fallback order
+/// itself can be unit-tested directly.
 fn resolve_tts_voice(
     request_voice: Option<String>,
+    lang: Option<&str>,
+    lang_voices: &HashMap<String, String>,
+    catalog: &[String],
     preset_voice: &Option<String>,
-    catalog_first: &Option<String>,
 ) -> Option<String> {
     if let Some(voice) = request_voice {
         return Some(voice);
     }
+    if let Some(lang) = lang {
+        let primary = lang_primary_subtag(lang);
+        if let Some(voice) = lookup_lang_voice(lang_voices, &primary) {
+            return Some(voice);
+        }
+        if let Some(voice) = kokoro_style_lang_voice(&primary, catalog) {
+            info!(
+                %voice,
+                %lang,
+                "ai: tts_request lang hint matched a kokoro-style catalog voice by \
+                 language prefix (no explicit lang_voices entry configured)"
+            );
+            return Some(voice);
+        }
+    }
     if let Some(voice) = preset_voice.clone() {
         return Some(voice);
     }
-    let voice = catalog_first.clone()?;
+    let voice = catalog.first().cloned()?;
     info!(
         %voice,
         "ai: tts_request had no voice and the tts preset has none configured; \
@@ -908,6 +1086,7 @@ async fn serve_start(service: &Arc<AiService>, state: &Arc<AppState>) -> Result<
 mod tests {
     use super::*;
     use crate::config::{AiConfig, AiPresetConfig, AiProviderConfig, resolve_preset};
+    use std::collections::HashMap;
 
     #[test]
     fn provider_upstream_maps_base_url_and_api_key_for_a_known_provider() {
@@ -957,6 +1136,7 @@ mod tests {
             temperature: None,
             reasoning_effort: None,
             voice: None,
+            lang_voices: HashMap::new(),
             kind: "chat".to_string(),
         });
         ai.presets.push(AiPresetConfig {
@@ -967,6 +1147,7 @@ mod tests {
             temperature: None,
             reasoning_effort: None,
             voice: Some("alloy".to_string()),
+            lang_voices: HashMap::new(),
             kind: "tts".to_string(),
         });
         ai.default_preset_id = "chat-default".to_string();
@@ -987,6 +1168,103 @@ mod tests {
         assert_eq!(provider.base_url, "https://tts.example/v1");
         assert_eq!(resolved.model, "tts-1");
         assert_eq!(resolved.voice.as_deref(), Some("alloy"));
+    }
+
+    #[test]
+    fn resolve_advertised_models_empty_when_no_ids_configured() {
+        let ai = ai_with_chat_default_and_tts_preset();
+        let (models, advertised) = resolve_advertised_models(&ai);
+        assert!(models.is_empty());
+        assert!(advertised.is_empty());
+    }
+
+    #[test]
+    fn resolve_advertised_models_uses_label_when_non_blank_else_model() {
+        let mut ai = ai_with_chat_default_and_tts_preset();
+        ai.presets.push(AiPresetConfig {
+            id: "unlabeled".to_string(),
+            label: "   ".to_string(), // blank once trimmed
+            provider_id: "p1".to_string(),
+            model: "raw-model-id".to_string(),
+            temperature: None,
+            reasoning_effort: None,
+            voice: None,
+            lang_voices: HashMap::new(),
+            kind: "chat".to_string(),
+        });
+        ai.advertised_models = vec!["chat-default".to_string(), "unlabeled".to_string()];
+
+        let (models, advertised) = resolve_advertised_models(&ai);
+        assert_eq!(models, vec!["Chat".to_string(), "raw-model-id".to_string()]);
+        assert_eq!(advertised.get("Chat").unwrap().model, "gpt-4o");
+        assert_eq!(advertised.get("raw-model-id").unwrap().model, "raw-model-id");
+    }
+
+    #[test]
+    fn resolve_advertised_models_orders_by_preset_config_order_not_advertised_list_order() {
+        let mut ai = ai_with_chat_default_and_tts_preset();
+        ai.presets.push(AiPresetConfig {
+            id: "chat-second".to_string(),
+            label: "Second".to_string(),
+            provider_id: "p1".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            temperature: None,
+            reasoning_effort: None,
+            voice: None,
+            lang_voices: HashMap::new(),
+            kind: "chat".to_string(),
+        });
+        // Listed in reverse of `ai.presets`'s own order.
+        ai.advertised_models = vec!["chat-second".to_string(), "chat-default".to_string()];
+
+        let (models, _advertised) = resolve_advertised_models(&ai);
+        assert_eq!(models, vec!["Chat".to_string(), "Second".to_string()]);
+    }
+
+    #[test]
+    fn resolve_advertised_models_dedups_same_name_first_configured_preset_wins() {
+        let mut ai = ai_with_chat_default_and_tts_preset();
+        ai.presets.push(AiPresetConfig {
+            id: "chat-duplicate-name".to_string(),
+            label: "Chat".to_string(), // same advertised name as chat-default
+            provider_id: "p2".to_string(),
+            model: "other-model".to_string(),
+            temperature: None,
+            reasoning_effort: None,
+            voice: None,
+            lang_voices: HashMap::new(),
+            kind: "chat".to_string(),
+        });
+        ai.advertised_models = vec!["chat-default".to_string(), "chat-duplicate-name".to_string()];
+
+        let (models, advertised) = resolve_advertised_models(&ai);
+        assert_eq!(models, vec!["Chat".to_string()], "the duplicate name is dropped entirely");
+        assert_eq!(
+            advertised.get("Chat").unwrap().model,
+            "gpt-4o",
+            "the first-configured preset wins the shared name"
+        );
+    }
+
+    #[test]
+    fn resolve_advertised_models_skips_a_preset_whose_provider_is_not_configured() {
+        let mut ai = ai_with_chat_default_and_tts_preset();
+        ai.presets.push(AiPresetConfig {
+            id: "dangling".to_string(),
+            label: "Dangling".to_string(),
+            provider_id: "no-such-provider".to_string(),
+            model: "whatever".to_string(),
+            temperature: None,
+            reasoning_effort: None,
+            voice: None,
+            lang_voices: HashMap::new(),
+            kind: "chat".to_string(),
+        });
+        ai.advertised_models = vec!["chat-default".to_string(), "dangling".to_string()];
+
+        let (models, advertised) = resolve_advertised_models(&ai);
+        assert_eq!(models, vec!["Chat".to_string()]);
+        assert!(!advertised.contains_key("Dangling"));
     }
 
     /// The critical regression test: a dangling `tts_preset_id` (its preset
@@ -1014,6 +1292,7 @@ mod tests {
             temperature: None,
             reasoning_effort: None,
             voice: Some("alloy".to_string()),
+            lang_voices: HashMap::new(),
             kind: "tts".to_string(),
         });
         assert!(voice_preset_provider(&ai, "orphaned").is_none());
@@ -1092,6 +1371,7 @@ mod tests {
             temperature: None,
             reasoning_effort: None,
             voice: None,
+            lang_voices: HashMap::new(),
             kind: String::new(),
         });
         let resolved = resolve_preset(&ai, Some("legacy")).unwrap();
@@ -1107,12 +1387,22 @@ mod tests {
 
     // -- resolve_tts_voice: pure fallback-order tests -------------------
 
+    fn empty_lang_voices() -> HashMap<String, String> {
+        HashMap::new()
+    }
+
+    fn no_catalog() -> Vec<String> {
+        Vec::new()
+    }
+
     #[test]
     fn resolve_tts_voice_prefers_the_request_voice() {
         let voice = resolve_tts_voice(
             Some("request-voice".to_string()),
+            None,
+            &empty_lang_voices(),
+            &no_catalog(),
             &Some("preset-voice".to_string()),
-            &Some("catalog-voice".to_string()),
         );
         assert_eq!(voice.as_deref(), Some("request-voice"));
     }
@@ -1121,24 +1411,239 @@ mod tests {
     fn resolve_tts_voice_falls_back_to_the_preset_voice() {
         let voice = resolve_tts_voice(
             None,
+            None,
+            &empty_lang_voices(),
+            &no_catalog(),
             &Some("preset-voice".to_string()),
-            &Some("catalog-voice".to_string()),
         );
         assert_eq!(voice.as_deref(), Some("preset-voice"));
     }
 
     #[test]
     fn resolve_tts_voice_falls_back_to_the_first_catalog_voice() {
-        // The new fallback: no request voice, no preset voice, but a
-        // non-empty advertised catalog -- previously this would have gone
-        // on to hit `tts::synthesize`'s "ai: tts requires a voice" error.
-        let voice = resolve_tts_voice(None, &None, &Some("catalog-voice".to_string()));
+        // No request voice, no preset voice, but a non-empty advertised
+        // catalog -- previously this would have gone on to hit
+        // `tts::synthesize`'s "ai: tts requires a voice" error.
+        let voice = resolve_tts_voice(
+            None,
+            None,
+            &empty_lang_voices(),
+            &["catalog-voice".to_string()],
+            &None,
+        );
         assert_eq!(voice.as_deref(), Some("catalog-voice"));
     }
 
     #[test]
-    fn resolve_tts_voice_none_when_all_three_are_absent() {
-        assert_eq!(resolve_tts_voice(None, &None, &None), None);
+    fn resolve_tts_voice_none_when_everything_is_absent() {
+        assert_eq!(
+            resolve_tts_voice(None, None, &empty_lang_voices(), &no_catalog(), &None),
+            None
+        );
+    }
+
+    // -- resolve_tts_voice: `lang` hint (mistllm-wire tts-lang-hint-v1) ----
+
+    #[test]
+    fn resolve_tts_voice_request_voice_wins_over_lang() {
+        // lang never overrides an explicit request voice, even when
+        // lang_voices has its own entry for that exact language.
+        let mut lang_voices = empty_lang_voices();
+        lang_voices.insert("en".to_string(), "lang-voice".to_string());
+        let voice = resolve_tts_voice(
+            Some("request-voice".to_string()),
+            Some("en"),
+            &lang_voices,
+            &no_catalog(),
+            &Some("preset-voice".to_string()),
+        );
+        assert_eq!(voice.as_deref(), Some("request-voice"));
+    }
+
+    #[test]
+    fn resolve_tts_voice_lang_voices_exact_match() {
+        let mut lang_voices = empty_lang_voices();
+        lang_voices.insert("en".to_string(), "en-voice".to_string());
+        lang_voices.insert("ja".to_string(), "ja-voice".to_string());
+        let voice = resolve_tts_voice(
+            None,
+            Some("ja"),
+            &lang_voices,
+            &no_catalog(),
+            &Some("preset-voice".to_string()),
+        );
+        assert_eq!(voice.as_deref(), Some("ja-voice"));
+    }
+
+    #[test]
+    fn resolve_tts_voice_lang_voices_matches_primary_subtag() {
+        // "en-US" must match a lang_voices entry keyed just "en".
+        let mut lang_voices = empty_lang_voices();
+        lang_voices.insert("en".to_string(), "en-voice".to_string());
+        let voice = resolve_tts_voice(
+            None,
+            Some("en-US"),
+            &lang_voices,
+            &no_catalog(),
+            &None,
+        );
+        assert_eq!(voice.as_deref(), Some("en-voice"));
+    }
+
+    #[test]
+    fn resolve_tts_voice_lang_voices_lookup_is_case_insensitive() {
+        let mut lang_voices = empty_lang_voices();
+        lang_voices.insert("EN".to_string(), "en-voice".to_string());
+        let voice = resolve_tts_voice(
+            None,
+            Some("en-us"),
+            &lang_voices,
+            &no_catalog(),
+            &None,
+        );
+        assert_eq!(voice.as_deref(), Some("en-voice"));
+    }
+
+    #[test]
+    fn resolve_tts_voice_lang_with_no_lang_voices_entry_falls_back_to_preset_voice() {
+        let mut lang_voices = empty_lang_voices();
+        lang_voices.insert("ja".to_string(), "ja-voice".to_string());
+        // Requested "fr" has no entry and the catalog isn't kokoro-shaped
+        // (empty), so this falls all the way through to preset_voice.
+        let voice = resolve_tts_voice(
+            None,
+            Some("fr"),
+            &lang_voices,
+            &no_catalog(),
+            &Some("preset-voice".to_string()),
+        );
+        assert_eq!(voice.as_deref(), Some("preset-voice"));
+    }
+
+    // -- resolve_tts_voice: kokoro-style catalog heuristic -----------------
+
+    fn kokoro_catalog() -> Vec<String> {
+        vec![
+            "af_heart".to_string(),
+            "bm_george".to_string(),
+            "jf_alpha".to_string(),
+            "zm_yunjian".to_string(),
+        ]
+    }
+
+    #[test]
+    fn resolve_tts_voice_kokoro_heuristic_applies_when_catalog_is_uniformly_kokoro_shaped() {
+        let voice = resolve_tts_voice(
+            None,
+            Some("ja"),
+            &empty_lang_voices(),
+            &kokoro_catalog(),
+            &None,
+        );
+        assert_eq!(voice.as_deref(), Some("jf_alpha"));
+    }
+
+    #[test]
+    fn resolve_tts_voice_kokoro_heuristic_prefers_lang_voices_when_both_could_apply() {
+        // lang_voices is checked before the kokoro heuristic, even though
+        // the catalog is also kokoro-shaped and could otherwise resolve
+        // "ja" itself.
+        let mut lang_voices = empty_lang_voices();
+        lang_voices.insert("ja".to_string(), "explicit-ja-voice".to_string());
+        let voice = resolve_tts_voice(
+            None,
+            Some("ja"),
+            &lang_voices,
+            &kokoro_catalog(),
+            &None,
+        );
+        assert_eq!(voice.as_deref(), Some("explicit-ja-voice"));
+    }
+
+    #[test]
+    fn resolve_tts_voice_kokoro_heuristic_picks_first_matching_prefix_english_has_two_letters() {
+        // "en" maps to both "a" and "b" prefixes; the first catalog entry
+        // matching either wins (catalog order, not prefix-letter order).
+        let voice = resolve_tts_voice(
+            None,
+            Some("en"),
+            &empty_lang_voices(),
+            &kokoro_catalog(),
+            &None,
+        );
+        assert_eq!(voice.as_deref(), Some("af_heart"));
+    }
+
+    #[test]
+    fn resolve_tts_voice_kokoro_heuristic_does_not_apply_to_a_non_kokoro_catalog() {
+        // Safety-first: a catalog with even one non-conforming id must not
+        // be treated as kokoro-shaped at all.
+        let catalog = vec!["af_heart".to_string(), "alloy".to_string()];
+        let voice = resolve_tts_voice(
+            None,
+            Some("en"),
+            &empty_lang_voices(),
+            &catalog,
+            &Some("preset-voice".to_string()),
+        );
+        assert_eq!(voice.as_deref(), Some("preset-voice"));
+    }
+
+    #[test]
+    fn resolve_tts_voice_kokoro_heuristic_does_not_apply_to_an_empty_catalog() {
+        let voice = resolve_tts_voice(
+            None,
+            Some("en"),
+            &empty_lang_voices(),
+            &no_catalog(),
+            &Some("preset-voice".to_string()),
+        );
+        assert_eq!(voice.as_deref(), Some("preset-voice"));
+    }
+
+    #[test]
+    fn resolve_tts_voice_kokoro_heuristic_does_not_apply_for_an_unmapped_language() {
+        // "de" (German) has no documented kokoro prefix letter.
+        let voice = resolve_tts_voice(
+            None,
+            Some("de"),
+            &empty_lang_voices(),
+            &kokoro_catalog(),
+            &Some("preset-voice".to_string()),
+        );
+        assert_eq!(voice.as_deref(), Some("preset-voice"));
+    }
+
+    #[test]
+    fn resolve_tts_voice_kokoro_heuristic_does_not_apply_when_no_prefix_letter_matches() {
+        // Catalog is kokoro-shaped but has no "z" (zh) entries -- must not
+        // guess a wrong-language voice, falls through instead.
+        let catalog = vec!["af_heart".to_string(), "jf_alpha".to_string()];
+        let voice = resolve_tts_voice(
+            None,
+            Some("zh"),
+            &empty_lang_voices(),
+            &catalog,
+            &Some("preset-voice".to_string()),
+        );
+        assert_eq!(voice.as_deref(), Some("preset-voice"));
+    }
+
+    #[test]
+    fn lang_primary_subtag_lowercases_and_strips_region() {
+        assert_eq!(lang_primary_subtag("en-US"), "en");
+        assert_eq!(lang_primary_subtag("JA-JP"), "ja");
+        assert_eq!(lang_primary_subtag("en"), "en");
+    }
+
+    #[test]
+    fn is_kokoro_style_voice_matches_and_rejects() {
+        assert!(is_kokoro_style_voice("af_heart"));
+        assert!(is_kokoro_style_voice("jm_kumo"));
+        assert!(!is_kokoro_style_voice("alloy"));
+        assert!(!is_kokoro_style_voice("a_heart")); // missing gender letter
+        assert!(!is_kokoro_style_voice("Af_heart")); // uppercase language letter
+        assert!(!is_kokoro_style_voice(""));
     }
 
     // -- resolve_voice_call_model: request model vs. preset model ---------
@@ -1227,6 +1732,7 @@ mod tests {
             temperature: None,
             reasoning_effort: None,
             voice: voice.map(String::from),
+            lang_voices: HashMap::new(),
         }
     }
 

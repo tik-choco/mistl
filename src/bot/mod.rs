@@ -781,6 +781,7 @@ async fn cmd_options(state: &Arc<AppState>) -> Result<Value> {
 mod tests {
     use super::*;
     use crate::config::{AiPresetConfig, AiProviderConfig};
+    use std::collections::HashMap;
 
     fn sample_pipeline(id: &str, schedule: &str) -> PipelineConfig {
         PipelineConfig {
@@ -812,6 +813,7 @@ mod tests {
             temperature: None,
             reasoning_effort: None,
             voice: None,
+            lang_voices: HashMap::new(),
             kind: "chat".to_string(),
         });
         config.ai.presets.push(AiPresetConfig {
@@ -822,6 +824,7 @@ mod tests {
             temperature: None,
             reasoning_effort: None,
             voice: Some("alloy".to_string()),
+            lang_voices: HashMap::new(),
             kind: "tts".to_string(),
         });
         config
