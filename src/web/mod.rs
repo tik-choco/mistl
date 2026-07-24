@@ -6,7 +6,10 @@
 //! rejected via a required custom header (browsers can't send it cross-site
 //! without a CORS preflight, which this server never grants).
 
+pub mod autoreopen;
+pub mod browser;
 pub mod server;
+pub mod ui_state;
 
 pub use server::serve;
 

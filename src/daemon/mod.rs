@@ -1,9 +1,9 @@
 pub mod ipc;
 
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
@@ -23,6 +23,12 @@ pub struct AppState {
     /// Set by [`AppState::request_restart`]: after the daemon shuts down it
     /// relaunches itself from the (freshly self-updated) executable.
     restart: AtomicBool,
+    /// When the daemon last saw an HTTP request that indicates an open
+    /// dashboard tab (page load or the dashboard's status poll). Used by
+    /// [`crate::web::autoreopen`] to tell "a tab is already open" from "the
+    /// dashboard was left closed" both at startup (grace-period check) and
+    /// at shutdown (deciding whether to persist `dashboard_open`).
+    dashboard_seen: Mutex<Option<Instant>>,
 }
 
 impl AppState {
@@ -50,6 +56,20 @@ impl AppState {
     fn wants_restart(&self) -> bool {
         self.restart.load(Ordering::SeqCst)
     }
+
+    /// Record that a dashboard HTTP request just came in (see call sites in
+    /// `web::server` for exactly which requests count).
+    pub fn note_dashboard_activity(&self) {
+        *self.dashboard_seen.lock().expect("dashboard_seen lock poisoned") = Some(Instant::now());
+    }
+
+    /// Whether a dashboard request was seen within the last `window`.
+    pub fn dashboard_seen_within(&self, window: Duration) -> bool {
+        match *self.dashboard_seen.lock().expect("dashboard_seen lock poisoned") {
+            Some(seen) => seen.elapsed() <= window,
+            None => false,
+        }
+    }
 }
 
 /// Run the daemon in the foreground until Ctrl-C or a `daemon.stop` request.
@@ -69,6 +89,7 @@ async fn daemon_main(host_override: Option<String>) -> Result<()> {
         started_at: Instant::now(),
         shutdown: shutdown_tx,
         restart: AtomicBool::new(false),
+        dashboard_seen: Mutex::new(None),
     });
 
     let server = ipc::serve(state.clone()).await?;
@@ -83,6 +104,13 @@ async fn daemon_main(host_override: Option<String>) -> Result<()> {
         match crate::web::serve(state.clone(), &listen).await {
             Ok(web) => {
                 info!(url = %web.url(), "web dashboard ready");
+                // Restore "the dashboard was open" across restarts: if
+                // `ui-state.json` says a tab was open when the previous run
+                // shut down, reopen it -- after a grace period that lets an
+                // existing tab reconnect first, so a `daemon.restart` (or
+                // any fresh start right after one) doesn't pop a duplicate
+                // browser tab alongside the one that's already there.
+                crate::web::autoreopen::spawn_dashboard_autoreopen(state.clone(), listen.clone());
                 Some(web)
             }
             Err(error) => {
@@ -137,6 +165,25 @@ async fn daemon_main(host_override: Option<String>) -> Result<()> {
         web.close().await;
     }
     server.close().await;
+
+    // Persist whether the dashboard was open at shutdown so the next start
+    // (in particular, the relaunch below after a `daemon.restart`) knows
+    // whether to reopen it -- see `crate::web::autoreopen`. A release
+    // dashboard polls `/api/call` every 5s, so "seen within 15s" is a good
+    // proxy for "a tab was open just now". Written unconditionally (with the
+    // UI disabled there's no activity, so this correctly persists `false`);
+    // any failure is logged and never blocks shutdown.
+    match config::data_dir() {
+        Ok(data_dir) => {
+            let ui_state = crate::web::ui_state::UiState {
+                dashboard_open: state.dashboard_seen_within(Duration::from_secs(15)),
+            };
+            if let Err(error) = crate::web::ui_state::write_state(&data_dir, ui_state) {
+                tracing::warn!(%error, "failed to persist dashboard UI state");
+            }
+        }
+        Err(error) => tracing::warn!(%error, "failed to resolve data directory for UI state"),
+    }
 
     // A self-update applied with `--restart`, or a `daemon.restart` IPC call,
     // asks us to come back up. The sockets are now released, so relaunch is

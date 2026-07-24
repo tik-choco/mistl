@@ -509,6 +509,10 @@ async fn handle_connection_inner(
 
     match (method.as_str(), path.as_str()) {
         ("GET", "/") | ("GET", "/index.html") => {
+            // Page load: a strong signal the dashboard tab is open, used by
+            // `web::autoreopen` to avoid reopening a duplicate after a
+            // restart (and to decide what to persist at shutdown).
+            state.note_dashboard_activity();
             write_html_response(stream, 200, "OK", index_html_body().as_ref()).await
         }
         ("GET", "/favicon.png") => {
@@ -517,7 +521,13 @@ async fn handle_connection_inner(
         ("GET", "/api/dev/instance") => {
             write_json_response(stream, 200, "OK", &json!({"ok": true, "data": {"instance": instance_id}})).await
         }
-        ("POST", "/api/call") => handle_api_call(stream, &head, leftover, state).await,
+        ("POST", "/api/call") => {
+            // The dashboard polls this every 5s while a tab is open (status
+            // refresh), so it doubles as a liveness signal -- see the `GET
+            // /` comment above.
+            state.note_dashboard_activity();
+            handle_api_call(stream, &head, leftover, state).await
+        }
         ("POST", "/api/store/upload") => handle_store_upload(stream, &head, leftover, state).await,
         ("GET", "/api/store/download") => handle_store_download(stream, &head, state).await,
         ("POST", "/api/store/sandbox-upload") => {

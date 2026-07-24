@@ -9771,7 +9771,7 @@
        ai.editor.kindLabel on the preset editor -- a preset's `kind`
        ("chat"|"tts"|"stt") is decided once, there, not here). Checking the
        box writes to whichever single config field that kind maps to:
-       chat -> add/remove the preset's model in ai.advertised_models
+       chat -> add/remove the preset's id in ai.advertised_models
        (provider_hello.models, multi-select); tts/stt -> assign/clear
        ai.tts_preset_id/stt_preset_id to this preset's id (single-select --
        checking one tts-kind row and re-rendering naturally unchecks any
@@ -9822,11 +9822,11 @@
           };
         } else {
           var advertised = Array.isArray(sectionCfg.advertised_models) ? sectionCfg.advertised_models : [];
-          checked = !!preset.model && advertised.indexOf(preset.model) !== -1;
+          checked = advertised.indexOf(preset.id) !== -1;
           onChange = function (isChecked) {
             var next = isChecked
-              ? (preset.model && advertised.indexOf(preset.model) === -1 ? advertised.concat([preset.model]) : advertised)
-              : advertised.filter(function (m) { return m !== preset.model; });
+              ? (advertised.indexOf(preset.id) === -1 ? advertised.concat([preset.id]) : advertised)
+              : advertised.filter(function (m) { return m !== preset.id; });
             saveSetting("ai.advertised_models", next, sectionCfg, "advertised_models", provideBadge).then(renderProvideChecklist);
           };
         }
