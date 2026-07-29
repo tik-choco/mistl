@@ -189,6 +189,38 @@ pub enum KeyAction {
     List,
     /// Show the primary DID
     Did,
+    /// Sign a root -> leaf DID delegation (this identity becomes `root`),
+    /// printed as JSON -- the manual-transfer path ("経路B") from
+    /// did-delegation.md: paste the output into a browser app that
+    /// supports importing a delegation. For the no-copy-paste path, see
+    /// `mistl key pair`.
+    Delegate {
+        /// The leaf DID to delegate to (a `did:key:z...`, typically a
+        /// browser app's existing per-origin identity)
+        #[arg(long)]
+        leaf: String,
+        /// Delegation lifetime: a number of days, or suffixed s/m/h/d
+        /// (e.g. `90d`, `12h`). Range 1-365 days.
+        #[arg(long, default_value = "60d")]
+        ttl: String,
+    },
+    /// List delegations this identity has issued as root (most recent
+    /// last), including expired ones
+    Delegations,
+    /// Pair with a browser app over a short-lived mistlib room ("経路A"
+    /// from did-delegation.md): prints a one-time code to read aloud/type
+    /// into the browser, then waits for it to be claimed and a delegation
+    /// issued
+    Pair {
+        /// Delegation lifetime once a pairing request is accepted (same
+        /// format as `key delegate --ttl`)
+        #[arg(long, default_value = "60d")]
+        ttl: String,
+        /// How long to wait for the code to be claimed before giving up
+        /// (suffixed s/m/h/d, default 5 minutes)
+        #[arg(long, default_value = "5m")]
+        timeout: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -604,6 +636,15 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             KeyAction::Generate => client_call("key.generate", json!({})),
             KeyAction::List => client_call("key.list", json!({})),
             KeyAction::Did => client_call("key.did", json!({})),
+            KeyAction::Delegate { leaf, ttl } => {
+                client_call("key.delegate", json!({ "leaf": leaf, "ttl": ttl }))
+            }
+            KeyAction::Delegations => {
+                let response = request("key.delegations", json!({}))?;
+                println!("{}", render_delegations(&response));
+                Ok(())
+            }
+            KeyAction::Pair { ttl, timeout } => key_pair(ttl, timeout),
         },
         Command::Store { json, action } => match action {
             StoreAction::Put { path } => {
@@ -993,6 +1034,83 @@ fn status_overview() -> Result<()> {
     });
     println!("{}", serde_json::to_string_pretty(&overview)?);
     Ok(())
+}
+
+// -- `mistl key delegate`/`delegations`/`pair` --------------------------
+
+/// `mistl key delegations`: one row per issued delegation (as returned by
+/// `key.delegations`, which already tags each entry with `expired`).
+fn render_delegations(response: &Value) -> String {
+    let entries = response.as_array().cloned().unwrap_or_default();
+    if entries.is_empty() {
+        return "no delegations issued".to_string();
+    }
+    let mut lines = vec!["LEAF\tISSUED\tEXPIRES\tSTATUS".to_string()];
+    lines.extend(entries.iter().map(|d| {
+        let leaf = d.get("leaf").and_then(Value::as_str).unwrap_or_default();
+        let iat = d.get("iat").and_then(Value::as_str).unwrap_or_default();
+        let exp = d.get("exp").and_then(Value::as_str).unwrap_or_default();
+        let status = if d.get("expired").and_then(Value::as_bool).unwrap_or(false) {
+            "expired"
+        } else {
+            "active"
+        };
+        format!("{leaf}\t{iat}\t{exp}\t{status}")
+    }));
+    lines.join("\n")
+}
+
+/// `mistl key pair`: start a pairing session, print the code, then poll
+/// `key.pair.status` every 2 seconds (matching did-delegation.md's
+/// suggested polling cadence for this side) until the browser claims the
+/// code (or it expires/is cancelled).
+fn key_pair(ttl: String, timeout: String) -> Result<()> {
+    let start = request("key.pair.start", json!({ "ttl": ttl, "timeout": timeout }))?;
+    let formatted = start
+        .get("formatted_code")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let room = start
+        .get("room")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let expires_at = start
+        .get("expires_at")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+
+    println!("pairing code: {formatted}");
+    println!();
+    println!("  Enter this code in the browser app's \"pair with mistl\" flow.");
+    println!("  Waiting (room {room}) until {expires_at}...");
+    println!();
+
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let status = request("key.pair.status", json!({}))?;
+        match status
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("none")
+        {
+            "waiting" => continue,
+            "issued" => {
+                let leaf = status
+                    .get("leaf")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let app = status
+                    .get("app")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                println!("paired: delegated to {leaf} (app: {app})");
+                return Ok(());
+            }
+            "expired" => bail!("pairing code expired before it was claimed"),
+            "cancelled" => bail!("pairing was cancelled"),
+            other => bail!("unexpected pairing status: {other}"),
+        }
+    }
 }
 
 /// Ensure the daemon is up, then open the dashboard URL in the default
@@ -1863,10 +1981,7 @@ mod bot_render_tests {
             }]
         });
         let rendered = render_bot_ls(&response);
-        assert!(
-            rendered.contains("FAIL: preset \"worker\" not found in ai.presets"),
-            "{rendered}"
-        );
+        assert!(rendered.contains("FAIL: preset \"worker\" not found in ai.presets"), "{rendered}");
     }
 
     #[test]

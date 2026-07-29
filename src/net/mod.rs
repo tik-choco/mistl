@@ -50,6 +50,22 @@ pub const EVENT_RAW: u32 = mistlib::EVENT_RAW;
 pub const EVENT_JOIN: u32 = mistlib::EVENT_JOIN;
 pub const EVENT_LEAVE: u32 = mistlib::EVENT_LEAVE;
 
+/// Nostr signaling discovery namespace, together with [`MIST_INVITE_CODE`].
+/// mistlib ships a built-in default (`"nostr-sig-test-local-salt"` /
+/// `"dev-invite-001"`) that its signaling spec reserves for local-relay
+/// development; two peers only ever find each other when both values match,
+/// so leaving the default in place on the public relays puts this daemon in
+/// the same namespace as every other deployment that also never set it.
+/// This pair matches every other tik-choco app -- see
+/// `protocol/docs/data-contracts/reference/mistSignaling.ts`, the canonical
+/// source for this family's value; keep the two in sync or cross-app rooms
+/// (mailbox, ai, stream relay, storage, the DID pairing room) silently split
+/// into per-app islands where each side just sees an empty room. Not a
+/// secret: it ships in public JS bundles for the browser apps already.
+pub const MIST_INVITE_SALT: &str = "tik-choco-v1";
+/// See [`MIST_INVITE_SALT`].
+pub const MIST_INVITE_CODE: &str = "tik-choco-public-v1";
+
 /// A per-module event handler: `(event_type, from_node_id, payload)`.
 ///
 /// Invoked synchronously on mistlib's dispatch thread (no tokio runtime),
@@ -323,9 +339,19 @@ async fn start_engine(state: &Arc<AppState>) -> Result<Arc<Engine>> {
 
     // Same shape tc-storage's mistStorage.ts uses: explicit Nostr signaling
     // with no relay override, which falls back to mistlib's default public
-    // relay list (NostrSignalingConfig::effective_relay_list_url).
+    // relay list (NostrSignalingConfig::effective_relay_list_url). inviteSalt
+    // / inviteCode are set explicitly to this family's shared namespace --
+    // see MIST_INVITE_SALT's doc comment for why the engine default can't be
+    // trusted here.
     let config_json = json!({
-        "signaling": { "mode": "nostr", "nostr": { "relays": [] } }
+        "signaling": {
+            "mode": "nostr",
+            "nostr": {
+                "relays": [],
+                "inviteSalt": MIST_INVITE_SALT,
+                "inviteCode": MIST_INVITE_CODE,
+            }
+        }
     })
     .to_string();
 
