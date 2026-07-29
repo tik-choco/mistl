@@ -98,6 +98,13 @@ $ mistl config set stream.room my-room
 # Profile / DID keys
 $ mistl key did               # generates a key on first call
 $ mistl key list
+
+# DID delegation (root/leaf chain): let a browser app's per-origin identity
+# be recognized as the same person as this mistl-held root identity
+$ mistl key delegate --leaf did:key:z6Mk...   # manual transfer: prints a DelegationV1 JSON to paste into the app
+$ mistl key delegations                       # list delegations issued so far
+$ mistl key pair                              # no-copy-paste: prints a pairing code, waits for the app to claim it
+
 $ mistl profile set display_name "yourname"
 $ mistl profile show
 
@@ -313,11 +320,50 @@ The dashboard's **Profile** panel sets the avatar end-to-end: it downscales the
 chosen image to 256 px client-side, uploads it to the content store
 (`POST /api/store/upload`), and points `avatar_cid` at the returned CID.
 
+## DID delegation (root/leaf)
+
+A browser app's `did:key` is scoped to its own origin, so the same person looks
+like a different identity in every browser/tab/dev-port. mistl can hold a
+permanent **root** identity and sign short-lived delegations to an app's
+existing per-origin **leaf** key, so peers that understand the chain treat
+`leaf` messages as belonging to `root`. Chain depth is fixed at 1 (root → leaf,
+no sub-delegation) and there's no revocation list — delegations are short-lived
+(`exp`, recommended 60 days) and reissued rather than revoked. Full spec:
+`protocol/docs/data-contracts/docs/did-delegation.md` (shared byte-for-byte
+with the TypeScript implementation in mistai).
+
+Two issuance paths:
+
+- **Pairing** (`mistl key pair`, recommended): joins a short-lived,
+  code-derived mistlib room and prints a `XXXX-XXXX-XXXX-XXXX` code. Enter
+  that code in the browser app's "pair with mistl" flow; once it claims the
+  code (MAC-authenticated so only someone who read/typed the code can), mistl
+  signs and broadcasts a delegation, then leaves the room (one-shot — the code
+  can't be reused). `--ttl` sets the issued delegation's lifetime (default
+  60d), `--timeout` how long to wait for a claim (default 5m).
+- **Manual transfer** (`mistl key delegate --leaf <did:key> [--ttl 60d]`):
+  prints the signed `DelegationV1` JSON directly, to copy/paste (or QR) into
+  an app that supports importing one.
+
+`mistl key delegations` lists every delegation this identity has issued as
+root, including expired ones.
+
+IPC/dashboard bridge:
+
+- `key.delegate` `{leaf, ttl?}` → `DelegationV1` JSON
+- `key.delegations` `{}` → `[DelegationV1 & {expired: bool}, ...]`
+- `key.pair.start` `{ttl?, timeout?}` → `{code, formatted_code, room, expires_at}`
+- `key.pair.status` `{}` → `{status, code?, leaf?, app?, delegation?, expires_at?}`
+- `key.pair.cancel` `{}` → `{cancelled: bool}`
+
 ## Architecture
 
 ```
 mistl <subcommand>  --(JSON over loopback TCP)-->  mistl daemon run
                                                      ├─ identity  (did:key ed25519, profile)
+                                                     │    ├─ crypto.rs      (tc-storage-compatible AES-GCM+PBKDF2 envelope)
+                                                     │    ├─ delegation.rs  (root -> leaf DID delegation: issue/verify)
+                                                     │    └─ pairing.rs     (mistlib-room code pairing, issuer side)
                                                      ├─ storage   (mistlib StorageEngine + NativeBlockStore)
                                                      ├─ stream    (screen capture or p2p WebRTC relay → RTP → RTSP server)
                                                      ├─ mailbox   (signed envelope spools over net)
@@ -330,6 +376,9 @@ mistl <subcommand>  --(JSON over loopback TCP)-->  mistl daemon run
   local user can connect
 - tc-storage interop: DID format, AES-256-GCM + PBKDF2-SHA256 (210k) envelopes
   (`identity::crypto`), CID semantics
+- DID delegation (`identity::delegation` + `identity::pairing`): root/leaf
+  chain issuance, byte-compatible with mistai's independent TypeScript
+  implementation of the same spec — see "DID delegation (root/leaf)" above
 - mistlink interop: AVPro-friendly dummy SPS/PPS RTSP keepalive, PT 96 / SSRC 0x12345678
 - `stream` backends: `native` captures via Windows.Graphics.Capture and encodes with
   OpenH264 in-process; `ffmpeg` spawns ffmpeg (gdigrab → MPEG-TS → demux) as a fallback;

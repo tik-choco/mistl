@@ -8,6 +8,8 @@
 //! [`current`]; do not change them without updating callers.
 
 pub mod crypto;
+mod delegation;
+mod pairing;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -89,7 +91,12 @@ pub fn verify(did: &str, data: &[u8], signature: &[u8]) -> Result<bool> {
 }
 
 /// Extract the raw 32-byte Ed25519 public key from a `did:key:z...` string.
-fn pubkey_from_did(did: &str) -> Result<[u8; 32]> {
+///
+/// `pub(crate)` (rather than private) so [`delegation`] and [`pairing`] can
+/// reuse it to validate a delegation's `leaf`/`root` without re-implementing
+/// did:key decoding -- there must be exactly one did:key implementation in
+/// this crate.
+pub(crate) fn pubkey_from_did(did: &str) -> Result<[u8; 32]> {
     let multibase = did.strip_prefix("did:key:").context("not a did:key DID")?;
     let encoded = multibase
         .strip_prefix('z')
@@ -326,6 +333,21 @@ fn profile_with_did(profile: &Profile, did: &str) -> Result<Value> {
 /// - `key.generate` `{}` -> `{did}` (errors if one already exists)
 /// - `key.list` `{}` -> `[{did, created_at}]`
 /// - `key.did` `{}` -> `{did}`
+/// - `key.delegate` `{leaf, ttl?}` -> `DelegationV1` JSON (root -> leaf
+///   delegation, signed by this identity as root; see
+///   `protocol/docs/data-contracts/docs/did-delegation.md`'s "経路B" --
+///   manual transfer). `ttl` is a duration string like `"60d"` (default),
+///   range 1-365 days.
+/// - `key.delegations` `{}` -> `[DelegationV1 & {expired: bool}, ...]`,
+///   every delegation issued by this identity so far.
+/// - `key.pair.start` `{ttl?, timeout?}` -> `{code, formatted_code, room,
+///   expires_at}` -- begin "経路A" pairing: joins a code-derived room and
+///   waits for a browser to claim the code and receive a delegation.
+///   `timeout` defaults to `"5m"`.
+/// - `key.pair.status` `{}` -> `{status, code?, leaf?, app?, delegation?,
+///   expires_at?}`, `status` one of `none`/`waiting`/`issued`/`expired`/
+///   `cancelled`.
+/// - `key.pair.cancel` `{}` -> `{cancelled: bool}`
 pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Value> {
     match cmd {
         "profile.show" => {
@@ -367,6 +389,53 @@ pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Val
             let identity = current(state).await?;
             Ok(json!({ "did": identity.did() }))
         }
+        "key.delegate" => {
+            let leaf = args
+                .get("leaf")
+                .and_then(Value::as_str)
+                .context("missing `leaf`")?;
+            let ttl_str = args.get("ttl").and_then(Value::as_str).unwrap_or("60d");
+            let ttl = delegation::parse_ttl(ttl_str)?;
+
+            let identity = current(state).await?;
+            let issued = delegation::issue(&identity, leaf, ttl, Utc::now())?;
+            delegation::record_delegation(issued.clone())?;
+            Ok(serde_json::to_value(&issued)?)
+        }
+        "key.delegations" => {
+            let now = Utc::now();
+            let issued = delegation::load_delegations()?;
+            let out: Vec<Value> = issued
+                .into_iter()
+                .map(|d| {
+                    let expired = chrono::DateTime::parse_from_rfc3339(&d.exp)
+                        .map(|exp| exp.with_timezone(&Utc) <= now)
+                        .unwrap_or(true);
+                    let mut value = serde_json::to_value(&d).unwrap_or(Value::Null);
+                    if let Value::Object(map) = &mut value {
+                        map.insert("expired".to_string(), json!(expired));
+                    }
+                    value
+                })
+                .collect();
+            Ok(json!(out))
+        }
+        "key.pair.start" => {
+            let ttl_str = args.get("ttl").and_then(Value::as_str).unwrap_or("60d");
+            let ttl = delegation::parse_ttl(ttl_str)?;
+            let timeout_str = args.get("timeout").and_then(Value::as_str).unwrap_or("5m");
+            let timeout = delegation::parse_short_duration(timeout_str)?;
+
+            let (code, room, expires_at) = pairing::start_pairing(state, ttl, timeout).await?;
+            Ok(json!({
+                "code": code,
+                "formatted_code": pairing::format_code(&code),
+                "room": room,
+                "expires_at": expires_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            }))
+        }
+        "key.pair.status" => Ok(pairing::status_json()),
+        "key.pair.cancel" => Ok(json!({ "cancelled": pairing::cancel().await })),
         _ => bail!("unknown identity command: {cmd}"),
     }
 }
