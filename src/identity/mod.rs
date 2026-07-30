@@ -16,11 +16,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use chrono::Utc;
 use ed25519_dalek::pkcs8::{DecodePrivateKey, EncodePrivateKey};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as BASE64;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -84,9 +84,10 @@ fn node_id_for_did(did: &str) -> String {
 /// Verify an Ed25519 signature against a `did:key` DID.
 pub fn verify(did: &str, data: &[u8], signature: &[u8]) -> Result<bool> {
     let pubkey_bytes = pubkey_from_did(did)?;
-    let verifying_key =
-        VerifyingKey::from_bytes(&pubkey_bytes).map_err(|e| anyhow!("invalid ed25519 public key: {e}"))?;
-    let signature = Signature::try_from(signature).map_err(|e| anyhow!("invalid signature: {e}"))?;
+    let verifying_key = VerifyingKey::from_bytes(&pubkey_bytes)
+        .map_err(|e| anyhow!("invalid ed25519 public key: {e}"))?;
+    let signature =
+        Signature::try_from(signature).map_err(|e| anyhow!("invalid signature: {e}"))?;
     Ok(verifying_key.verify(data, &signature).is_ok())
 }
 
@@ -104,7 +105,10 @@ pub(crate) fn pubkey_from_did(did: &str) -> Result<[u8; 32]> {
     let bytes = bs58::decode(encoded)
         .into_vec()
         .map_err(|e| anyhow!("invalid base58btc encoding: {e}"))?;
-    if bytes.len() != 34 || bytes[0] != MULTICODEC_ED25519_PUB[0] || bytes[1] != MULTICODEC_ED25519_PUB[1] {
+    if bytes.len() != 34
+        || bytes[0] != MULTICODEC_ED25519_PUB[0]
+        || bytes[1] != MULTICODEC_ED25519_PUB[1]
+    {
         bail!("DID key is not an Ed25519 public key");
     }
     let mut pubkey = [0u8; 32];
@@ -165,8 +169,8 @@ fn load_identity() -> Result<Option<Identity>> {
 
     let meta_text = std::fs::read_to_string(&meta_path)
         .with_context(|| format!("reading {}", meta_path.display()))?;
-    let meta: IdentityMeta =
-        serde_json::from_str(&meta_text).with_context(|| format!("parsing {}", meta_path.display()))?;
+    let meta: IdentityMeta = serde_json::from_str(&meta_text)
+        .with_context(|| format!("parsing {}", meta_path.display()))?;
 
     let expected_did = did_from_pubkey(&signing_key.verifying_key().to_bytes());
     if meta.did != expected_did {
@@ -214,10 +218,7 @@ fn generate_identity(state: &AppState) -> Result<Identity> {
         did: did.clone(),
         method: "did:key".into(),
         key_type: "Ed25519".into(),
-        public_key_multibase: did
-            .strip_prefix("did:key:")
-            .unwrap_or(&did)
-            .to_string(),
+        public_key_multibase: did.strip_prefix("did:key:").unwrap_or(&did).to_string(),
         created_at: created_at.clone(),
     })?;
 
@@ -303,7 +304,8 @@ fn load_profile() -> Result<Profile> {
     if !path.exists() {
         return Ok(Profile::default());
     }
-    let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
 }
 
@@ -552,7 +554,10 @@ mod tests {
         assert_eq!(profile.display_name.as_deref(), Some("Ada"));
         assert_eq!(profile.bio.as_deref(), Some("Loves math"));
         assert_eq!(profile.avatar_cid.as_deref(), Some("bafyavatarcid"));
-        assert_eq!(profile.extra.get("custom_field").map(String::as_str), Some("custom value"));
+        assert_eq!(
+            profile.extra.get("custom_field").map(String::as_str),
+            Some("custom value")
+        );
 
         let value = serde_json::to_value(&profile).unwrap();
         assert_eq!(value["display_name"], "Ada");

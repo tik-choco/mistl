@@ -68,20 +68,41 @@ pub(super) async fn run_chain(
             TransformConfig::Summarize { preset_id } => {
                 outcome.script = Some(summarize(&config.ai, preset_id, article).await?);
             }
-            TransformConfig::Tts { preset_id, format, speed } => {
+            TransformConfig::Tts {
+                preset_id,
+                format,
+                speed,
+            } => {
                 let raw_text = outcome
                     .script
                     .clone()
                     .unwrap_or_else(|| fallback_script(article));
                 let text = truncate_for_tts(&raw_text, pipeline_id, &article.id);
                 outcome.audio = Some(
-                    synthesize_audio(state, &config.ai, preset_id, format.as_deref(), *speed, &text, &article.id)
-                        .await?,
+                    synthesize_audio(
+                        state,
+                        &config.ai,
+                        preset_id,
+                        format.as_deref(),
+                        *speed,
+                        &text,
+                        &article.id,
+                    )
+                    .await?,
                 );
             }
-            TransformConfig::Translate { preset_id, target_lang } => {
-                let title = outcome.title.clone().unwrap_or_else(|| article.title.clone());
-                let text = outcome.script.clone().unwrap_or_else(|| article.body.clone());
+            TransformConfig::Translate {
+                preset_id,
+                target_lang,
+            } => {
+                let title = outcome
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| article.title.clone());
+                let text = outcome
+                    .script
+                    .clone()
+                    .unwrap_or_else(|| article.body.clone());
                 let (translated_title, translated_text) =
                     translate(&config.ai, preset_id, target_lang, &title, &text).await?;
                 outcome.title = Some(translated_title);
@@ -111,7 +132,9 @@ fn translate_system_prompt(target_lang: &str, for_title: bool) -> String {
 原文の意味とトーンを保ちながら、自然な訳文にしてください。"
     );
     if for_title {
-        prompt.push_str("これは見出し(タイトル)の翻訳です。出力は1行の短いタイトルのみにしてください。");
+        prompt.push_str(
+            "これは見出し(タイトル)の翻訳です。出力は1行の短いタイトルのみにしてください。",
+        );
     }
     prompt
 }
@@ -143,15 +166,25 @@ async fn translate_one(
         reasoning_effort: resolved.reasoning_effort,
     };
     let messages = vec![
-        ChatMessage { role: "system".to_string(), content: system_prompt },
-        ChatMessage { role: "user".to_string(), content: input.to_string() },
+        ChatMessage {
+            role: "system".to_string(),
+            content: system_prompt,
+        },
+        ChatMessage {
+            role: "user".to_string(),
+            content: input.to_string(),
+        },
     ];
     let translated = openai::stream_chat_completion(&upstream, &messages, None, None)
         .await
-        .with_context(|| format!("bot: transform \"translate\" failed calling preset {preset_id:?}"))?;
+        .with_context(|| {
+            format!("bot: transform \"translate\" failed calling preset {preset_id:?}")
+        })?;
     let translated = translated.trim().to_string();
     if translated.is_empty() {
-        anyhow::bail!("bot: transform \"translate\" (preset {preset_id:?}) returned an empty {empty_label}");
+        anyhow::bail!(
+            "bot: transform \"translate\" (preset {preset_id:?}) returned an empty {empty_label}"
+        );
     }
     Ok(translated)
 }
@@ -174,10 +207,23 @@ async fn translate(
     let translated_title = if title.trim().is_empty() {
         title.to_string()
     } else {
-        translate_one(ai, preset_id, translate_system_prompt(target_lang, true), title, "title").await?
+        translate_one(
+            ai,
+            preset_id,
+            translate_system_prompt(target_lang, true),
+            title,
+            "title",
+        )
+        .await?
     };
-    let translated_text =
-        translate_one(ai, preset_id, translate_system_prompt(target_lang, false), text, "translation").await?;
+    let translated_text = translate_one(
+        ai,
+        preset_id,
+        translate_system_prompt(target_lang, false),
+        text,
+        "translation",
+    )
+    .await?;
     Ok((translated_title, translated_text))
 }
 
@@ -221,10 +267,14 @@ async fn summarize(ai: &AiConfig, preset_id: &str, article: &Article) -> Result<
     ];
     let script = openai::stream_chat_completion(&upstream, &messages, None, None)
         .await
-        .with_context(|| format!("bot: transform \"summarize\" failed calling preset {preset_id:?}"))?;
+        .with_context(|| {
+            format!("bot: transform \"summarize\" failed calling preset {preset_id:?}")
+        })?;
     let script = script.trim().to_string();
     if script.is_empty() {
-        anyhow::bail!("bot: transform \"summarize\" (preset {preset_id:?}) returned an empty script");
+        anyhow::bail!(
+            "bot: transform \"summarize\" (preset {preset_id:?}) returned an empty script"
+        );
     }
     Ok(script)
 }
@@ -248,7 +298,10 @@ fn truncate_for_tts(text: &str, pipeline_id: &str, article_id: &str) -> String {
         return text.to_string();
     }
     warn!(
-        pipeline_id, article_id, original_chars = char_count, kept_chars = tts::MAX_INPUT_CHARS,
+        pipeline_id,
+        article_id,
+        original_chars = char_count,
+        kept_chars = tts::MAX_INPUT_CHARS,
         "bot: read-aloud script exceeded the TTS upstream's character limit; truncated at a character boundary"
     );
     text.chars().take(tts::MAX_INPUT_CHARS).collect()
@@ -316,7 +369,11 @@ async fn synthesize_audio(
     let name = format!("{article_id}.{}", extension_for_mime(&audio.mime));
     let size = audio.bytes.len() as u64;
     let cid = store.put(&name, audio.bytes).await?;
-    Ok(AudioOutcome { cid, mime: audio.mime, size })
+    Ok(AudioOutcome {
+        cid,
+        mime: audio.mime,
+        size,
+    })
 }
 
 #[cfg(test)]
@@ -384,22 +441,37 @@ mod tests {
             .await
             .expect_err("an unresolved preset must error");
         let msg = err.to_string();
-        assert!(msg.contains("missing-preset"), "error should name the preset: {msg}");
-        assert!(msg.contains("ai.presets"), "error should point at the config path: {msg}");
+        assert!(
+            msg.contains("missing-preset"),
+            "error should name the preset: {msg}"
+        );
+        assert!(
+            msg.contains("ai.presets"),
+            "error should point at the config path: {msg}"
+        );
     }
 
     #[test]
     fn translate_system_prompt_names_the_target_language() {
         let prompt = translate_system_prompt("fr", false);
-        assert!(prompt.contains("\"fr\""), "prompt should name the target language tag: {prompt}");
+        assert!(
+            prompt.contains("\"fr\""),
+            "prompt should name the target language tag: {prompt}"
+        );
     }
 
     #[test]
     fn translate_system_prompt_for_title_constrains_output_to_a_single_line() {
         let body_prompt = translate_system_prompt("en", false);
         let title_prompt = translate_system_prompt("en", true);
-        assert!(!body_prompt.contains("1行"), "body prompt should not mention a single-line constraint");
-        assert!(title_prompt.contains("1行"), "title prompt should require a single-line title: {title_prompt}");
+        assert!(
+            !body_prompt.contains("1行"),
+            "body prompt should not mention a single-line constraint"
+        );
+        assert!(
+            title_prompt.contains("1行"),
+            "title prompt should require a single-line title: {title_prompt}"
+        );
         assert!(
             title_prompt.starts_with(&body_prompt),
             "title prompt should extend the shared body prompt"
@@ -413,8 +485,14 @@ mod tests {
             .await
             .expect_err("an unresolved preset must error");
         let msg = err.to_string();
-        assert!(msg.contains("missing-preset"), "error should name the preset: {msg}");
-        assert!(msg.contains("ai.presets"), "error should point at the config path: {msg}");
+        assert!(
+            msg.contains("missing-preset"),
+            "error should name the preset: {msg}"
+        );
+        assert!(
+            msg.contains("ai.presets"),
+            "error should point at the config path: {msg}"
+        );
     }
 
     #[tokio::test]
@@ -434,7 +512,10 @@ mod tests {
             .await
             .expect_err("the body call must still run (and fail) even when the title is blank");
         let msg = err.to_string();
-        assert!(msg.contains("missing-preset"), "error should name the preset: {msg}");
+        assert!(
+            msg.contains("missing-preset"),
+            "error should name the preset: {msg}"
+        );
     }
 
     #[test]

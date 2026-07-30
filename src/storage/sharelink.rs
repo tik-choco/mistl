@@ -244,7 +244,9 @@ pub fn build_folder_share_link(
         owner_node_id: Some(owner_node_id.to_string()),
         access_grant_mode: Some(access_grant_mode.to_string()),
         folder_key_hash: Some(folder_key_hash.to_string()),
-        sender_profile: Some(ShareProfile { name: sender_name.to_string() }),
+        sender_profile: Some(ShareProfile {
+            name: sender_name.to_string(),
+        }),
     };
     validate(&payload)?;
     let json = serde_json::to_vec(&payload).context("serializing tc-share payload")?;

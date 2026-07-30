@@ -138,7 +138,13 @@ async fn status(state: &Arc<AppState>) -> Result<Value> {
     let consensus = crate::consensus::handle("consensus.status", json!({}), state).await?;
     let stream = crate::stream::handle("stream.status", json!({}), state).await?;
 
-    Ok(build_status(self_info, net_snapshot, module_rooms, consensus, stream))
+    Ok(build_status(
+        self_info,
+        net_snapshot,
+        module_rooms,
+        consensus,
+        stream,
+    ))
 }
 
 /// Per-module room resolution passed to [`build_status`]: mailbox and ai
@@ -167,8 +173,19 @@ struct NetSnapshot {
 /// `net`/`consensus`/`stream` calls (which need a running mistlib engine) so
 /// the response shape is unit-testable -- same precedent as
 /// `stream::relay::cascade_status_json`.
-fn build_status(self_info: Value, net: NetSnapshot, module_rooms: ModuleRooms, consensus: Value, stream: Value) -> Value {
-    let NetSnapshot { rooms, peers, room_connections, activity } = net;
+fn build_status(
+    self_info: Value,
+    net: NetSnapshot,
+    module_rooms: ModuleRooms,
+    consensus: Value,
+    stream: Value,
+) -> Value {
+    let NetSnapshot {
+        rooms,
+        peers,
+        room_connections,
+        activity,
+    } = net;
     let room_peers = build_room_peers(&rooms, &room_connections);
     let activity_json = build_activity(&activity);
 
@@ -218,13 +235,18 @@ fn build_room_peers(
     joined_rooms: &[String],
     room_connections: &[(String, Vec<(String, String)>)],
 ) -> Vec<Value> {
-    let mut merged: std::collections::BTreeMap<&str, Vec<(&str, &str)>> = std::collections::BTreeMap::new();
+    let mut merged: std::collections::BTreeMap<&str, Vec<(&str, &str)>> =
+        std::collections::BTreeMap::new();
     for room in joined_rooms {
         merged.entry(room.as_str()).or_default();
     }
     for (room, peers) in room_connections {
         let entry = merged.entry(room.as_str()).or_default();
-        entry.extend(peers.iter().map(|(node_id, state)| (node_id.as_str(), state.as_str())));
+        entry.extend(
+            peers
+                .iter()
+                .map(|(node_id, state)| (node_id.as_str(), state.as_str())),
+        );
     }
     merged
         .into_iter()
@@ -246,12 +268,14 @@ fn build_room_peers(
 fn build_activity(activity: &[crate::net::ActivityEntry]) -> Vec<Value> {
     let mut entries: Vec<&crate::net::ActivityEntry> = activity.iter().collect();
     entries.sort_by(|a, b| {
-        a.room.cmp(&b.room).then_with(|| match (a.peer.is_empty(), b.peer.is_empty()) {
-            (true, true) => std::cmp::Ordering::Equal,
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            (false, false) => a.peer.cmp(&b.peer),
-        })
+        a.room
+            .cmp(&b.room)
+            .then_with(|| match (a.peer.is_empty(), b.peer.is_empty()) {
+                (true, true) => std::cmp::Ordering::Equal,
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                (false, false) => a.peer.cmp(&b.peer),
+            })
     });
     entries
         .into_iter()
@@ -275,7 +299,9 @@ fn build_activity(activity: &[crate::net::ActivityEntry]) -> Vec<Value> {
 /// `null` for one that hasn't (see `net::ActivityEntry`'s doc comment).
 fn direction_json(direction: Option<crate::net::DirectionActivity>) -> Value {
     match direction {
-        Some(d) => json!({ "count": d.count, "bytes": d.bytes, "age_ms": d.age.as_millis() as u64 }),
+        Some(d) => {
+            json!({ "count": d.count, "bytes": d.bytes, "age_ms": d.age.as_millis() as u64 })
+        }
         None => Value::Null,
     }
 }
@@ -432,7 +458,10 @@ mod tests {
                             ("peer1".to_string(), "connecting".to_string()),
                         ],
                     ),
-                    ("room-c".to_string(), vec![("peer3".to_string(), "reconnecting".to_string())]),
+                    (
+                        "room-c".to_string(),
+                        vec![("peer3".to_string(), "reconnecting".to_string())],
+                    ),
                 ],
                 activity: Vec::new(),
             },
@@ -475,7 +504,11 @@ mod tests {
             crate::net::ActivityEntry {
                 room: "room-a".to_string(),
                 peer: "peer1".to_string(),
-                tx: Some(crate::net::DirectionActivity { count: 3, bytes: 1234, age: Duration::from_millis(500) }),
+                tx: Some(crate::net::DirectionActivity {
+                    count: 3,
+                    bytes: 1234,
+                    age: Duration::from_millis(500),
+                }),
                 rx: None,
             },
             // Direct peer with only inbound activity so far.
@@ -483,13 +516,21 @@ mod tests {
                 room: "room-a".to_string(),
                 peer: "peer2".to_string(),
                 tx: None,
-                rx: Some(crate::net::DirectionActivity { count: 1, bytes: 88, age: Duration::from_millis(12_000) }),
+                rx: Some(crate::net::DirectionActivity {
+                    count: 1,
+                    bytes: 88,
+                    age: Duration::from_millis(12_000),
+                }),
             },
             // Room-wide broadcast (empty peer id -> null node_id).
             crate::net::ActivityEntry {
                 room: "room-a".to_string(),
                 peer: String::new(),
-                tx: Some(crate::net::DirectionActivity { count: 5, bytes: 999, age: Duration::from_millis(10) }),
+                tx: Some(crate::net::DirectionActivity {
+                    count: 5,
+                    bytes: 999,
+                    age: Duration::from_millis(10),
+                }),
                 rx: None,
             },
         ];

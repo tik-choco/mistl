@@ -88,7 +88,10 @@ pub async fn stream_chat_completion(
             anyhow!("ai: no model configured for upstream request (set a default model or pass one per-request)")
         })?;
 
-    let url = format!("{}/chat/completions", strip_trailing_slash(&config.base_url));
+    let url = format!(
+        "{}/chat/completions",
+        strip_trailing_slash(&config.base_url)
+    );
 
     let mut body = json!({
         "model": model,
@@ -132,7 +135,10 @@ pub async fn stream_chat_completion(
         return stream_sse(response, delta_tx).await;
     }
 
-    let text = response.text().await.context("ai: reading LLM API response body")?;
+    let text = response
+        .text()
+        .await
+        .context("ai: reading LLM API response body")?;
     let value: Value = serde_json::from_str(&text)
         .map_err(|_| anyhow!("ai: LLM API returned a response with an unexpected format"))?;
     let content = value
@@ -443,7 +449,9 @@ mod tests {
     /// up to two sequential requests (potentially to the same host:port).
     /// Returns the raw request bytes captured for each accepted connection,
     /// in accept order.
-    async fn mock_sequential_server(responses: Vec<Vec<Vec<u8>>>) -> (String, JoinHandle<Vec<Vec<u8>>>) {
+    async fn mock_sequential_server(
+        responses: Vec<Vec<Vec<u8>>>,
+    ) -> (String, JoinHandle<Vec<Vec<u8>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let handle = tokio::spawn(async move {
@@ -464,7 +472,12 @@ mod tests {
     }
 
     fn request_line(raw: &[u8]) -> String {
-        split_request(raw).0.lines().next().unwrap_or_default().to_string()
+        split_request(raw)
+            .0
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_string()
     }
 
     fn cfg(base_url: String, model: Option<&str>, temperature: Option<f64>) -> UpstreamConfig {
@@ -493,8 +506,11 @@ mod tests {
         let seg_a = r#"data: {"choices":[{"delta":{"content":"Hel"#;
         let seg_b = "lo\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n\n: keep-alive\n\ndata: not-json\n\ndata: [DONE]\n\n";
 
-        let (base_url, server) =
-            mock_server(chunked_sse_response(&[seg_a, seg_b]), Duration::from_millis(15)).await;
+        let (base_url, server) = mock_server(
+            chunked_sse_response(&[seg_a, seg_b]),
+            Duration::from_millis(15),
+        )
+        .await;
 
         let (tx, mut rx) = unbounded_channel();
         let config = cfg(base_url, Some("gpt-test"), None);
@@ -516,8 +532,7 @@ mod tests {
     #[tokio::test]
     async fn sse_keepalive_and_malformed_lines_ignored() {
         let body = "data: not-json-at-all\n\n: this is a keepalive comment\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n";
-        let (base_url, server) =
-            mock_server(chunked_sse_response(&[body]), Duration::ZERO).await;
+        let (base_url, server) = mock_server(chunked_sse_response(&[body]), Duration::ZERO).await;
 
         let config = cfg(base_url, Some("gpt-test"), None);
         let result = stream_chat_completion(&config, &one_message(), None, None)
@@ -549,9 +564,11 @@ mod tests {
     #[tokio::test]
     async fn non_2xx_error_includes_status_and_truncated_body() {
         let long_body: String = "x".repeat(600);
-        let (base_url, server) =
-            mock_server(text_response(500, "Internal Server Error", &long_body), Duration::ZERO)
-                .await;
+        let (base_url, server) = mock_server(
+            text_response(500, "Internal Server Error", &long_body),
+            Duration::ZERO,
+        )
+        .await;
 
         let config = cfg(base_url, Some("gpt-test"), None);
         let err = stream_chat_completion(&config, &one_message(), None, None)
@@ -561,7 +578,10 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("500"), "error should mention status: {msg}");
         let x_count = msg.chars().filter(|c| *c == 'x').count();
-        assert_eq!(x_count, 500, "body snippet should be truncated to 500 chars");
+        assert_eq!(
+            x_count, 500,
+            "body snippet should be truncated to 500 chars"
+        );
 
         server.await.unwrap();
     }
@@ -589,7 +609,10 @@ mod tests {
         let was_contacted = tokio::time::timeout(Duration::from_millis(150), notify.notified())
             .await
             .is_ok();
-        assert!(!was_contacted, "no request should be sent when no model is configured");
+        assert!(
+            !was_contacted,
+            "no request should be sent when no model is configured"
+        );
 
         server.abort();
     }
@@ -724,11 +747,14 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_models_happy_path_filters_invalid_ids() {
-        let body = r#"{"data":[{"id":"gpt-4"},{"id":""},{"id":123},{"notid":"x"},{"id":"gpt-3.5"}]}"#;
+        let body =
+            r#"{"data":[{"id":"gpt-4"},{"id":""},{"id":123},{"notid":"x"},{"id":"gpt-3.5"}]}"#;
         let (base_url, server) = mock_server(json_response(200, "OK", body), Duration::ZERO).await;
 
         let config = cfg(base_url, None, None);
-        let models = fetch_models(&config).await.expect("fetch_models should succeed");
+        let models = fetch_models(&config)
+            .await
+            .expect("fetch_models should succeed");
         assert_eq!(models, vec!["gpt-4".to_string(), "gpt-3.5".to_string()]);
 
         server.await.unwrap();
@@ -740,7 +766,9 @@ mod tests {
         let (base_url, server) = mock_server(json_response(200, "OK", body), Duration::ZERO).await;
 
         let config = cfg(base_url, None, None);
-        let err = fetch_models(&config).await.expect_err("empty model list should error");
+        let err = fetch_models(&config)
+            .await
+            .expect_err("empty model list should error");
         assert!(err.to_string().contains("upstream returned no models"));
 
         server.await.unwrap();
@@ -748,11 +776,16 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_models_non_2xx_is_an_error() {
-        let (base_url, server) =
-            mock_server(text_response(503, "Service Unavailable", "down"), Duration::ZERO).await;
+        let (base_url, server) = mock_server(
+            text_response(503, "Service Unavailable", "down"),
+            Duration::ZERO,
+        )
+        .await;
 
         let config = cfg(base_url, None, None);
-        let err = fetch_models(&config).await.expect_err("non-2xx should error");
+        let err = fetch_models(&config)
+            .await
+            .expect_err("non-2xx should error");
         assert!(err.to_string().contains("503"));
 
         server.await.unwrap();
@@ -782,19 +815,28 @@ mod tests {
     #[test]
     fn parse_voices_body_accepts_bare_array_of_strings() {
         let body: Value = serde_json::from_str(r#"["alloy","echo"]"#).unwrap();
-        assert_eq!(parse_voices_body(&body), vec!["alloy".to_string(), "echo".to_string()]);
+        assert_eq!(
+            parse_voices_body(&body),
+            vec!["alloy".to_string(), "echo".to_string()]
+        );
     }
 
     #[test]
     fn parse_voices_body_accepts_voices_wrapper() {
         let body: Value = serde_json::from_str(r#"{"voices":["alloy","echo"]}"#).unwrap();
-        assert_eq!(parse_voices_body(&body), vec!["alloy".to_string(), "echo".to_string()]);
+        assert_eq!(
+            parse_voices_body(&body),
+            vec!["alloy".to_string(), "echo".to_string()]
+        );
     }
 
     #[test]
     fn parse_voices_body_accepts_data_wrapper() {
         let body: Value = serde_json::from_str(r#"{"data":["alloy","echo"]}"#).unwrap();
-        assert_eq!(parse_voices_body(&body), vec!["alloy".to_string(), "echo".to_string()]);
+        assert_eq!(
+            parse_voices_body(&body),
+            vec!["alloy".to_string(), "echo".to_string()]
+        );
     }
 
     #[test]
@@ -805,7 +847,12 @@ mod tests {
         .unwrap();
         assert_eq!(
             parse_voices_body(&body),
-            vec!["v-id".to_string(), "v-name".to_string(), "v-voice".to_string(), "i".to_string()]
+            vec![
+                "v-id".to_string(),
+                "v-name".to_string(),
+                "v-voice".to_string(),
+                "i".to_string()
+            ]
         );
     }
 
@@ -818,9 +865,15 @@ mod tests {
 
     #[test]
     fn parse_voices_body_returns_empty_for_unrecognized_shapes() {
-        assert_eq!(parse_voices_body(&json!({"unexpected": "shape"})), Vec::<String>::new());
+        assert_eq!(
+            parse_voices_body(&json!({"unexpected": "shape"})),
+            Vec::<String>::new()
+        );
         assert_eq!(parse_voices_body(&json!(null)), Vec::<String>::new());
-        assert_eq!(parse_voices_body(&json!("not-a-list")), Vec::<String>::new());
+        assert_eq!(
+            parse_voices_body(&json!("not-a-list")),
+            Vec::<String>::new()
+        );
     }
 
     // -- fetch_voices: endpoint selection / fallback / never-errors ----
@@ -857,10 +910,15 @@ mod tests {
         assert_eq!(voices, vec!["nova".to_string()]);
 
         let raw = server.await.unwrap();
-        assert_eq!(raw.len(), 2, "both candidate endpoints should have been tried");
+        assert_eq!(
+            raw.len(),
+            2,
+            "both candidate endpoints should have been tried"
+        );
         assert!(request_line(&raw[0]).contains("/audio/voices"));
         assert!(
-            request_line(&raw[1]).contains("/voices") && !request_line(&raw[1]).contains("/audio/voices"),
+            request_line(&raw[1]).contains("/voices")
+                && !request_line(&raw[1]).contains("/audio/voices"),
             "unexpected second request line: {}",
             request_line(&raw[1])
         );
@@ -892,7 +950,11 @@ mod tests {
         assert_eq!(voices, Vec::<String>::new());
 
         let raw = server.await.unwrap();
-        assert_eq!(raw.len(), 2, "both candidate endpoints should have been tried");
+        assert_eq!(
+            raw.len(),
+            2,
+            "both candidate endpoints should have been tried"
+        );
     }
 
     #[tokio::test]
@@ -906,13 +968,14 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_voices_sends_authorization_only_when_api_key_is_non_empty() {
-        let (base_url, server) =
-            mock_server(voices_ok_body(r#"["alloy"]"#), Duration::ZERO).await;
+        let (base_url, server) = mock_server(voices_ok_body(r#"["alloy"]"#), Duration::ZERO).await;
         fetch_voices(&base_url, "sk-test-voices").await;
         let raw = server.await.unwrap();
         let (headers, _body) = split_request(&raw);
         assert!(
-            headers.to_lowercase().contains("authorization: bearer sk-test-voices"),
+            headers
+                .to_lowercase()
+                .contains("authorization: bearer sk-test-voices"),
             "expected Authorization header, got: {headers}"
         );
 
@@ -928,8 +991,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_voices_strips_trailing_slash_from_base_url() {
-        let (base_url, server) =
-            mock_server(voices_ok_body(r#"["alloy"]"#), Duration::ZERO).await;
+        let (base_url, server) = mock_server(voices_ok_body(r#"["alloy"]"#), Duration::ZERO).await;
         fetch_voices(&format!("{base_url}///"), "key").await;
         let raw = server.await.unwrap();
         assert!(

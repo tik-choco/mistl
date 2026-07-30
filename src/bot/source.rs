@@ -307,7 +307,11 @@ fn effective_rooms(rooms: &[String]) -> Vec<String> {
 /// Joins every room in `rooms` this hub hasn't already joined (additive
 /// only -- see [`GlobalArticlesHub::joined_rooms`]'s doc), then schedules
 /// this bot's own catch-up history request for each newly-joined room.
-async fn ensure_rooms_joined(hub: &Arc<GlobalArticlesHub>, state: &Arc<AppState>, rooms: &[String]) -> Result<()> {
+async fn ensure_rooms_joined(
+    hub: &Arc<GlobalArticlesHub>,
+    state: &Arc<AppState>,
+    rooms: &[String],
+) -> Result<()> {
     for room in rooms {
         let already_joined = hub.joined_rooms.lock().await.contains(room);
         if already_joined {
@@ -416,7 +420,9 @@ pub(super) async fn poll_candidates(
     {
         let buffers = hub.buffers.lock().await;
         for room in &rooms {
-            let Some(buf) = buffers.get(room) else { continue };
+            let Some(buf) = buffers.get(room) else {
+                continue;
+            };
             for wire in buf {
                 if processed.contains(&wire.id) {
                     continue;
@@ -437,10 +443,16 @@ pub(super) async fn poll_candidates(
     let store = crate::storage::store(state).await?;
     let mut candidates = Vec::with_capacity(unresolved.len());
     for (room, wire) in unresolved {
-        match store.get_remote(&wire.cid, &[room.clone()], FETCH_TIMEOUT).await {
+        match store
+            .get_remote(&wire.cid, &[room.clone()], FETCH_TIMEOUT)
+            .await
+        {
             Ok(bytes) => {
                 let article = parse_and_filter(&bytes, &wire.from_id, langs);
-                candidates.push(Candidate { id: wire.id, article });
+                candidates.push(Candidate {
+                    id: wire.id,
+                    article,
+                });
             }
             Err(error) => {
                 debug!(
@@ -533,7 +545,11 @@ fn register_chat_handler(hub: Arc<ChatHub>) {
         ) else {
             return;
         };
-        let from_name = value.get("fromName").and_then(Value::as_str).unwrap_or("").to_string();
+        let from_name = value
+            .get("fromName")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         let wire = BufferedChatWire {
             id: id.to_string(),
             from_id: from_id.to_string(),
@@ -561,7 +577,11 @@ fn register_chat_handler(hub: Arc<ChatHub>) {
 /// using this hub) if not already joined, then schedules this bot's own
 /// catch-up history request -- mirrors [`ensure_rooms_joined`], just for one
 /// room instead of a list (`SourceConfig::ChatRoom` names exactly one).
-async fn ensure_chat_room_joined(hub: &Arc<ChatHub>, state: &Arc<AppState>, room: &str) -> Result<()> {
+async fn ensure_chat_room_joined(
+    hub: &Arc<ChatHub>,
+    state: &Arc<AppState>,
+    room: &str,
+) -> Result<()> {
     let already_joined = hub.joined_rooms.lock().await.contains(room);
     if already_joined {
         return Ok(());
@@ -583,7 +603,11 @@ async fn ensure_chat_room_joined(hub: &Arc<ChatHub>, state: &Arc<AppState>, room
 /// tc-chat's own `newId()` -- any collision-resistant string works, nothing
 /// on the receiving end re-parses it (see [`build_chat_history_request_wire`]).
 fn new_history_request_id() -> String {
-    format!("bot-hist-{}-{:016x}", chrono::Utc::now().timestamp_millis(), rand::random::<u64>())
+    format!(
+        "bot-hist-{}-{:016x}",
+        chrono::Utc::now().timestamp_millis(),
+        rand::random::<u64>()
+    )
 }
 
 /// Builds the `tc-chat:history-request` wire -- `{type, id, roomId}`,
@@ -738,10 +762,16 @@ pub(super) async fn poll_chat_candidates(
     let store = crate::storage::store(state).await?;
     let mut candidates = Vec::with_capacity(unresolved.len());
     for wire in unresolved {
-        match store.get_remote(&wire.cid, &[room.to_string()], FETCH_TIMEOUT).await {
+        match store
+            .get_remote(&wire.cid, &[room.to_string()], FETCH_TIMEOUT)
+            .await
+        {
             Ok(bytes) => {
                 let article = chat_body_to_article(&bytes, &wire);
-                candidates.push(Candidate { id: wire.id.clone(), article });
+                candidates.push(Candidate {
+                    id: wire.id.clone(),
+                    article,
+                });
             }
             Err(error) => {
                 debug!(
@@ -777,8 +807,9 @@ mod tests {
 
     #[test]
     fn parse_and_filter_accepts_a_well_formed_matching_article() {
-        let article = parse_and_filter(&sample_wire_bytes(), "did:key:zAuthor", &["ja".to_string()])
-            .expect("well-formed article matching the language filter must parse");
+        let article =
+            parse_and_filter(&sample_wire_bytes(), "did:key:zAuthor", &["ja".to_string()])
+                .expect("well-formed article matching the language filter must parse");
         assert_eq!(article.id, "article-1");
         assert_eq!(article.title, "Title");
         assert_eq!(article.source_links.len(), 1);
@@ -792,7 +823,10 @@ mod tests {
 
     #[test]
     fn parse_and_filter_rejects_a_language_mismatch() {
-        assert!(parse_and_filter(&sample_wire_bytes(), "did:key:zAuthor", &["en".to_string()]).is_none());
+        assert!(
+            parse_and_filter(&sample_wire_bytes(), "did:key:zAuthor", &["en".to_string()])
+                .is_none()
+        );
     }
 
     #[test]
@@ -814,7 +848,10 @@ mod tests {
 
     #[test]
     fn effective_rooms_defaults_to_the_well_known_room_when_empty_or_blank() {
-        assert_eq!(effective_rooms(&[]), vec![GLOBAL_ARTICLES_ROOM_ID.to_string()]);
+        assert_eq!(
+            effective_rooms(&[]),
+            vec![GLOBAL_ARTICLES_ROOM_ID.to_string()]
+        );
         assert_eq!(
             effective_rooms(&["  ".to_string(), "".to_string()]),
             vec![GLOBAL_ARTICLES_ROOM_ID.to_string()]
@@ -844,7 +881,8 @@ mod tests {
     #[test]
     fn chat_body_to_article_uses_the_bodys_title_when_present() {
         let bytes =
-            serde_json::to_vec(&serde_json::json!({ "title": "Hello", "text": "Hello world" })).unwrap();
+            serde_json::to_vec(&serde_json::json!({ "title": "Hello", "text": "Hello world" }))
+                .unwrap();
         let wire = sample_chat_wire("post-1", "Ada", 1_700_000_000_000);
         let article = chat_body_to_article(&bytes, &wire).expect("well-formed body must map");
         assert_eq!(article.id, "post-1");
@@ -858,7 +896,8 @@ mod tests {
 
     #[test]
     fn chat_body_to_article_falls_back_to_the_first_line_of_text_when_no_title() {
-        let bytes = serde_json::to_vec(&serde_json::json!({ "text": "First line\nSecond line" })).unwrap();
+        let bytes =
+            serde_json::to_vec(&serde_json::json!({ "text": "First line\nSecond line" })).unwrap();
         let wire = sample_chat_wire("post-2", "Ada", 1_700_000_000_000);
         let article = chat_body_to_article(&bytes, &wire).unwrap();
         assert_eq!(article.title, "First line");
@@ -867,7 +906,9 @@ mod tests {
 
     #[test]
     fn chat_body_to_article_falls_back_to_first_line_when_title_is_blank() {
-        let bytes = serde_json::to_vec(&serde_json::json!({ "title": "   ", "text": "Actual text" })).unwrap();
+        let bytes =
+            serde_json::to_vec(&serde_json::json!({ "title": "   ", "text": "Actual text" }))
+                .unwrap();
         let wire = sample_chat_wire("post-3", "Ada", 1_700_000_000_000);
         let article = chat_body_to_article(&bytes, &wire).unwrap();
         assert_eq!(article.title, "Actual text");
@@ -920,7 +961,10 @@ mod tests {
 
     #[test]
     fn first_line_truncated_trims_and_keeps_only_the_first_line() {
-        assert_eq!(first_line_truncated("  spaced out  \nsecond line", 80), "spaced out");
+        assert_eq!(
+            first_line_truncated("  spaced out  \nsecond line", 80),
+            "spaced out"
+        );
         assert_eq!(first_line_truncated("", 80), "");
     }
 
@@ -940,7 +984,11 @@ mod tests {
         let wire = build_chat_history_request_wire("room-1");
         assert_eq!(wire["type"], json!(WIRE_CHAT_HISTORY_REQUEST));
         assert_eq!(wire["roomId"], json!("room-1"));
-        assert!(wire.get("id").and_then(Value::as_str).is_some_and(|id| !id.is_empty()));
+        assert!(
+            wire.get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| !id.is_empty())
+        );
         assert!(wire.get("fromId").is_none());
         assert!(wire.get("timestamp").is_none());
         assert!(wire.get("signature").is_none());

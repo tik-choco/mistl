@@ -82,10 +82,7 @@ impl Store {
             .clone()
             .unwrap_or_else(|| data_dir.join("blocks"));
         let backend = NativeBlockStore::new(&blocks_dir).await.map_err(|error| {
-            anyhow::anyhow!(
-                "opening block store at {}: {error}",
-                blocks_dir.display()
-            )
+            anyhow::anyhow!("opening block store at {}: {error}", blocks_dir.display())
         })?;
         // No VRChat position source, so blocks are never spatially tagged
         // and the default (decay-disabled) policy applies.
@@ -169,7 +166,8 @@ impl Store {
     /// DEFAULT_REMOTE_TIMEOUT)`; see [`Self::get_remote`] to control either.
     pub async fn get(&self, cid: &str) -> Result<Vec<u8>> {
         let rooms: Vec<String> = self.rooms.lock().await.iter().cloned().collect();
-        self.get_remote(cid, &rooms, resolver::DEFAULT_REMOTE_TIMEOUT).await
+        self.get_remote(cid, &rooms, resolver::DEFAULT_REMOTE_TIMEOUT)
+            .await
     }
 
     /// Like [`Self::get`], but lets the caller pick which rooms to resolve
@@ -181,7 +179,12 @@ impl Store {
     /// immediately regardless of `rooms`/`timeout` (those only matter on a
     /// cache miss); an empty `rooms` list resolves nothing remotely and
     /// fails fast on a miss rather than waiting out `timeout`.
-    pub async fn get_remote(&self, cid: &str, rooms: &[String], timeout: Duration) -> Result<Vec<u8>> {
+    pub async fn get_remote(
+        &self,
+        cid: &str,
+        rooms: &[String],
+        timeout: Duration,
+    ) -> Result<Vec<u8>> {
         let scope = resolver::ResolveScope {
             rooms: rooms.to_vec(),
             timeout,
@@ -263,7 +266,12 @@ pub async fn store(state: &Arc<AppState>) -> Result<Arc<Store>> {
 /// filesystem) so it's unit-testable without a live `Store`/`AppState`; the
 /// handler creates whatever parent directory the result implies before
 /// writing to it.
-fn default_export_path(sandbox_path: &str, name: &str, export_dir: Option<&Path>, data_dir: &Path) -> PathBuf {
+fn default_export_path(
+    sandbox_path: &str,
+    name: &str,
+    export_dir: Option<&Path>,
+    data_dir: &Path,
+) -> PathBuf {
     match export_dir {
         Some(export_dir) => export_dir.join(Path::new(sandbox_path)),
         None => data_dir.join("downloads").join(name),
@@ -558,8 +566,14 @@ pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Val
                 .get("passphrase")
                 .and_then(Value::as_str)
                 .context("missing `passphrase`")?;
-            let output = args.get("output").and_then(Value::as_str).map(PathBuf::from);
-            let to_sandbox = args.get("to_sandbox").and_then(Value::as_bool).unwrap_or(false);
+            let output = args
+                .get("output")
+                .and_then(Value::as_str)
+                .map(PathBuf::from);
+            let to_sandbox = args
+                .get("to_sandbox")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             if to_sandbox && output.is_some() {
                 bail!("`output` and `to_sandbox` are mutually exclusive");
             }
@@ -623,7 +637,10 @@ pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Val
                 .get("url")
                 .and_then(Value::as_str)
                 .context("missing `url`")?;
-            let output = args.get("output").and_then(Value::as_str).map(PathBuf::from);
+            let output = args
+                .get("output")
+                .and_then(Value::as_str)
+                .map(PathBuf::from);
             let linked = sharelink::parse_share_link(url)?;
             match (linked.share.cid.as_deref(), linked.key.as_deref()) {
                 (Some(cid), Some(key)) if !cid.is_empty() && !key.is_empty() => {
@@ -692,7 +709,10 @@ pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Val
                 .get("path")
                 .and_then(Value::as_str)
                 .context("missing `path`")?;
-            let output_arg = args.get("output").and_then(Value::as_str).map(PathBuf::from);
+            let output_arg = args
+                .get("output")
+                .and_then(Value::as_str)
+                .map(PathBuf::from);
             let sandbox = sandbox::Sandbox::new(store.data_dir().join("sandbox"))?;
             let (data, _size) = sandbox.read_file(path)?;
             let size = data.len() as u64;
@@ -854,7 +874,8 @@ pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Val
                 .context("missing `url`")?;
             let mut progress_lines = Vec::new();
             let mut progress = |line: &str| progress_lines.push(line.to_string());
-            let result = folder_share::fetch_folder_share(url, store.as_ref(), state, &mut progress).await?;
+            let result =
+                folder_share::fetch_folder_share(url, store.as_ref(), state, &mut progress).await?;
             Ok(json!({
                 "folder_name": result.folder_name,
                 "files": result.files,
@@ -1074,7 +1095,9 @@ fn build_encrypted_file_bundle(
 /// Decode a `FileRecord.dataUrl` (`data:<mime>;base64,<b64>`) back into the
 /// original file bytes.
 fn decode_data_url(data_url: &str) -> Result<Vec<u8>> {
-    let comma = data_url.find(',').context("dataUrl is missing its payload")?;
+    let comma = data_url
+        .find(',')
+        .context("dataUrl is missing its payload")?;
     let meta = &data_url[..comma];
     if !meta.contains(";base64") {
         bail!("unsupported dataUrl encoding (expected base64)");
@@ -1202,7 +1225,9 @@ mod tests {
         let (store, _dir) = temp_store("multichunk").await;
         // > 1 MiB (CHUNK_SIZE) so the engine must split it into several
         // chunks and reassemble them on get.
-        let data: Vec<u8> = (0..(2 * 1024 * 1024 + 42)).map(|i| (i % 251) as u8).collect();
+        let data: Vec<u8> = (0..(2 * 1024 * 1024 + 42))
+            .map(|i| (i % 251) as u8)
+            .collect();
         let cid = store.put("big.bin", data.clone()).await.unwrap();
         let fetched = store.get(&cid).await.unwrap();
         assert_eq!(fetched, data);
@@ -1338,7 +1363,12 @@ mod tests {
     #[test]
     fn default_export_path_preserves_subdirectories_under_export_dir() {
         let export_dir = Path::new("/export");
-        let path = default_export_path("MyFolder/sub/a.txt", "a.txt", Some(export_dir), Path::new("/data"));
+        let path = default_export_path(
+            "MyFolder/sub/a.txt",
+            "a.txt",
+            Some(export_dir),
+            Path::new("/data"),
+        );
         assert_eq!(path, Path::new("/export/MyFolder/sub/a.txt"));
     }
 
@@ -1380,7 +1410,10 @@ mod tests {
         // Mirrors `store.put-file`'s `sandbox` arg: jail-validated read,
         // basename of the sandbox-relative path as the bundle's file name.
         let (data, _size) = sandbox.read_file("note.txt").unwrap();
-        let name = Path::new("note.txt").file_name().and_then(|n| n.to_str()).unwrap();
+        let name = Path::new("note.txt")
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap();
         let (bytes, storage_name) = build_encrypted_file_bundle(name, &data, "hunter2").unwrap();
         assert!(storage_name.ends_with(".tc-file.enc.json"));
         let cid = store.put(&storage_name, bytes).await.unwrap();

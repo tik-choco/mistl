@@ -1,8 +1,8 @@
 pub mod ipc;
 
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -60,12 +60,19 @@ impl AppState {
     /// Record that a dashboard HTTP request just came in (see call sites in
     /// `web::server` for exactly which requests count).
     pub fn note_dashboard_activity(&self) {
-        *self.dashboard_seen.lock().expect("dashboard_seen lock poisoned") = Some(Instant::now());
+        *self
+            .dashboard_seen
+            .lock()
+            .expect("dashboard_seen lock poisoned") = Some(Instant::now());
     }
 
     /// Whether a dashboard request was seen within the last `window`.
     pub fn dashboard_seen_within(&self, window: Duration) -> bool {
-        match *self.dashboard_seen.lock().expect("dashboard_seen lock poisoned") {
+        match *self
+            .dashboard_seen
+            .lock()
+            .expect("dashboard_seen lock poisoned")
+        {
             Some(seen) => seen.elapsed() <= window,
             None => false,
         }
@@ -205,7 +212,10 @@ async fn daemon_main(host_override: Option<String>) -> Result<()> {
 /// the bind address for this run, not the port, and never touches the
 /// persisted `ui.listen` config value.
 fn override_listen_host(listen: &str, host: &str) -> String {
-    let port = listen.rsplit_once(':').map(|(_, port)| port).unwrap_or("6480");
+    let port = listen
+        .rsplit_once(':')
+        .map(|(_, port)| port)
+        .unwrap_or("6480");
     format!("{host}:{port}")
 }
 

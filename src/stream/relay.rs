@@ -245,7 +245,11 @@ enum TaskRole {
 /// video/PLI task with a fresh one for the new track. Dropping a `JoinHandle`
 /// does *not* abort the task it refers to, so the previous handle must be
 /// aborted explicitly or its task would keep running detached forever.
-fn replace_task(active_tasks: &Arc<StdMutex<HashMap<TaskRole, JoinHandle<()>>>>, role: TaskRole, handle: JoinHandle<()>) {
+fn replace_task(
+    active_tasks: &Arc<StdMutex<HashMap<TaskRole, JoinHandle<()>>>>,
+    role: TaskRole,
+    handle: JoinHandle<()>,
+) {
     let previous = active_tasks
         .lock()
         .expect("relay active tasks lock poisoned")
@@ -351,7 +355,8 @@ impl RelayCapture {
         crate::net::set_media_consumer(Some(tx));
 
         let publisher = Arc::new(StdMutex::new(None));
-        let active_tasks: Arc<StdMutex<HashMap<TaskRole, JoinHandle<()>>>> = Arc::new(StdMutex::new(HashMap::new()));
+        let active_tasks: Arc<StdMutex<HashMap<TaskRole, JoinHandle<()>>>> =
+            Arc::new(StdMutex::new(HashMap::new()));
         let counters = Arc::new(RelayCounters::default());
         let republish: Arc<StdMutex<Option<RepublishTracks>>> = Arc::new(StdMutex::new(None));
         let audio_attached = Arc::new(AtomicBool::new(false));
@@ -414,10 +419,16 @@ impl RelayCapture {
     pub fn audio_status(&self) -> Value {
         audio_status_json(
             self.audio_attached.load(Ordering::Relaxed),
-            self.counters.audio_rtp_packets_total.load(Ordering::Relaxed),
+            self.counters
+                .audio_rtp_packets_total
+                .load(Ordering::Relaxed),
             self.counters.audio_rtp_bytes_total.load(Ordering::Relaxed),
-            self.counters.audio_frames_sent_total.load(Ordering::Relaxed),
-            self.counters.audio_transcode_errors_total.load(Ordering::Relaxed),
+            self.counters
+                .audio_frames_sent_total
+                .load(Ordering::Relaxed),
+            self.counters
+                .audio_transcode_errors_total
+                .load(Ordering::Relaxed),
         )
     }
 
@@ -514,7 +525,13 @@ fn cascade_status_json(
 
 /// Pure JSON builder for the `audio` field of `stream.status` (see
 /// [`RelayCapture::audio_status`]'s doc for how to read the shape).
-fn audio_status_json(attached: bool, rtp_packets: u64, rtp_bytes: u64, frames_sent: u64, transcode_errors: u64) -> Value {
+fn audio_status_json(
+    attached: bool,
+    rtp_packets: u64,
+    rtp_bytes: u64,
+    frames_sent: u64,
+    transcode_errors: u64,
+) -> Value {
     json!({
         "attached": attached,
         "rtp_packets": rtp_packets,
@@ -572,12 +589,16 @@ enum CascadePolicy {
 fn accepts_remote(remote_id: &str, policy: &CascadePolicy) -> bool {
     match policy {
         CascadePolicy::Disabled => true,
-        CascadePolicy::Active { role: ConsensusRole::Leader, relay_peers, .. } => {
-            !relay_peers.iter().any(|peer| peer == remote_id)
-        }
-        CascadePolicy::Active { role: ConsensusRole::Follower, leader: Some(leader), .. } => {
-            remote_id == leader
-        }
+        CascadePolicy::Active {
+            role: ConsensusRole::Leader,
+            relay_peers,
+            ..
+        } => !relay_peers.iter().any(|peer| peer == remote_id),
+        CascadePolicy::Active {
+            role: ConsensusRole::Follower,
+            leader: Some(leader),
+            ..
+        } => remote_id == leader,
         CascadePolicy::Active { .. } => false,
     }
 }
@@ -1012,14 +1033,27 @@ async fn control_loop(
                 }
                 VideoDecision::Lock => {
                     info!(%remote_id, "relay: locking onto publisher");
-                    *publisher.lock().expect("relay publisher lock poisoned") = Some(remote_id.clone());
+                    *publisher.lock().expect("relay publisher lock poisoned") =
+                        Some(remote_id.clone());
                     locked = Some(remote_id.clone());
                     current_video_ssrc = Some(event.track.ssrc());
                     audio_attached = false;
                     audio_attached_shared.store(false, Ordering::Relaxed);
 
-                    let is_leader = matches!(&policy, CascadePolicy::Active { role: ConsensusRole::Leader, .. });
-                    let is_follower = matches!(&policy, CascadePolicy::Active { role: ConsensusRole::Follower, .. });
+                    let is_leader = matches!(
+                        &policy,
+                        CascadePolicy::Active {
+                            role: ConsensusRole::Leader,
+                            ..
+                        }
+                    );
+                    let is_follower = matches!(
+                        &policy,
+                        CascadePolicy::Active {
+                            role: ConsensusRole::Follower,
+                            ..
+                        }
+                    );
                     let (video_republish, new_audio_republish) = if is_leader {
                         // Lock-in happens right when the sharer's own
                         // renegotiation traffic peaks, so this publish's
@@ -1117,38 +1151,40 @@ async fn control_loop(
                     replace_task(&active_tasks, TaskRole::Pli, pli_handle);
                 }
             },
-            RTPCodecType::Audio => match decide_audio(locked.as_deref(), &remote_id, audio_attached, &policy) {
-                AudioDecision::Attach => {
-                    info!(%remote_id, codec = audio_codec.as_str(), "relay: audio track attached");
-                    let audio_handle = tokio::spawn(audio_task(
-                        event.track,
-                        rtsp.clone(),
-                        audio_codec,
-                        remote_id.clone(),
-                        counters.clone(),
-                        audio_republish.clone(),
-                    ));
-                    replace_task(&active_tasks, TaskRole::Audio, audio_handle);
-                    audio_attached = true;
-                    audio_attached_shared.store(true, Ordering::Relaxed);
+            RTPCodecType::Audio => {
+                match decide_audio(locked.as_deref(), &remote_id, audio_attached, &policy) {
+                    AudioDecision::Attach => {
+                        info!(%remote_id, codec = audio_codec.as_str(), "relay: audio track attached");
+                        let audio_handle = tokio::spawn(audio_task(
+                            event.track,
+                            rtsp.clone(),
+                            audio_codec,
+                            remote_id.clone(),
+                            counters.clone(),
+                            audio_republish.clone(),
+                        ));
+                        replace_task(&active_tasks, TaskRole::Audio, audio_handle);
+                        audio_attached = true;
+                        audio_attached_shared.store(true, Ordering::Relaxed);
+                    }
+                    AudioDecision::Replace => {
+                        info!(%remote_id, codec = audio_codec.as_str(), "relay: publisher republished audio (screen switch); resuming on new track");
+                        let audio_handle = tokio::spawn(audio_task(
+                            event.track,
+                            rtsp.clone(),
+                            audio_codec,
+                            remote_id.clone(),
+                            counters.clone(),
+                            audio_republish.clone(),
+                        ));
+                        replace_task(&active_tasks, TaskRole::Audio, audio_handle);
+                    }
+                    AudioDecision::Buffer => {
+                        pending_audio.insert(remote_id, event);
+                    }
+                    AudioDecision::Ignore => {}
                 }
-                AudioDecision::Replace => {
-                    info!(%remote_id, codec = audio_codec.as_str(), "relay: publisher republished audio (screen switch); resuming on new track");
-                    let audio_handle = tokio::spawn(audio_task(
-                        event.track,
-                        rtsp.clone(),
-                        audio_codec,
-                        remote_id.clone(),
-                        counters.clone(),
-                        audio_republish.clone(),
-                    ));
-                    replace_task(&active_tasks, TaskRole::Audio, audio_handle);
-                }
-                AudioDecision::Buffer => {
-                    pending_audio.insert(remote_id, event);
-                }
-                AudioDecision::Ignore => {}
-            },
+            }
             RTPCodecType::Unspecified => {
                 debug!(%remote_id, "relay: ignoring track of unspecified kind");
             }
@@ -1253,7 +1289,11 @@ async fn video_task(
             // full PLI_INTERVAL for pli_task's next tick -- debounced so a
             // burst of gapped packets from one loss spike sends one PLI, not
             // dozens.
-            if immediate_pli_due(&mut last_immediate_pli, Instant::now(), IMMEDIATE_PLI_DEBOUNCE) {
+            if immediate_pli_due(
+                &mut last_immediate_pli,
+                Instant::now(),
+                IMMEDIATE_PLI_DEBOUNCE,
+            ) {
                 debug!(%remote_id, "relay: sending immediate PLI after sequence gap");
                 send_pli(&pc, ssrc).await;
             }
@@ -1286,7 +1326,11 @@ async fn video_task(
                 depacketizer = H264Packet::default();
                 assembler = AuAssembler::new();
                 awaiting_keyframe = true;
-                if immediate_pli_due(&mut last_immediate_pli, Instant::now(), IMMEDIATE_PLI_DEBOUNCE) {
+                if immediate_pli_due(
+                    &mut last_immediate_pli,
+                    Instant::now(),
+                    IMMEDIATE_PLI_DEBOUNCE,
+                ) {
                     debug!(%remote_id, "relay: sending immediate PLI after depacketizer reset");
                     send_pli(&pc, ssrc).await;
                 }
@@ -1397,16 +1441,23 @@ async fn audio_task_opus(
     loop {
         match track.read_rtp().await {
             Ok((packet, _attrs)) => {
-                counters.audio_rtp_packets_total.fetch_add(1, Ordering::Relaxed);
-                counters.audio_rtp_bytes_total.fetch_add(packet.payload.len() as u64, Ordering::Relaxed);
+                counters
+                    .audio_rtp_packets_total
+                    .fetch_add(1, Ordering::Relaxed);
+                counters
+                    .audio_rtp_bytes_total
+                    .fetch_add(packet.payload.len() as u64, Ordering::Relaxed);
                 if let Some(republish) = &republish {
                     if let Err(error) = republish.write_rtp(&packet).await {
                         debug!(%remote_id, %error, "cascade: republishing audio RTP packet failed");
                     }
                 }
-                rtsp.send_audio_frame(&packet.payload, packet.header.timestamp).await;
+                rtsp.send_audio_frame(&packet.payload, packet.header.timestamp)
+                    .await;
                 counters.audio_frames.fetch_add(1, Ordering::Relaxed);
-                counters.audio_frames_sent_total.fetch_add(1, Ordering::Relaxed);
+                counters
+                    .audio_frames_sent_total
+                    .fetch_add(1, Ordering::Relaxed);
             }
             Err(error) => {
                 debug!(%remote_id, %error, "relay: audio track ended");
@@ -1434,8 +1485,12 @@ async fn audio_task_aac(
     loop {
         match track.read_rtp().await {
             Ok((packet, _attrs)) => {
-                counters.audio_rtp_packets_total.fetch_add(1, Ordering::Relaxed);
-                counters.audio_rtp_bytes_total.fetch_add(packet.payload.len() as u64, Ordering::Relaxed);
+                counters
+                    .audio_rtp_packets_total
+                    .fetch_add(1, Ordering::Relaxed);
+                counters
+                    .audio_rtp_bytes_total
+                    .fetch_add(packet.payload.len() as u64, Ordering::Relaxed);
                 if let Some(republish) = &republish {
                     if let Err(error) = republish.write_rtp(&packet).await {
                         debug!(%remote_id, %error, "cascade: republishing audio RTP packet failed");
@@ -1444,7 +1499,9 @@ async fn audio_task_aac(
                 for (frame, ts) in transcoder.push(&packet.payload, packet.header.timestamp) {
                     rtsp.send_audio_frame(&frame, ts).await;
                     counters.audio_frames.fetch_add(1, Ordering::Relaxed);
-                    counters.audio_frames_sent_total.fetch_add(1, Ordering::Relaxed);
+                    counters
+                        .audio_frames_sent_total
+                        .fetch_add(1, Ordering::Relaxed);
                 }
             }
             Err(error) => {
@@ -1540,7 +1597,10 @@ struct AuAssembler {
 
 impl AuAssembler {
     fn new() -> Self {
-        Self { ts: None, buf: Vec::new() }
+        Self {
+            ts: None,
+            buf: Vec::new(),
+        }
     }
 
     /// Feeds one packet's depacketized chunk. Returns zero, one, or (on a
@@ -1579,7 +1639,11 @@ struct AuNals {
 }
 
 fn scan_au_nals(au: &[u8]) -> AuNals {
-    let mut result = AuNals { sps: None, pps: None, has_idr: false };
+    let mut result = AuNals {
+        sps: None,
+        pps: None,
+        has_idr: false,
+    };
     for nal in iter_annex_b_nals(au) {
         if nal.is_empty() {
             continue;
@@ -1671,16 +1735,22 @@ impl OpusToAac {
             Ok(n) => n,
             Err(error) => {
                 warn!(%error, "relay: Opus decode failed, dropping packet");
-                self.counters.audio_transcode_errors_total.fetch_add(1, Ordering::Relaxed);
+                self.counters
+                    .audio_transcode_errors_total
+                    .fetch_add(1, Ordering::Relaxed);
                 return Vec::new();
             }
         };
-        self.ring.extend(pcm[..samples_per_channel * AAC_CHANNELS].iter().copied());
+        self.ring
+            .extend(pcm[..samples_per_channel * AAC_CHANNELS].iter().copied());
 
         let mut out = Vec::new();
         let mut output_buf = [0u8; 4096];
         while self.ring.len() >= AAC_FRAME_SAMPLES * AAC_CHANNELS {
-            let frame: Vec<i16> = self.ring.drain(..AAC_FRAME_SAMPLES * AAC_CHANNELS).collect();
+            let frame: Vec<i16> = self
+                .ring
+                .drain(..AAC_FRAME_SAMPLES * AAC_CHANNELS)
+                .collect();
             let out_ts = *self.next_ts.get_or_insert(rtp_ts);
             self.next_ts = Some(out_ts.wrapping_add(AAC_FRAME_SAMPLES as u32));
 
@@ -1691,7 +1761,9 @@ impl OpusToAac {
                 Ok(_) => {} // encoder priming: no output yet for this frame
                 Err(error) => {
                     warn!(%error, "relay: AAC encode failed, dropping frame");
-                    self.counters.audio_transcode_errors_total.fetch_add(1, Ordering::Relaxed);
+                    self.counters
+                        .audio_transcode_errors_total
+                        .fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
@@ -1708,7 +1780,10 @@ mod tests {
 
     #[test]
     fn decide_video_locks_when_unlocked() {
-        assert_eq!(decide_video(None, "peer-a", &CascadePolicy::Disabled), VideoDecision::Lock);
+        assert_eq!(
+            decide_video(None, "peer-a", &CascadePolicy::Disabled),
+            VideoDecision::Lock
+        );
     }
 
     #[test]
@@ -1777,20 +1852,41 @@ mod tests {
         assert!(immediate_pli_due(&mut last, t0, debounce));
         // Back-to-back gaps within the window (one lossy spike is many
         // gapped packets): no PLI storm.
-        assert!(!immediate_pli_due(&mut last, t0 + Duration::from_millis(10), debounce));
-        assert!(!immediate_pli_due(&mut last, t0 + Duration::from_millis(999), debounce));
+        assert!(!immediate_pli_due(
+            &mut last,
+            t0 + Duration::from_millis(10),
+            debounce
+        ));
+        assert!(!immediate_pli_due(
+            &mut last,
+            t0 + Duration::from_millis(999),
+            debounce
+        ));
         // Window elapsed: the next loss event may send again.
-        assert!(immediate_pli_due(&mut last, t0 + Duration::from_millis(1000), debounce));
+        assert!(immediate_pli_due(
+            &mut last,
+            t0 + Duration::from_millis(1000),
+            debounce
+        ));
         // ...and that send re-arms the debounce from its own time.
-        assert!(!immediate_pli_due(&mut last, t0 + Duration::from_millis(1500), debounce));
-        assert!(immediate_pli_due(&mut last, t0 + Duration::from_millis(2000), debounce));
+        assert!(!immediate_pli_due(
+            &mut last,
+            t0 + Duration::from_millis(1500),
+            debounce
+        ));
+        assert!(immediate_pli_due(
+            &mut last,
+            t0 + Duration::from_millis(2000),
+            debounce
+        ));
     }
 
     // --- task role bookkeeping (screen-switch task replacement) ------------
 
     #[tokio::test]
     async fn replace_task_aborts_the_previous_handle_for_the_same_role() {
-        let active_tasks: Arc<StdMutex<HashMap<TaskRole, JoinHandle<()>>>> = Arc::new(StdMutex::new(HashMap::new()));
+        let active_tasks: Arc<StdMutex<HashMap<TaskRole, JoinHandle<()>>>> =
+            Arc::new(StdMutex::new(HashMap::new()));
 
         let first = tokio::spawn(std::future::pending::<()>());
         replace_task(&active_tasks, TaskRole::Video, first);
@@ -1802,18 +1898,39 @@ mod tests {
         replace_task(&active_tasks, TaskRole::Video, second);
 
         let guard = active_tasks.lock().expect("lock poisoned");
-        assert_eq!(guard.len(), 1, "replacing the same role must not accumulate handles");
+        assert_eq!(
+            guard.len(),
+            1,
+            "replacing the same role must not accumulate handles"
+        );
         assert_eq!(guard.get(&TaskRole::Video).map(|h| h.id()), Some(second_id));
     }
 
     #[tokio::test]
     async fn abort_role_only_touches_its_own_role() {
-        let active_tasks: Arc<StdMutex<HashMap<TaskRole, JoinHandle<()>>>> = Arc::new(StdMutex::new(HashMap::new()));
+        let active_tasks: Arc<StdMutex<HashMap<TaskRole, JoinHandle<()>>>> =
+            Arc::new(StdMutex::new(HashMap::new()));
 
-        replace_task(&active_tasks, TaskRole::Video, tokio::spawn(std::future::pending::<()>()));
-        replace_task(&active_tasks, TaskRole::Pli, tokio::spawn(std::future::pending::<()>()));
-        replace_task(&active_tasks, TaskRole::Audio, tokio::spawn(std::future::pending::<()>()));
-        replace_task(&active_tasks, TaskRole::Summary, tokio::spawn(std::future::pending::<()>()));
+        replace_task(
+            &active_tasks,
+            TaskRole::Video,
+            tokio::spawn(std::future::pending::<()>()),
+        );
+        replace_task(
+            &active_tasks,
+            TaskRole::Pli,
+            tokio::spawn(std::future::pending::<()>()),
+        );
+        replace_task(
+            &active_tasks,
+            TaskRole::Audio,
+            tokio::spawn(std::future::pending::<()>()),
+        );
+        replace_task(
+            &active_tasks,
+            TaskRole::Summary,
+            tokio::spawn(std::future::pending::<()>()),
+        );
 
         abort_role(&active_tasks, TaskRole::Video);
         abort_role(&active_tasks, TaskRole::Pli);
@@ -1830,7 +1947,11 @@ mod tests {
 
     // --- cascade policy matrix ----------------------------------------------
 
-    fn active_policy(role: ConsensusRole, leader: Option<&str>, relay_peers: &[&str]) -> CascadePolicy {
+    fn active_policy(
+        role: ConsensusRole,
+        leader: Option<&str>,
+        relay_peers: &[&str],
+    ) -> CascadePolicy {
         CascadePolicy::Active {
             role,
             leader: leader.map(str::to_string),
@@ -1840,21 +1961,42 @@ mod tests {
 
     #[test]
     fn decide_video_leader_accepts_a_non_relay_peer_as_the_sharer() {
-        let policy = active_policy(ConsensusRole::Leader, Some("self-id"), &["self-id", "relay-2"]);
-        assert_eq!(decide_video(None, "browser-sharer", &policy), VideoDecision::Lock);
+        let policy = active_policy(
+            ConsensusRole::Leader,
+            Some("self-id"),
+            &["self-id", "relay-2"],
+        );
+        assert_eq!(
+            decide_video(None, "browser-sharer", &policy),
+            VideoDecision::Lock
+        );
     }
 
     #[test]
     fn decide_video_leader_ignores_tracks_from_other_relay_peers() {
-        let policy = active_policy(ConsensusRole::Leader, Some("self-id"), &["self-id", "relay-2"]);
-        assert_eq!(decide_video(None, "relay-2", &policy), VideoDecision::Ignore);
+        let policy = active_policy(
+            ConsensusRole::Leader,
+            Some("self-id"),
+            &["self-id", "relay-2"],
+        );
+        assert_eq!(
+            decide_video(None, "relay-2", &policy),
+            VideoDecision::Ignore
+        );
     }
 
     #[test]
     fn decide_video_follower_accepts_only_the_leader_and_ignores_the_sharer() {
-        let policy = active_policy(ConsensusRole::Follower, Some("relay-1"), &["self-id", "relay-1"]);
+        let policy = active_policy(
+            ConsensusRole::Follower,
+            Some("relay-1"),
+            &["self-id", "relay-1"],
+        );
         assert_eq!(decide_video(None, "relay-1", &policy), VideoDecision::Lock);
-        assert_eq!(decide_video(None, "browser-sharer", &policy), VideoDecision::Ignore);
+        assert_eq!(
+            decide_video(None, "browser-sharer", &policy),
+            VideoDecision::Ignore
+        );
     }
 
     #[test]
@@ -1880,7 +2022,10 @@ mod tests {
             Some("relay-1"),
             &["self-id", "relay-1", "relay-2"],
         );
-        assert_eq!(decide_video(None, "relay-1", &following_old_leader), VideoDecision::Lock);
+        assert_eq!(
+            decide_video(None, "relay-1", &following_old_leader),
+            VideoDecision::Lock
+        );
 
         // ...after a leader change (control_loop unlocks first), the same
         // node now follows the new leader instead, and no longer the old one.
@@ -1889,17 +2034,37 @@ mod tests {
             Some("relay-2"),
             &["self-id", "relay-1", "relay-2"],
         );
-        assert_eq!(decide_video(None, "relay-2", &following_new_leader), VideoDecision::Lock);
-        assert_eq!(decide_video(None, "relay-1", &following_new_leader), VideoDecision::Ignore);
+        assert_eq!(
+            decide_video(None, "relay-2", &following_new_leader),
+            VideoDecision::Lock
+        );
+        assert_eq!(
+            decide_video(None, "relay-1", &following_new_leader),
+            VideoDecision::Ignore
+        );
     }
 
     #[test]
     fn decide_video_role_transition_from_follower_to_leader_accepts_the_sharer() {
-        let as_follower = active_policy(ConsensusRole::Follower, Some("relay-1"), &["self-id", "relay-1"]);
-        assert_eq!(decide_video(None, "browser-sharer", &as_follower), VideoDecision::Ignore);
+        let as_follower = active_policy(
+            ConsensusRole::Follower,
+            Some("relay-1"),
+            &["self-id", "relay-1"],
+        );
+        assert_eq!(
+            decide_video(None, "browser-sharer", &as_follower),
+            VideoDecision::Ignore
+        );
 
-        let as_leader = active_policy(ConsensusRole::Leader, Some("self-id"), &["self-id", "relay-1"]);
-        assert_eq!(decide_video(None, "browser-sharer", &as_leader), VideoDecision::Lock);
+        let as_leader = active_policy(
+            ConsensusRole::Leader,
+            Some("self-id"),
+            &["self-id", "relay-1"],
+        );
+        assert_eq!(
+            decide_video(None, "browser-sharer", &as_leader),
+            VideoDecision::Lock
+        );
     }
 
     #[test]
@@ -1907,10 +2072,21 @@ mod tests {
         // The screen-switch "same peer, new track" arm must win regardless of
         // cascade role -- a follower re-locked onto the leader, or a leader
         // re-locked onto the sharer, both just resume on the replacement track.
-        let follower = active_policy(ConsensusRole::Follower, Some("relay-1"), &["self-id", "relay-1"]);
-        assert_eq!(decide_video(Some("relay-1"), "relay-1", &follower), VideoDecision::Switch);
+        let follower = active_policy(
+            ConsensusRole::Follower,
+            Some("relay-1"),
+            &["self-id", "relay-1"],
+        );
+        assert_eq!(
+            decide_video(Some("relay-1"), "relay-1", &follower),
+            VideoDecision::Switch
+        );
 
-        let leader = active_policy(ConsensusRole::Leader, Some("self-id"), &["self-id", "relay-2"]);
+        let leader = active_policy(
+            ConsensusRole::Leader,
+            Some("self-id"),
+            &["self-id", "relay-2"],
+        );
         assert_eq!(
             decide_video(Some("browser-sharer"), "browser-sharer", &leader),
             VideoDecision::Switch
@@ -1919,18 +2095,32 @@ mod tests {
 
     #[test]
     fn decide_audio_follower_ignores_the_sharer_but_buffers_the_leader() {
-        let policy = active_policy(ConsensusRole::Follower, Some("relay-1"), &["self-id", "relay-1"]);
+        let policy = active_policy(
+            ConsensusRole::Follower,
+            Some("relay-1"),
+            &["self-id", "relay-1"],
+        );
         assert_eq!(
             decide_audio(None, "browser-sharer", false, &policy),
             AudioDecision::Ignore
         );
-        assert_eq!(decide_audio(None, "relay-1", false, &policy), AudioDecision::Buffer);
+        assert_eq!(
+            decide_audio(None, "relay-1", false, &policy),
+            AudioDecision::Buffer
+        );
     }
 
     #[test]
     fn decide_audio_leader_ignores_other_relay_peers_but_buffers_the_sharer() {
-        let policy = active_policy(ConsensusRole::Leader, Some("self-id"), &["self-id", "relay-2"]);
-        assert_eq!(decide_audio(None, "relay-2", false, &policy), AudioDecision::Ignore);
+        let policy = active_policy(
+            ConsensusRole::Leader,
+            Some("self-id"),
+            &["self-id", "relay-2"],
+        );
+        assert_eq!(
+            decide_audio(None, "relay-2", false, &policy),
+            AudioDecision::Ignore
+        );
         assert_eq!(
             decide_audio(None, "browser-sharer", false, &policy),
             AudioDecision::Buffer
@@ -1946,21 +2136,37 @@ mod tests {
         // follower of that same peer" -- the locked publisher is still
         // correct, so the lock must survive instead of unlocking into a
         // no-new-`on_track`-ever-fires hang.
-        let now_following_the_locked_peer =
-            active_policy(ConsensusRole::Follower, Some("relay-1"), &["self-id", "relay-1"]);
-        assert!(lock_survives_view_change(Some("relay-1"), &now_following_the_locked_peer));
+        let now_following_the_locked_peer = active_policy(
+            ConsensusRole::Follower,
+            Some("relay-1"),
+            &["self-id", "relay-1"],
+        );
+        assert!(lock_survives_view_change(
+            Some("relay-1"),
+            &now_following_the_locked_peer
+        ));
     }
 
     #[test]
     fn lock_survives_view_change_is_false_when_the_new_policy_rejects_the_locked_peer() {
-        let now_following_someone_else =
-            active_policy(ConsensusRole::Follower, Some("relay-2"), &["self-id", "relay-1", "relay-2"]);
-        assert!(!lock_survives_view_change(Some("relay-1"), &now_following_someone_else));
+        let now_following_someone_else = active_policy(
+            ConsensusRole::Follower,
+            Some("relay-2"),
+            &["self-id", "relay-1", "relay-2"],
+        );
+        assert!(!lock_survives_view_change(
+            Some("relay-1"),
+            &now_following_someone_else
+        ));
     }
 
     #[test]
     fn lock_survives_view_change_is_false_when_nothing_is_locked() {
-        let policy = active_policy(ConsensusRole::Follower, Some("relay-1"), &["self-id", "relay-1"]);
+        let policy = active_policy(
+            ConsensusRole::Follower,
+            Some("relay-1"),
+            &["self-id", "relay-1"],
+        );
         assert!(!lock_survives_view_change(None, &policy));
     }
 
@@ -2069,7 +2275,12 @@ mod tests {
         payload
     }
 
-    fn fu_a_fragments(nal_type: u8, nal_ref_idc: u8, rbsp: &[u8], chunk_size: usize) -> Vec<Vec<u8>> {
+    fn fu_a_fragments(
+        nal_type: u8,
+        nal_ref_idc: u8,
+        rbsp: &[u8],
+        chunk_size: usize,
+    ) -> Vec<Vec<u8>> {
         let mut fragments = Vec::new();
         let chunks: Vec<&[u8]> = rbsp.chunks(chunk_size).collect();
         let last = chunks.len() - 1;
@@ -2117,7 +2328,11 @@ mod tests {
             completed.extend(assembler.push(packet.header.timestamp, packet.header.marker, &chunk));
         }
 
-        assert_eq!(completed.len(), 1, "exactly one AU should close on the marker");
+        assert_eq!(
+            completed.len(),
+            1,
+            "exactly one AU should close on the marker"
+        );
         let (au_ts, au) = &completed[0];
         assert_eq!(*au_ts, ts, "the AU should carry its own RTP timestamp");
 
@@ -2146,7 +2361,11 @@ mod tests {
         let first = assembler.push(1000, false, &[0xAA]);
         assert!(first.is_empty());
         let second = assembler.push(2000, false, &[0xBB]);
-        assert_eq!(second, vec![(1000, vec![0xAA])], "closed AU keeps its own timestamp");
+        assert_eq!(
+            second,
+            vec![(1000, vec![0xAA])],
+            "closed AU keeps its own timestamp"
+        );
     }
 
     #[test]
@@ -2176,11 +2395,15 @@ mod tests {
         let frame_samples = 960usize; // 20ms @ 48kHz, a common Opus frame size
         let num_frames = 40; // 800ms of audio, several AAC frames' worth
 
-        let mut opus_encoder = opus::Encoder::new(sample_rate, opus::Channels::Stereo, opus::Application::Audio)
-            .expect("creating Opus encoder");
+        let mut opus_encoder = opus::Encoder::new(
+            sample_rate,
+            opus::Channels::Stereo,
+            opus::Application::Audio,
+        )
+        .expect("creating Opus encoder");
 
-        let mut transcoder =
-            OpusToAac::new(Arc::new(RelayCounters::default())).expect("creating Opus->AAC transcoder");
+        let mut transcoder = OpusToAac::new(Arc::new(RelayCounters::default()))
+            .expect("creating Opus->AAC transcoder");
 
         let start_ts: u32 = 12_345;
         let mut ts = start_ts;
@@ -2190,13 +2413,16 @@ mod tests {
             let mut pcm = vec![0i16; frame_samples * channels];
             for i in 0..frame_samples {
                 let t = (frame_index * frame_samples + i) as f32 / sample_rate as f32;
-                let sample = (2.0 * std::f32::consts::PI * 440.0 * t).sin() * i16::MAX as f32 * 0.25;
+                let sample =
+                    (2.0 * std::f32::consts::PI * 440.0 * t).sin() * i16::MAX as f32 * 0.25;
                 pcm[i * channels] = sample as i16;
                 pcm[i * channels + 1] = sample as i16;
             }
 
             let mut opus_payload = vec![0u8; 4000];
-            let len = opus_encoder.encode(&pcm, &mut opus_payload).expect("Opus encode");
+            let len = opus_encoder
+                .encode(&pcm, &mut opus_payload)
+                .expect("Opus encode");
             opus_payload.truncate(len);
 
             for (frame, out_ts) in transcoder.push(&opus_payload, ts) {
@@ -2224,14 +2450,18 @@ mod tests {
         }
 
         for (size, _) in &emitted {
-            assert!(*size > 0 && *size < 1024, "AAC-LC frame at 128kbps/1024 samples should be well under 1KB, got {size}");
+            assert!(
+                *size > 0 && *size < 1024,
+                "AAC-LC frame at 128kbps/1024 samples should be well under 1KB, got {size}"
+            );
         }
     }
 
     #[test]
     fn opus_to_aac_counts_a_decode_failure_as_a_transcode_error() {
         let counters = Arc::new(RelayCounters::default());
-        let mut transcoder = OpusToAac::new(counters.clone()).expect("creating Opus->AAC transcoder");
+        let mut transcoder =
+            OpusToAac::new(counters.clone()).expect("creating Opus->AAC transcoder");
 
         // Not a valid Opus payload -- the decoder must reject it, and `push`
         // should record that in the shared counters (surfaced via
@@ -2241,7 +2471,12 @@ mod tests {
         let out = transcoder.push(&garbage, 0);
 
         assert!(out.is_empty(), "a failed decode should emit no frames");
-        assert_eq!(counters.audio_transcode_errors_total.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            counters
+                .audio_transcode_errors_total
+                .load(Ordering::Relaxed),
+            1
+        );
     }
 
     // --- empirical pitch-conservation audit ---------------------------------
@@ -2258,18 +2493,25 @@ mod tests {
     #[test]
     fn opus_to_aac_conserves_sample_count_10s_stereo_440hz() {
         let sample_rate = rtp_out::AUDIO_CLOCK_RATE;
-        assert_eq!(sample_rate, 48_000, "test's Hz math assumes the relay's 48kHz clock");
+        assert_eq!(
+            sample_rate, 48_000,
+            "test's Hz math assumes the relay's 48kHz clock"
+        );
         let channels = 2usize;
         let frame_samples = 960usize; // 20ms @ 48kHz -- what browsers send
         let seconds = 10u32;
         let total_input_samples = sample_rate * seconds; // 480_000 samples/channel
         let num_packets = total_input_samples as usize / frame_samples;
 
-        let mut opus_encoder = opus::Encoder::new(sample_rate, opus::Channels::Stereo, opus::Application::Audio)
-            .expect("creating Opus encoder");
+        let mut opus_encoder = opus::Encoder::new(
+            sample_rate,
+            opus::Channels::Stereo,
+            opus::Application::Audio,
+        )
+        .expect("creating Opus encoder");
 
-        let mut transcoder =
-            OpusToAac::new(Arc::new(RelayCounters::default())).expect("creating Opus->AAC transcoder");
+        let mut transcoder = OpusToAac::new(Arc::new(RelayCounters::default()))
+            .expect("creating Opus->AAC transcoder");
 
         let start_ts: u32 = 1_000_000;
         let mut ts = start_ts;
@@ -2279,13 +2521,16 @@ mod tests {
             let mut pcm = vec![0i16; frame_samples * channels];
             for i in 0..frame_samples {
                 let t = (packet_index * frame_samples + i) as f64 / sample_rate as f64;
-                let sample = (2.0 * std::f64::consts::PI * 440.0 * t).sin() * i16::MAX as f64 * 0.25;
+                let sample =
+                    (2.0 * std::f64::consts::PI * 440.0 * t).sin() * i16::MAX as f64 * 0.25;
                 pcm[i * channels] = sample as i16;
                 pcm[i * channels + 1] = sample as i16;
             }
 
             let mut opus_payload = vec![0u8; 4000];
-            let len = opus_encoder.encode(&pcm, &mut opus_payload).expect("Opus encode");
+            let len = opus_encoder
+                .encode(&pcm, &mut opus_payload)
+                .expect("Opus encode");
             opus_payload.truncate(len);
 
             for pair in transcoder.push(&opus_payload, ts) {
@@ -2311,10 +2556,14 @@ mod tests {
         let implied_samples = frames_emitted * AAC_FRAME_SAMPLES;
         let pitch_ratio = implied_samples as f64 / total_input_samples as f64;
 
-        println!("=== OpusToAac sample-count conservation (stereo, {seconds}s @ {sample_rate}Hz) ===");
+        println!(
+            "=== OpusToAac sample-count conservation (stereo, {seconds}s @ {sample_rate}Hz) ==="
+        );
         println!("input samples/channel:   {total_input_samples}");
         println!("opus packets pushed:     {num_packets} ({frame_samples} samples/channel each)");
-        println!("AAC frames emitted:      {frames_emitted} ({AAC_FRAME_SAMPLES} samples/channel each)");
+        println!(
+            "AAC frames emitted:      {frames_emitted} ({AAC_FRAME_SAMPLES} samples/channel each)"
+        );
         println!("implied samples/channel: {implied_samples}");
         println!("pitch ratio (implied/input): {pitch_ratio:.6}  (1.000000 == pitch-perfect)");
         println!(
@@ -2338,12 +2587,20 @@ mod tests {
 
         // --- (5) BONUS: decode the emitted AAC back to PCM and measure the
         // dominant frequency by zero-crossing count over the middle 5s. -----
-        let asc_info = transcoder.encoder.info().expect("reading AAC encoder ASC info");
+        let asc_info = transcoder
+            .encoder
+            .info()
+            .expect("reading AAC encoder ASC info");
         let asc = asc_info.confBuf[..asc_info.confSize as usize].to_vec();
-        assert!(!asc.is_empty(), "encoder should have produced a non-empty AudioSpecificConfig");
+        assert!(
+            !asc.is_empty(),
+            "encoder should have produced a non-empty AudioSpecificConfig"
+        );
 
         let mut aac_decoder = fdk_aac::dec::Decoder::new(fdk_aac::dec::Transport::Raw);
-        aac_decoder.config_raw(&asc).expect("configuring AAC decoder with encoder's ASC");
+        aac_decoder
+            .config_raw(&asc)
+            .expect("configuring AAC decoder with encoder's ASC");
 
         let mut decoded_pcm: Vec<i16> = Vec::new();
         for (frame, _ts) in &emitted {
@@ -2362,7 +2619,9 @@ mod tests {
         }
 
         let decoded_samples_per_channel = decoded_pcm.len() / channels;
-        println!("decoded PCM samples/channel (incl. encoder priming delay): {decoded_samples_per_channel}");
+        println!(
+            "decoded PCM samples/channel (incl. encoder priming delay): {decoded_samples_per_channel}"
+        );
 
         // fdk-aac's AAC-LC encoder inserts one frame (1024 samples) of
         // priming delay at the start of the encoded stream; skip it before
@@ -2423,11 +2682,12 @@ mod tests {
         let num_packets = total_input_samples as usize / frame_samples;
 
         // Mono encoder: one channel of samples per Opus frame.
-        let mut opus_encoder = opus::Encoder::new(sample_rate, opus::Channels::Mono, opus::Application::Audio)
-            .expect("creating mono Opus encoder");
+        let mut opus_encoder =
+            opus::Encoder::new(sample_rate, opus::Channels::Mono, opus::Application::Audio)
+                .expect("creating mono Opus encoder");
 
-        let mut transcoder =
-            OpusToAac::new(Arc::new(RelayCounters::default())).expect("creating Opus->AAC transcoder");
+        let mut transcoder = OpusToAac::new(Arc::new(RelayCounters::default()))
+            .expect("creating Opus->AAC transcoder");
 
         let start_ts: u32 = 500_000;
         let mut ts = start_ts;
@@ -2437,12 +2697,15 @@ mod tests {
             let mut pcm = vec![0i16; frame_samples]; // mono: 1 sample per frame index
             for (i, sample_slot) in pcm.iter_mut().enumerate() {
                 let t = (packet_index * frame_samples + i) as f64 / sample_rate as f64;
-                let sample = (2.0 * std::f64::consts::PI * 440.0 * t).sin() * i16::MAX as f64 * 0.25;
+                let sample =
+                    (2.0 * std::f64::consts::PI * 440.0 * t).sin() * i16::MAX as f64 * 0.25;
                 *sample_slot = sample as i16;
             }
 
             let mut opus_payload = vec![0u8; 4000];
-            let len = opus_encoder.encode(&pcm, &mut opus_payload).expect("mono Opus encode");
+            let len = opus_encoder
+                .encode(&pcm, &mut opus_payload)
+                .expect("mono Opus encode");
             opus_payload.truncate(len);
 
             for pair in transcoder.push(&opus_payload, ts) {
@@ -2466,10 +2729,16 @@ mod tests {
         let implied_samples = frames_emitted * AAC_FRAME_SAMPLES;
         let pitch_ratio = implied_samples as f64 / total_input_samples as f64;
 
-        println!("=== OpusToAac sample-count conservation (MONO opus source -> stereo decoder, {seconds}s) ===");
+        println!(
+            "=== OpusToAac sample-count conservation (MONO opus source -> stereo decoder, {seconds}s) ==="
+        );
         println!("input samples/channel:   {total_input_samples}");
-        println!("opus packets pushed:     {num_packets} ({frame_samples} samples/channel each, mono-encoded)");
-        println!("AAC frames emitted:      {frames_emitted} ({AAC_FRAME_SAMPLES} samples/channel each)");
+        println!(
+            "opus packets pushed:     {num_packets} ({frame_samples} samples/channel each, mono-encoded)"
+        );
+        println!(
+            "AAC frames emitted:      {frames_emitted} ({AAC_FRAME_SAMPLES} samples/channel each)"
+        );
         println!("implied samples/channel: {implied_samples}");
         println!("pitch ratio (implied/input): {pitch_ratio:.6}  (1.000000 == pitch-perfect)");
 

@@ -71,7 +71,11 @@ pub fn stable_stringify(value: &Value) -> String {
         Value::Number(n) => format_number(n),
         Value::String(s) => serde_json::to_string(s).expect("strings always serialize to JSON"),
         Value::Array(items) => {
-            let body = items.iter().map(stable_stringify).collect::<Vec<_>>().join(",");
+            let body = items
+                .iter()
+                .map(stable_stringify)
+                .collect::<Vec<_>>()
+                .join(",");
             format!("[{body}]")
         }
         Value::Object(map) => {
@@ -208,35 +212,65 @@ mod tests {
 
     const WIRE_SIMPLE_TEXT_WIRE: &str = r#"{"v":1,"type":"tc-chat:post","surface":"chat","id":"msg-0001","parentId":null,"fromId":"did:key:z6MkrNaiFHW7PvxfTPbQJKg74twJH4v7BgcPJxQxoN6cCaQ4","fromName":"テストBot","timestamp":1700000000000,"kind":"text","cid":"bafybeigdyrzt5example"}"#;
     const PAYLOAD_SIMPLE_TEXT_WIRE: &str = r#"{"cid":"bafybeigdyrzt5example","fromId":"did:key:z6MkrNaiFHW7PvxfTPbQJKg74twJH4v7BgcPJxQxoN6cCaQ4","fromName":"テストBot","id":"msg-0001","kind":"text","parentId":null,"surface":"chat","timestamp":1700000000000,"type":"tc-chat:post","v":1}"#;
-    const SIGNATURE_SIMPLE_TEXT_WIRE: &str = r#"TvwjJVPBov7jjqHeQ2EwZi1PkAk5mtzGxeiP9kIrvFDd_uLVZ3F5GhxuFlFBOd8GWkEtdb8dB0juhkMJx_UGAw"#;
+    const SIGNATURE_SIMPLE_TEXT_WIRE: &str =
+        r#"TvwjJVPBov7jjqHeQ2EwZi1PkAk5mtzGxeiP9kIrvFDd_uLVZ3F5GhxuFlFBOd8GWkEtdb8dB0juhkMJx_UGAw"#;
 
     const WIRE_MEDIA_WIRE_WITH_OPTIONALS: &str = r#"{"type":"tc-chat:post","surface":"chat","id":"msg-0002","parentId":"msg-0001","fromId":"did:key:z6MkrNaiFHW7PvxfTPbQJKg74twJH4v7BgcPJxQxoN6cCaQ4","fromName":"mistl-bot","timestamp":1700000123456,"kind":"media","cid":"bafybeih2audioexample","mimeType":"audio/mpeg","fileName":"朝のニュース.mp3","fileSize":234567}"#;
     const PAYLOAD_MEDIA_WIRE_WITH_OPTIONALS: &str = r#"{"cid":"bafybeih2audioexample","fileName":"朝のニュース.mp3","fileSize":234567,"fromId":"did:key:z6MkrNaiFHW7PvxfTPbQJKg74twJH4v7BgcPJxQxoN6cCaQ4","fromName":"mistl-bot","id":"msg-0002","kind":"media","mimeType":"audio/mpeg","parentId":"msg-0001","surface":"chat","timestamp":1700000123456,"type":"tc-chat:post"}"#;
-    const SIGNATURE_MEDIA_WIRE_WITH_OPTIONALS: &str = r#"jG1CXv8b8T0Dz1Bhvp3sSUv30n0KoSMq_FOCfYojI9hC1eKNeLzG80uH2_JTZOR9nn4_fSKmBV5l2OZ3oe4oDg"#;
+    const SIGNATURE_MEDIA_WIRE_WITH_OPTIONALS: &str =
+        r#"jG1CXv8b8T0Dz1Bhvp3sSUv30n0KoSMq_FOCfYojI9hC1eKNeLzG80uH2_JTZOR9nn4_fSKmBV5l2OZ3oe4oDg"#;
 
     const WIRE_NESTED_AND_ARRAY_FIELDS: &str = r#"{"type":"tc-news:article","fromId":"did:key:z6MkrNaiFHW7PvxfTPbQJKg74twJH4v7BgcPJxQxoN6cCaQ4","id":"article-42","timestamp":1700500000000,"meta":{"langs":["ja","en"],"sourceLinks":["https://example.com/a","https://example.com/b"],"nested":{"a":1,"b":{"c":2,"d":[1,2,3]}}},"tags":[],"score":0}"#;
     const PAYLOAD_NESTED_AND_ARRAY_FIELDS: &str = r#"{"fromId":"did:key:z6MkrNaiFHW7PvxfTPbQJKg74twJH4v7BgcPJxQxoN6cCaQ4","id":"article-42","meta":{"langs":["ja","en"],"nested":{"a":1,"b":{"c":2,"d":[1,2,3]}},"sourceLinks":["https://example.com/a","https://example.com/b"]},"score":0,"tags":[],"timestamp":1700500000000,"type":"tc-news:article"}"#;
-    const SIGNATURE_NESTED_AND_ARRAY_FIELDS: &str = r#"lcj4JU5vz0Xa8-ETIOTCMg4Xu5hYOvdOmG96zZ6Eq7wi1uwGo1LEZs1COGYJe-ebN2QCK41_3bOcztWkGv2zCQ"#;
+    const SIGNATURE_NESTED_AND_ARRAY_FIELDS: &str =
+        r#"lcj4JU5vz0Xa8-ETIOTCMg4Xu5hYOvdOmG96zZ6Eq7wi1uwGo1LEZs1COGYJe-ebN2QCK41_3bOcztWkGv2zCQ"#;
 
     const WIRE_NUMERIC_EDGE_CASES: &str = r#"{"type":"tc-bot:test-numbers","fromId":"did:key:z6MkrNaiFHW7PvxfTPbQJKg74twJH4v7BgcPJxQxoN6cCaQ4","intVal":42,"negIntVal":-17,"floatVal":3.14159,"wholeFloatVal":2,"zeroVal":0,"negZeroVal":0,"smallFloat":0.0001,"bigInt":1700000000000,"negFloat":-2.5}"#;
     const PAYLOAD_NUMERIC_EDGE_CASES: &str = r#"{"bigInt":1700000000000,"floatVal":3.14159,"fromId":"did:key:z6MkrNaiFHW7PvxfTPbQJKg74twJH4v7BgcPJxQxoN6cCaQ4","intVal":42,"negFloat":-2.5,"negIntVal":-17,"negZeroVal":0,"smallFloat":0.0001,"type":"tc-bot:test-numbers","wholeFloatVal":2,"zeroVal":0}"#;
-    const SIGNATURE_NUMERIC_EDGE_CASES: &str = r#"dNpnqeHNHe3gBjgSYvm1NuogNOM128ROcQuEZNJwRKadXAvYML3HFgLR7G1NCVLeKI6Vjkw729Z22npgZfGPDQ"#;
+    const SIGNATURE_NUMERIC_EDGE_CASES: &str =
+        r#"dNpnqeHNHe3gBjgSYvm1NuogNOM128ROcQuEZNJwRKadXAvYML3HFgLR7G1NCVLeKI6Vjkw729Z22npgZfGPDQ"#;
 
     const WIRE_NULL_AND_JAPANESE_STRINGS: &str = r#"{"type":"tc-bot:test-strings","fromId":"did:key:z6MkrNaiFHW7PvxfTPbQJKg74twJH4v7BgcPJxQxoN6cCaQ4","nullable":null,"japanese":"日本語のテスト文字列です。「引用」と\\バックスラッシュ、改行\nタブ\t。","emoji":"絵文字🎉テスト","empty":"","withQuotes":"he said \"hello\""}"#;
     const PAYLOAD_NULL_AND_JAPANESE_STRINGS: &str = r#"{"emoji":"絵文字🎉テスト","empty":"","fromId":"did:key:z6MkrNaiFHW7PvxfTPbQJKg74twJH4v7BgcPJxQxoN6cCaQ4","japanese":"日本語のテスト文字列です。「引用」と\\バックスラッシュ、改行\nタブ\t。","nullable":null,"type":"tc-bot:test-strings","withQuotes":"he said \"hello\""}"#;
-    const SIGNATURE_NULL_AND_JAPANESE_STRINGS: &str = r#"kI5qt0RuzIuynUsyRrl8P6qbucMKGD_6CPD6nKEHi2g5cckkeyqmPij2PDpANXUuZLIK8eRfG-4HCJ1j0VwdDg"#;
+    const SIGNATURE_NULL_AND_JAPANESE_STRINGS: &str =
+        r#"kI5qt0RuzIuynUsyRrl8P6qbucMKGD_6CPD6nKEHi2g5cckkeyqmPij2PDpANXUuZLIK8eRfG-4HCJ1j0VwdDg"#;
 
     const WIRE_WEBHOOK_DELIVERY_WIRE: &str = r#"{"v":1,"type":"tc-bot:delivery","fromId":"did:key:z6MkrNaiFHW7PvxfTPbQJKg74twJH4v7BgcPJxQxoN6cCaQ4","pipeline":"news-audio","item":{"articleId":"a-1","title":"記事タイトル","excerpt":"記事の抜粋テキスト","sourceLinks":["https://example.com/src1"],"publishedAt":"2026-07-12T00:00:00.000Z","audio":{"mime":"audio/mpeg","size":12345}}}"#;
     const PAYLOAD_WEBHOOK_DELIVERY_WIRE: &str = r#"{"fromId":"did:key:z6MkrNaiFHW7PvxfTPbQJKg74twJH4v7BgcPJxQxoN6cCaQ4","item":{"articleId":"a-1","audio":{"mime":"audio/mpeg","size":12345},"excerpt":"記事の抜粋テキスト","publishedAt":"2026-07-12T00:00:00.000Z","sourceLinks":["https://example.com/src1"],"title":"記事タイトル"},"pipeline":"news-audio","type":"tc-bot:delivery","v":1}"#;
-    const SIGNATURE_WEBHOOK_DELIVERY_WIRE: &str = r#"b_dBkQh7e7UOJaE92s1DksvlZPD6M57Hg8UY0P60Mbw2MRC7znJhCpyTOLzWuw80lwuO_UXXx_VXY0-Yll0vBA"#;
+    const SIGNATURE_WEBHOOK_DELIVERY_WIRE: &str =
+        r#"b_dBkQh7e7UOJaE92s1DksvlZPD6M57Hg8UY0P60Mbw2MRC7znJhCpyTOLzWuw80lwuO_UXXx_VXY0-Yll0vBA"#;
 
     const ALL_CASES: &[(&str, &str, &str)] = &[
-        (WIRE_SIMPLE_TEXT_WIRE, PAYLOAD_SIMPLE_TEXT_WIRE, SIGNATURE_SIMPLE_TEXT_WIRE),
-        (WIRE_MEDIA_WIRE_WITH_OPTIONALS, PAYLOAD_MEDIA_WIRE_WITH_OPTIONALS, SIGNATURE_MEDIA_WIRE_WITH_OPTIONALS),
-        (WIRE_NESTED_AND_ARRAY_FIELDS, PAYLOAD_NESTED_AND_ARRAY_FIELDS, SIGNATURE_NESTED_AND_ARRAY_FIELDS),
-        (WIRE_NUMERIC_EDGE_CASES, PAYLOAD_NUMERIC_EDGE_CASES, SIGNATURE_NUMERIC_EDGE_CASES),
-        (WIRE_NULL_AND_JAPANESE_STRINGS, PAYLOAD_NULL_AND_JAPANESE_STRINGS, SIGNATURE_NULL_AND_JAPANESE_STRINGS),
-        (WIRE_WEBHOOK_DELIVERY_WIRE, PAYLOAD_WEBHOOK_DELIVERY_WIRE, SIGNATURE_WEBHOOK_DELIVERY_WIRE),
+        (
+            WIRE_SIMPLE_TEXT_WIRE,
+            PAYLOAD_SIMPLE_TEXT_WIRE,
+            SIGNATURE_SIMPLE_TEXT_WIRE,
+        ),
+        (
+            WIRE_MEDIA_WIRE_WITH_OPTIONALS,
+            PAYLOAD_MEDIA_WIRE_WITH_OPTIONALS,
+            SIGNATURE_MEDIA_WIRE_WITH_OPTIONALS,
+        ),
+        (
+            WIRE_NESTED_AND_ARRAY_FIELDS,
+            PAYLOAD_NESTED_AND_ARRAY_FIELDS,
+            SIGNATURE_NESTED_AND_ARRAY_FIELDS,
+        ),
+        (
+            WIRE_NUMERIC_EDGE_CASES,
+            PAYLOAD_NUMERIC_EDGE_CASES,
+            SIGNATURE_NUMERIC_EDGE_CASES,
+        ),
+        (
+            WIRE_NULL_AND_JAPANESE_STRINGS,
+            PAYLOAD_NULL_AND_JAPANESE_STRINGS,
+            SIGNATURE_NULL_AND_JAPANESE_STRINGS,
+        ),
+        (
+            WIRE_WEBHOOK_DELIVERY_WIRE,
+            PAYLOAD_WEBHOOK_DELIVERY_WIRE,
+            SIGNATURE_WEBHOOK_DELIVERY_WIRE,
+        ),
     ];
 
     #[test]
@@ -244,7 +278,11 @@ mod tests {
         for (wire_json, expected_payload, _signature) in ALL_CASES {
             let wire: Value = serde_json::from_str(wire_json).expect("vector wire is valid JSON");
             let map = wire.as_object().unwrap();
-            assert_eq!(&signing_payload(map), expected_payload, "payload mismatch for {wire_json}");
+            assert_eq!(
+                &signing_payload(map),
+                expected_payload,
+                "payload mismatch for {wire_json}"
+            );
         }
     }
 
@@ -256,9 +294,15 @@ mod tests {
         // produce -- the strongest interop guarantee available without a
         // test-only Identity constructor (see below).
         for (wire_json, _payload, signature) in ALL_CASES {
-            let mut wire: Value = serde_json::from_str(wire_json).expect("vector wire is valid JSON");
-            wire.as_object_mut().unwrap().insert("signature".to_string(), json!(signature));
-            assert!(verify_wire(&wire).unwrap(), "verify_wire rejected a TS-signed vector: {wire_json}");
+            let mut wire: Value =
+                serde_json::from_str(wire_json).expect("vector wire is valid JSON");
+            wire.as_object_mut()
+                .unwrap()
+                .insert("signature".to_string(), json!(signature));
+            assert!(
+                verify_wire(&wire).unwrap(),
+                "verify_wire rejected a TS-signed vector: {wire_json}"
+            );
         }
     }
 
@@ -266,7 +310,9 @@ mod tests {
     fn verify_wire_rejects_tampered_field() {
         let (wire_json, _payload, signature) = ALL_CASES[0];
         let mut wire: Value = serde_json::from_str(wire_json).expect("vector wire is valid JSON");
-        wire.as_object_mut().unwrap().insert("signature".to_string(), json!(signature));
+        wire.as_object_mut()
+            .unwrap()
+            .insert("signature".to_string(), json!(signature));
         wire["fromName"] = json!("attacker");
         assert!(!verify_wire(&wire).unwrap());
     }
@@ -305,14 +351,23 @@ mod tests {
 
     #[test]
     fn stable_stringify_sorts_keys_and_keeps_array_order() {
-        assert_eq!(stable_stringify(&json!({"b": 1, "a": 2})), r#"{"a":2,"b":1}"#);
-        assert_eq!(stable_stringify(&json!({"tags": ["b", "a"]})), r#"{"tags":["b","a"]}"#);
+        assert_eq!(
+            stable_stringify(&json!({"b": 1, "a": 2})),
+            r#"{"a":2,"b":1}"#
+        );
+        assert_eq!(
+            stable_stringify(&json!({"tags": ["b", "a"]})),
+            r#"{"tags":["b","a"]}"#
+        );
     }
 
     #[test]
     fn signing_payload_excludes_signature_field() {
         let wire = json!({"fromId": "did:key:z6Mk...", "signature": "sig"});
-        assert_eq!(signing_payload(wire.as_object().unwrap()), r#"{"fromId":"did:key:z6Mk..."}"#);
+        assert_eq!(
+            signing_payload(wire.as_object().unwrap()),
+            r#"{"fromId":"did:key:z6Mk..."}"#
+        );
     }
 
     // `sign_wire`'s own logic (the `fromId` equality check, and the
@@ -335,7 +390,10 @@ mod tests {
 
         sign_wire(&mut wire, &identity).expect("signing a well-formed wire must succeed");
         assert!(wire.get("signature").and_then(Value::as_str).is_some());
-        assert!(verify_wire(&wire).unwrap(), "a freshly-signed wire must verify");
+        assert!(
+            verify_wire(&wire).unwrap(),
+            "a freshly-signed wire must verify"
+        );
 
         // Tampering with any signed field (not just `fromId`) must invalidate it.
         let mut tampered = wire.clone();

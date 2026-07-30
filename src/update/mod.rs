@@ -91,7 +91,9 @@ async fn cmd_check(state: &Arc<AppState>) -> Result<Value> {
     let release = fetch_latest_release_recorded(&client, &repo, update.prerelease).await?;
 
     let update_available = is_update_available(CURRENT_VERSION, &release.version);
-    let asset_available = release.asset(&asset_name(&release.version, TARGET)).is_some();
+    let asset_available = release
+        .asset(&asset_name(&release.version, TARGET))
+        .is_some();
     record_check(if update_available {
         format!("v{} available", release.version)
     } else {
@@ -115,7 +117,10 @@ async fn cmd_check(state: &Arc<AppState>) -> Result<Value> {
 }
 
 async fn cmd_apply(args: Value, state: &Arc<AppState>) -> Result<Value> {
-    let restart = args.get("restart").and_then(Value::as_bool).unwrap_or(false);
+    let restart = args
+        .get("restart")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let update = state.config().update;
     let repo = effective_repo(&update.repo);
     let client = build_client()?;
@@ -465,7 +470,11 @@ fn effective_repo(configured: &str) -> String {
 /// Release asset filename for `version` on `target`:
 /// `mistl-v{version}-{target}`, plus `.exe` for Windows targets.
 fn asset_name(version: &str, target: &str) -> String {
-    let ext = if target.contains("windows") { ".exe" } else { "" };
+    let ext = if target.contains("windows") {
+        ".exe"
+    } else {
+        ""
+    };
     format!("mistl-v{version}-{target}{ext}")
 }
 
@@ -504,7 +513,11 @@ fn parse_sha256sums(sums: &str, filename: &str) -> Option<String> {
 fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 fn apply_lock() -> &'static tokio::sync::Mutex<()> {

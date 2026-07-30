@@ -122,7 +122,9 @@ mod tests {
     fn raft_envelope_roundtrips() {
         let bytes = encode_raft_message("room-a", &sample_message()).unwrap();
         match decode(&bytes, "room-a") {
-            Some(WireMessage::Raft(RaftMessage::RequestVote { term, candidate_id, .. })) => {
+            Some(WireMessage::Raft(RaftMessage::RequestVote {
+                term, candidate_id, ..
+            })) => {
                 assert_eq!(term, 7);
                 assert_eq!(candidate_id, NodeId("cand".into()));
             }

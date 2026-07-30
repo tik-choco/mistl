@@ -202,7 +202,10 @@ async fn receive_deposit(
     envelope: Envelope,
 ) -> Result<()> {
     if !service.serve_as_bot {
-        debug!(from = from_node, "mailbox: ignoring deposit (not serving as bot)");
+        debug!(
+            from = from_node,
+            "mailbox: ignoring deposit (not serving as bot)"
+        );
         return Ok(());
     }
 
@@ -303,8 +306,7 @@ pub async fn send(
         .context("mailbox: loading identity")?;
 
     let mut envelope = if let Some(path) = file {
-        let data =
-            std::fs::read(&path).with_context(|| format!("mailbox: reading file {path}"))?;
+        let data = std::fs::read(&path).with_context(|| format!("mailbox: reading file {path}"))?;
         let size = data.len() as u64;
         let name = std::path::Path::new(&path)
             .file_name()
@@ -318,8 +320,11 @@ pub async fn send(
             .await
             .context("mailbox: storing attachment")?;
 
-        let mut envelope =
-            Envelope::new(identity.did().to_string(), to.to_string(), EnvelopeKind::File);
+        let mut envelope = Envelope::new(
+            identity.did().to_string(),
+            to.to_string(),
+            EnvelopeKind::File,
+        );
         envelope.cid = Some(cid);
         envelope.name = name;
         envelope.size = Some(size);
@@ -340,9 +345,15 @@ pub async fn send(
     let connected = connected_nodes_with_timeout().await;
 
     let status = if connected.iter().any(|n| n == &to_node) {
-        if send_wire(&service.room, &to_node, &WireMessage::Mail { envelope: envelope.clone() })
-            .await
-            .is_ok()
+        if send_wire(
+            &service.room,
+            &to_node,
+            &WireMessage::Mail {
+                envelope: envelope.clone(),
+            },
+        )
+        .await
+        .is_ok()
         {
             "delivered"
         } else {
@@ -350,9 +361,15 @@ pub async fn send(
             "queued"
         }
     } else if let Some(bot) = connected.first() {
-        if send_wire(&service.room, bot, &WireMessage::Deposit { envelope: envelope.clone() })
-            .await
-            .is_ok()
+        if send_wire(
+            &service.room,
+            bot,
+            &WireMessage::Deposit {
+                envelope: envelope.clone(),
+            },
+        )
+        .await
+        .is_ok()
         {
             "deposited"
         } else {
@@ -436,13 +453,25 @@ async fn flush_outbox(service: &Arc<MailboxService>) {
         }
         let to_node = node_id_for(&entry.envelope.to);
         let sent = if connected.iter().any(|n| n == &to_node) {
-            send_wire(&service.room, &to_node, &WireMessage::Mail { envelope: entry.envelope.clone() })
-                .await
-                .is_ok()
+            send_wire(
+                &service.room,
+                &to_node,
+                &WireMessage::Mail {
+                    envelope: entry.envelope.clone(),
+                },
+            )
+            .await
+            .is_ok()
         } else if let Some(bot) = connected.first() {
-            send_wire(&service.room, bot, &WireMessage::Deposit { envelope: entry.envelope.clone() })
-                .await
-                .is_ok()
+            send_wire(
+                &service.room,
+                bot,
+                &WireMessage::Deposit {
+                    envelope: entry.envelope.clone(),
+                },
+            )
+            .await
+            .is_ok()
         } else {
             false
         };
@@ -490,9 +519,15 @@ async fn forward_held_to_connected(service: &Arc<MailboxService>) -> Result<()> 
         if !connected.iter().any(|n| n == to_node) {
             continue;
         }
-        if send_wire(&service.room, to_node, &WireMessage::Mail { envelope: entry.envelope.clone() })
-            .await
-            .is_ok()
+        if send_wire(
+            &service.room,
+            to_node,
+            &WireMessage::Mail {
+                envelope: entry.envelope.clone(),
+            },
+        )
+        .await
+        .is_ok()
         {
             delivered_ids.push(entry.envelope.id.clone());
         }

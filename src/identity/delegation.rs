@@ -491,7 +491,9 @@ mod tests {
     }
 
     fn instant(rfc3339: &str) -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339(rfc3339).unwrap().with_timezone(&Utc)
+        DateTime::parse_from_rfc3339(rfc3339)
+            .unwrap()
+            .with_timezone(&Utc)
     }
 
     #[test]

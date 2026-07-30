@@ -192,10 +192,14 @@ pub fn advertises_service(services: &Option<Vec<String>>, service: &str) -> bool
 
 /// Encode a message to wire bytes (UTF-8 JSON).
 pub fn encode(msg: &ProtocolMessage) -> Vec<u8> {
-    use serde_json::{json, Map, Value};
+    use serde_json::{Map, Value, json};
 
     let value: Value = match msg {
-        ProtocolMessage::ProviderHello { models, services, voices } => {
+        ProtocolMessage::ProviderHello {
+            models,
+            services,
+            voices,
+        } => {
             let mut map = Map::new();
             map.insert("v".into(), json!(1));
             map.insert("type".into(), json!("provider_hello"));
@@ -213,7 +217,11 @@ pub fn encode(msg: &ProtocolMessage) -> Vec<u8> {
         ProtocolMessage::ConsumerHello => {
             json!({"v": 1, "type": "consumer_hello"})
         }
-        ProtocolMessage::LlmRequest { id, messages, model } => {
+        ProtocolMessage::LlmRequest {
+            id,
+            messages,
+            model,
+        } => {
             let mut map = Map::new();
             map.insert("v".into(), json!(1));
             map.insert("type".into(), json!("llm_request"));
@@ -259,7 +267,13 @@ pub fn encode(msg: &ProtocolMessage) -> Vec<u8> {
         ProtocolMessage::RaftMessage { payload } => {
             json!({"v": 1, "type": "raft_message", "payload": payload})
         }
-        ProtocolMessage::TtsRequest { id, text, model, voice, lang } => {
+        ProtocolMessage::TtsRequest {
+            id,
+            text,
+            model,
+            voice,
+            lang,
+        } => {
             let mut map = Map::new();
             map.insert("v".into(), json!(1));
             map.insert("type".into(), json!("tts_request"));
@@ -276,7 +290,13 @@ pub fn encode(msg: &ProtocolMessage) -> Vec<u8> {
             }
             Value::Object(map)
         }
-        ProtocolMessage::TtsResponse { id, seq, data, last, mime } => {
+        ProtocolMessage::TtsResponse {
+            id,
+            seq,
+            data,
+            last,
+            mime,
+        } => {
             json!({
                 "v": 1,
                 "type": "tts_response",
@@ -287,7 +307,15 @@ pub fn encode(msg: &ProtocolMessage) -> Vec<u8> {
                 "mime": mime,
             })
         }
-        ProtocolMessage::SttRequest { id, seq, data, last, mime, model, file_name } => {
+        ProtocolMessage::SttRequest {
+            id,
+            seq,
+            data,
+            last,
+            mime,
+            model,
+            file_name,
+        } => {
             let mut map = Map::new();
             map.insert("v".into(), json!(1));
             map.insert("type".into(), json!("stt_request"));
@@ -414,7 +442,11 @@ pub fn decode(bytes: &[u8]) -> Option<ProtocolMessage> {
                 None => None,
                 Some(v) => str_array_non_empty(v),
             };
-            Some(ProtocolMessage::ProviderHello { models, services, voices })
+            Some(ProtocolMessage::ProviderHello {
+                models,
+                services,
+                voices,
+            })
         }
         "consumer_hello" => Some(ProtocolMessage::ConsumerHello),
         "llm_request" => {
@@ -437,7 +469,11 @@ pub fn decode(bytes: &[u8]) -> Option<ProtocolMessage> {
                 });
             }
             let model = opt_str(obj, "model")?;
-            Some(ProtocolMessage::LlmRequest { id, messages, model })
+            Some(ProtocolMessage::LlmRequest {
+                id,
+                messages,
+                model,
+            })
         }
         "llm_response_chunk" => {
             let id = non_empty_str(obj, "id")?;
@@ -475,7 +511,13 @@ pub fn decode(bytes: &[u8]) -> Option<ProtocolMessage> {
             // malformed value degrades gracefully instead of invalidating
             // an otherwise well-formed `tts_request`.
             let lang = dropped_opt_str(obj, "lang");
-            Some(ProtocolMessage::TtsRequest { id, text, model, voice, lang })
+            Some(ProtocolMessage::TtsRequest {
+                id,
+                text,
+                model,
+                voice,
+                lang,
+            })
         }
         "tts_response" => {
             let id = non_empty_str(obj, "id")?;
@@ -483,7 +525,13 @@ pub fn decode(bytes: &[u8]) -> Option<ProtocolMessage> {
             let data = any_str(obj, "data")?;
             let last = obj.get("last")?.as_bool()?;
             let mime = non_empty_str(obj, "mime")?;
-            Some(ProtocolMessage::TtsResponse { id, seq, data, last, mime })
+            Some(ProtocolMessage::TtsResponse {
+                id,
+                seq,
+                data,
+                last,
+                mime,
+            })
         }
         "stt_request" => {
             let id = non_empty_str(obj, "id")?;
@@ -526,15 +574,25 @@ pub fn random_id() -> String {
     bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
     bytes[8] = (bytes[8] & 0x3f) | 0x80; // RFC 4122 variant
     let h = |range: std::ops::Range<usize>| {
-        bytes[range].iter().map(|b| format!("{b:02x}")).collect::<String>()
+        bytes[range]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
     };
-    format!("{}-{}-{}-{}-{}", h(0..4), h(4..6), h(6..8), h(8..10), h(10..16))
+    format!(
+        "{}-{}-{}-{}-{}",
+        h(0..4),
+        h(4..6),
+        h(6..8),
+        h(8..10),
+        h(10..16)
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use std::collections::BTreeSet;
 
     fn keys(bytes: &[u8]) -> BTreeSet<String> {
@@ -576,10 +634,7 @@ mod tests {
             services: None,
             voices: None,
         });
-        assert_eq!(
-            keys(&bytes),
-            BTreeSet::from(["v".into(), "type".into()])
-        );
+        assert_eq!(keys(&bytes), BTreeSet::from(["v".into(), "type".into()]));
         let v = parsed(&bytes);
         assert!(v.get("models").is_none());
     }
@@ -621,7 +676,12 @@ mod tests {
         assert_eq!(v["voices"], json!(["alloy", "kokoro-1"]));
         assert_eq!(
             keys(&bytes),
-            BTreeSet::from(["v".into(), "type".into(), "services".into(), "voices".into()])
+            BTreeSet::from([
+                "v".into(),
+                "type".into(),
+                "services".into(),
+                "voices".into()
+            ])
         );
     }
 
@@ -639,10 +699,7 @@ mod tests {
     #[test]
     fn encode_consumer_hello() {
         let bytes = encode(&ProtocolMessage::ConsumerHello);
-        assert_eq!(
-            keys(&bytes),
-            BTreeSet::from(["v".into(), "type".into()])
-        );
+        assert_eq!(keys(&bytes), BTreeSet::from(["v".into(), "type".into()]));
         assert_eq!(parsed(&bytes)["type"], json!("consumer_hello"));
     }
 
@@ -695,7 +752,13 @@ mod tests {
         });
         assert_eq!(
             keys(&bytes),
-            BTreeSet::from(["v".into(), "type".into(), "id".into(), "delta".into(), "seq".into()])
+            BTreeSet::from([
+                "v".into(),
+                "type".into(),
+                "id".into(),
+                "delta".into(),
+                "seq".into()
+            ])
         );
         assert_eq!(parsed(&bytes)["seq"], json!(0));
     }
@@ -1302,7 +1365,11 @@ mod tests {
         let bytes = br#"{"v":1,"type":"provider_hello","models":"not-an-array"}"#;
         assert_eq!(
             decode(bytes),
-            Some(ProtocolMessage::ProviderHello { models: None, services: None, voices: None })
+            Some(ProtocolMessage::ProviderHello {
+                models: None,
+                services: None,
+                voices: None
+            })
         );
     }
 
@@ -1324,8 +1391,7 @@ mod tests {
         // `models` follows the same element-wise filtering rule as
         // `services`: non-string *and* empty-string elements are dropped,
         // not just non-string ones.
-        let bytes =
-            br#"{"v":1,"type":"provider_hello","models":["gpt-4o",42,null,"","claude"]}"#;
+        let bytes = br#"{"v":1,"type":"provider_hello","models":["gpt-4o",42,null,"","claude"]}"#;
         assert_eq!(
             decode(bytes),
             Some(ProtocolMessage::ProviderHello {
@@ -1341,14 +1407,17 @@ mod tests {
         let bytes = br#"{"v":1,"type":"provider_hello","services":42}"#;
         assert_eq!(
             decode(bytes),
-            Some(ProtocolMessage::ProviderHello { models: None, services: None, voices: None })
+            Some(ProtocolMessage::ProviderHello {
+                models: None,
+                services: None,
+                voices: None
+            })
         );
     }
 
     #[test]
     fn decode_provider_hello_filters_non_string_and_empty_services() {
-        let bytes =
-            br#"{"v":1,"type":"provider_hello","services":["chat",42,null,"","tts"]}"#;
+        let bytes = br#"{"v":1,"type":"provider_hello","services":["chat",42,null,"","tts"]}"#;
         assert_eq!(
             decode(bytes),
             Some(ProtocolMessage::ProviderHello {
@@ -1379,7 +1448,11 @@ mod tests {
         let bytes = br#"{"v":1,"type":"provider_hello"}"#;
         assert_eq!(
             decode(bytes),
-            Some(ProtocolMessage::ProviderHello { models: None, services: None, voices: None })
+            Some(ProtocolMessage::ProviderHello {
+                models: None,
+                services: None,
+                voices: None
+            })
         );
     }
 
@@ -1530,7 +1603,13 @@ mod tests {
         let parts: Vec<&str> = id.split('-').collect();
         assert_eq!(parts.len(), 5);
         assert_eq!(
-            [parts[0].len(), parts[1].len(), parts[2].len(), parts[3].len(), parts[4].len()],
+            [
+                parts[0].len(),
+                parts[1].len(),
+                parts[2].len(),
+                parts[3].len(),
+                parts[4].len()
+            ],
             [8, 4, 4, 4, 12]
         );
         assert!(id.chars().all(|c| c.is_ascii_hexdigit() || c == '-'));

@@ -36,8 +36,22 @@ impl Capture {
 
         let mut command = Command::new("ffmpeg");
         command
-            .args(["-f", "gdigrab", "-framerate", &frame_rate.to_string(), "-i", "desktop"])
-            .args(["-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency"])
+            .args([
+                "-f",
+                "gdigrab",
+                "-framerate",
+                &frame_rate.to_string(),
+                "-i",
+                "desktop",
+            ])
+            .args([
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-tune",
+                "zerolatency",
+            ])
             .args(["-pix_fmt", "yuv420p", "-bf", "0", "-g", &gop.to_string()])
             .args(["-f", "mpegts", &format!("udp://127.0.0.1:{ingest_port}")])
             .stdin(std::process::Stdio::null())
@@ -65,7 +79,9 @@ impl Capture {
                 let mut lines = BufReader::new(stderr).lines();
                 loop {
                     match lines.next_line().await {
-                        Ok(Some(line)) => tracing::debug!(target: "mistl::stream::ffmpeg", "{line}"),
+                        Ok(Some(line)) => {
+                            tracing::debug!(target: "mistl::stream::ffmpeg", "{line}")
+                        }
                         Ok(None) | Err(_) => break,
                     }
                 }

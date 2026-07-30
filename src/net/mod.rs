@@ -95,7 +95,8 @@ static ENGINE: OnceCell<Arc<Engine>> = OnceCell::const_new();
 /// holder releases it). Guarded by an async mutex (rather than
 /// `std::sync::RwLock`) because the check-then-join/leave-then-update
 /// sequences in [`ensure_started`]/[`leave_room`] span an `.await`.
-static ROOMS: LazyLock<Mutex<HashMap<String, usize>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static ROOMS: LazyLock<Mutex<HashMap<String, usize>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 static HANDLERS: RwLock<Vec<EventHandler>> = RwLock::new(Vec::new());
 
 /// Optional consumer of remote WebRTC media tracks (the stream relay).
@@ -103,12 +104,17 @@ static HANDLERS: RwLock<Vec<EventHandler>> = RwLock::new(Vec::new());
 /// registered they are dropped here, so a relay started later only sees
 /// tracks from peers that (re)negotiate after it subscribed -- which is the
 /// normal case, since tc-chat renegotiates whenever a share starts.
-static MEDIA_CONSUMER: RwLock<Option<tokio::sync::mpsc::UnboundedSender<mistlib::MediaTrackEvent>>> =
-    RwLock::new(None);
+static MEDIA_CONSUMER: RwLock<
+    Option<tokio::sync::mpsc::UnboundedSender<mistlib::MediaTrackEvent>>,
+> = RwLock::new(None);
 
 /// Route media track events to `tx` (or drop them again when `None`).
-pub fn set_media_consumer(tx: Option<tokio::sync::mpsc::UnboundedSender<mistlib::MediaTrackEvent>>) {
-    *MEDIA_CONSUMER.write().expect("media consumer lock poisoned") = tx;
+pub fn set_media_consumer(
+    tx: Option<tokio::sync::mpsc::UnboundedSender<mistlib::MediaTrackEvent>>,
+) {
+    *MEDIA_CONSUMER
+        .write()
+        .expect("media consumer lock poisoned") = tx;
 }
 
 /// Ensure the shared transport is up and `room` is joined, then return a
@@ -175,7 +181,10 @@ pub async fn leave_room(room: &str) -> Result<()> {
 /// [`ensure_started`]; handlers receive every engine event -- from every
 /// joined room -- from registration onward, and never get unregistered.
 pub fn register_handler(handler: impl Fn(u32, &str, &[u8]) + Send + Sync + 'static) {
-    HANDLERS.write().expect("net handler registry poisoned").push(Box::new(handler));
+    HANDLERS
+        .write()
+        .expect("net handler registry poisoned")
+        .push(Box::new(handler));
 }
 
 /// A per-module event handler that also knows which room the event came
@@ -218,7 +227,9 @@ static ACTIVITY: LazyLock<RwLock<HashMap<(String, String), ActivityRecord>>> =
 /// node) and [`send_broadcast`] (peer = `""`).
 fn record_tx(room: &str, peer: &str, bytes: usize) {
     let mut activity = ACTIVITY.write().expect("net activity lock poisoned");
-    let entry = activity.entry((room.to_string(), peer.to_string())).or_default();
+    let entry = activity
+        .entry((room.to_string(), peer.to_string()))
+        .or_default();
     entry.tx.count += 1;
     entry.tx.bytes += bytes as u64;
     entry.tx.last = Some(Instant::now());
@@ -230,7 +241,9 @@ fn record_tx(room: &str, peer: &str, bytes: usize) {
 /// acquisition and one hash map entry lookup/insert, no other allocation.
 fn record_rx(room: &str, peer: &str, bytes: usize) {
     let mut activity = ACTIVITY.write().expect("net activity lock poisoned");
-    let entry = activity.entry((room.to_string(), peer.to_string())).or_default();
+    let entry = activity
+        .entry((room.to_string(), peer.to_string()))
+        .or_default();
     entry.rx.count += 1;
     entry.rx.bytes += bytes as u64;
     entry.rx.last = Some(Instant::now());
@@ -294,7 +307,10 @@ pub fn activity_snapshot() -> Vec<ActivityEntry> {
 /// registration (both fire for every event) rather than a change to that
 /// one's signature.
 pub fn register_room_handler(handler: impl Fn(u32, &str, &str, &[u8]) + Send + Sync + 'static) {
-    ROOM_HANDLERS.write().expect("net room handler registry poisoned").push(Box::new(handler));
+    ROOM_HANDLERS
+        .write()
+        .expect("net room handler registry poisoned")
+        .push(Box::new(handler));
 }
 
 /// `mistlib::app::register_event_callback_v2`'s callback: same events as the
@@ -322,7 +338,9 @@ unsafe extern "C" fn dispatch_room_event(
     if event_type == EVENT_RAW {
         record_rx(&room, &from, data.len());
     }
-    let handlers = ROOM_HANDLERS.read().expect("net room handler registry poisoned");
+    let handlers = ROOM_HANDLERS
+        .read()
+        .expect("net room handler registry poisoned");
     for handler in handlers.iter() {
         handler(event_type, &room, &from, data);
     }
@@ -466,7 +484,12 @@ pub async fn joined_rooms() -> Vec<String> {
 /// RTT, or bitrate) -- for a room-scoped breakdown of who's connected where,
 /// see [`room_connections`] instead.
 pub async fn peer_connection_state(node_id: &str) -> String {
-    match tokio::time::timeout(NET_TIMEOUT, mistlib::app::get_connection_state_async(node_id)).await {
+    match tokio::time::timeout(
+        NET_TIMEOUT,
+        mistlib::app::get_connection_state_async(node_id),
+    )
+    .await
+    {
         Ok(state) => state,
         Err(_) => {
             tracing::debug!(%node_id, "net: get_connection_state timed out");

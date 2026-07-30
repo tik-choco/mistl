@@ -159,7 +159,9 @@ impl ShareCapture {
             Ok(native) => native,
             Err(error) => {
                 publish_task.abort();
-                if let Err(unpublish_error) = mistlib::unpublish_local_track(&room, video_track).await {
+                if let Err(unpublish_error) =
+                    mistlib::unpublish_local_track(&room, video_track).await
+                {
                     warn!(%unpublish_error, "share: unpublishing video track after failed capture start also failed");
                 }
                 return Err(error);
@@ -276,7 +278,10 @@ mod tests {
     fn random_uuid_like_is_32_lowercase_hex_chars() {
         let id = random_uuid_like();
         assert_eq!(id.len(), 32);
-        assert!(id.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(
+            id.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
     }
 
     #[test]

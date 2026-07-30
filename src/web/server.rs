@@ -178,7 +178,11 @@ fn parse_head(bytes: &[u8]) -> Option<RequestHead> {
         }
     }
 
-    Some(RequestHead { method, path, headers })
+    Some(RequestHead {
+        method,
+        path,
+        headers,
+    })
 }
 
 /// Read bytes from `stream` until the header terminator is found (capped at
@@ -190,20 +194,27 @@ async fn read_request_head(stream: &mut TcpStream) -> io::Result<Option<(Request
     let mut chunk = [0u8; 1024];
     loop {
         if let Some(pos) = find_header_end(&buf) {
-            let head = parse_head(&buf[..pos])
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "malformed request head"))?;
+            let head = parse_head(&buf[..pos]).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "malformed request head")
+            })?;
             let leftover = buf[pos..].to_vec();
             return Ok(Some((head, leftover)));
         }
         if buf.len() >= MAX_HEADER_BYTES {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "header section too large"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "header section too large",
+            ));
         }
         let n = stream.read(&mut chunk).await?;
         if n == 0 {
             if buf.is_empty() {
                 return Ok(None);
             }
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "connection closed mid-headers"));
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "connection closed mid-headers",
+            ));
         }
         buf.extend_from_slice(&chunk[..n]);
     }
@@ -212,7 +223,11 @@ async fn read_request_head(stream: &mut TcpStream) -> io::Result<Option<(Request
 /// Read the remaining body bytes (on top of any `leftover` already read
 /// during header parsing) until exactly `content_length` bytes are
 /// available.
-async fn read_body(stream: &mut TcpStream, mut leftover: Vec<u8>, content_length: usize) -> io::Result<Vec<u8>> {
+async fn read_body(
+    stream: &mut TcpStream,
+    mut leftover: Vec<u8>,
+    content_length: usize,
+) -> io::Result<Vec<u8>> {
     if leftover.len() >= content_length {
         leftover.truncate(content_length);
         return Ok(leftover);
@@ -221,7 +236,10 @@ async fn read_body(stream: &mut TcpStream, mut leftover: Vec<u8>, content_length
     while leftover.len() < content_length {
         let n = stream.read(&mut chunk).await?;
         if n == 0 {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "connection closed before body complete"));
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "connection closed before body complete",
+            ));
         }
         let take = n.min(content_length - leftover.len());
         leftover.extend_from_slice(&chunk[..take]);
@@ -248,7 +266,10 @@ async fn read_body_to_file(
     while written < content_length {
         let n = stream.read(&mut chunk).await?;
         if n == 0 {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "connection closed before body complete"));
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "connection closed before body complete",
+            ));
         }
         let take = (n as u64).min(content_length - written) as usize;
         file.write_all(&chunk[..take]).await?;
@@ -384,7 +405,9 @@ fn percent_encode_rfc5987(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for byte in s.bytes() {
         match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => out.push(byte as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(byte as char)
+            }
             _ => out.push_str(&format!("%{byte:02X}")),
         }
     }
@@ -402,7 +425,10 @@ fn validate_upload_filename(name: &str) -> Result<(), &'static str> {
         return Err("file name must not contain path separators or `..`");
     }
     const FORBIDDEN: [char; 7] = ['<', '>', ':', '"', '|', '?', '*'];
-    if name.chars().any(|c| FORBIDDEN.contains(&c) || c.is_control()) {
+    if name
+        .chars()
+        .any(|c| FORBIDDEN.contains(&c) || c.is_control())
+    {
         return Err("file name contains forbidden characters");
     }
     Ok(())
@@ -426,7 +452,12 @@ fn response_head(status: u16, reason: &str, content_type: &str, content_length: 
     )
 }
 
-async fn write_json_response(stream: &mut TcpStream, status: u16, reason: &str, body: &Value) -> io::Result<()> {
+async fn write_json_response(
+    stream: &mut TcpStream,
+    status: u16,
+    reason: &str,
+    body: &Value,
+) -> io::Result<()> {
     let body_bytes = serde_json::to_vec(body).unwrap_or_else(|_| b"{}".to_vec());
     let head = response_head(status, reason, "application/json", body_bytes.len());
     stream.write_all(head.as_bytes()).await?;
@@ -434,7 +465,12 @@ async fn write_json_response(stream: &mut TcpStream, status: u16, reason: &str, 
     stream.flush().await
 }
 
-async fn write_html_response(stream: &mut TcpStream, status: u16, reason: &str, body: &str) -> io::Result<()> {
+async fn write_html_response(
+    stream: &mut TcpStream,
+    status: u16,
+    reason: &str,
+    body: &str,
+) -> io::Result<()> {
     // The dashboard HTML is baked into the binary (`include_str!`), so a
     // browser heuristically caching `/` (we send no validators) keeps
     // showing a stale UI after the daemon is rebuilt. `no-cache` forces a
@@ -462,8 +498,19 @@ async fn write_binary_response(
 }
 
 /// JSON error body shape used by every non-2xx response from this server.
-async fn write_error(stream: &mut TcpStream, status: u16, reason: &str, message: &str) -> io::Result<()> {
-    write_json_response(stream, status, reason, &json!({"ok": false, "error": message})).await
+async fn write_error(
+    stream: &mut TcpStream,
+    status: u16,
+    reason: &str,
+    message: &str,
+) -> io::Result<()> {
+    write_json_response(
+        stream,
+        status,
+        reason,
+        &json!({"ok": false, "error": message}),
+    )
+    .await
 }
 
 /// Status-line + header block for a successful `/api/store/download`
@@ -519,7 +566,13 @@ async fn handle_connection_inner(
             write_binary_response(stream, 200, "OK", "image/png", super::FAVICON_PNG).await
         }
         ("GET", "/api/dev/instance") => {
-            write_json_response(stream, 200, "OK", &json!({"ok": true, "data": {"instance": instance_id}})).await
+            write_json_response(
+                stream,
+                200,
+                "OK",
+                &json!({"ok": true, "data": {"instance": instance_id}}),
+            )
+            .await
         }
         ("POST", "/api/call") => {
             // The dashboard polls this every 5s while a tab is open (status
@@ -533,7 +586,9 @@ async fn handle_connection_inner(
         ("POST", "/api/store/sandbox-upload") => {
             handle_store_sandbox_upload(stream, &head, leftover, state).await
         }
-        ("GET", "/api/store/sandbox-download") => handle_store_sandbox_download(stream, &head, state).await,
+        ("GET", "/api/store/sandbox-download") => {
+            handle_store_sandbox_download(stream, &head, state).await
+        }
         // Never send CORS headers/allow preflights: any OPTIONS is refused.
         ("OPTIONS", _) => write_error(stream, 403, "Forbidden", "forbidden").await,
         _ => write_error(stream, 404, "Not Found", "not found").await,
@@ -562,9 +617,13 @@ async fn handle_api_call(
     let content_length: usize = match head.header("content-length") {
         Some(v) => match v.trim().parse() {
             Ok(n) => n,
-            Err(_) => return write_error(stream, 400, "Bad Request", "invalid Content-Length").await,
+            Err(_) => {
+                return write_error(stream, 400, "Bad Request", "invalid Content-Length").await;
+            }
         },
-        None => return write_error(stream, 411, "Length Required", "Content-Length required").await,
+        None => {
+            return write_error(stream, 411, "Length Required", "Content-Length required").await;
+        }
     };
     if content_length > MAX_BODY_BYTES {
         return write_error(stream, 413, "Payload Too Large", "request body too large").await;
@@ -577,7 +636,13 @@ async fn handle_api_call(
     let parsed: CallRequestBody = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(error) => {
-            return write_error(stream, 400, "Bad Request", &format!("invalid request body: {error}")).await;
+            return write_error(
+                stream,
+                400,
+                "Bad Request",
+                &format!("invalid request body: {error}"),
+            )
+            .await;
         }
     };
     let Some(cmd) = parsed.cmd.as_str() else {
@@ -588,9 +653,17 @@ async fn handle_api_call(
     // The frontend always gets HTTP 200 for a well-formed call and switches
     // on the `ok` field; only malformed/forbidden requests get non-2xx.
     match crate::daemon::dispatch(cmd, args, &state).await {
-        Ok(data) => write_json_response(stream, 200, "OK", &json!({"ok": true, "data": data})).await,
+        Ok(data) => {
+            write_json_response(stream, 200, "OK", &json!({"ok": true, "data": data})).await
+        }
         Err(error) => {
-            write_json_response(stream, 200, "OK", &json!({"ok": false, "error": format!("{error:#}")})).await
+            write_json_response(
+                stream,
+                200,
+                "OK",
+                &json!({"ok": false, "error": format!("{error:#}")}),
+            )
+            .await
         }
     }
 }
@@ -617,7 +690,13 @@ async fn handle_store_upload(
         return write_error(stream, 400, "Bad Request", "x-file-name header required").await;
     };
     let Some(file_name) = percent_decode(raw_name) else {
-        return write_error(stream, 400, "Bad Request", "x-file-name is not validly percent-encoded UTF-8").await;
+        return write_error(
+            stream,
+            400,
+            "Bad Request",
+            "x-file-name is not validly percent-encoded UTF-8",
+        )
+        .await;
     };
     if let Err(reason) = validate_upload_filename(&file_name) {
         return write_error(stream, 400, "Bad Request", reason).await;
@@ -626,9 +705,13 @@ async fn handle_store_upload(
     let content_length: u64 = match head.header("content-length") {
         Some(v) => match v.trim().parse() {
             Ok(n) => n,
-            Err(_) => return write_error(stream, 400, "Bad Request", "invalid Content-Length").await,
+            Err(_) => {
+                return write_error(stream, 400, "Bad Request", "invalid Content-Length").await;
+            }
         },
-        None => return write_error(stream, 411, "Length Required", "Content-Length required").await,
+        None => {
+            return write_error(stream, 411, "Length Required", "Content-Length required").await;
+        }
     };
     if content_length > MAX_UPLOAD_BYTES {
         return write_error(stream, 413, "Payload Too Large", "upload too large").await;
@@ -637,11 +720,18 @@ async fn handle_store_upload(
     let dir = std::env::temp_dir().join(format!("mistl-upload-{:016x}", rand::random::<u64>()));
     if let Err(error) = tokio::fs::create_dir_all(&dir).await {
         warn!(%error, dir = %dir.display(), "creating upload temp dir failed");
-        return write_error(stream, 500, "Internal Server Error", "failed to create temp directory").await;
+        return write_error(
+            stream,
+            500,
+            "Internal Server Error",
+            "failed to create temp directory",
+        )
+        .await;
     }
     let file_path = dir.join(&file_name);
 
-    let result = handle_store_upload_body(stream, leftover, content_length, &file_path, &state).await;
+    let result =
+        handle_store_upload_body(stream, leftover, content_length, &file_path, &state).await;
 
     // Best-effort cleanup: the store already copied/hashed the bytes it
     // needs, the temp copy is not useful afterward either way.
@@ -662,7 +752,13 @@ async fn handle_store_upload_body(
         Ok(f) => f,
         Err(error) => {
             warn!(%error, path = %file_path.display(), "creating upload file failed");
-            return write_error(stream, 500, "Internal Server Error", "failed to create upload file").await;
+            return write_error(
+                stream,
+                500,
+                "Internal Server Error",
+                "failed to create upload file",
+            )
+            .await;
         }
     };
     if let Err(error) = read_body_to_file(stream, leftover, content_length, &mut file).await {
@@ -671,10 +767,24 @@ async fn handle_store_upload_body(
     }
     drop(file);
 
-    match crate::daemon::dispatch("store.put", json!({"path": file_path.to_string_lossy()}), state).await {
-        Ok(data) => write_json_response(stream, 200, "OK", &json!({"ok": true, "data": data})).await,
+    match crate::daemon::dispatch(
+        "store.put",
+        json!({"path": file_path.to_string_lossy()}),
+        state,
+    )
+    .await
+    {
+        Ok(data) => {
+            write_json_response(stream, 200, "OK", &json!({"ok": true, "data": data})).await
+        }
         Err(error) => {
-            write_json_response(stream, 200, "OK", &json!({"ok": false, "error": format!("{error:#}")})).await
+            write_json_response(
+                stream,
+                200,
+                "OK",
+                &json!({"ok": false, "error": format!("{error:#}")}),
+            )
+            .await
         }
     }
 }
@@ -691,7 +801,11 @@ async fn handle_store_upload_body(
 /// cross-origin page that triggers the navigation still cannot read the
 /// response bytes back into its own JavaScript. Only the Host allowlist
 /// (DNS-rebinding guard) applies here.
-async fn handle_store_download(stream: &mut TcpStream, head: &RequestHead, state: Arc<AppState>) -> io::Result<()> {
+async fn handle_store_download(
+    stream: &mut TcpStream,
+    head: &RequestHead,
+    state: Arc<AppState>,
+) -> io::Result<()> {
     let local_addr = stream.local_addr()?;
     if !host_is_allowed(head.header("host").unwrap_or(""), &local_addr) {
         return write_error(stream, 403, "Forbidden", "forbidden").await;
@@ -706,7 +820,13 @@ async fn handle_store_download(stream: &mut TcpStream, head: &RequestHead, state
     let dir = std::env::temp_dir().join(format!("mistl-download-{:016x}", rand::random::<u64>()));
     if let Err(error) = tokio::fs::create_dir_all(&dir).await {
         warn!(%error, dir = %dir.display(), "creating download temp dir failed");
-        return write_error(stream, 500, "Internal Server Error", "failed to create temp directory").await;
+        return write_error(
+            stream,
+            500,
+            "Internal Server Error",
+            "failed to create temp directory",
+        )
+        .await;
     }
     let output_path = dir.join("payload");
 
@@ -733,20 +853,35 @@ async fn handle_store_download_inner(
         Ok(data) => data,
         Err(error) => return write_error(stream, 404, "Not Found", &format!("{error:#}")).await,
     };
-    let name = data.get("name").and_then(Value::as_str).unwrap_or("download");
+    let name = data
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("download");
 
     let mut file = match File::open(output_path).await {
         Ok(f) => f,
         Err(error) => {
             warn!(%error, path = %output_path.display(), "opening downloaded file failed");
-            return write_error(stream, 500, "Internal Server Error", "failed to read downloaded file").await;
+            return write_error(
+                stream,
+                500,
+                "Internal Server Error",
+                "failed to read downloaded file",
+            )
+            .await;
         }
     };
     let content_length = match file.metadata().await {
         Ok(m) => m.len(),
         Err(error) => {
             warn!(%error, path = %output_path.display(), "stat of downloaded file failed");
-            return write_error(stream, 500, "Internal Server Error", "failed to stat downloaded file").await;
+            return write_error(
+                stream,
+                500,
+                "Internal Server Error",
+                "failed to stat downloaded file",
+            )
+            .await;
         }
     };
 
@@ -787,7 +922,13 @@ async fn handle_store_sandbox_upload(
         return write_error(stream, 400, "Bad Request", "x-file-name header required").await;
     };
     let Some(file_name) = percent_decode(raw_name) else {
-        return write_error(stream, 400, "Bad Request", "x-file-name is not validly percent-encoded UTF-8").await;
+        return write_error(
+            stream,
+            400,
+            "Bad Request",
+            "x-file-name is not validly percent-encoded UTF-8",
+        )
+        .await;
     };
     if let Err(reason) = validate_upload_filename(&file_name) {
         return write_error(stream, 400, "Bad Request", reason).await;
@@ -796,25 +937,40 @@ async fn handle_store_sandbox_upload(
     let content_length: u64 = match head.header("content-length") {
         Some(v) => match v.trim().parse() {
             Ok(n) => n,
-            Err(_) => return write_error(stream, 400, "Bad Request", "invalid Content-Length").await,
+            Err(_) => {
+                return write_error(stream, 400, "Bad Request", "invalid Content-Length").await;
+            }
         },
-        None => return write_error(stream, 411, "Length Required", "Content-Length required").await,
+        None => {
+            return write_error(stream, 411, "Length Required", "Content-Length required").await;
+        }
     };
     if content_length > MAX_UPLOAD_BYTES {
         return write_error(stream, 413, "Payload Too Large", "upload too large").await;
     }
 
-    let dir = std::env::temp_dir().join(format!("mistl-sandbox-upload-{:016x}", rand::random::<u64>()));
+    let dir = std::env::temp_dir().join(format!(
+        "mistl-sandbox-upload-{:016x}",
+        rand::random::<u64>()
+    ));
     if let Err(error) = tokio::fs::create_dir_all(&dir).await {
         warn!(%error, dir = %dir.display(), "creating upload temp dir failed");
-        return write_error(stream, 500, "Internal Server Error", "failed to create temp directory").await;
+        return write_error(
+            stream,
+            500,
+            "Internal Server Error",
+            "failed to create temp directory",
+        )
+        .await;
     }
     // `store.sandbox.import` names the imported sandbox entry after this
     // path's basename, so the temp file's basename must be the (sanitized)
     // client-supplied name, not a random temp name.
     let file_path = dir.join(&file_name);
 
-    let result = handle_store_sandbox_upload_body(stream, leftover, content_length, &file_path, &state).await;
+    let result =
+        handle_store_sandbox_upload_body(stream, leftover, content_length, &file_path, &state)
+            .await;
 
     // Best-effort cleanup: the sandbox already copied the bytes it needs,
     // the temp copy is not useful afterward either way.
@@ -835,7 +991,13 @@ async fn handle_store_sandbox_upload_body(
         Ok(f) => f,
         Err(error) => {
             warn!(%error, path = %file_path.display(), "creating upload file failed");
-            return write_error(stream, 500, "Internal Server Error", "failed to create upload file").await;
+            return write_error(
+                stream,
+                500,
+                "Internal Server Error",
+                "failed to create upload file",
+            )
+            .await;
         }
     };
     if let Err(error) = read_body_to_file(stream, leftover, content_length, &mut file).await {
@@ -844,11 +1006,24 @@ async fn handle_store_sandbox_upload_body(
     }
     drop(file);
 
-    match crate::daemon::dispatch("store.sandbox.import", json!({"path": file_path.to_string_lossy()}), state).await
+    match crate::daemon::dispatch(
+        "store.sandbox.import",
+        json!({"path": file_path.to_string_lossy()}),
+        state,
+    )
+    .await
     {
-        Ok(data) => write_json_response(stream, 200, "OK", &json!({"ok": true, "data": data})).await,
+        Ok(data) => {
+            write_json_response(stream, 200, "OK", &json!({"ok": true, "data": data})).await
+        }
         Err(error) => {
-            write_json_response(stream, 200, "OK", &json!({"ok": false, "error": format!("{error:#}")})).await
+            write_json_response(
+                stream,
+                200,
+                "OK",
+                &json!({"ok": false, "error": format!("{error:#}")}),
+            )
+            .await
         }
     }
 }
@@ -881,10 +1056,19 @@ async fn handle_store_sandbox_download(
         _ => return write_error(stream, 400, "Bad Request", "path query parameter required").await,
     };
 
-    let dir = std::env::temp_dir().join(format!("mistl-sandbox-download-{:016x}", rand::random::<u64>()));
+    let dir = std::env::temp_dir().join(format!(
+        "mistl-sandbox-download-{:016x}",
+        rand::random::<u64>()
+    ));
     if let Err(error) = tokio::fs::create_dir_all(&dir).await {
         warn!(%error, dir = %dir.display(), "creating download temp dir failed");
-        return write_error(stream, 500, "Internal Server Error", "failed to create temp directory").await;
+        return write_error(
+            stream,
+            500,
+            "Internal Server Error",
+            "failed to create temp directory",
+        )
+        .await;
     }
     let output_path = dir.join("payload");
 
@@ -911,20 +1095,35 @@ async fn handle_store_sandbox_download_inner(
         Ok(data) => data,
         Err(error) => return write_error(stream, 404, "Not Found", &format!("{error:#}")).await,
     };
-    let name = data.get("name").and_then(Value::as_str).unwrap_or("download");
+    let name = data
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("download");
 
     let mut file = match File::open(output_path).await {
         Ok(f) => f,
         Err(error) => {
             warn!(%error, path = %output_path.display(), "opening downloaded file failed");
-            return write_error(stream, 500, "Internal Server Error", "failed to read downloaded file").await;
+            return write_error(
+                stream,
+                500,
+                "Internal Server Error",
+                "failed to read downloaded file",
+            )
+            .await;
         }
     };
     let content_length = match file.metadata().await {
         Ok(m) => m.len(),
         Err(error) => {
             warn!(%error, path = %output_path.display(), "stat of downloaded file failed");
-            return write_error(stream, 500, "Internal Server Error", "failed to stat downloaded file").await;
+            return write_error(
+                stream,
+                500,
+                "Internal Server Error",
+                "failed to stat downloaded file",
+            )
+            .await;
         }
     };
 
@@ -973,7 +1172,9 @@ mod tests {
 
     #[test]
     fn parse_head_basic() {
-        let head = parse_head(b"POST /api/call HTTP/1.1\r\nHost: localhost\r\nContent-Length: 3\r\n\r\n").unwrap();
+        let head =
+            parse_head(b"POST /api/call HTTP/1.1\r\nHost: localhost\r\nContent-Length: 3\r\n\r\n")
+                .unwrap();
         assert_eq!(head.method, "POST");
         assert_eq!(head.path, "/api/call");
         assert_eq!(head.header("host"), Some("localhost"));
@@ -1105,19 +1306,28 @@ mod tests {
 
     #[test]
     fn percent_decode_roundtrip_ascii() {
-        assert_eq!(percent_decode("hello%20world").as_deref(), Some("hello world"));
+        assert_eq!(
+            percent_decode("hello%20world").as_deref(),
+            Some("hello world")
+        );
     }
 
     #[test]
     fn percent_decode_roundtrip_multibyte_utf8() {
         // "caf\u{e9} \u{1F600}.txt" percent-encoded (UTF-8 bytes escaped).
         let encoded = "caf%C3%A9%20%F0%9F%98%80.txt";
-        assert_eq!(percent_decode(encoded).as_deref(), Some("caf\u{e9} \u{1f600}.txt"));
+        assert_eq!(
+            percent_decode(encoded).as_deref(),
+            Some("caf\u{e9} \u{1f600}.txt")
+        );
     }
 
     #[test]
     fn percent_decode_passes_through_unescaped_bytes() {
-        assert_eq!(percent_decode("plain-name.txt").as_deref(), Some("plain-name.txt"));
+        assert_eq!(
+            percent_decode("plain-name.txt").as_deref(),
+            Some("plain-name.txt")
+        );
     }
 
     #[test]
@@ -1137,9 +1347,17 @@ mod tests {
 
     #[test]
     fn validate_upload_filename_accept_reject_table() {
-        let accept = ["report.pdf", "photo (1).jpg", "\u{e9}t\u{e9}.txt", "no-extension"];
+        let accept = [
+            "report.pdf",
+            "photo (1).jpg",
+            "\u{e9}t\u{e9}.txt",
+            "no-extension",
+        ];
         for name in accept {
-            assert!(validate_upload_filename(name).is_ok(), "expected {name:?} to be accepted");
+            assert!(
+                validate_upload_filename(name).is_ok(),
+                "expected {name:?} to be accepted"
+            );
         }
 
         let reject = [
@@ -1160,7 +1378,10 @@ mod tests {
             "with\0nul.txt",
         ];
         for name in reject {
-            assert!(validate_upload_filename(name).is_err(), "expected {name:?} to be rejected");
+            assert!(
+                validate_upload_filename(name).is_err(),
+                "expected {name:?} to be rejected"
+            );
         }
     }
 
@@ -1168,7 +1389,10 @@ mod tests {
 
     #[test]
     fn parse_query_param_finds_and_decodes_value() {
-        assert_eq!(parse_query_param("cid=abc%20def&x=1", "cid").as_deref(), Some("abc def"));
+        assert_eq!(
+            parse_query_param("cid=abc%20def&x=1", "cid").as_deref(),
+            Some("abc def")
+        );
     }
 
     #[test]

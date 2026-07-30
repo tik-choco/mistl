@@ -119,11 +119,17 @@ impl BotEngine {
         if !running.insert(pipeline_id.to_string()) {
             return None; // already present -- already running
         }
-        Some(RunningGuard { engine: self.clone(), pipeline_id: pipeline_id.to_string() })
+        Some(RunningGuard {
+            engine: self.clone(),
+            pipeline_id: pipeline_id.to_string(),
+        })
     }
 
     fn is_running(&self, pipeline_id: &str) -> bool {
-        self.running.lock().expect("bot running-set lock poisoned").contains(pipeline_id)
+        self.running
+            .lock()
+            .expect("bot running-set lock poisoned")
+            .contains(pipeline_id)
     }
     /// Applies one pipeline's current config to the in-memory tick cache:
     /// removes it (so re-enabling recomputes a fresh anchor) when disabled,
@@ -141,7 +147,10 @@ impl BotEngine {
             let next_fire = compute_next_fire(&pipeline.schedule, now);
             ticks.insert(
                 pipeline.id.clone(),
-                PipelineTickState { schedule_expr: pipeline.schedule.clone(), next_fire },
+                PipelineTickState {
+                    schedule_expr: pipeline.schedule.clone(),
+                    next_fire,
+                },
             );
         }
     }
@@ -158,10 +167,17 @@ impl BotEngine {
     /// advanced: it stays "due" and is re-checked (and re-skipped, or
     /// finally fired) on every subsequent tick until it's no longer
     /// running, rather than silently missing a fire window.
-    async fn take_due(&self, pipelines: &[PipelineConfig], now: DateTime<Local>) -> Vec<PipelineConfig> {
+    async fn take_due(
+        &self,
+        pipelines: &[PipelineConfig],
+        now: DateTime<Local>,
+    ) -> Vec<PipelineConfig> {
         {
-            let live_ids: BTreeSet<&str> =
-                pipelines.iter().filter(|p| p.enabled).map(|p| p.id.as_str()).collect();
+            let live_ids: BTreeSet<&str> = pipelines
+                .iter()
+                .filter(|p| p.enabled)
+                .map(|p| p.id.as_str())
+                .collect();
             let mut ticks = self.ticks.lock().await;
             ticks.retain(|id, _| live_ids.contains(id.as_str()));
         }
@@ -172,7 +188,9 @@ impl BotEngine {
         let mut ticks = self.ticks.lock().await;
         let mut due = Vec::new();
         for pipeline in pipelines.iter().filter(|p| p.enabled) {
-            let Some(state) = ticks.get_mut(&pipeline.id) else { continue };
+            let Some(state) = ticks.get_mut(&pipeline.id) else {
+                continue;
+            };
             if state.next_fire.is_some_and(|t| t <= now) {
                 if self.is_running(&pipeline.id) {
                     continue; // still running a previous fire; retry next tick
@@ -185,7 +203,11 @@ impl BotEngine {
     }
 
     async fn next_fire_of(&self, id: &str) -> Option<DateTime<Local>> {
-        self.ticks.lock().await.get(id).and_then(|state| state.next_fire)
+        self.ticks
+            .lock()
+            .await
+            .get(id)
+            .and_then(|state| state.next_fire)
     }
 }
 
@@ -202,7 +224,9 @@ fn compute_next_fire(expr: &str, now: DateTime<Local>) -> Option<DateTime<Local>
 static ENGINE: OnceCell<Arc<BotEngine>> = OnceCell::const_new();
 
 async fn ensure_engine(state: &Arc<AppState>) -> Result<Arc<BotEngine>> {
-    let engine = ENGINE.get_or_try_init(|| async { init_engine(state).await }).await?;
+    let engine = ENGINE
+        .get_or_try_init(|| async { init_engine(state).await })
+        .await?;
     Ok(engine.clone())
 }
 
@@ -241,7 +265,9 @@ pub fn spawn_background(state: Arc<AppState>) {
 }
 
 async fn run_background(state: Arc<AppState>) -> Result<()> {
-    let engine = ensure_engine(&state).await.context("bot: initializing engine")?;
+    let engine = ensure_engine(&state)
+        .await
+        .context("bot: initializing engine")?;
 
     let mut ticker = tokio::time::interval(std::time::Duration::from_secs(1));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -278,7 +304,11 @@ async fn run_background(state: Arc<AppState>) -> Result<()> {
 /// captured in the record's `ok`/`error` fields. See the module doc's
 /// "Fatal vs. non-fatal errors" section for exactly which failures abort
 /// the run vs. are recorded per-item/per-sink and retried later.
-async fn run_pipeline(state: &Arc<AppState>, data_dir: &std::path::Path, pipeline: &PipelineConfig) -> persist::RunRecord {
+async fn run_pipeline(
+    state: &Arc<AppState>,
+    data_dir: &std::path::Path,
+    pipeline: &PipelineConfig,
+) -> persist::RunRecord {
     let started_at = Utc::now();
     let config = state.config();
 
@@ -316,11 +346,24 @@ async fn run_pipeline(state: &Arc<AppState>, data_dir: &std::path::Path, pipelin
                 match candidate.article {
                     Some(article) => {
                         fetched_count += 1;
-                        match transform::run_chain(state, &config, &pipeline.id, &pipeline.transforms, &article).await
+                        match transform::run_chain(
+                            state,
+                            &config,
+                            &pipeline.id,
+                            &pipeline.transforms,
+                            &article,
+                        )
+                        .await
                         {
                             Ok(outcome) => {
-                                let item =
-                                    sink::deliver(state, &pipeline.id, &pipeline.sinks, &article, &outcome).await;
+                                let item = sink::deliver(
+                                    state,
+                                    &pipeline.id,
+                                    &pipeline.sinks,
+                                    &article,
+                                    &outcome,
+                                )
+                                .await;
                                 if let Err(error) = persist::append_item(data_dir, &item).await {
                                     warn!(%error, pipeline_id = %pipeline.id, "bot: failed to append delivered item");
                                 }
@@ -333,9 +376,12 @@ async fn run_pipeline(state: &Arc<AppState>, data_dir: &std::path::Path, pipelin
                                 // next run. The per-run cap
                                 // (`MAX_ITEMS_PER_RUN`) keeps this to at most
                                 // a handful of extra small disk writes.
-                                if let Err(error) =
-                                    persist::mark_processed(data_dir, &pipeline.id, std::slice::from_ref(&candidate.id))
-                                        .await
+                                if let Err(error) = persist::mark_processed(
+                                    data_dir,
+                                    &pipeline.id,
+                                    std::slice::from_ref(&candidate.id),
+                                )
+                                .await
                                 {
                                     warn!(%error, pipeline_id = %pipeline.id, article_id = %candidate.id, "bot: failed to persist a processed article id");
                                 }
@@ -359,8 +405,12 @@ async fn run_pipeline(state: &Arc<AppState>, data_dir: &std::path::Path, pipelin
                         // never worth retrying. Persisted immediately for
                         // the same crash-safety reason as the delivered
                         // branch above.
-                        if let Err(error) =
-                            persist::mark_processed(data_dir, &pipeline.id, std::slice::from_ref(&candidate.id)).await
+                        if let Err(error) = persist::mark_processed(
+                            data_dir,
+                            &pipeline.id,
+                            std::slice::from_ref(&candidate.id),
+                        )
+                        .await
                         {
                             warn!(%error, pipeline_id = %pipeline.id, article_id = %candidate.id, "bot: failed to persist a processed article id");
                         }
@@ -412,14 +462,18 @@ fn check_transforms_resolve(config: &Config, transforms: &[TransformConfig]) -> 
                  `mistl config set bot.pipelines <json>`"
             );
         }
-        let resolved = crate::config::resolve_preset(&config.ai, Some(preset_id)).with_context(|| {
-            format!(
-                "preset {preset_id:?} not found in ai.presets; add it with \
+        let resolved =
+            crate::config::resolve_preset(&config.ai, Some(preset_id)).with_context(|| {
+                format!(
+                    "preset {preset_id:?} not found in ai.presets; add it with \
                  `mistl config set ai.presets <json>` (and ai.providers -- see `mistl config show`)"
-            )
-        })?;
+                )
+            })?;
         if kind == "tts" {
-            let voice_set = resolved.voice.as_deref().is_some_and(|voice| !voice.trim().is_empty());
+            let voice_set = resolved
+                .voice
+                .as_deref()
+                .is_some_and(|voice| !voice.trim().is_empty());
             if !voice_set {
                 bail!(
                     "ai.presets[id={preset_id:?}].voice is not set; set it with \
@@ -490,7 +544,14 @@ fn validate_pipeline(config: &Config, pipeline: &PipelineConfig) -> Vec<String> 
                      `mistl config set bot.pipelines <json>`"
                 ));
             }
-            SinkConfig::Webhook { url, method, body_template, include_audio, headers, .. } => {
+            SinkConfig::Webhook {
+                url,
+                method,
+                body_template,
+                include_audio,
+                headers,
+                ..
+            } => {
                 if url.trim().is_empty() {
                     warnings.push(format!(
                         "{prefix}.sinks[kind=\"webhook\"].url is not set; set it with \
@@ -498,8 +559,9 @@ fn validate_pipeline(config: &Config, pipeline: &PipelineConfig) -> Vec<String> 
                     ));
                 }
                 if let Some(method) = method {
-                    let is_known =
-                        ["post", "put", "patch"].iter().any(|known| method.eq_ignore_ascii_case(known));
+                    let is_known = ["post", "put", "patch"]
+                        .iter()
+                        .any(|known| method.eq_ignore_ascii_case(known));
                     if !is_known {
                         warnings.push(format!(
                             "{prefix}.sinks[kind=\"webhook\"].method {method:?} is not one of \
@@ -513,7 +575,11 @@ fn validate_pipeline(config: &Config, pipeline: &PipelineConfig) -> Vec<String> 
                          it will be skipped"
                     ));
                 }
-                if body_template.as_deref().is_some_and(|template| !template.trim().is_empty()) && *include_audio {
+                if body_template
+                    .as_deref()
+                    .is_some_and(|template| !template.trim().is_empty())
+                    && *include_audio
+                {
                     warnings.push(format!(
                         "{prefix}.sinks[kind=\"webhook\"].include_audio is ignored because \
                          body_template is set (template mode never embeds audio)"
@@ -537,7 +603,11 @@ fn validate_pipeline(config: &Config, pipeline: &PipelineConfig) -> Vec<String> 
 /// `bot.pipelines` is an array, so `crate::config::set_by_path` (which only
 /// replaces one whole `section.field` slot) can't express an in-place
 /// element update -- this is the dedicated helper the brief calls for.
-async fn set_pipeline_enabled(state: &Arc<AppState>, id: &str, enabled: bool) -> Result<PipelineConfig> {
+async fn set_pipeline_enabled(
+    state: &Arc<AppState>,
+    id: &str,
+    enabled: bool,
+) -> Result<PipelineConfig> {
     let mut config = state.config();
     let pipeline = config
         .bot
@@ -598,8 +668,15 @@ async fn cmd_list(engine: &Arc<BotEngine>, state: &Arc<AppState>) -> Result<Valu
     let runs = persist::read_runs(&engine.data_dir).await?;
     let mut pipelines = Vec::with_capacity(config.bot.pipelines.len());
     for pipeline in &config.bot.pipelines {
-        let next_run = engine.next_fire_of(&pipeline.id).await.map(|t| t.to_rfc3339());
-        let last_run = runs.iter().rev().find(|r| r.pipeline_id == pipeline.id).cloned();
+        let next_run = engine
+            .next_fire_of(&pipeline.id)
+            .await
+            .map(|t| t.to_rfc3339());
+        let last_run = runs
+            .iter()
+            .rev()
+            .find(|r| r.pipeline_id == pipeline.id)
+            .cloned();
         pipelines.push(json!({
             "id": pipeline.id,
             "enabled": pipeline.enabled,
@@ -639,8 +716,14 @@ async fn cmd_run(engine: &Arc<BotEngine>, state: &Arc<AppState>, args: Value) ->
     Ok(serde_json::to_value(&record)?)
 }
 
-async fn cmd_set_enabled(engine: &Arc<BotEngine>, state: &Arc<AppState>, args: Value, enabled: bool) -> Result<Value> {
-    let args: IdArg = serde_json::from_value(args).context("bot.enable/bot.disable: invalid arguments")?;
+async fn cmd_set_enabled(
+    engine: &Arc<BotEngine>,
+    state: &Arc<AppState>,
+    args: Value,
+    enabled: bool,
+) -> Result<Value> {
+    let args: IdArg =
+        serde_json::from_value(args).context("bot.enable/bot.disable: invalid arguments")?;
     let updated = set_pipeline_enabled(state, &args.id, enabled).await?;
     engine.sync_pipeline(&updated, Local::now()).await;
     info!(pipeline_id = %updated.id, enabled, "bot: pipeline enabled state changed");
@@ -677,7 +760,10 @@ async fn cmd_status(engine: &Arc<BotEngine>, state: &Arc<AppState>) -> Result<Va
     for pipeline in &config.bot.pipelines {
         warnings.extend(validate_pipeline(&config, pipeline));
         match &pipeline.source {
-            SourceConfig::GlobalArticles { rooms: pipeline_rooms, .. } => {
+            SourceConfig::GlobalArticles {
+                rooms: pipeline_rooms,
+                ..
+            } => {
                 if pipeline_rooms.is_empty() {
                     rooms.insert(source::GLOBAL_ARTICLES_ROOM_ID.to_string());
                 } else {
@@ -737,7 +823,10 @@ async fn cmd_options(state: &Arc<AppState>) -> Result<Value> {
     }
     for pipeline in &config.bot.pipelines {
         match &pipeline.source {
-            SourceConfig::GlobalArticles { rooms: source_rooms, .. } => {
+            SourceConfig::GlobalArticles {
+                rooms: source_rooms,
+                ..
+            } => {
                 for room in source_rooms {
                     add_room(room, &mut rooms);
                 }
@@ -746,7 +835,9 @@ async fn cmd_options(state: &Arc<AppState>) -> Result<Value> {
         }
         for sink in &pipeline.sinks {
             match sink {
-                SinkConfig::ChatPost { room } | SinkConfig::ArticlePublish { room } => add_room(room, &mut rooms),
+                SinkConfig::ChatPost { room } | SinkConfig::ArticlePublish { room } => {
+                    add_room(room, &mut rooms)
+                }
                 SinkConfig::Webhook { .. } => {}
             }
         }
@@ -788,12 +879,23 @@ mod tests {
             id: id.to_string(),
             enabled: true,
             schedule: schedule.to_string(),
-            source: SourceConfig::GlobalArticles { rooms: vec![], langs: vec![] },
+            source: SourceConfig::GlobalArticles {
+                rooms: vec![],
+                langs: vec![],
+            },
             transforms: vec![
-                TransformConfig::Summarize { preset_id: "worker".to_string() },
-                TransformConfig::Tts { preset_id: "tts-default".to_string(), format: None, speed: None },
+                TransformConfig::Summarize {
+                    preset_id: "worker".to_string(),
+                },
+                TransformConfig::Tts {
+                    preset_id: "tts-default".to_string(),
+                    format: None,
+                    speed: None,
+                },
             ],
-            sinks: vec![SinkConfig::ChatPost { room: "chat-room".to_string() }],
+            sinks: vec![SinkConfig::ChatPost {
+                room: "chat-room".to_string(),
+            }],
         }
     }
 
@@ -892,10 +994,14 @@ mod tests {
             running: std::sync::Mutex::new(HashSet::new()),
         };
         let now = Local::now();
-        engine.take_due(&[sample_pipeline("p1", "@every 1h")], now).await;
+        engine
+            .take_due(&[sample_pipeline("p1", "@every 1h")], now)
+            .await;
         let first_anchor = engine.next_fire_of("p1").await.unwrap();
 
-        engine.take_due(&[sample_pipeline("p1", "@every 5m")], now).await;
+        engine
+            .take_due(&[sample_pipeline("p1", "@every 5m")], now)
+            .await;
         let second_anchor = engine.next_fire_of("p1").await.unwrap();
         assert_ne!(first_anchor, second_anchor);
     }
@@ -908,7 +1014,10 @@ mod tests {
             running: std::sync::Mutex::new(HashSet::new()),
         };
         let due = engine
-            .take_due(&[sample_pipeline("p1", "not a valid schedule")], Local::now())
+            .take_due(
+                &[sample_pipeline("p1", "not a valid schedule")],
+                Local::now(),
+            )
             .await;
         assert!(due.is_empty());
         assert!(engine.next_fire_of("p1").await.is_none());
@@ -931,7 +1040,10 @@ mod tests {
         assert!(engine.is_running("p1"));
 
         let due = engine.take_due(&[pipeline.clone()], anchor).await;
-        assert!(due.is_empty(), "a running pipeline must be skipped even though its anchor is due");
+        assert!(
+            due.is_empty(),
+            "a running pipeline must be skipped even though its anchor is due"
+        );
         // The anchor must not have advanced -- it stays due so the very
         // next tick retries it instead of silently skipping a whole
         // schedule interval.
@@ -941,14 +1053,23 @@ mod tests {
         drop(guard);
         assert!(!engine.is_running("p1"));
         let due = engine.take_due(&[pipeline], anchor).await;
-        assert_eq!(due.len(), 1, "no longer running -- the still-due pipeline now fires");
+        assert_eq!(
+            due.len(),
+            1,
+            "no longer running -- the still-due pipeline now fires"
+        );
     }
 
     #[tokio::test]
     async fn try_start_running_refuses_a_second_concurrent_start_for_the_same_pipeline() {
         let engine = test_engine();
-        let first = engine.try_start_running("p1").expect("first start must succeed");
-        assert!(engine.try_start_running("p1").is_none(), "a second concurrent start must be refused");
+        let first = engine
+            .try_start_running("p1")
+            .expect("first start must succeed");
+        assert!(
+            engine.try_start_running("p1").is_none(),
+            "a second concurrent start must be refused"
+        );
 
         // A different pipeline id is unaffected.
         assert!(engine.try_start_running("p2").is_some());
@@ -972,7 +1093,10 @@ mod tests {
             panic!("simulated pipeline run panic");
         });
         assert!(handle.await.is_err(), "the spawned task must have panicked");
-        assert!(!engine.is_running("p1"), "the running slot must be released after the panic unwound");
+        assert!(
+            !engine.is_running("p1"),
+            "the running slot must be released after the panic unwound"
+        );
     }
 
     // -- validation warnings --
@@ -989,26 +1113,46 @@ mod tests {
         let config = Config::default(); // no providers/presets configured
         let pipeline = sample_pipeline("p1", "@every 1h");
         let warnings = validate_pipeline(&config, &pipeline);
-        assert!(warnings.iter().any(|w| w.contains("worker") && w.contains("ai.presets")));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("worker") && w.contains("ai.presets"))
+        );
         assert!(warnings.iter().any(|w| w.contains("tts-default")));
     }
 
     #[test]
     fn validate_pipeline_flags_a_tts_preset_missing_a_voice() {
         let mut config = configured_ai();
-        config.ai.presets.iter_mut().find(|p| p.id == "tts-default").unwrap().voice = None;
+        config
+            .ai
+            .presets
+            .iter_mut()
+            .find(|p| p.id == "tts-default")
+            .unwrap()
+            .voice = None;
         let pipeline = sample_pipeline("p1", "@every 1h");
         let warnings = validate_pipeline(&config, &pipeline);
-        assert!(warnings.iter().any(|w| w.contains("voice") && w.contains("tts-default")));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("voice") && w.contains("tts-default"))
+        );
     }
 
     #[test]
     fn validate_pipeline_flags_an_unset_chat_post_room() {
         let config = configured_ai();
         let mut pipeline = sample_pipeline("p1", "@every 1h");
-        pipeline.sinks = vec![SinkConfig::ChatPost { room: String::new() }];
+        pipeline.sinks = vec![SinkConfig::ChatPost {
+            room: String::new(),
+        }];
         let warnings = validate_pipeline(&config, &pipeline);
-        assert!(warnings.iter().any(|w| w.contains("sinks") && w.contains("room")));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("sinks") && w.contains("room"))
+        );
     }
 
     #[test]
@@ -1026,7 +1170,11 @@ mod tests {
             headers: Vec::new(),
         }];
         let warnings = validate_pipeline(&config, &pipeline);
-        assert!(warnings.iter().any(|w| w.contains("sinks") && w.contains("url")));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("sinks") && w.contains("url"))
+        );
     }
 
     #[test]
@@ -1044,7 +1192,10 @@ mod tests {
             headers: Vec::new(),
         }];
         let warnings = validate_pipeline(&config, &pipeline);
-        assert!(warnings.iter().any(|w| w.contains("method")), "got: {warnings:?}");
+        assert!(
+            warnings.iter().any(|w| w.contains("method")),
+            "got: {warnings:?}"
+        );
     }
 
     #[test]
@@ -1062,7 +1213,10 @@ mod tests {
             headers: Vec::new(),
         }];
         let warnings = validate_pipeline(&config, &pipeline);
-        assert!(!warnings.iter().any(|w| w.contains("method")), "got: {warnings:?}");
+        assert!(
+            !warnings.iter().any(|w| w.contains("method")),
+            "got: {warnings:?}"
+        );
     }
 
     #[test]
@@ -1077,18 +1231,28 @@ mod tests {
             body_template: Some("{{title}}".to_string()),
             sign: true,
             include_body: false,
-            headers: vec![crate::config::WebhookHeader { name: String::new(), value: "v".to_string() }],
+            headers: vec![crate::config::WebhookHeader {
+                name: String::new(),
+                value: "v".to_string(),
+            }],
         }];
         let warnings = validate_pipeline(&config, &pipeline);
-        assert!(warnings.iter().any(|w| w.contains("headers")), "got: {warnings:?}");
-        assert!(warnings.iter().any(|w| w.contains("include_audio")), "got: {warnings:?}");
+        assert!(
+            warnings.iter().any(|w| w.contains("headers")),
+            "got: {warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains("include_audio")),
+            "got: {warnings:?}"
+        );
     }
 
     #[test]
     fn check_transforms_resolve_matches_validate_pipelines_preset_check() {
         let config = Config::default();
         let pipeline = sample_pipeline("p1", "@every 1h");
-        let err = check_transforms_resolve(&config, &pipeline.transforms).expect_err("unresolved preset must error");
+        let err = check_transforms_resolve(&config, &pipeline.transforms)
+            .expect_err("unresolved preset must error");
         assert!(err.to_string().contains("ai.presets"));
 
         let config = configured_ai();
@@ -1102,7 +1266,13 @@ mod tests {
         // agree on what counts as "not usable", per this function's doc
         // comment ("mirrors validate_pipeline's equivalent checks exactly").
         let mut config = configured_ai();
-        config.ai.presets.iter_mut().find(|p| p.id == "tts-default").unwrap().voice = None;
+        config
+            .ai
+            .presets
+            .iter_mut()
+            .find(|p| p.id == "tts-default")
+            .unwrap()
+            .voice = None;
         let pipeline = sample_pipeline("p1", "@every 1h");
 
         let err = check_transforms_resolve(&config, &pipeline.transforms)
@@ -1117,8 +1287,16 @@ mod tests {
         // A summarize-only pipeline has no tts step, so a missing voice
         // anywhere in ai.presets must not block it.
         let mut config = configured_ai();
-        config.ai.presets.iter_mut().find(|p| p.id == "tts-default").unwrap().voice = None;
-        let summarize_only = vec![TransformConfig::Summarize { preset_id: "worker".to_string() }];
+        config
+            .ai
+            .presets
+            .iter_mut()
+            .find(|p| p.id == "tts-default")
+            .unwrap()
+            .voice = None;
+        let summarize_only = vec![TransformConfig::Summarize {
+            preset_id: "worker".to_string(),
+        }];
         assert!(check_transforms_resolve(&config, &summarize_only).is_ok());
     }
 }

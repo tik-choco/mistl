@@ -841,8 +841,12 @@ pub fn applies_when(path: &str) -> &'static str {
         // already running, so -- unlike the "next service start" paths
         // below, which need an explicit stop/start of *something* -- there
         // is nothing left for the user to do at all.
-        "ai.providers" | "ai.presets" | "ai.default_preset_id" | "ai.tts_preset_id"
-        | "ai.stt_preset_id" | "ai.advertised_models" => "applied immediately",
+        "ai.providers"
+        | "ai.presets"
+        | "ai.default_preset_id"
+        | "ai.tts_preset_id"
+        | "ai.stt_preset_id"
+        | "ai.advertised_models" => "applied immediately",
         _ => "next service start",
     }
 }
@@ -1151,7 +1155,11 @@ mod tests {
             "legacy fields are still present in memory, so persisting again is still requested"
         );
 
-        assert_eq!(config.ai.providers.len(), 1, "provider must not be duplicated");
+        assert_eq!(
+            config.ai.providers.len(),
+            1,
+            "provider must not be duplicated"
+        );
         assert_eq!(config.ai.presets.len(), 1, "preset must not be duplicated");
         assert_eq!(config.ai.default_preset_id, "default");
     }
@@ -1647,7 +1655,11 @@ mod tests {
             other => panic!("expected Summarize, got {other:?}"),
         }
         match &pipeline.transforms[1] {
-            TransformConfig::Tts { preset_id, format, speed } => {
+            TransformConfig::Tts {
+                preset_id,
+                format,
+                speed,
+            } => {
                 assert_eq!(preset_id, "tts-default");
                 assert_eq!(format.as_deref(), Some("mp3"));
                 assert_eq!(*speed, None);
@@ -1660,7 +1672,14 @@ mod tests {
             other => panic!("expected ChatPost, got {other:?}"),
         }
         match &pipeline.sinks[1] {
-            SinkConfig::Webhook { url, include_audio, max_audio_bytes, sign, headers, .. } => {
+            SinkConfig::Webhook {
+                url,
+                include_audio,
+                max_audio_bytes,
+                sign,
+                headers,
+                ..
+            } => {
                 assert_eq!(url, "https://example.com/hook");
                 assert!(!include_audio);
                 assert_eq!(*max_audio_bytes, Some(5_242_880));
@@ -1684,7 +1703,9 @@ mod tests {
             id: "webhook-extended".to_string(),
             enabled: true,
             schedule: "@every 1h".to_string(),
-            source: SourceConfig::ChatRoom { room: "team-room".to_string() },
+            source: SourceConfig::ChatRoom {
+                room: "team-room".to_string(),
+            },
             transforms: vec![],
             sinks: vec![SinkConfig::Webhook {
                 url: "https://example.com/hook".to_string(),
@@ -1695,16 +1716,32 @@ mod tests {
                 sign: false,
                 include_body: true,
                 headers: vec![
-                    WebhookHeader { name: "X-Api-Key".to_string(), value: "secret".to_string() },
-                    WebhookHeader { name: "Content-Type".to_string(), value: "application/custom".to_string() },
+                    WebhookHeader {
+                        name: "X-Api-Key".to_string(),
+                        value: "secret".to_string(),
+                    },
+                    WebhookHeader {
+                        name: "Content-Type".to_string(),
+                        value: "application/custom".to_string(),
+                    },
                 ],
             }],
         });
 
-        let text = toml::to_string_pretty(&config).expect("extended webhook config must serialize to TOML");
-        let reloaded: Config = toml::from_str(&text).expect("extended webhook config must parse back from TOML");
+        let text = toml::to_string_pretty(&config)
+            .expect("extended webhook config must serialize to TOML");
+        let reloaded: Config =
+            toml::from_str(&text).expect("extended webhook config must parse back from TOML");
         match &reloaded.bot.pipelines[0].sinks[0] {
-            SinkConfig::Webhook { url, method, body_template, sign, include_body, headers, .. } => {
+            SinkConfig::Webhook {
+                url,
+                method,
+                body_template,
+                sign,
+                include_body,
+                headers,
+                ..
+            } => {
                 assert_eq!(url, "https://example.com/hook");
                 assert_eq!(method.as_deref(), Some("PUT"));
                 assert_eq!(body_template.as_deref(), Some(r#"{"title":"{{title}}"}"#));
@@ -1742,7 +1779,14 @@ mod tests {
         "#;
         let config: Config = toml::from_str(text).expect("legacy webhook config must still parse");
         match &config.bot.pipelines[0].sinks[0] {
-            SinkConfig::Webhook { method, body_template, sign, include_body, headers, .. } => {
+            SinkConfig::Webhook {
+                method,
+                body_template,
+                sign,
+                include_body,
+                headers,
+                ..
+            } => {
                 assert_eq!(*method, None);
                 assert_eq!(*body_template, None);
                 assert!(*sign, "sign must default to true for legacy configs");
@@ -1762,12 +1806,16 @@ mod tests {
             id: "chat-digest".to_string(),
             enabled: true,
             schedule: "@every 1h".to_string(),
-            source: SourceConfig::ChatRoom { room: "team-room".to_string() },
+            source: SourceConfig::ChatRoom {
+                room: "team-room".to_string(),
+            },
             transforms: vec![TransformConfig::Translate {
                 preset_id: "worker".to_string(),
                 target_lang: "en".to_string(),
             }],
-            sinks: vec![SinkConfig::ArticlePublish { room: "tc-global-articles".to_string() }],
+            sinks: vec![SinkConfig::ArticlePublish {
+                room: "tc-global-articles".to_string(),
+            }],
         });
 
         let text = toml::to_string_pretty(&config).expect("v2 bot config must serialize to TOML");
@@ -1775,14 +1823,18 @@ mod tests {
         assert!(text.contains(r#"kind = "translate""#), "got:\n{text}");
         assert!(text.contains(r#"kind = "article-publish""#), "got:\n{text}");
 
-        let reloaded: Config = toml::from_str(&text).expect("v2 bot config must parse back from TOML");
+        let reloaded: Config =
+            toml::from_str(&text).expect("v2 bot config must parse back from TOML");
         let pipeline = &reloaded.bot.pipelines[0];
         match &pipeline.source {
             SourceConfig::ChatRoom { room } => assert_eq!(room, "team-room"),
             other => panic!("expected ChatRoom, got {other:?}"),
         }
         match &pipeline.transforms[0] {
-            TransformConfig::Translate { preset_id, target_lang } => {
+            TransformConfig::Translate {
+                preset_id,
+                target_lang,
+            } => {
                 assert_eq!(preset_id, "worker");
                 assert_eq!(target_lang, "en");
             }
@@ -1902,16 +1954,25 @@ mod tests {
         let text = toml::to_string_pretty(&config).unwrap();
         let reloaded: Config = toml::from_str(&text).unwrap();
         assert_eq!(
-            reloaded.ai.presets[0].lang_voices.get("en").map(String::as_str),
+            reloaded.ai.presets[0]
+                .lang_voices
+                .get("en")
+                .map(String::as_str),
             Some("af_heart")
         );
         assert_eq!(
-            reloaded.ai.presets[0].lang_voices.get("ja").map(String::as_str),
+            reloaded.ai.presets[0]
+                .lang_voices
+                .get("ja")
+                .map(String::as_str),
             Some("jf_alpha")
         );
 
         let resolved = resolve_preset(&reloaded.ai, Some("tts-default")).unwrap();
-        assert_eq!(resolved.lang_voices.get("en").map(String::as_str), Some("af_heart"));
+        assert_eq!(
+            resolved.lang_voices.get("en").map(String::as_str),
+            Some("af_heart")
+        );
         // `voice` remains the language-agnostic fallback, independent of
         // `lang_voices`.
         assert_eq!(resolved.voice.as_deref(), Some("alloy"));

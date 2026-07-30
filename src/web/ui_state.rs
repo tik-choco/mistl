@@ -92,7 +92,13 @@ mod tests {
     #[test]
     fn write_then_read_round_trips_dashboard_open_true() {
         let dir = scratch_dir("roundtrip");
-        write_state(&dir, UiState { dashboard_open: true }).unwrap();
+        write_state(
+            &dir,
+            UiState {
+                dashboard_open: true,
+            },
+        )
+        .unwrap();
         let state = read_state(&dir).unwrap();
         assert!(state.dashboard_open);
     }
@@ -100,8 +106,20 @@ mod tests {
     #[test]
     fn writing_false_clears_a_previously_open_flag() {
         let dir = scratch_dir("clear");
-        write_state(&dir, UiState { dashboard_open: true }).unwrap();
-        write_state(&dir, UiState { dashboard_open: false }).unwrap();
+        write_state(
+            &dir,
+            UiState {
+                dashboard_open: true,
+            },
+        )
+        .unwrap();
+        write_state(
+            &dir,
+            UiState {
+                dashboard_open: false,
+            },
+        )
+        .unwrap();
         let state = read_state(&dir).unwrap();
         assert!(!state.dashboard_open);
     }
@@ -126,7 +144,13 @@ mod tests {
     fn write_state_creates_missing_parent_directories() {
         let dir = scratch_dir("nested").join("nested").join("dirs");
         assert!(!dir.exists());
-        write_state(&dir, UiState { dashboard_open: true }).unwrap();
+        write_state(
+            &dir,
+            UiState {
+                dashboard_open: true,
+            },
+        )
+        .unwrap();
         assert!(read_state(&dir).unwrap().dashboard_open);
     }
 }

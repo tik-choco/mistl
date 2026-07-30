@@ -51,10 +51,23 @@ pub(super) async fn deliver(
                         )),
                     )
                 } else {
-                    ("chat-post", room.to_string(), chat_post(state, room, article, outcome).await)
+                    (
+                        "chat-post",
+                        room.to_string(),
+                        chat_post(state, room, article, outcome).await,
+                    )
                 }
             }
-            SinkConfig::Webhook { url, include_audio, max_audio_bytes, method, body_template, sign, include_body, headers } => {
+            SinkConfig::Webhook {
+                url,
+                include_audio,
+                max_audio_bytes,
+                method,
+                body_template,
+                sign,
+                include_body,
+                headers,
+            } => {
                 let url = url.trim();
                 if url.is_empty() {
                     (
@@ -99,7 +112,11 @@ pub(super) async fn deliver(
                         )),
                     )
                 } else {
-                    ("article-publish", room.to_string(), article_publish(state, room, article, outcome).await)
+                    (
+                        "article-publish",
+                        room.to_string(),
+                        article_publish(state, room, article, outcome).await,
+                    )
                 }
             }
         };
@@ -145,7 +162,11 @@ fn build_chat_text(article: &Article, script: Option<&str>) -> String {
 /// not the exact algorithm) of tc-chat's own `newId()` -- any
 /// collision-resistant string works, `hydratePost` never re-parses it.
 fn new_wire_id() -> String {
-    format!("bot-{}-{:016x}", chrono::Utc::now().timestamp_millis(), rand::random::<u64>())
+    format!(
+        "bot-{}-{:016x}",
+        chrono::Utc::now().timestamp_millis(),
+        rand::random::<u64>()
+    )
 }
 
 /// Publishes a `tc-chat:post` text post (script + source links), then --
@@ -166,7 +187,13 @@ fn new_wire_id() -> String {
 /// the caller-supplied `id`/`timestamp`), so directly unit-testable against
 /// `PostWire`'s field shape without an `AppState`. [`sign_wire`] is applied
 /// by the caller.
-fn build_text_post_wire(id: &str, from_id: &str, from_name: &str, timestamp: i64, cid: &str) -> Value {
+fn build_text_post_wire(
+    id: &str,
+    from_id: &str,
+    from_name: &str,
+    timestamp: i64,
+    cid: &str,
+) -> Value {
     json!({
         "type": "tc-chat:post",
         "surface": "chat",
@@ -214,12 +241,23 @@ fn build_media_post_wire(
 /// transform's output wins over the source article's own text whenever it
 /// actually produced something).
 fn preferred_text<'a>(override_value: Option<&'a str>, fallback: &'a str) -> &'a str {
-    override_value.filter(|value| !value.trim().is_empty()).unwrap_or(fallback)
+    override_value
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(fallback)
 }
 
-async fn chat_post(state: &Arc<AppState>, room: &str, article: &Article, outcome: &TransformOutcome) -> Result<()> {
-    let identity = crate::identity::current(state).await.context("bot: loading identity")?;
-    let store = crate::storage::store(state).await.context("bot: opening content store")?;
+async fn chat_post(
+    state: &Arc<AppState>,
+    room: &str,
+    article: &Article,
+    outcome: &TransformOutcome,
+) -> Result<()> {
+    let identity = crate::identity::current(state)
+        .await
+        .context("bot: loading identity")?;
+    let store = crate::storage::store(state)
+        .await
+        .context("bot: opening content store")?;
     let from_name = state
         .config()
         .identity
@@ -232,7 +270,8 @@ async fn chat_post(state: &Arc<AppState>, room: &str, article: &Article, outcome
         .with_context(|| format!("bot: joining chat-post room {room:?}"))?;
 
     let title = preferred_text(outcome.title.as_deref(), &article.title);
-    let body = json!({ "title": title, "text": build_chat_text(article, outcome.script.as_deref()) });
+    let body =
+        json!({ "title": title, "text": build_chat_text(article, outcome.script.as_deref()) });
     let body_cid = store
         .put(&format!("{}.json", article.id), serde_json::to_vec(&body)?)
         .await
@@ -288,7 +327,11 @@ async fn chat_post(state: &Arc<AppState>, room: &str, article: &Article, outcome
 /// matches the `WIRE_WEBHOOK_DELIVERY_WIRE` interop test vector already
 /// present in `src/wiresign.rs` from Wave 1.
 fn build_webhook_item(article: &Article, outcome: &TransformOutcome) -> Value {
-    let source_links: Vec<&str> = article.source_links.iter().map(|link| link.url.as_str()).collect();
+    let source_links: Vec<&str> = article
+        .source_links
+        .iter()
+        .map(|link| link.url.as_str())
+        .collect();
     let mut item = json!({
         "articleId": article.id,
         "title": article.title,
@@ -321,7 +364,11 @@ fn build_webhook_body(pipeline_id: &str, from_id: &str, item: Value) -> Value {
 /// field carrying `article.body` verbatim -- shared by [`webhook`]'s default
 /// body and [`render_webhook_template`]'s `{{item_json}}` variable, so both
 /// reflect `include_body` identically.
-fn build_webhook_item_with_body(article: &Article, outcome: &TransformOutcome, include_body: bool) -> Value {
+fn build_webhook_item_with_body(
+    article: &Article,
+    outcome: &TransformOutcome,
+    include_body: bool,
+) -> Value {
     let mut item = build_webhook_item(article, outcome);
     if include_body {
         item["body"] = json!(article.body);
@@ -338,7 +385,10 @@ fn json_escape(value: &str) -> String {
     let quoted = serde_json::to_string(value).unwrap_or_default();
     // `serde_json::to_string` on a `&str` always yields a quoted JSON
     // string (at minimum `""`), so stripping the first/last byte is safe.
-    quoted.get(1..quoted.len().saturating_sub(1)).unwrap_or_default().to_string()
+    quoted
+        .get(1..quoted.len().saturating_sub(1))
+        .unwrap_or_default()
+        .to_string()
 }
 
 /// Renders a `SinkConfig::Webhook.body_template` by substituting `{{var}}`
@@ -363,11 +413,23 @@ fn render_webhook_template(
     let published_at = chrono::DateTime::from_timestamp_millis(article.created_at)
         .map(|t| t.to_rfc3339())
         .unwrap_or_default();
-    let link = article.source_links.first().map(|link| link.url.as_str()).unwrap_or("");
-    let links: String =
-        article.source_links.iter().map(|link| link.url.as_str()).collect::<Vec<_>>().join("\n");
-    let item_json =
-        serde_json::to_string(&build_webhook_item_with_body(article, outcome, include_body)).unwrap_or_default();
+    let link = article
+        .source_links
+        .first()
+        .map(|link| link.url.as_str())
+        .unwrap_or("");
+    let links: String = article
+        .source_links
+        .iter()
+        .map(|link| link.url.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let item_json = serde_json::to_string(&build_webhook_item_with_body(
+        article,
+        outcome,
+        include_body,
+    ))
+    .unwrap_or_default();
 
     let mut result = String::with_capacity(template.len());
     let mut rest = template;
@@ -442,13 +504,24 @@ async fn webhook(
     article: &Article,
     outcome: &TransformOutcome,
 ) -> Result<()> {
-    let identity = crate::identity::current(state).await.context("bot: loading identity")?;
+    let identity = crate::identity::current(state)
+        .await
+        .context("bot: loading identity")?;
 
-    let template = body_template.map(str::trim).filter(|template| !template.is_empty());
+    let template = body_template
+        .map(str::trim)
+        .filter(|template| !template.is_empty());
     let (body_bytes, signature): (Vec<u8>, Option<String>) = if let Some(template) = template {
         // Template mode: never wiresigned, and `include_audio` has no
         // effect (see `SinkConfig::Webhook`'s doc comment).
-        let rendered = render_webhook_template(template, article, outcome, pipeline_id, identity.did(), include_body);
+        let rendered = render_webhook_template(
+            template,
+            article,
+            outcome,
+            pipeline_id,
+            identity.did(),
+            include_body,
+        );
         (rendered.into_bytes(), None)
     } else {
         let mut item = build_webhook_item_with_body(article, outcome, include_body);
@@ -456,8 +529,13 @@ async fn webhook(
             && include_audio
             && max_audio_bytes.is_none_or(|max| audio.size <= max)
         {
-            let store = crate::storage::store(state).await.context("bot: opening content store")?;
-            let bytes = store.get(&audio.cid).await.context("bot: resolving audio for webhook inline delivery")?;
+            let store = crate::storage::store(state)
+                .await
+                .context("bot: opening content store")?;
+            let bytes = store
+                .get(&audio.cid)
+                .await
+                .context("bot: resolving audio for webhook inline delivery")?;
             item["audio"]["b64"] = json!(BASE64_STANDARD.encode(bytes));
         }
 
@@ -520,8 +598,14 @@ async fn webhook(
 const PUBLISHED_EXCERPT_CHAR_LIMIT: usize = 120;
 
 fn build_published_excerpt(body: &str) -> String {
-    let single_line: String = body.chars().map(|c| if c == '\n' || c == '\r' { ' ' } else { c }).collect();
-    single_line.chars().take(PUBLISHED_EXCERPT_CHAR_LIMIT).collect()
+    let single_line: String = body
+        .chars()
+        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+        .collect();
+    single_line
+        .chars()
+        .take(PUBLISHED_EXCERPT_CHAR_LIMIT)
+        .collect()
 }
 
 /// Builds the `NewsArticle`-shaped JSON body (`tc-news/src/types.ts:28-44`)
@@ -563,8 +647,11 @@ fn build_published_article(
 ) -> Value {
     let title = preferred_text(outcome.title.as_deref(), &article.title);
     let body = preferred_text(outcome.script.as_deref(), &article.body);
-    let source_links: Vec<Value> =
-        article.source_links.iter().map(|link| json!({ "title": link.title, "url": link.url })).collect();
+    let source_links: Vec<Value> = article
+        .source_links
+        .iter()
+        .map(|link| json!({ "title": link.title, "url": link.url }))
+        .collect();
     let mut value = json!({
         "id": id,
         "title": title,
@@ -587,7 +674,13 @@ fn build_published_article(
 /// explicitly optional on the reading side (`isArticleWire`,
 /// `newsWire.ts:271`) and, per the same symmetric-signing reasoning as
 /// [`build_text_post_wire`], never desyncs signing from verification.
-fn build_article_wire(id: &str, from_id: &str, from_name: &str, timestamp: i64, cid: &str) -> Value {
+fn build_article_wire(
+    id: &str,
+    from_id: &str,
+    from_name: &str,
+    timestamp: i64,
+    cid: &str,
+) -> Value {
     json!({
         "type": "tc-news:article",
         "id": id,
@@ -613,8 +706,12 @@ async fn article_publish(
     article: &Article,
     outcome: &TransformOutcome,
 ) -> Result<()> {
-    let identity = crate::identity::current(state).await.context("bot: loading identity")?;
-    let store = crate::storage::store(state).await.context("bot: opening content store")?;
+    let identity = crate::identity::current(state)
+        .await
+        .context("bot: loading identity")?;
+    let store = crate::storage::store(state)
+        .await
+        .context("bot: opening content store")?;
     let from_name = state
         .config()
         .identity
@@ -628,7 +725,14 @@ async fn article_publish(
 
     let id = new_wire_id();
     let created_at = chrono::Utc::now().timestamp_millis();
-    let body = build_published_article(&id, article, outcome, identity.did(), &from_name, created_at);
+    let body = build_published_article(
+        &id,
+        article,
+        outcome,
+        identity.did(),
+        &from_name,
+        created_at,
+    );
     let body_cid = store
         .put(&format!("{id}.json"), serde_json::to_vec(&body)?)
         .await
@@ -690,10 +794,20 @@ mod tests {
     #[test]
     fn text_post_wire_has_the_post_wire_shape_and_signs_and_verifies() {
         let identity = crate::identity::for_test();
-        let mut wire = build_text_post_wire("wire-1", identity.did(), "mistl", 1_700_000_000_000, "bafy-body");
+        let mut wire = build_text_post_wire(
+            "wire-1",
+            identity.did(),
+            "mistl",
+            1_700_000_000_000,
+            "bafy-body",
+        );
         assert_eq!(wire["type"], json!("tc-chat:post"));
         assert_eq!(wire["surface"], json!("chat"));
-        assert_eq!(wire["parentId"], Value::Null, "parentId must be explicit null, not omitted");
+        assert_eq!(
+            wire["parentId"],
+            Value::Null,
+            "parentId must be explicit null, not omitted"
+        );
         assert_eq!(wire["kind"], json!("text"));
         assert_eq!(wire["fromApp"], json!("mistl"));
 
@@ -713,8 +827,14 @@ mod tests {
             mime: "audio/mpeg".to_string(),
             size: 12345,
         };
-        let mut wire =
-            build_media_post_wire("wire-2", identity.did(), "mistl", 1_700_000_000_000, &audio, "article-1.mp3");
+        let mut wire = build_media_post_wire(
+            "wire-2",
+            identity.did(),
+            "mistl",
+            1_700_000_000_000,
+            &audio,
+            "article-1.mp3",
+        );
         assert_eq!(wire["kind"], json!("media"));
         assert_eq!(wire["cid"], json!("bafy-audio"));
         assert_eq!(wire["mimeType"], json!("audio/mpeg"));
@@ -734,7 +854,10 @@ mod tests {
         let item = build_webhook_item(&sample_article(), &TransformOutcome::default());
         assert_eq!(item["sourceLinks"], json!(["https://example.com/a"]));
         assert_eq!(item["articleId"], json!("article-1"));
-        assert!(item.get("audio").is_none(), "no audio outcome -> no audio field");
+        assert!(
+            item.get("audio").is_none(),
+            "no audio outcome -> no audio field"
+        );
     }
 
     #[test]
@@ -748,7 +871,10 @@ mod tests {
         let item = build_webhook_item(&sample_article(), &outcome);
         assert_eq!(item["audio"]["mime"], json!("audio/mpeg"));
         assert_eq!(item["audio"]["size"], json!(12345));
-        assert!(item["audio"].get("b64").is_none(), "b64 is only added by the async include_audio path");
+        assert!(
+            item["audio"].get("b64").is_none(),
+            "b64 is only added by the async include_audio path"
+        );
     }
 
     #[test]
@@ -760,7 +886,8 @@ mod tests {
         assert_eq!(body["type"], json!("tc-bot:delivery"));
         assert_eq!(body["pipeline"], json!("news-audio"));
 
-        crate::wiresign::sign_wire(&mut body, &identity).expect("a well-formed webhook body must sign");
+        crate::wiresign::sign_wire(&mut body, &identity)
+            .expect("a well-formed webhook body must sign");
         assert!(crate::wiresign::verify_wire(&body).unwrap());
 
         let mut tampered = body.clone();
@@ -771,7 +898,8 @@ mod tests {
     // -- flexible webhook sink: include_body / template mode / method parsing --
 
     #[test]
-    fn build_webhook_item_with_body_is_byte_identical_to_the_legacy_item_when_include_body_is_false() {
+    fn build_webhook_item_with_body_is_byte_identical_to_the_legacy_item_when_include_body_is_false()
+     {
         // Pins the WIRE_WEBHOOK_DELIVERY_WIRE-shaped default payload: with
         // `include_body` unset (false), the item must be exactly what
         // `build_webhook_item` alone produces.
@@ -785,7 +913,8 @@ mod tests {
 
     #[test]
     fn build_webhook_item_with_body_adds_the_article_body_when_true() {
-        let item = build_webhook_item_with_body(&sample_article(), &TransformOutcome::default(), true);
+        let item =
+            build_webhook_item_with_body(&sample_article(), &TransformOutcome::default(), true);
         assert_eq!(item["body"], json!("本文"));
         // Everything else must still be present, unchanged.
         assert_eq!(item["articleId"], json!("article-1"));
@@ -794,11 +923,13 @@ mod tests {
     #[test]
     fn webhook_body_with_include_body_still_signs_and_verifies() {
         let identity = crate::identity::for_test();
-        let item = build_webhook_item_with_body(&sample_article(), &TransformOutcome::default(), true);
+        let item =
+            build_webhook_item_with_body(&sample_article(), &TransformOutcome::default(), true);
         let mut body = build_webhook_body("news-audio", identity.did(), item);
         assert_eq!(body["item"]["body"], json!("本文"));
 
-        crate::wiresign::sign_wire(&mut body, &identity).expect("a well-formed webhook body must sign");
+        crate::wiresign::sign_wire(&mut body, &identity)
+            .expect("a well-formed webhook body must sign");
         assert!(crate::wiresign::verify_wire(&body).unwrap());
 
         let mut tampered = body.clone();
@@ -820,7 +951,8 @@ mod tests {
         );
         // The rendered text must itself be valid JSON, and round-trip the
         // *unescaped* original value.
-        let parsed: Value = serde_json::from_str(&rendered).expect("rendered template must be valid JSON");
+        let parsed: Value =
+            serde_json::from_str(&rendered).expect("rendered template must be valid JSON");
         assert_eq!(parsed["title"], json!("見出し \"引用\" と\n改行"));
         assert_eq!(parsed["pipeline"], json!("news-audio"));
     }
@@ -829,8 +961,14 @@ mod tests {
     fn render_webhook_template_title_prefers_outcome_title_over_article_title() {
         let mut outcome = TransformOutcome::default();
         outcome.title = Some("翻訳タイトル".to_string());
-        let rendered =
-            render_webhook_template("{{title}}", &sample_article(), &outcome, "news-audio", "did:key:zBot", false);
+        let rendered = render_webhook_template(
+            "{{title}}",
+            &sample_article(),
+            &outcome,
+            "news-audio",
+            "did:key:zBot",
+            false,
+        );
         assert_eq!(rendered, "翻訳タイトル");
     }
 
@@ -844,9 +982,14 @@ mod tests {
             "did:key:zBot",
             true,
         );
-        let parsed: Value = serde_json::from_str(&rendered).expect("rendered template must be valid JSON");
+        let parsed: Value =
+            serde_json::from_str(&rendered).expect("rendered template must be valid JSON");
         assert_eq!(parsed["item"]["articleId"], json!("article-1"));
-        assert_eq!(parsed["item"]["body"], json!("本文"), "item_json must reflect include_body");
+        assert_eq!(
+            parsed["item"]["body"],
+            json!("本文"),
+            "item_json must reflect include_body"
+        );
     }
 
     #[test]
@@ -877,10 +1020,12 @@ mod tests {
         assert_eq!(rendered, "link=[] links=[]");
 
         let mut two_links = sample_article();
-        two_links.source_links.push(super::super::source::SourceLink {
-            title: "別記事".to_string(),
-            url: "https://example.com/b".to_string(),
-        });
+        two_links
+            .source_links
+            .push(super::super::source::SourceLink {
+                title: "別記事".to_string(),
+                url: "https://example.com/b".to_string(),
+            });
         let rendered = render_webhook_template(
             "link=[{{link}}] links=[{{links}}]",
             &two_links,
@@ -889,7 +1034,10 @@ mod tests {
             "did:key:zBot",
             false,
         );
-        assert_eq!(rendered, "link=[https://example.com/a] links=[https://example.com/a\\nhttps://example.com/b]");
+        assert_eq!(
+            rendered,
+            "link=[https://example.com/a] links=[https://example.com/a\\nhttps://example.com/b]"
+        );
     }
 
     #[test]
@@ -914,7 +1062,11 @@ mod tests {
     #[test]
     fn preferred_text_prefers_a_non_blank_override_and_falls_back_otherwise() {
         assert_eq!(preferred_text(Some("override"), "fallback"), "override");
-        assert_eq!(preferred_text(Some("   "), "fallback"), "fallback", "blank override must fall back");
+        assert_eq!(
+            preferred_text(Some("   "), "fallback"),
+            "fallback",
+            "blank override must fall back"
+        );
         assert_eq!(preferred_text(None, "fallback"), "fallback");
     }
 
@@ -922,7 +1074,10 @@ mod tests {
     fn build_published_excerpt_collapses_newlines_and_truncates_at_a_char_boundary() {
         let body = "見出し\n本文が続きます。".to_string() + &"あ".repeat(200);
         let excerpt = build_published_excerpt(&body);
-        assert!(!excerpt.contains('\n'), "newlines must be collapsed to spaces");
+        assert!(
+            !excerpt.contains('\n'),
+            "newlines must be collapsed to spaces"
+        );
         assert_eq!(
             excerpt.chars().count(),
             PUBLISHED_EXCERPT_CHAR_LIMIT,
@@ -947,8 +1102,14 @@ mod tests {
         assert_eq!(value["authorDid"], json!("did:key:zBot"));
         assert_eq!(value["authorName"], json!("mistl-bot"));
         assert_eq!(value["createdAt"], json!(1_700_000_000_000i64));
-        assert_eq!(value["sourceLinks"], json!([{ "title": "元記事", "url": "https://example.com/a" }]));
-        assert!(value.get("lang").is_none(), "lang must be omitted entirely when the transform never set one");
+        assert_eq!(
+            value["sourceLinks"],
+            json!([{ "title": "元記事", "url": "https://example.com/a" }])
+        );
+        assert!(
+            value.get("lang").is_none(),
+            "lang must be omitted entirely when the transform never set one"
+        );
     }
 
     #[test]
@@ -957,8 +1118,14 @@ mod tests {
         outcome.title = Some("翻訳タイトル".to_string());
         outcome.script = Some("翻訳本文".to_string());
         outcome.lang = Some("en".to_string());
-        let value =
-            build_published_article("article-pub-2", &sample_article(), &outcome, "did:key:zBot", "mistl-bot", 0);
+        let value = build_published_article(
+            "article-pub-2",
+            &sample_article(),
+            &outcome,
+            "did:key:zBot",
+            "mistl-bot",
+            0,
+        );
         assert_eq!(value["title"], json!("翻訳タイトル"));
         assert_eq!(value["body"], json!("翻訳本文"));
         assert_eq!(value["excerpt"], json!("翻訳本文"));
@@ -970,10 +1137,24 @@ mod tests {
         let mut outcome = TransformOutcome::default();
         outcome.title = Some("   ".to_string());
         outcome.script = Some("".to_string());
-        let value =
-            build_published_article("article-pub-3", &sample_article(), &outcome, "did:key:zBot", "mistl-bot", 0);
-        assert_eq!(value["title"], json!("見出し"), "blank title override must fall back to the article's title");
-        assert_eq!(value["body"], json!("本文"), "blank script override must fall back to the article's body");
+        let value = build_published_article(
+            "article-pub-3",
+            &sample_article(),
+            &outcome,
+            "did:key:zBot",
+            "mistl-bot",
+            0,
+        );
+        assert_eq!(
+            value["title"],
+            json!("見出し"),
+            "blank title override must fall back to the article's title"
+        );
+        assert_eq!(
+            value["body"],
+            json!("本文"),
+            "blank script override must fall back to the article's body"
+        );
     }
 
     #[test]
@@ -990,7 +1171,9 @@ mod tests {
             "mistl-bot",
             0,
         );
-        let links = value["sourceLinks"].as_array().expect("sourceLinks must be an array");
+        let links = value["sourceLinks"]
+            .as_array()
+            .expect("sourceLinks must be an array");
         assert_eq!(links.len(), 1);
         assert_eq!(links[0]["title"], json!("元記事"));
         assert_eq!(links[0]["url"], json!("https://example.com/a"));
@@ -1013,7 +1196,11 @@ mod tests {
         assert!(value["title"].is_string());
         assert!(value["excerpt"].is_string());
         assert!(value["body"].is_string());
-        assert_eq!(value["authorDid"], json!("did:key:zBot"), "authorDid must equal the announce wire's fromId");
+        assert_eq!(
+            value["authorDid"],
+            json!("did:key:zBot"),
+            "authorDid must equal the announce wire's fromId"
+        );
         assert!(value["authorName"].is_string());
         assert!(value["createdAt"].is_i64());
         assert!(value["sourceLinks"].is_array());
@@ -1022,7 +1209,13 @@ mod tests {
     #[test]
     fn article_wire_has_the_article_wire_shape_and_signs_and_verifies() {
         let identity = crate::identity::for_test();
-        let mut wire = build_article_wire("article-pub-1", identity.did(), "mistl", 1_700_000_000_000, "bafy-body");
+        let mut wire = build_article_wire(
+            "article-pub-1",
+            identity.did(),
+            "mistl",
+            1_700_000_000_000,
+            "bafy-body",
+        );
         assert_eq!(wire["type"], json!("tc-news:article"));
         assert_eq!(wire["id"], json!("article-pub-1"));
         assert_eq!(wire["fromId"], json!(identity.did()));

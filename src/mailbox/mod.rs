@@ -94,8 +94,7 @@ async fn cmd_send(
     state: &Arc<AppState>,
     args: Value,
 ) -> Result<Value> {
-    let args: SendArgs =
-        serde_json::from_value(args).context("mailbox.send: invalid arguments")?;
+    let args: SendArgs = serde_json::from_value(args).context("mailbox.send: invalid arguments")?;
     if args.file.is_none() && args.message.is_none() {
         bail!("mailbox.send requires `file` or `message`");
     }

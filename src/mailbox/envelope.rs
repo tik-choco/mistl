@@ -103,10 +103,7 @@ impl Envelope {
 
     /// Verify `sig` against `from`'s DID key via `crate::identity::verify`.
     pub fn verify(&self) -> Result<bool> {
-        let sig_b64 = self
-            .sig
-            .as_deref()
-            .context("envelope has no signature")?;
+        let sig_b64 = self.sig.as_deref().context("envelope has no signature")?;
         let signature = BASE64
             .decode(sig_b64)
             .context("envelope sig is not valid base64")?;
@@ -224,8 +221,15 @@ mod tests {
         let envelope = sample_envelope();
         let text = String::from_utf8(envelope.canonical_bytes()).unwrap();
         let keys = [
-            "\"body\"", "\"cid\"", "\"from\"", "\"id\"", "\"kind\"", "\"name\"", "\"sent_at\"",
-            "\"size\"", "\"to\"",
+            "\"body\"",
+            "\"cid\"",
+            "\"from\"",
+            "\"id\"",
+            "\"kind\"",
+            "\"name\"",
+            "\"sent_at\"",
+            "\"size\"",
+            "\"to\"",
         ];
         let positions: Vec<usize> = keys.iter().map(|k| text.find(k).unwrap()).collect();
         let mut sorted = positions.clone();

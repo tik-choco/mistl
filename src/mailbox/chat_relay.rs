@@ -135,7 +135,9 @@ pub struct ChatRelayService {
 /// when unconfigured; callers should treat that as "relay disabled", not an
 /// error.
 pub async fn ensure_started(state: &Arc<AppState>) -> Result<Option<Arc<ChatRelayService>>> {
-    let service = SERVICE.get_or_try_init(|| async { init_service(state).await }).await?;
+    let service = SERVICE
+        .get_or_try_init(|| async { init_service(state).await })
+        .await?;
     Ok(service.clone())
 }
 
@@ -173,7 +175,10 @@ async fn init_service(state: &Arc<AppState>) -> Result<Option<Arc<ChatRelayServi
     let mut rooms = Vec::new();
     for room in &cfg.chat_rooms {
         if !is_valid_room_id(room) {
-            warn!(room, "chat relay: skipping invalid room id (expected 1-64 chars of [A-Za-z0-9_-])");
+            warn!(
+                room,
+                "chat relay: skipping invalid room id (expected 1-64 chars of [A-Za-z0-9_-])"
+            );
             continue;
         }
         match crate::net::ensure_started(state, room.clone()).await {
@@ -259,7 +264,10 @@ async fn handle_wire(
         return handle_history_request(service, room, from_node, &obj).await;
     }
 
-    if !matches!(wire_type, WIRE_POST | WIRE_REACTION | WIRE_POST_EDIT | WIRE_POST_DELETE) {
+    if !matches!(
+        wire_type,
+        WIRE_POST | WIRE_REACTION | WIRE_POST_EDIT | WIRE_POST_DELETE
+    ) {
         return Ok(()); // some other/future tc-chat:* wire type; ignore rather than guess
     }
 
@@ -268,7 +276,12 @@ async fn handle_wire(
     };
 
     if !verify_wire(&obj) {
-        warn!(id, room, from = from_node, "chat relay: dropping tc-chat wire with an invalid signature");
+        warn!(
+            id,
+            room,
+            from = from_node,
+            "chat relay: dropping tc-chat wire with an invalid signature"
+        );
         return Ok(());
     }
 
@@ -368,7 +381,9 @@ async fn request_history(service: &Arc<ChatRelayService>, room: &str) {
 fn is_valid_room_id(room: &str) -> bool {
     !room.is_empty()
         && room.len() <= 64
-        && room.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        && room
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
 fn wirelog_path(data_dir: &Path, room: &str) -> PathBuf {
@@ -394,7 +409,9 @@ fn read_wirelog_lines(path: &Path) -> Result<Vec<Vec<u8>>> {
 /// same directory then rename over the target, mirroring
 /// `mailbox::spool::write_entries`.
 fn write_wirelog_lines(path: &Path, lines: &[Vec<u8>]) -> Result<()> {
-    let dir = path.parent().context("wirelog path has no parent directory")?;
+    let dir = path
+        .parent()
+        .context("wirelog path has no parent directory")?;
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
 
     let mut body = Vec::new();
@@ -422,19 +439,30 @@ fn line_id(line: &[u8]) -> Option<String> {
 /// entries (oldest dropped first). A no-op if `id` is already present --
 /// live delivery and a later replay of the same wire are expected to
 /// overlap.
-async fn persist_wire(service: &Arc<ChatRelayService>, room: &str, id: &str, raw: &[u8]) -> Result<()> {
+async fn persist_wire(
+    service: &Arc<ChatRelayService>,
+    room: &str,
+    id: &str,
+    raw: &[u8],
+) -> Result<()> {
     if raw.contains(&b'\n') {
         // Every wire this module relays is compact single-line JSON (as
         // produced by `JSON.stringify`/`serde_json::to_vec`, never
         // pretty-printed), so a literal embedded newline would corrupt the
         // JSONL log; refuse rather than silently splitting a line.
-        warn!(room, id, "chat relay: refusing to persist a wire containing a raw newline byte");
+        warn!(
+            room,
+            id, "chat relay: refusing to persist a wire containing a raw newline byte"
+        );
         return Ok(());
     }
     let _guard = service.wirelog_lock.lock().await;
     let path = wirelog_path(&service.data_dir, room);
     let mut lines = read_wirelog_lines(&path)?;
-    if lines.iter().any(|line| line_id(line).as_deref() == Some(id)) {
+    if lines
+        .iter()
+        .any(|line| line_id(line).as_deref() == Some(id))
+    {
         return Ok(());
     }
     lines.push(raw.to_vec());
@@ -450,7 +478,10 @@ async fn persist_wire(service: &Arc<ChatRelayService>, room: &str, id: &str, raw
 pub async fn rooms_status(state: &Arc<AppState>) -> Result<Value> {
     let cfg = state.config().mailbox;
     let service = ensure_started(state).await?;
-    let joined: Vec<String> = service.as_ref().map(|s| s.rooms.clone()).unwrap_or_default();
+    let joined: Vec<String> = service
+        .as_ref()
+        .map(|s| s.rooms.clone())
+        .unwrap_or_default();
     let items: Vec<Value> = cfg
         .chat_rooms
         .iter()
@@ -513,8 +544,10 @@ async fn describe_entry(value: Value) -> Value {
             item["mimeType"] = json!(str_field("mimeType"));
             item["fileName"] = json!(str_field("fileName"));
             item["fileSize"] = obj.get("fileSize").cloned().unwrap_or(Value::Null);
-            if matches!(str_field("kind").as_deref(), Some("text") | Some("project") | Some("event"))
-                && let Some(cid) = str_field("cid")
+            if matches!(
+                str_field("kind").as_deref(),
+                Some("text") | Some("project") | Some("event")
+            ) && let Some(cid) = str_field("cid")
             {
                 item["text"] = resolve_body_text(&cid).await;
             }
@@ -641,21 +674,33 @@ mod tests {
 
         let mut tampered = signed.clone();
         tampered.insert("cid".into(), json!("bafy-different"));
-        assert!(!verify_wire(&tampered), "tampering with a signed field must invalidate the signature");
+        assert!(
+            !verify_wire(&tampered),
+            "tampering with a signed field must invalidate the signature"
+        );
 
         let mut wrong_signer = signed;
         let (other_did, _other_key) = test_did_and_signer();
         wrong_signer.insert("fromId".into(), json!(other_did));
-        assert!(!verify_wire(&wrong_signer), "signature must not verify against a different DID");
+        assert!(
+            !verify_wire(&wrong_signer),
+            "signature must not verify against a different DID"
+        );
     }
 
     #[test]
     fn verify_wire_rejects_missing_signature_or_from_id() {
         let mut fields = sample_post_fields("did:key:zNotUsed");
-        assert!(!verify_wire(&fields), "no signature field at all must be rejected");
+        assert!(
+            !verify_wire(&fields),
+            "no signature field at all must be rejected"
+        );
 
         fields.insert("signature".into(), json!("not-base64url!!"));
-        assert!(!verify_wire(&fields), "malformed base64url signature must be rejected, not panic");
+        assert!(
+            !verify_wire(&fields),
+            "malformed base64url signature must be rejected, not panic"
+        );
     }
 
     #[tokio::test]
@@ -667,13 +712,23 @@ mod tests {
         let dir = scratch_dir("roundtrip");
         let service = test_service(dir.clone(), vec!["room-a".into()]);
 
-        handle_wire(&service, "room-a", "peer-node", WIRE_POST, raw.clone(), value)
-            .await
-            .expect("handling a validly-signed post must succeed");
+        handle_wire(
+            &service,
+            "room-a",
+            "peer-node",
+            WIRE_POST,
+            raw.clone(),
+            value,
+        )
+        .await
+        .expect("handling a validly-signed post must succeed");
 
         let lines = read_wirelog_lines(&wirelog_path(&service.data_dir, "room-a")).unwrap();
         assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0], raw, "replayed bytes must be byte-identical to the original wire");
+        assert_eq!(
+            lines[0], raw,
+            "replayed bytes must be byte-identical to the original wire"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -691,10 +746,15 @@ mod tests {
         let dir = scratch_dir("invalid-sig");
         let service = test_service(dir.clone(), vec!["room-a".into()]);
 
-        handle_wire(&service, "room-a", "peer-node", WIRE_POST, raw, value).await.unwrap();
+        handle_wire(&service, "room-a", "peer-node", WIRE_POST, raw, value)
+            .await
+            .unwrap();
 
         let lines = read_wirelog_lines(&wirelog_path(&service.data_dir, "room-a")).unwrap();
-        assert!(lines.is_empty(), "an invalidly-signed wire must never be persisted");
+        assert!(
+            lines.is_empty(),
+            "an invalidly-signed wire must never be persisted"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -704,8 +764,12 @@ mod tests {
         let dir = scratch_dir("dedupe");
         let service = test_service(dir.clone(), vec!["room-a".into()]);
 
-        persist_wire(&service, "room-a", "same-id", br#"{"id":"same-id","n":1}"#).await.unwrap();
-        persist_wire(&service, "room-a", "same-id", br#"{"id":"same-id","n":1}"#).await.unwrap();
+        persist_wire(&service, "room-a", "same-id", br#"{"id":"same-id","n":1}"#)
+            .await
+            .unwrap();
+        persist_wire(&service, "room-a", "same-id", br#"{"id":"same-id","n":1}"#)
+            .await
+            .unwrap();
         let lines = read_wirelog_lines(&wirelog_path(&service.data_dir, "room-a")).unwrap();
         assert_eq!(lines.len(), 1, "the same wire id must not be stored twice");
 

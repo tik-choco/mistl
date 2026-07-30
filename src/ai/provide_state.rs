@@ -93,7 +93,8 @@ mod tests {
 
     fn scratch_dir(name: &str) -> PathBuf {
         let suffix: u64 = rand::random();
-        let dir = std::env::temp_dir().join(format!("mistl-ai-provide-state-test-{name}-{suffix:016x}"));
+        let dir =
+            std::env::temp_dir().join(format!("mistl-ai-provide-state-test-{name}-{suffix:016x}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir

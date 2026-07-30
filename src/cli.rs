@@ -914,13 +914,17 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             BotAction::Enable { id } => client_call("bot.enable", json!({ "id": id })),
             BotAction::Disable { id } => client_call("bot.disable", json!({ "id": id })),
             BotAction::Logs { id, limit } => {
-                let response = request("bot.logs", json!({ "id": id, "limit": limit.unwrap_or(20) }))?;
+                let response = request(
+                    "bot.logs",
+                    json!({ "id": id, "limit": limit.unwrap_or(20) }),
+                )?;
                 println!("{}", render_bot_logs(&response));
                 Ok(())
             }
-            BotAction::Items { id, limit } => {
-                client_call("bot.items", json!({ "id": id, "limit": limit.unwrap_or(20) }))
-            }
+            BotAction::Items { id, limit } => client_call(
+                "bot.items",
+                json!({ "id": id, "limit": limit.unwrap_or(20) }),
+            ),
             BotAction::Status => client_call("bot.status", json!({})),
         },
         Command::Ui => open_dashboard(),
@@ -1832,13 +1836,22 @@ fn render_bot_ls(response: &Value) -> String {
     }
     let mut lines = vec!["ID\tENABLED\tSCHEDULE\tNEXT RUN\tLAST RUN\tLAST STATUS".to_string()];
     lines.extend(pipelines.iter().map(|pipeline| {
-        let id = pipeline.get("id").and_then(Value::as_str).unwrap_or_default();
-        let enabled = pipeline.get("enabled").and_then(Value::as_bool).unwrap_or(false);
+        let id = pipeline
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let enabled = pipeline
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let schedule = pipeline
             .get("schedule")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let next_run = pipeline.get("next_run").and_then(Value::as_str).unwrap_or("-");
+        let next_run = pipeline
+            .get("next_run")
+            .and_then(Value::as_str)
+            .unwrap_or("-");
         let (last_run_at, last_status) = bot_last_run_columns(pipeline.get("last_run"));
         format!("{id}\t{enabled}\t{schedule}\t{next_run}\t{last_run_at}\t{last_status}")
     }));
@@ -1857,10 +1870,16 @@ fn bot_last_run_columns(last_run: Option<&Value>) -> (String, String) {
         .unwrap_or_default()
         .to_string();
     let status = if run.get("ok").and_then(Value::as_bool).unwrap_or(false) {
-        let delivered = run.get("delivered_count").and_then(Value::as_u64).unwrap_or(0);
+        let delivered = run
+            .get("delivered_count")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
         format!("OK ({delivered} delivered)")
     } else {
-        let error = run.get("error").and_then(Value::as_str).unwrap_or("unknown error");
+        let error = run
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown error");
         format!("FAIL: {error}")
     };
     (started_at, status)
@@ -1877,7 +1896,10 @@ fn render_bot_logs(response: &Value) -> String {
     if runs.is_empty() {
         return "no bot runs recorded".to_string();
     }
-    runs.iter().map(render_bot_run).collect::<Vec<_>>().join("\n\n")
+    runs.iter()
+        .map(render_bot_run)
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// Render one `RunRecord`: a header line (start time, pipeline id, OK/FAIL,
@@ -1888,19 +1910,34 @@ fn render_bot_run(run: &Value) -> String {
         .get("pipeline_id")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let started_at = run.get("started_at").and_then(Value::as_str).unwrap_or_default();
+    let started_at = run
+        .get("started_at")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let ended_at = run.get("ended_at").and_then(Value::as_str);
     let ok = run.get("ok").and_then(Value::as_bool).unwrap_or(false);
-    let fetched = run.get("fetched_count").and_then(Value::as_u64).unwrap_or(0);
-    let delivered = run.get("delivered_count").and_then(Value::as_u64).unwrap_or(0);
+    let fetched = run
+        .get("fetched_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let delivered = run
+        .get("delivered_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
 
-    let mut header = format!("{started_at}  {pipeline_id}  {}", if ok { "OK" } else { "FAIL" });
+    let mut header = format!(
+        "{started_at}  {pipeline_id}  {}",
+        if ok { "OK" } else { "FAIL" }
+    );
     if let Some(ended_at) = ended_at
         && let Some(duration) = sched_duration(started_at, ended_at)
     {
         header.push_str(&format!("  ({duration})"));
     }
-    let mut lines = vec![header, format!("    fetched={fetched} delivered={delivered}")];
+    let mut lines = vec![
+        header,
+        format!("    fetched={fetched} delivered={delivered}"),
+    ];
     if let Some(error) = run.get("error").and_then(Value::as_str) {
         lines.push(format!("    error: {error}"));
     }
@@ -1913,7 +1950,10 @@ mod bot_render_tests {
 
     #[test]
     fn render_bot_ls_reports_no_pipelines() {
-        assert_eq!(render_bot_ls(&json!({ "pipelines": [] })), "no bot pipelines configured");
+        assert_eq!(
+            render_bot_ls(&json!({ "pipelines": [] })),
+            "no bot pipelines configured"
+        );
     }
 
     #[test]
@@ -1957,7 +1997,10 @@ mod bot_render_tests {
             }]
         });
         let rendered = render_bot_ls(&response);
-        assert!(rendered.contains("2026-07-12T00:00:00Z\tOK (2 delivered)"), "{rendered}");
+        assert!(
+            rendered.contains("2026-07-12T00:00:00Z\tOK (2 delivered)"),
+            "{rendered}"
+        );
     }
 
     #[test]
@@ -1981,12 +2024,18 @@ mod bot_render_tests {
             }]
         });
         let rendered = render_bot_ls(&response);
-        assert!(rendered.contains("FAIL: preset \"worker\" not found in ai.presets"), "{rendered}");
+        assert!(
+            rendered.contains("FAIL: preset \"worker\" not found in ai.presets"),
+            "{rendered}"
+        );
     }
 
     #[test]
     fn render_bot_logs_reports_no_runs() {
-        assert_eq!(render_bot_logs(&json!({ "runs": [] })), "no bot runs recorded");
+        assert_eq!(
+            render_bot_logs(&json!({ "runs": [] })),
+            "no bot runs recorded"
+        );
     }
 
     #[test]
@@ -2003,7 +2052,10 @@ mod bot_render_tests {
             }]
         });
         let rendered = render_bot_logs(&response);
-        assert!(rendered.starts_with("2026-07-12T00:00:00Z  news-audio  OK  (2.0s)"), "{rendered}");
+        assert!(
+            rendered.starts_with("2026-07-12T00:00:00Z  news-audio  OK  (2.0s)"),
+            "{rendered}"
+        );
         assert!(rendered.contains("fetched=2 delivered=2"), "{rendered}");
     }
 
@@ -2022,7 +2074,10 @@ mod bot_render_tests {
         });
         let rendered = render_bot_logs(&response);
         assert!(rendered.contains("FAIL"), "{rendered}");
-        assert!(rendered.contains("error: source failed: could not join room"), "{rendered}");
+        assert!(
+            rendered.contains("error: source failed: could not join room"),
+            "{rendered}"
+        );
     }
 
     #[test]
