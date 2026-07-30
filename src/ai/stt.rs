@@ -209,13 +209,14 @@ mod tests {
             .expect_err("empty audio should error");
         assert!(err.to_string().contains("audio"));
 
-        let was_contacted = tokio::time::timeout(
-            std::time::Duration::from_millis(150),
-            notify.notified(),
-        )
-        .await
-        .is_ok();
-        assert!(!was_contacted, "no request should be sent for invalid input");
+        let was_contacted =
+            tokio::time::timeout(std::time::Duration::from_millis(150), notify.notified())
+                .await
+                .is_ok();
+        assert!(
+            !was_contacted,
+            "no request should be sent for invalid input"
+        );
 
         server.abort();
     }

@@ -104,7 +104,11 @@ pub(super) struct ShareEnvelope {
     pub(super) clock: i64,
     /// `folder-change` discriminator: `file-upserted` | `file-deleted` |
     /// `folder-upserted` | `folder-deleted`.
-    #[serde(rename = "changeType", skip_serializing_if = "Option::is_none", default)]
+    #[serde(
+        rename = "changeType",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
     pub(super) change_type: Option<String>,
     /// Cheap "did anything change" digest of the folder tree (see
     /// `folder_sync::folder_signature`); not cryptographically meaningful.
@@ -116,7 +120,11 @@ pub(super) struct ShareEnvelope {
     pub(super) folder_signature: Option<String>,
     #[serde(rename = "folderId", skip_serializing_if = "Option::is_none", default)]
     pub(super) folder_id: Option<String>,
-    #[serde(rename = "folderName", skip_serializing_if = "Option::is_none", default)]
+    #[serde(
+        rename = "folderName",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
     pub(super) folder_name: Option<String>,
     /// Full folder record carried by `folder-change` upserts.
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -130,7 +138,11 @@ pub(super) struct ShareEnvelope {
     pub(super) file: Option<super::domain::FileRecord>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub(super) cid: Option<String>,
-    #[serde(rename = "ownerNodeId", skip_serializing_if = "Option::is_none", default)]
+    #[serde(
+        rename = "ownerNodeId",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
     pub(super) owner_node_id: Option<String>,
     #[serde(
         rename = "accessGrantMode",
@@ -268,7 +280,9 @@ pub(super) fn decrypt_folder_key_grant(
     let key_bytes = shared.raw_secret_bytes();
 
     let iv = BASE64_STANDARD.decode(iv_b64).context("grant iv")?;
-    let cipher_text = BASE64_STANDARD.decode(cipher_text_b64).context("grant ciphertext")?;
+    let cipher_text = BASE64_STANDARD
+        .decode(cipher_text_b64)
+        .context("grant ciphertext")?;
     let cipher = Aes256Gcm::new_from_slice(key_bytes.as_slice()).context("grant key")?;
     let nonce = Nonce::from_slice(&iv);
     let plain = cipher
@@ -298,7 +312,11 @@ pub(super) fn folder_key_hash(folder_id: &str, passphrase: &str) -> String {
     sha256_hex(&buf)
 }
 
-pub(super) fn matches_folder_key_hash(folder_id: &str, passphrase: &str, expected_hash: &str) -> bool {
+pub(super) fn matches_folder_key_hash(
+    folder_id: &str,
+    passphrase: &str,
+    expected_hash: &str,
+) -> bool {
     !expected_hash.is_empty() && folder_key_hash(folder_id, passphrase) == expected_hash
 }
 
@@ -459,11 +477,19 @@ pub(super) async fn send_bytes_retrying(
 pub(super) async fn wait_for_peer(node_id: &str, timeout: Duration) -> Result<()> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
-        if crate::net::connected_nodes().await.iter().any(|n| n == node_id) {
+        if crate::net::connected_nodes()
+            .await
+            .iter()
+            .any(|n| n == node_id)
+        {
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
-            bail!("owner {} did not connect within {:?}", short(node_id), timeout);
+            bail!(
+                "owner {} did not connect within {:?}",
+                short(node_id),
+                timeout
+            );
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
@@ -559,7 +585,9 @@ pub(super) async fn await_folder_state_cid(folder_id: &str, timeout: Duration) -
                 }
             }
             Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
-            Ok(Err(broadcast::error::RecvError::Closed)) => bail!("envelope channel closed unexpectedly"),
+            Ok(Err(broadcast::error::RecvError::Closed)) => {
+                bail!("envelope channel closed unexpectedly")
+            }
             Err(_) => bail!("timed out waiting for folder-state"),
         }
     }
@@ -585,7 +613,8 @@ pub(super) async fn fetch_blob(store: &Store, cid: &str) -> Result<Vec<u8>> {
 pub(super) async fn p2p_storage_get(cid: &str) -> Result<Vec<u8>> {
     let cid = cid.to_string();
     tokio::task::spawn_blocking(move || {
-        mistlib::app::storage_get(&cid).map_err(|error| anyhow::anyhow!("p2p storage_get {cid}: {error}"))
+        mistlib::app::storage_get(&cid)
+            .map_err(|error| anyhow::anyhow!("p2p storage_get {cid}: {error}"))
     })
     .await
     .context("p2p storage_get task")?
@@ -615,9 +644,14 @@ pub(super) async fn fetch_folder_bundle(
     super::crypto::decrypt_json(&payload, folder_key)
 }
 
-pub(super) async fn fetch_file_content(store: &Store, cid: &str, folder_key: &str) -> Result<Vec<u8>> {
+pub(super) async fn fetch_file_content(
+    store: &Store,
+    cid: &str,
+    folder_key: &str,
+) -> Result<Vec<u8>> {
     let raw = fetch_blob(store, cid).await?;
-    let payload: super::crypto::EncryptedPayload = serde_json::from_slice(&raw).context("file bundle parse")?;
+    let payload: super::crypto::EncryptedPayload =
+        serde_json::from_slice(&raw).context("file bundle parse")?;
     let bundle: super::domain::FileBundle = super::crypto::decrypt_json(&payload, folder_key)?;
     let data_url = bundle.file.data_url.context("file has no content")?;
     decode_data_url(&data_url)
@@ -671,17 +705,23 @@ async fn download_bundle_files(
     folder_key: &str,
     progress: &mut (dyn FnMut(&str) + Send),
 ) -> Result<FolderShareResult> {
-    let folder_name = [bundle.folder.name.as_str(), share.folder_name.as_deref().unwrap_or("")]
-        .into_iter()
-        .find(|s| !s.trim().is_empty())
-        .unwrap_or("shared-folder")
-        .to_string();
+    let folder_name = [
+        bundle.folder.name.as_str(),
+        share.folder_name.as_deref().unwrap_or(""),
+    ]
+    .into_iter()
+    .find(|s| !s.trim().is_empty())
+    .unwrap_or("shared-folder")
+    .to_string();
     let mut result = FolderShareResult {
         folder_name: folder_name.clone(),
         files: Vec::new(),
         skipped: Vec::new(),
     };
-    progress(&format!("folder {folder_name:?}: {} file(s)", bundle.files.len()));
+    progress(&format!(
+        "folder {folder_name:?}: {} file(s)",
+        bundle.files.len()
+    ));
 
     let mut folders: HashMap<String, super::domain::FolderRecord> = HashMap::new();
     for folder in bundle.folders.iter().flatten() {
@@ -705,7 +745,9 @@ async fn download_bundle_files(
             .filter(|s| !s.is_empty())
             .or_else(|| file.last_cid.clone().filter(|s| !s.is_empty()));
         let Some(cid) = cid else {
-            result.skipped.push(format!("{} (no content cid)", file.name));
+            result
+                .skipped
+                .push(format!("{} (no content cid)", file.name));
             continue;
         };
         let data = match fetch_file_content(store, &cid, folder_key).await {
@@ -734,7 +776,9 @@ async fn download_bundle_files(
             .with_context(|| format!("writing {}", target.display()))?;
 
         if !file.checksum.is_empty() && sha256_hex(&data) != file.checksum {
-            result.skipped.push(format!("{} (checksum mismatch)", file.name));
+            result
+                .skipped
+                .push(format!("{} (checksum mismatch)", file.name));
             continue;
         }
         progress(&format!("saved {rel} ({} bytes)", data.len()));
@@ -754,13 +798,19 @@ pub(super) type SingleFlightRegistry<T> = OnceCell<Mutex<HashMap<String, Arc<Onc
 /// slot is removed from `registry` as soon as every joined caller has picked
 /// up the result, so a later call with the same key starts a fresh run
 /// rather than replaying a stale cached outcome.
-pub(super) async fn single_flight<T, F, Fut>(registry: &SingleFlightRegistry<T>, key: String, make: F) -> T
+pub(super) async fn single_flight<T, F, Fut>(
+    registry: &SingleFlightRegistry<T>,
+    key: String,
+    make: F,
+) -> T
 where
     T: Clone,
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = T>,
 {
-    let map = registry.get_or_init(|| async { Mutex::new(HashMap::new()) }).await;
+    let map = registry
+        .get_or_init(|| async { Mutex::new(HashMap::new()) })
+        .await;
     let slot = map
         .lock()
         .unwrap()
@@ -816,7 +866,10 @@ pub async fn fetch_folder_share(
         let result = fetch_folder_share_once(share_url, store, state, &mut record)
             .await
             .map_err(|error| format!("{error:#}"));
-        SharedFetchOutcome { result, progress: recorded }
+        SharedFetchOutcome {
+            result,
+            progress: recorded,
+        }
     })
     .await;
 
@@ -876,7 +929,10 @@ async fn fetch_folder_share_once(
     let mut suffix = [0u8; 4];
     rand::thread_rng().fill_bytes(&mut suffix);
     let suffix_hex: String = suffix.iter().map(|b| format!("{b:02x}")).collect();
-    let request_id = format!("access-{}-{suffix_hex}", chrono::Utc::now().timestamp_millis());
+    let request_id = format!(
+        "access-{}-{suffix_hex}",
+        chrono::Utc::now().timestamp_millis()
+    );
 
     let request = ShareEnvelope {
         type_: "folder-access-request".to_string(),
@@ -895,7 +951,9 @@ async fn fetch_folder_share_once(
         folder_key_hash: Some(folder_key_hash_expected.clone()),
         target_node_id: Some(owner.clone()),
         request_id: Some(request_id.clone()),
-        sender_profile: Some(ShareProfile { name: "mistl".to_string() }),
+        sender_profile: Some(ShareProfile {
+            name: "mistl".to_string(),
+        }),
         access_public_key: Some(request_key.public_b64url.clone()),
         ..ShareEnvelope::default()
     };
@@ -962,7 +1020,11 @@ mod tests {
 
         assert_eq!(a, 42);
         assert_eq!(b, 42);
-        assert_eq!(runs.load(Ordering::SeqCst), 1, "maker must run exactly once for concurrent joiners");
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            1,
+            "maker must run exactly once for concurrent joiners"
+        );
     }
 
     #[tokio::test]
@@ -983,7 +1045,11 @@ mod tests {
 
         assert_eq!(first, 0);
         assert_eq!(second, 1);
-        assert_eq!(runs.load(Ordering::SeqCst), 2, "a call after completion must run again, not replay a cached value");
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            2,
+            "a call after completion must run again, not replay a cached value"
+        );
     }
 
     #[tokio::test]

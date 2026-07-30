@@ -81,7 +81,10 @@ mod tests {
     fn record_hello_reports_new_peer_once() {
         let mut m = Membership::new("self".into());
         let t0 = Instant::now();
-        assert!(m.record_hello("peer-a", t0), "first hello from a peer is new");
+        assert!(
+            m.record_hello("peer-a", t0),
+            "first hello from a peer is new"
+        );
         assert!(
             !m.record_hello("peer-a", t0 + Duration::from_secs(1)),
             "second hello from the same peer is a refresh, not new membership"
@@ -126,7 +129,10 @@ mod tests {
     #[test]
     fn remove_reports_whether_the_peer_was_known() {
         let mut m = Membership::new("self".into());
-        assert!(!m.remove("ghost"), "removing an unknown peer changes nothing");
+        assert!(
+            !m.remove("ghost"),
+            "removing an unknown peer changes nothing"
+        );
         m.record_hello("peer-a", Instant::now());
         assert!(m.remove("peer-a"));
         assert_eq!(m.peers_with_self(), vec!["self".to_string()]);

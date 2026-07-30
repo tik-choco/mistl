@@ -292,8 +292,10 @@ pub(super) fn folder_signature(
             folder.name
         )
     };
-    let mut sync_folders: Vec<&FolderRecord> =
-        folders.iter().filter(|f| ids.contains(f.id.as_str())).collect();
+    let mut sync_folders: Vec<&FolderRecord> = folders
+        .iter()
+        .filter(|f| ids.contains(f.id.as_str()))
+        .collect();
     sync_folders.sort_by(|a, b| {
         folder_sort_key(a)
             .cmp(&folder_sort_key(b))
@@ -301,8 +303,10 @@ pub(super) fn folder_signature(
     });
 
     // folderFilesForSync: descendant filter + (folderId, compareFilesForDisplay).
-    let mut sync_files: Vec<&FileRecord> =
-        files.iter().filter(|f| ids.contains(f.folder_id.as_str())).collect();
+    let mut sync_files: Vec<&FileRecord> = files
+        .iter()
+        .filter(|f| ids.contains(f.folder_id.as_str()))
+        .collect();
     sync_files.sort_by(|a, b| {
         let sort_order = |v: Option<f64>| v.filter(|n| n.is_finite()).unwrap_or(0.0);
         a.folder_id
@@ -467,7 +471,10 @@ mod tests {
         assert!(!signature.contains("Unrelated") && !signature.contains("z.txt"));
         let root_pos = signature.find("\"Root\"").expect("root present");
         let child_pos = signature.find("\"Child\"").expect("child present");
-        assert!(root_pos < child_pos, "parent sorts before child: {signature}");
+        assert!(
+            root_pos < child_pos,
+            "parent sorts before child: {signature}"
+        );
         assert_eq!(folder_signature("missing", &folders, &files), "");
     }
 }
@@ -542,10 +549,17 @@ where
 }
 
 async fn find_entry(store: &Store, folder_id: &str) -> Result<Option<SyncEntry>> {
-    Ok(read_entries(store).await?.into_iter().find(|e| e.folder_id == folder_id))
+    Ok(read_entries(store)
+        .await?
+        .into_iter()
+        .find(|e| e.folder_id == folder_id))
 }
 
-async fn update_entry(store: &Store, folder_id: &str, f: impl FnOnce(&mut SyncEntry)) -> Result<()> {
+async fn update_entry(
+    store: &Store,
+    folder_id: &str,
+    f: impl FnOnce(&mut SyncEntry),
+) -> Result<()> {
     with_entries(store, |entries| {
         if let Some(entry) = entries.iter_mut().find(|e| e.folder_id == folder_id) {
             f(entry);
@@ -584,7 +598,9 @@ fn build_folder_map(bundle: &super::domain::FolderBundle) -> HashMap<String, Fol
         None => HashMap::new(),
     };
     if !bundle.folder.id.is_empty() && !folder_share::folder_deleted(&bundle.folder) {
-        folders.entry(bundle.folder.id.clone()).or_insert_with(|| bundle.folder.clone());
+        folders
+            .entry(bundle.folder.id.clone())
+            .or_insert_with(|| bundle.folder.clone());
     }
     folders
 }
@@ -614,7 +630,11 @@ fn build_folder_map(bundle: &super::domain::FolderBundle) -> HashMap<String, Fol
 /// (`folder_signature`'s `localeCompare` note) of accepting a rare,
 /// self-correcting cosmetic misplacement rather than adding real complexity
 /// for owner-side data that's already inconsistent.
-fn file_target_rel(folders: &HashMap<String, FolderRecord>, folder_id: &str, file_name: &str) -> Option<String> {
+fn file_target_rel(
+    folders: &HashMap<String, FolderRecord>,
+    folder_id: &str,
+    file_name: &str,
+) -> Option<String> {
     let mut parts = folder_share::folder_path_parts(folders, folder_id);
     if parts.is_empty() {
         return None;
@@ -674,8 +694,10 @@ fn plan_resync(
         let previous = previous_files.iter().find(|f| f.file_id == file.id);
 
         let Some(rel) = file_target_rel(folders, &file.folder_id, &file.name) else {
-            plan.skipped
-                .push(format!("{}: unresolved folder {}", file.name, file.folder_id));
+            plan.skipped.push(format!(
+                "{}: unresolved folder {}",
+                file.name, file.folder_id
+            ));
             continue;
         };
         let cid = file
@@ -697,7 +719,11 @@ fn plan_resync(
                 plan.remove_paths.push(previous.rel_path.clone());
             }
         }
-        plan.fetch.push(FetchItem { file: file.clone(), rel, cid });
+        plan.fetch.push(FetchItem {
+            file: file.clone(),
+            rel,
+            cid,
+        });
     }
 
     for previous in previous_files {
@@ -862,11 +888,18 @@ const COLLISION_SUFFIX_LEN: usize = 8;
 /// itself), in which case `-<first 8 chars of folder_id>` is appended to
 /// disambiguate. Pure and offline so it's unit-testable without a live
 /// `Store`; [`register_sync`] is the only caller.
-fn sandbox_dir_name_for(folder_name: &str, folder_id: &str, existing: &[SyncEntry], sandbox_root: &Path) -> String {
+fn sandbox_dir_name_for(
+    folder_name: &str,
+    folder_id: &str,
+    existing: &[SyncEntry],
+    sandbox_root: &Path,
+) -> String {
     let base_name = folder_share::sanitize_name(folder_name);
-    let collides = existing
-        .iter()
-        .any(|e| e.folder_id != folder_id && sandbox_relative_dir(&e.local_dir, sandbox_root).as_deref() == Some(base_name.as_str()));
+    let collides = existing.iter().any(|e| {
+        e.folder_id != folder_id
+            && sandbox_relative_dir(&e.local_dir, sandbox_root).as_deref()
+                == Some(base_name.as_str())
+    });
     if collides {
         let suffix: String = folder_id.chars().take(COLLISION_SUFFIX_LEN).collect();
         format!("{base_name}-{suffix}")
@@ -927,7 +960,10 @@ pub async fn register_sync(
 
     let existing_entries = read_entries(store).await?;
     if let Some(existing) = existing_entries.iter().find(|e| e.folder_id == folder_id) {
-        bail!("already syncing folder {folder_id} ({})", existing.folder_name);
+        bail!(
+            "already syncing folder {folder_id} ({})",
+            existing.folder_name
+        );
     }
 
     let folder_name = share
@@ -944,8 +980,11 @@ pub async fn register_sync(
         Some(dir) => Sandbox::new(dir)?.root().to_path_buf(),
         None => {
             let sandbox_root = store.data_dir().join("sandbox");
-            let dir_name = sandbox_dir_name_for(&folder_name, &folder_id, &existing_entries, &sandbox_root);
-            Sandbox::new(sandbox_root.join(dir_name))?.root().to_path_buf()
+            let dir_name =
+                sandbox_dir_name_for(&folder_name, &folder_id, &existing_entries, &sandbox_root);
+            Sandbox::new(sandbox_root.join(dir_name))?
+                .root()
+                .to_path_buf()
         }
     };
 
@@ -1044,7 +1083,11 @@ async fn retry_sync_once(folder_id: &str, store: &Store, state: &Arc<AppState>) 
 /// and, on success, updating the persisted entry to [`STATUS_SYNCED`] with
 /// the granted key and fetched state. Progress is logged at debug level
 /// (there is no live CLI caller waiting on this -- see the module doc).
-async fn run_initial_handshake(entry: &SyncEntry, store: &Store, state: &Arc<AppState>) -> Result<()> {
+async fn run_initial_handshake(
+    entry: &SyncEntry,
+    store: &Store,
+    state: &Arc<AppState>,
+) -> Result<()> {
     let mut progress = |line: &str| debug!(folder_id = %entry.folder_id, "folder-sync: {line}");
 
     crate::net::ensure_started(state, entry.room_id.clone())
@@ -1054,14 +1097,20 @@ async fn run_initial_handshake(entry: &SyncEntry, store: &Store, state: &Arc<App
 
     let identity = crate::identity::current(state).await?;
 
-    progress(&format!("connecting to owner {}…", folder_share::short(&entry.owner_node_id)));
+    progress(&format!(
+        "connecting to owner {}…",
+        folder_share::short(&entry.owner_node_id)
+    ));
     folder_share::wait_for_peer(&entry.owner_node_id, Duration::from_secs(40)).await?;
 
     let request_key = folder_share::create_access_request_key();
     let mut suffix = [0u8; 4];
     rand::thread_rng().fill_bytes(&mut suffix);
     let suffix_hex: String = suffix.iter().map(|b| format!("{b:02x}")).collect();
-    let request_id = format!("access-{}-{suffix_hex}", chrono::Utc::now().timestamp_millis());
+    let request_id = format!(
+        "access-{}-{suffix_hex}",
+        chrono::Utc::now().timestamp_millis()
+    );
 
     let request = ShareEnvelope {
         type_: "folder-access-request".to_string(),
@@ -1074,7 +1123,9 @@ async fn run_initial_handshake(entry: &SyncEntry, store: &Store, state: &Arc<App
         folder_key_hash: Some(entry.folder_key_hash.clone()),
         target_node_id: Some(entry.owner_node_id.clone()),
         request_id: Some(request_id.clone()),
-        sender_profile: Some(ShareProfile { name: "mistl".to_string() }),
+        sender_profile: Some(ShareProfile {
+            name: "mistl".to_string(),
+        }),
         access_public_key: Some(request_key.public_b64url.clone()),
         ..ShareEnvelope::default()
     };
@@ -1100,7 +1151,10 @@ async fn run_initial_handshake(entry: &SyncEntry, store: &Store, state: &Arc<App
         }
     };
 
-    progress(&format!("fetching folder manifest ({})…", folder_share::short(&cid)));
+    progress(&format!(
+        "fetching folder manifest ({})…",
+        folder_share::short(&cid)
+    ));
     let bundle = folder_share::fetch_folder_bundle(store, &cid, &folder_key).await?;
     let folder_name = [bundle.folder.name.as_str(), entry.folder_name.as_str()]
         .into_iter()
@@ -1108,8 +1162,19 @@ async fn run_initial_handshake(entry: &SyncEntry, store: &Store, state: &Arc<App
         .unwrap_or("shared-folder")
         .to_string();
 
-    progress(&format!("folder {folder_name:?}: {} file(s)", bundle.files.len()));
-    let (files, folders) = sync_bundle(store, &entry.local_dir, &folder_key, &bundle, &[], &mut progress).await?;
+    progress(&format!(
+        "folder {folder_name:?}: {} file(s)",
+        bundle.files.len()
+    ));
+    let (files, folders) = sync_bundle(
+        store,
+        &entry.local_dir,
+        &folder_key,
+        &bundle,
+        &[],
+        &mut progress,
+    )
+    .await?;
 
     let now = chrono::Utc::now().to_rfc3339();
     update_entry(store, &entry.folder_id, move |e| {
@@ -1138,12 +1203,13 @@ async fn run_resync(entry: &SyncEntry, store: &Store, state: &Arc<AppState>) -> 
         .context("folder-sync: rejoining share room")?;
     broadcast_hello(&entry.room_id, state).await;
 
-    let cid = match folder_share::await_folder_state_cid(&entry.folder_id, Duration::from_secs(15)).await {
+    let cid = match folder_share::await_folder_state_cid(&entry.folder_id, Duration::from_secs(15))
+        .await
+    {
         Ok(cid) => cid,
-        Err(_) => entry
-            .last_cid
-            .clone()
-            .context("folder-sync: owner did not respond and no known folder state to retry against")?,
+        Err(_) => entry.last_cid.clone().context(
+            "folder-sync: owner did not respond and no known folder state to retry against",
+        )?,
     };
     full_resync(store, entry, &cid, None).await
 }
@@ -1151,7 +1217,11 @@ async fn run_resync(entry: &SyncEntry, store: &Store, state: &Arc<AppState>) -> 
 /// All persisted syncs, active or errored.
 pub async fn list_syncs(store: &Store) -> Result<Vec<SyncEntry>> {
     let sandbox_root = store.data_dir().join("sandbox");
-    Ok(read_entries(store).await?.into_iter().map(|entry| redact(entry, &sandbox_root)).collect())
+    Ok(read_entries(store)
+        .await?
+        .into_iter()
+        .map(|entry| redact(entry, &sandbox_root))
+        .collect())
 }
 
 /// Stop and forget the sync for `folder_id` (leaves its room refcount,
@@ -1176,7 +1246,11 @@ pub async fn stop_sync(folder_id: &str, store: &Store, _state: &Arc<AppState>) -
 // verified `ShareEnvelope` for a folder we're syncing.
 // ---------------------------------------------------------------------
 
-async fn apply_file_upsert(store: &Store, entry: &SyncEntry, envelope: &ShareEnvelope) -> Result<()> {
+async fn apply_file_upsert(
+    store: &Store,
+    entry: &SyncEntry,
+    envelope: &ShareEnvelope,
+) -> Result<()> {
     let Some(file) = envelope.file.clone() else {
         return Ok(());
     };
@@ -1189,7 +1263,11 @@ async fn apply_file_upsert(store: &Store, entry: &SyncEntry, envelope: &ShareEnv
 
     let folders = folder_map_from_records(&entry.folders);
     let Some(rel) = file_target_rel(&folders, &file.folder_id, &file.name) else {
-        bail!("file {}: unknown folder {} in local sync tree", file.name, file.folder_id);
+        bail!(
+            "file {}: unknown folder {} in local sync tree",
+            file.name,
+            file.folder_id
+        );
     };
     let cid = file
         .last_share_cid
@@ -1215,7 +1293,9 @@ async fn apply_file_upsert(store: &Store, entry: &SyncEntry, envelope: &ShareEnv
     {
         let _ = sandbox.remove(&previous.rel_path);
     }
-    let target = sandbox.resolve(&rel).with_context(|| format!("resolving {rel}"))?;
+    let target = sandbox
+        .resolve(&rel)
+        .with_context(|| format!("resolving {rel}"))?;
     if let Some(parent) = target.parent() {
         tokio::fs::create_dir_all(parent)
             .await
@@ -1241,7 +1321,11 @@ async fn apply_file_upsert(store: &Store, entry: &SyncEntry, envelope: &ShareEnv
     .await
 }
 
-async fn apply_file_delete(store: &Store, entry: &SyncEntry, envelope: &ShareEnvelope) -> Result<()> {
+async fn apply_file_delete(
+    store: &Store,
+    entry: &SyncEntry,
+    envelope: &ShareEnvelope,
+) -> Result<()> {
     let file_id = envelope
         .file_id
         .clone()
@@ -1268,13 +1352,19 @@ async fn apply_file_delete(store: &Store, entry: &SyncEntry, envelope: &ShareEnv
     .await
 }
 
-async fn handle_folder_change(store: &Store, entry: &SyncEntry, envelope: &ShareEnvelope) -> Result<()> {
+async fn handle_folder_change(
+    store: &Store,
+    entry: &SyncEntry,
+    envelope: &ShareEnvelope,
+) -> Result<()> {
     match envelope.change_type.as_deref() {
         Some("file-upserted") => apply_file_upsert(store, entry, envelope).await,
         Some("file-deleted") => apply_file_delete(store, entry, envelope).await,
         Some("folder-upserted") | Some("folder-deleted") => {
             match envelope.cid.clone().filter(|s| !s.is_empty()) {
-                Some(cid) => full_resync(store, entry, &cid, envelope.folder_signature.clone()).await,
+                Some(cid) => {
+                    full_resync(store, entry, &cid, envelope.folder_signature.clone()).await
+                }
                 // Structural change with no cid inline: wait for the
                 // owner's next `folder-state`/`folder-share` (<=60s, or
                 // immediately on our own next `hello`), which always
@@ -1286,7 +1376,11 @@ async fn handle_folder_change(store: &Store, entry: &SyncEntry, envelope: &Share
     }
 }
 
-async fn handle_folder_state(store: &Store, entry: &SyncEntry, envelope: &ShareEnvelope) -> Result<()> {
+async fn handle_folder_state(
+    store: &Store,
+    entry: &SyncEntry,
+    envelope: &ShareEnvelope,
+) -> Result<()> {
     let Some(cid) = envelope.cid.clone().filter(|s| !s.is_empty()) else {
         return Ok(());
     };
@@ -1297,7 +1391,10 @@ async fn handle_folder_state(store: &Store, entry: &SyncEntry, envelope: &ShareE
         // if we didn't already have one, so future comparisons have a real
         // value to compare against (see `resync_needed`'s doc).
         if entry.last_folder_signature.is_none() && signature.is_some() {
-            return update_entry(store, &entry.folder_id, move |e| e.last_folder_signature = signature).await;
+            return update_entry(store, &entry.folder_id, move |e| {
+                e.last_folder_signature = signature
+            })
+            .await;
         }
         return Ok(());
     }
@@ -1305,13 +1402,25 @@ async fn handle_folder_state(store: &Store, entry: &SyncEntry, envelope: &ShareE
     full_resync(store, entry, &cid, signature).await
 }
 
-async fn full_resync(store: &Store, entry: &SyncEntry, cid: &str, folder_signature: Option<String>) -> Result<()> {
+async fn full_resync(
+    store: &Store,
+    entry: &SyncEntry,
+    cid: &str,
+    folder_signature: Option<String>,
+) -> Result<()> {
     let bundle = folder_share::fetch_folder_bundle(store, cid, &entry.folder_key)
         .await
         .with_context(|| format!("fetching folder bundle {cid}"))?;
     let mut discard = |_line: &str| {};
-    let (files, folders) =
-        sync_bundle(store, &entry.local_dir, &entry.folder_key, &bundle, &entry.files, &mut discard).await?;
+    let (files, folders) = sync_bundle(
+        store,
+        &entry.local_dir,
+        &entry.folder_key,
+        &bundle,
+        &entry.files,
+        &mut discard,
+    )
+    .await?;
 
     let cid = cid.to_string();
     update_entry(store, &entry.folder_id, move |e| {
@@ -1377,10 +1486,15 @@ fn retry_unsynced_entries(entries: Vec<SyncEntry>, store: &Arc<Store>, state: &A
 }
 
 async fn run_background(state: Arc<AppState>) -> Result<()> {
-    let store = super::store(&state).await.context("folder-sync: opening store")?;
+    let store = super::store(&state)
+        .await
+        .context("folder-sync: opening store")?;
 
     let mut still_connecting = Vec::new();
-    for entry in read_entries(&store).await.context("folder-sync: loading sync table")? {
+    for entry in read_entries(&store)
+        .await
+        .context("folder-sync: loading sync table")?
+    {
         if entry.status != STATUS_SYNCED {
             // Handshake never finished (or errored) before the last
             // restart/shutdown: no room to rejoin yet in the "never
@@ -1565,7 +1679,10 @@ mod sync_tests {
         let loaded = read_entries_at(&dir.path()).await.expect("read");
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].folder_id, "folder-a");
-        assert_eq!(loaded[0].folder_key, "super-secret-key", "the real key must survive a restart");
+        assert_eq!(
+            loaded[0].folder_key, "super-secret-key",
+            "the real key must survive a restart"
+        );
         assert_eq!(loaded[0].room_id, "room-1");
     }
 
@@ -1588,7 +1705,11 @@ mod sync_tests {
         assert!(result.is_err());
 
         let loaded = read_entries_at(&dir.path()).await.unwrap();
-        assert_eq!(loaded.len(), 1, "a failed closure must not persist its partial mutation");
+        assert_eq!(
+            loaded.len(),
+            1,
+            "a failed closure must not persist its partial mutation"
+        );
     }
 
     #[tokio::test]
@@ -1607,7 +1728,10 @@ mod sync_tests {
         let sandbox_root = dir.path().join("unrelated-sandbox-root");
         let redacted = redact(entry.clone(), &sandbox_root);
         assert_eq!(redacted.folder_key, "");
-        assert_eq!(redacted.folder_id, entry.folder_id, "only the key is touched");
+        assert_eq!(
+            redacted.folder_id, entry.folder_id,
+            "only the key is touched"
+        );
         assert_eq!(redacted.room_id, entry.room_id);
     }
 
@@ -1626,7 +1750,10 @@ mod sync_tests {
         let outside = TempDir::new("redact-outside-dir");
         let entry = sample_entry("folder-a", &outside.path());
         let redacted = redact(entry, &root.path());
-        assert_eq!(redacted.sandbox_dir, "", "legacy / --dir entries have no sandbox_dir");
+        assert_eq!(
+            redacted.sandbox_dir, "",
+            "legacy / --dir entries have no sandbox_dir"
+        );
     }
 
     // -- sandbox subdirectory naming / collisions --------------------------
@@ -1643,7 +1770,10 @@ mod sync_tests {
         let sandbox_root = Path::new("/data/sandbox");
         let other = sample_entry("folder-other", &sandbox_root.join("Shared"));
         let name = sandbox_dir_name_for("Shared", "abcdefgh12345", &[other], sandbox_root);
-        assert_eq!(name, "Shared-abcdefgh", "disambiguated with the first 8 chars of the new folder_id");
+        assert_eq!(
+            name, "Shared-abcdefgh",
+            "disambiguated with the first 8 chars of the new folder_id"
+        );
     }
 
     #[test]
@@ -1681,21 +1811,32 @@ mod sync_tests {
     fn file_target_rel_drops_the_root_segment_and_keeps_the_rest() {
         let folders: HashMap<String, FolderRecord> = [
             ("root".to_string(), folder_rec("root", None, "Shared")),
-            ("child".to_string(), folder_rec("child", Some("root"), "Sub")),
+            (
+                "child".to_string(),
+                folder_rec("child", Some("root"), "Sub"),
+            ),
         ]
         .into_iter()
         .collect();
 
         // Root-level file: no folder prefix at all.
-        assert_eq!(file_target_rel(&folders, "root", "a.txt").as_deref(), Some("a.txt"));
+        assert_eq!(
+            file_target_rel(&folders, "root", "a.txt").as_deref(),
+            Some("a.txt")
+        );
         // Nested file: keeps the subfolder, drops "Shared".
-        assert_eq!(file_target_rel(&folders, "child", "b.txt").as_deref(), Some("Sub/b.txt"));
+        assert_eq!(
+            file_target_rel(&folders, "child", "b.txt").as_deref(),
+            Some("Sub/b.txt")
+        );
     }
 
     #[test]
     fn file_target_rel_sanitizes_traversal_attempts_into_harmless_components() {
         let folders: HashMap<String, FolderRecord> =
-            [("root".to_string(), folder_rec("root", None, ".."))].into_iter().collect();
+            [("root".to_string(), folder_rec("root", None, ".."))]
+                .into_iter()
+                .collect();
 
         // A malicious/pathological folder or file name can never smuggle a
         // `..`/`/` *path component* through -- `sanitize_name` replaces
@@ -1728,7 +1869,9 @@ mod sync_tests {
     // -- resync diff planning ----------------------------------------------
 
     fn root_folders() -> HashMap<String, FolderRecord> {
-        [("root".to_string(), folder_rec("root", None, "Shared"))].into_iter().collect()
+        [("root".to_string(), folder_rec("root", None, "Shared"))]
+            .into_iter()
+            .collect()
     }
 
     #[test]
@@ -1816,7 +1959,10 @@ mod sync_tests {
     fn plan_resync_moves_a_file_to_its_new_path_and_cleans_up_the_old_one() {
         let folders: HashMap<String, FolderRecord> = [
             ("root".to_string(), folder_rec("root", None, "Shared")),
-            ("child".to_string(), folder_rec("child", Some("root"), "Sub")),
+            (
+                "child".to_string(),
+                folder_rec("child", Some("root"), "Sub"),
+            ),
         ]
         .into_iter()
         .collect();
@@ -1830,10 +1976,17 @@ mod sync_tests {
         }];
 
         let plan = plan_resync(&bundle_files, &folders, &previous);
-        assert!(plan.reuse.is_empty(), "the target path changed, so this must be re-materialized");
+        assert!(
+            plan.reuse.is_empty(),
+            "the target path changed, so this must be re-materialized"
+        );
         assert_eq!(plan.fetch.len(), 1);
         assert_eq!(plan.fetch[0].rel, "Sub/a.txt");
-        assert_eq!(plan.remove_paths, vec!["a.txt".to_string()], "the old path must be cleaned up");
+        assert_eq!(
+            plan.remove_paths,
+            vec!["a.txt".to_string()],
+            "the old path must be cleaned up"
+        );
     }
 
     #[test]
@@ -1868,9 +2021,18 @@ mod sync_tests {
         entry.last_cid = Some("cid-1".to_string());
         entry.last_folder_signature = Some("sig-1".to_string());
 
-        assert!(!resync_needed(&entry, "cid-1", Some("sig-1")), "identical state: no resync");
-        assert!(resync_needed(&entry, "cid-2", Some("sig-1")), "cid changed: always resync");
-        assert!(resync_needed(&entry, "cid-2", None), "cid changed even with no signature to compare");
+        assert!(
+            !resync_needed(&entry, "cid-1", Some("sig-1")),
+            "identical state: no resync"
+        );
+        assert!(
+            resync_needed(&entry, "cid-2", Some("sig-1")),
+            "cid changed: always resync"
+        );
+        assert!(
+            resync_needed(&entry, "cid-2", None),
+            "cid changed even with no signature to compare"
+        );
     }
 
     #[test]
@@ -1886,7 +2048,10 @@ mod sync_tests {
         );
 
         entry.last_folder_signature = Some("sig-old".to_string());
-        assert!(resync_needed(&entry, "cid-1", Some("sig-new")), "same cid but signature diverged");
+        assert!(
+            resync_needed(&entry, "cid-1", Some("sig-new")),
+            "same cid but signature diverged"
+        );
         assert!(
             !resync_needed(&entry, "cid-1", None),
             "same cid, announce carries no signature: cid alone says nothing changed"

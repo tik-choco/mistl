@@ -89,12 +89,22 @@ pub struct ProviderInfo {
 /// Internal events routed to an in-flight [`Consumer::request`] call.
 #[derive(Debug, Clone)]
 enum Event {
-    Chunk { delta: String, seq: Option<u64> },
-    Done { content: Option<String> },
+    Chunk {
+        delta: String,
+        seq: Option<u64>,
+    },
+    Done {
+        content: Option<String>,
+    },
     /// `code` is the wire `llm_error.code` (e.g. `"unsupported_service"`),
     /// when present.
-    Error { message: String, code: Option<String> },
-    Rejected { reason: String },
+    Error {
+        message: String,
+        code: Option<String>,
+    },
+    Rejected {
+        reason: String,
+    },
 }
 
 /// Consumer state: provider lock + in-flight requests.
@@ -127,7 +137,11 @@ impl Consumer {
     /// at all -- see the module doc's "Discovery" section.
     pub fn handle_message(&self, from: &str, msg: &ProtocolMessage) {
         match msg {
-            ProtocolMessage::ProviderHello { models, services, voices } => {
+            ProtocolMessage::ProviderHello {
+                models,
+                services,
+                voices,
+            } => {
                 if !protocol::advertises_service(services, protocol::SERVICE_CHAT) {
                     debug!(
                         %from,
@@ -326,7 +340,9 @@ impl Consumer {
                         }
                     }
                 },
-                Event::Done { content: final_content } => {
+                Event::Done {
+                    content: final_content,
+                } => {
                     return Ok(final_content.unwrap_or(content));
                 }
                 Event::Error { message, code } => {
@@ -461,8 +477,14 @@ mod tests {
         let consumer = Consumer::new(send);
         let c2 = consumer.clone();
         let handle = tokio::spawn(async move {
-            c2.request("provider1", vec![chat("hi")], None, Duration::from_millis(500), None)
-                .await
+            c2.request(
+                "provider1",
+                vec![chat("hi")],
+                None,
+                Duration::from_millis(500),
+                None,
+            )
+            .await
         });
         sleep(Duration::from_millis(20)).await;
         let id = last_request_id(&sent);
@@ -510,8 +532,14 @@ mod tests {
         let consumer = Consumer::new(send);
         let c2 = consumer.clone();
         let handle = tokio::spawn(async move {
-            c2.request("provider1", vec![chat("hi")], None, Duration::from_millis(500), None)
-                .await
+            c2.request(
+                "provider1",
+                vec![chat("hi")],
+                None,
+                Duration::from_millis(500),
+                None,
+            )
+            .await
         });
         sleep(Duration::from_millis(20)).await;
         let id = last_request_id(&sent);
@@ -544,8 +572,14 @@ mod tests {
         let consumer = Consumer::new(send);
         let c2 = consumer.clone();
         let handle = tokio::spawn(async move {
-            c2.request("provider1", vec![chat("hi")], None, Duration::from_millis(500), None)
-                .await
+            c2.request(
+                "provider1",
+                vec![chat("hi")],
+                None,
+                Duration::from_millis(500),
+                None,
+            )
+            .await
         });
         sleep(Duration::from_millis(20)).await;
         let id = last_request_id(&sent);
@@ -576,8 +610,14 @@ mod tests {
         let consumer = Consumer::new(send);
         let c2 = consumer.clone();
         let handle = tokio::spawn(async move {
-            c2.request("provider1", vec![chat("hi")], None, Duration::from_millis(500), None)
-                .await
+            c2.request(
+                "provider1",
+                vec![chat("hi")],
+                None,
+                Duration::from_millis(500),
+                None,
+            )
+            .await
         });
         sleep(Duration::from_millis(20)).await;
         let id = last_request_id(&sent);
@@ -607,10 +647,19 @@ mod tests {
         let (send, _sent) = fake_send();
         let consumer = Consumer::new(send);
         let result = consumer
-            .request("provider1", vec![chat("hi")], None, Duration::from_millis(60), None)
+            .request(
+                "provider1",
+                vec![chat("hi")],
+                None,
+                Duration::from_millis(60),
+                None,
+            )
             .await;
         let err = result.unwrap_err();
-        assert!(err.to_string().contains("timed out"), "unexpected error: {err}");
+        assert!(
+            err.to_string().contains("timed out"),
+            "unexpected error: {err}"
+        );
     }
 
     #[tokio::test]
@@ -619,8 +668,14 @@ mod tests {
         let consumer = Consumer::new(send);
         let c2 = consumer.clone();
         let handle = tokio::spawn(async move {
-            c2.request("provider1", vec![chat("hi")], None, Duration::from_millis(150), None)
-                .await
+            c2.request(
+                "provider1",
+                vec![chat("hi")],
+                None,
+                Duration::from_millis(150),
+                None,
+            )
+            .await
         });
         sleep(Duration::from_millis(20)).await;
         let id = last_request_id(&sent);
@@ -664,8 +719,14 @@ mod tests {
         let consumer = Consumer::new(send);
         let c2 = consumer.clone();
         let handle = tokio::spawn(async move {
-            c2.request("provider1", vec![chat("hi")], None, Duration::from_millis(100), None)
-                .await
+            c2.request(
+                "provider1",
+                vec![chat("hi")],
+                None,
+                Duration::from_millis(100),
+                None,
+            )
+            .await
         });
         sleep(Duration::from_millis(20)).await;
         let id = last_request_id(&sent);
@@ -681,7 +742,10 @@ mod tests {
         // No further activity for longer than the inactivity timeout.
         let result = handle.await.unwrap();
         let err = result.unwrap_err();
-        assert!(err.to_string().contains("timed out"), "unexpected error: {err}");
+        assert!(
+            err.to_string().contains("timed out"),
+            "unexpected error: {err}"
+        );
     }
 
     #[tokio::test]
@@ -690,8 +754,14 @@ mod tests {
         let consumer = Consumer::new(send);
         let c2 = consumer.clone();
         let handle = tokio::spawn(async move {
-            c2.request("provider1", vec![chat("hi")], None, Duration::from_millis(500), None)
-                .await
+            c2.request(
+                "provider1",
+                vec![chat("hi")],
+                None,
+                Duration::from_millis(500),
+                None,
+            )
+            .await
         });
         sleep(Duration::from_millis(20)).await;
         let id = last_request_id(&sent);
@@ -715,8 +785,14 @@ mod tests {
         let consumer = Consumer::new(send);
         let c2 = consumer.clone();
         let handle = tokio::spawn(async move {
-            c2.request("provider1", vec![chat("hi")], None, Duration::from_millis(500), None)
-                .await
+            c2.request(
+                "provider1",
+                vec![chat("hi")],
+                None,
+                Duration::from_millis(500),
+                None,
+            )
+            .await
         });
         sleep(Duration::from_millis(20)).await;
         let id = last_request_id(&sent);
@@ -731,7 +807,10 @@ mod tests {
         );
 
         let err = handle.await.unwrap().unwrap_err();
-        assert_eq!(err.to_string(), "chat not supported (code: unsupported_service)");
+        assert_eq!(
+            err.to_string(),
+            "chat not supported (code: unsupported_service)"
+        );
     }
 
     #[tokio::test]
@@ -741,12 +820,24 @@ mod tests {
         let c2 = consumer.clone();
         let c3 = consumer.clone();
         let h1 = tokio::spawn(async move {
-            c2.request("provider1", vec![chat("hi")], None, Duration::from_secs(5), None)
-                .await
+            c2.request(
+                "provider1",
+                vec![chat("hi")],
+                None,
+                Duration::from_secs(5),
+                None,
+            )
+            .await
         });
         let h2 = tokio::spawn(async move {
-            c3.request("provider1", vec![chat("yo")], None, Duration::from_secs(5), None)
-                .await
+            c3.request(
+                "provider1",
+                vec![chat("yo")],
+                None,
+                Duration::from_secs(5),
+                None,
+            )
+            .await
         });
         sleep(Duration::from_millis(20)).await;
         assert_eq!(consumer.pending.lock().unwrap().len(), 2);
@@ -810,7 +901,10 @@ mod tests {
 
         let info = consumer.provider().unwrap();
         assert_eq!(info.node_id, "p1");
-        assert_eq!(info.models, vec!["gpt-4o".to_string(), "gpt-4o-mini".to_string()]);
+        assert_eq!(
+            info.models,
+            vec!["gpt-4o".to_string(), "gpt-4o-mini".to_string()]
+        );
 
         // Only the first hello should have triggered a consumer_hello reply.
         let consumer_hellos = sent
@@ -837,7 +931,10 @@ mod tests {
         );
 
         let info = consumer.provider().expect("should be locked in");
-        assert_eq!(info.services, Some(vec!["chat".to_string(), "tts".to_string()]));
+        assert_eq!(
+            info.services,
+            Some(vec!["chat".to_string(), "tts".to_string()])
+        );
         assert_eq!(info.voices, Some(vec!["alloy".to_string()]));
     }
 
@@ -859,8 +956,15 @@ mod tests {
             },
         );
 
-        assert!(consumer.provider().is_none(), "must not lock onto a non-chat provider");
-        let sent_to_voice_only = sent.lock().unwrap().iter().any(|(to, _)| to == "voice-only");
+        assert!(
+            consumer.provider().is_none(),
+            "must not lock onto a non-chat provider"
+        );
+        let sent_to_voice_only = sent
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(to, _)| to == "voice-only");
         assert!(
             !sent_to_voice_only,
             "must not reply consumer_hello to a non-chat provider"
@@ -895,9 +999,9 @@ mod tests {
         assert_eq!(info.node_id, "chat-provider");
         let sent = sent.lock().unwrap();
         assert!(
-            sent.iter().any(
-                |(to, msg)| to == "chat-provider" && matches!(msg, ProtocolMessage::ConsumerHello)
-            ),
+            sent.iter()
+                .any(|(to, msg)| to == "chat-provider"
+                    && matches!(msg, ProtocolMessage::ConsumerHello)),
             "expected a consumer_hello reply to the chat provider, got: {sent:?}"
         );
     }
@@ -913,7 +1017,11 @@ mod tests {
 
         consumer.handle_message(
             "legacy-provider",
-            &ProtocolMessage::ProviderHello { models: None, services: None, voices: None },
+            &ProtocolMessage::ProviderHello {
+                models: None,
+                services: None,
+                voices: None,
+            },
         );
 
         let info = consumer.provider().expect("should be locked in");
@@ -927,7 +1035,11 @@ mod tests {
 
         consumer.handle_message(
             "p1",
-            &ProtocolMessage::ProviderHello { models: None, services: None, voices: None },
+            &ProtocolMessage::ProviderHello {
+                models: None,
+                services: None,
+                voices: None,
+            },
         );
         consumer.handle_message(
             "p2",
@@ -951,7 +1063,11 @@ mod tests {
         let consumer = Consumer::new(send);
         consumer.handle_message(
             "p1",
-            &ProtocolMessage::ProviderHello { models: None, services: None, voices: None },
+            &ProtocolMessage::ProviderHello {
+                models: None,
+                services: None,
+                voices: None,
+            },
         );
         assert!(consumer.provider().is_some());
 
@@ -976,7 +1092,11 @@ mod tests {
         let consumer = Consumer::new(send);
         consumer.handle_message(
             "p1",
-            &ProtocolMessage::ProviderHello { models: None, services: None, voices: None },
+            &ProtocolMessage::ProviderHello {
+                models: None,
+                services: None,
+                voices: None,
+            },
         );
 
         consumer.on_peer_disconnected("someone-else");
@@ -990,7 +1110,8 @@ mod tests {
         let consumer = Consumer::new(send);
         let c2 = consumer.clone();
 
-        let handle = tokio::spawn(async move { c2.wait_for_provider(Duration::from_secs(5)).await });
+        let handle =
+            tokio::spawn(async move { c2.wait_for_provider(Duration::from_secs(5)).await });
         sleep(Duration::from_millis(30)).await;
         consumer.handle_message(
             "p1",
@@ -1005,7 +1126,10 @@ mod tests {
         assert_eq!(info.node_id, "p1");
 
         // Already locked in: returns immediately, well within a tiny timeout.
-        let info2 = consumer.wait_for_provider(Duration::from_millis(10)).await.unwrap();
+        let info2 = consumer
+            .wait_for_provider(Duration::from_millis(10))
+            .await
+            .unwrap();
         assert_eq!(info2.node_id, "p1");
     }
 

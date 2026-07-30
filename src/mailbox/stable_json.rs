@@ -21,13 +21,23 @@ pub fn stable_stringify(value: &Value) -> String {
             entries.sort_by(|(a, _), (b, _)| a.cmp(b));
             let body = entries
                 .iter()
-                .map(|(key, val)| format!("{}:{}", serde_json::to_string(key).unwrap(), stable_stringify(val)))
+                .map(|(key, val)| {
+                    format!(
+                        "{}:{}",
+                        serde_json::to_string(key).unwrap(),
+                        stable_stringify(val)
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join(",");
             format!("{{{body}}}")
         }
         Value::Array(items) => {
-            let body = items.iter().map(stable_stringify).collect::<Vec<_>>().join(",");
+            let body = items
+                .iter()
+                .map(stable_stringify)
+                .collect::<Vec<_>>()
+                .join(",");
             format!("[{body}]")
         }
         _ => serde_json::to_string(value).unwrap(),

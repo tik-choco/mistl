@@ -77,7 +77,9 @@ impl CaptureBackend {
             "native" => Ok(Self::Native),
             "ffmpeg" => Ok(Self::Ffmpeg),
             other => {
-                bail!("invalid stream.capture_backend {other:?}; valid values: \"native\", \"ffmpeg\"")
+                bail!(
+                    "invalid stream.capture_backend {other:?}; valid values: \"native\", \"ffmpeg\""
+                )
             }
         }
     }
@@ -116,7 +118,10 @@ impl Backend {
     /// forward task and stops the Windows Graphics Capture thread.
     async fn stop(self) {
         match self {
-            Backend::Ffmpeg { capture, ingest_task } => {
+            Backend::Ffmpeg {
+                capture,
+                ingest_task,
+            } => {
                 ingest_task.abort();
                 capture.stop().await;
             }
@@ -232,15 +237,24 @@ fn parse_selftest_opts(args: &Value) -> Result<selftest::SelfTestOpts> {
         None | Some("aac") => Some(rtp_out::AudioCodec::Aac),
         Some("opus") => Some(rtp_out::AudioCodec::Opus),
         Some("none") => None,
-        Some(other) => bail!("invalid selftest audio {other:?}; valid values: \"aac\", \"opus\", \"none\""),
+        Some(other) => {
+            bail!("invalid selftest audio {other:?}; valid values: \"aac\", \"opus\", \"none\"")
+        }
     };
-    let as_u32 = |key: &str, fallback: u32| args.get(key).and_then(Value::as_u64).map_or(fallback, |v| v as u32);
+    let as_u32 = |key: &str, fallback: u32| {
+        args.get(key)
+            .and_then(Value::as_u64)
+            .map_or(fallback, |v| v as u32)
+    };
     Ok(selftest::SelfTestOpts {
         width: as_u32("width", defaults.width),
         height: as_u32("height", defaults.height),
         frame_rate: as_u32("fps", defaults.frame_rate),
         audio,
-        duration: args.get("seconds").and_then(Value::as_u64).map(Duration::from_secs),
+        duration: args
+            .get("seconds")
+            .and_then(Value::as_u64)
+            .map(Duration::from_secs),
     })
 }
 
@@ -284,7 +298,9 @@ async fn start(
         parsed.path().to_string()
     };
 
-    let bind_ip: IpAddr = host.parse().unwrap_or_else(|_| "127.0.0.1".parse().expect("valid IP"));
+    let bind_ip: IpAddr = host
+        .parse()
+        .unwrap_or_else(|_| "127.0.0.1".parse().expect("valid IP"));
     let bind_addr = SocketAddr::new(bind_ip, port);
 
     let rtsp = rtsp::RtspServer::start(bind_addr, cfg.frame_rate, audio)
@@ -326,7 +342,9 @@ async fn start(
     };
 
     let advertise_host = if bind_ip.is_unspecified() {
-        lan_ip().map(|ip| ip.to_string()).unwrap_or_else(|| "127.0.0.1".to_string())
+        lan_ip()
+            .map(|ip| ip.to_string())
+            .unwrap_or_else(|| "127.0.0.1".to_string())
     } else {
         host
     };
@@ -368,7 +386,10 @@ async fn start_ffmpeg_backend(cfg: &StreamConfig, rtsp: &Arc<rtsp::RtspServer>) 
         }
     });
 
-    Ok(Backend::Ffmpeg { capture, ingest_task })
+    Ok(Backend::Ffmpeg {
+        capture,
+        ingest_task,
+    })
 }
 
 #[cfg(windows)]
@@ -379,7 +400,10 @@ async fn start_native_backend(cfg: &StreamConfig, rtsp: &Arc<rtsp::RtspServer>) 
 }
 
 #[cfg(not(windows))]
-async fn start_native_backend(_cfg: &StreamConfig, _rtsp: &Arc<rtsp::RtspServer>) -> Result<Backend> {
+async fn start_native_backend(
+    _cfg: &StreamConfig,
+    _rtsp: &Arc<rtsp::RtspServer>,
+) -> Result<Backend> {
     bail!(
         "stream.capture_backend = \"native\" is only supported on Windows; set \
          stream.capture_backend = \"ffmpeg\" on this platform"
@@ -433,7 +457,8 @@ async fn status() -> Result<Value> {
             // Delivery-aware siblings of the above: age since media was last
             // actually dispatched to a *playing* RTSP session, not just
             // received from the browser -- see `RtspServer::delivered_flow_ages_ms`.
-            let (video_delivered_age_ms, audio_delivered_age_ms) = pipeline.rtsp.delivered_flow_ages_ms().await;
+            let (video_delivered_age_ms, audio_delivered_age_ms) =
+                pipeline.rtsp.delivered_flow_ages_ms().await;
             let mut value = json!({
                 "running": true,
                 "rtsp_url": pipeline.rtsp_url,
@@ -495,8 +520,14 @@ mod tests {
 
     #[test]
     fn parses_known_backend_names() {
-        assert_eq!(CaptureBackend::parse("native").unwrap(), CaptureBackend::Native);
-        assert_eq!(CaptureBackend::parse("ffmpeg").unwrap(), CaptureBackend::Ffmpeg);
+        assert_eq!(
+            CaptureBackend::parse("native").unwrap(),
+            CaptureBackend::Native
+        );
+        assert_eq!(
+            CaptureBackend::parse("ffmpeg").unwrap(),
+            CaptureBackend::Ffmpeg
+        );
     }
 
     #[test]

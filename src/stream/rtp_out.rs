@@ -98,7 +98,12 @@ pub struct RtpHeaderFields {
 }
 
 /// Serialize one RTP packet (12-byte fixed header + payload) to wire bytes.
-pub fn serialize_rtp_packet(payload_type: u8, ssrc: u32, fields: RtpHeaderFields, payload: &[u8]) -> Vec<u8> {
+pub fn serialize_rtp_packet(
+    payload_type: u8,
+    ssrc: u32,
+    fields: RtpHeaderFields,
+    payload: &[u8],
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(12 + payload.len());
     out.push(0x80); // V=2, P=0, X=0, CC=0
     out.push(payload_type | if fields.marker { 0x80 } else { 0 });
@@ -262,7 +267,14 @@ mod tests {
 
     #[test]
     fn sender_report_has_expected_28_byte_layout() {
-        let bytes = serialize_sender_report(VIDEO_SSRC, 0x1122_3344, 0x5566_7788, 0x9900_1122, 42, 12_345);
+        let bytes = serialize_sender_report(
+            VIDEO_SSRC,
+            0x1122_3344,
+            0x5566_7788,
+            0x9900_1122,
+            42,
+            12_345,
+        );
         assert_eq!(bytes.len(), 28);
         assert_eq!(bytes[0], 0x80); // V=2 P=0 RC=0
         assert_eq!(bytes[1], 200); // PT=200 SR

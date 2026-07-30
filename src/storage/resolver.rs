@@ -137,11 +137,19 @@ impl PeerResolver for RoomPeerResolver {
             return None;
         }
 
-        match tokio::time::timeout(scope.timeout, self.resolve_within(cid, &scope.rooms, scope.timeout)).await {
+        match tokio::time::timeout(
+            scope.timeout,
+            self.resolve_within(cid, &scope.rooms, scope.timeout),
+        )
+        .await
+        {
             Ok(data) => data,
             Err(_) => {
                 REGISTRY.cancel(cid);
-                tracing::debug!("storage: resolve_block({cid}) timed out after {:?}", scope.timeout);
+                tracing::debug!(
+                    "storage: resolve_block({cid}) timed out after {:?}",
+                    scope.timeout
+                );
                 None
             }
         }
@@ -155,7 +163,12 @@ impl RoomPeerResolver {
     /// transport" (mistl has no such registry -- see the module doc
     /// comment). Bounded by the outer `tokio::time::timeout` in
     /// [`PeerResolver::resolve_block`] above, not by anything in here.
-    async fn resolve_within(&self, cid: &str, rooms: &[String], budget: Duration) -> Option<Vec<u8>> {
+    async fn resolve_within(
+        &self,
+        cid: &str,
+        rooms: &[String],
+        budget: Duration,
+    ) -> Option<Vec<u8>> {
         let mut known_peers = REGISTRY.get_peers(cid);
         if known_peers.is_empty() {
             tracing::debug!("storage: discovery phase for {cid}");
@@ -175,7 +188,10 @@ impl RoomPeerResolver {
                 if let Ok(Ok(data)) = tokio::time::timeout(per_attempt, rx_data).await {
                     return Some(data);
                 }
-                tracing::debug!("storage: peer {} did not deliver {cid}, failing over", target.0);
+                tracing::debug!(
+                    "storage: peer {} did not deliver {cid}, failing over",
+                    target.0
+                );
             }
         }
 
@@ -317,11 +333,20 @@ mod tests {
     #[test]
     fn per_peer_timeout_is_clamped_to_a_sane_range() {
         // Below the floor: too-small a budget still gets a fighting chance.
-        assert_eq!(per_peer_timeout(Duration::from_millis(1)), Duration::from_millis(300));
+        assert_eq!(
+            per_peer_timeout(Duration::from_millis(1)),
+            Duration::from_millis(300)
+        );
         // Within range: a third of the budget, unclamped.
-        assert_eq!(per_peer_timeout(Duration::from_secs(5)), Duration::from_secs(5) / 3);
+        assert_eq!(
+            per_peer_timeout(Duration::from_secs(5)),
+            Duration::from_secs(5) / 3
+        );
         // Above the ceiling: one huge peer attempt can't eat the whole budget.
-        assert_eq!(per_peer_timeout(Duration::from_secs(30)), Duration::from_secs(3));
+        assert_eq!(
+            per_peer_timeout(Duration::from_secs(30)),
+            Duration::from_secs(3)
+        );
     }
 
     #[tokio::test]
@@ -349,9 +374,12 @@ mod tests {
         // trait method directly): falls back to the same "no rooms" empty
         // scope rather than panicking or hanging.
         let resolver = RoomPeerResolver::new();
-        let result = tokio::time::timeout(Duration::from_millis(200), resolver.resolve_block("bsome-other-cid"))
-            .await
-            .expect("resolve_block should return promptly outside any scope");
+        let result = tokio::time::timeout(
+            Duration::from_millis(200),
+            resolver.resolve_block("bsome-other-cid"),
+        )
+        .await
+        .expect("resolve_block should return promptly outside any scope");
         assert_eq!(result, None);
     }
 }

@@ -231,7 +231,10 @@ mod tests {
         let long_input = "a".repeat(MAX_INPUT_CHARS + 1);
         let err = validate(&params(&long_input)).expect_err("over-limit input should error");
         let msg = err.to_string();
-        assert!(msg.contains("4096"), "error should mention the limit: {msg}");
+        assert!(
+            msg.contains("4096"),
+            "error should mention the limit: {msg}"
+        );
     }
 
     #[test]
@@ -273,7 +276,10 @@ mod tests {
         assert_eq!(body["voice"], json!("alloy"));
         assert_eq!(body["input"], json!("read this aloud"));
         assert_eq!(body["response_format"], json!("mp3"));
-        assert!(body.get("speed").is_none(), "speed should be omitted when not set");
+        assert!(
+            body.get("speed").is_none(),
+            "speed should be omitted when not set"
+        );
     }
 
     #[test]
@@ -320,13 +326,14 @@ mod tests {
             .expect_err("over-limit input should error");
         assert!(err.to_string().contains("4096"));
 
-        let was_contacted = tokio::time::timeout(
-            std::time::Duration::from_millis(150),
-            notify.notified(),
-        )
-        .await
-        .is_ok();
-        assert!(!was_contacted, "no request should be sent for invalid input");
+        let was_contacted =
+            tokio::time::timeout(std::time::Duration::from_millis(150), notify.notified())
+                .await
+                .is_ok();
+        assert!(
+            !was_contacted,
+            "no request should be sent for invalid input"
+        );
 
         server.abort();
     }

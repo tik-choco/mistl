@@ -111,7 +111,9 @@ pub fn decrypt(passphrase: &str, envelope_json: &str) -> Result<Vec<u8>> {
     let salt = BASE64
         .decode(&envelope.salt)
         .map_err(|e| anyhow!("invalid salt: {e}"))?;
-    let iv = BASE64.decode(&envelope.iv).map_err(|e| anyhow!("invalid iv: {e}"))?;
+    let iv = BASE64
+        .decode(&envelope.iv)
+        .map_err(|e| anyhow!("invalid iv: {e}"))?;
     let cipher_text = BASE64
         .decode(&envelope.cipher_text)
         .map_err(|e| anyhow!("invalid ciphertext: {e}"))?;

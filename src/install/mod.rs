@@ -83,8 +83,8 @@ pub async fn handle(cmd: &str, args: Value, _state: &Arc<AppState>) -> Result<Va
 /// Fixed per-user install directory: `%LOCALAPPDATA%\Programs\mistl` on
 /// Windows, `$XDG_BIN_HOME` or `~/.local/bin` on Unix.
 pub fn install_dir() -> Result<PathBuf> {
-    let base = directories::BaseDirs::new()
-        .context("install: could not determine the home directory")?;
+    let base =
+        directories::BaseDirs::new().context("install: could not determine the home directory")?;
     if cfg!(windows) {
         Ok(base.data_local_dir().join("Programs").join("mistl"))
     } else {
@@ -123,7 +123,8 @@ pub fn install(enable_autostart: bool) -> Result<PathBuf> {
     let current = std::env::current_exe().context("install: resolving current executable")?;
     let dir = install_dir()?;
     let dest = installed_exe_path()?;
-    std::fs::create_dir_all(&dir).with_context(|| format!("install: creating {}", dir.display()))?;
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("install: creating {}", dir.display()))?;
 
     if paths_equal(&current, &dest) {
         info!(exe = %dest.display(), "install: already running from the install dir; skipping self-copy");
@@ -136,7 +137,10 @@ pub fn install(enable_autostart: bool) -> Result<PathBuf> {
                 let old = dest.with_extension("old");
                 let _ = std::fs::remove_file(&old);
                 std::fs::rename(&dest, &old).with_context(|| {
-                    format!("install: moving the existing {} out of the way", dest.display())
+                    format!(
+                        "install: moving the existing {} out of the way",
+                        dest.display()
+                    )
                 })?;
                 // Fails while the old exe still runs; a stale `.old` is harmless.
                 let _ = std::fs::remove_file(&old);
@@ -273,7 +277,9 @@ pub fn autostart_enabled() -> bool {
 /// Whether the per-user autostart entry currently exists.
 #[cfg(not(windows))]
 pub fn autostart_enabled() -> bool {
-    autostart_file_path().map(|path| path.exists()).unwrap_or(false)
+    autostart_file_path()
+        .map(|path| path.exists())
+        .unwrap_or(false)
 }
 
 #[cfg(windows)]
@@ -301,8 +307,7 @@ fn write_or_remove_autostart_file(enabled: bool, render: fn(&Path) -> String) ->
             // Already absent: disabling is idempotent.
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("install: removing {}", path.display()));
+                return Err(error).with_context(|| format!("install: removing {}", path.display()));
             }
         }
     }
@@ -311,15 +316,15 @@ fn write_or_remove_autostart_file(enabled: bool, render: fn(&Path) -> String) ->
 
 #[cfg(all(unix, not(target_os = "macos")))]
 fn autostart_file_path() -> Result<PathBuf> {
-    let base = directories::BaseDirs::new()
-        .context("install: could not determine the home directory")?;
+    let base =
+        directories::BaseDirs::new().context("install: could not determine the home directory")?;
     Ok(base.config_dir().join("autostart").join("mistl.desktop"))
 }
 
 #[cfg(target_os = "macos")]
 fn autostart_file_path() -> Result<PathBuf> {
-    let base = directories::BaseDirs::new()
-        .context("install: could not determine the home directory")?;
+    let base =
+        directories::BaseDirs::new().context("install: could not determine the home directory")?;
     Ok(base
         .home_dir()
         .join("Library")
@@ -402,8 +407,8 @@ fn paths_equal(a: &Path, b: &Path) -> bool {
 
 #[cfg(windows)]
 fn start_menu_shortcut_path() -> Result<PathBuf> {
-    let base = directories::BaseDirs::new()
-        .context("install: could not determine the home directory")?;
+    let base =
+        directories::BaseDirs::new().context("install: could not determine the home directory")?;
     // data_dir() is %APPDATA% (Roaming) on Windows.
     Ok(base
         .data_dir()
@@ -479,7 +484,10 @@ mod tests {
     fn autostart_command_quotes_the_exe_and_runs_the_daemon_headless() {
         let command = autostart_command(Path::new(r"C:\Users\Jo Do\mistl.exe"));
         assert_eq!(command, r#""C:\Users\Jo Do\mistl.exe" daemon run"#);
-        assert!(command.ends_with("daemon run"), "must not launch the dashboard");
+        assert!(
+            command.ends_with("daemon run"),
+            "must not launch the dashboard"
+        );
     }
 
     #[test]

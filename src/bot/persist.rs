@@ -307,7 +307,12 @@ mod tests {
         assert_eq!(processed.len(), 3);
 
         // A different pipeline id has entirely separate state.
-        assert!(load_processed(&dir, "other-pipeline").await.unwrap().is_empty());
+        assert!(
+            load_processed(&dir, "other-pipeline")
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -320,11 +325,16 @@ mod tests {
     #[tokio::test]
     async fn processed_ids_cap_drops_oldest_first() {
         let dir = scratch_dir("processed-cap");
-        let ids: Vec<String> = (0..(PROCESSED_IDS_CAP + 10)).map(|i| format!("id-{i}")).collect();
+        let ids: Vec<String> = (0..(PROCESSED_IDS_CAP + 10))
+            .map(|i| format!("id-{i}"))
+            .collect();
         mark_processed(&dir, "news-audio", &ids).await.unwrap();
         let processed = load_processed(&dir, "news-audio").await.unwrap();
         assert_eq!(processed.len(), PROCESSED_IDS_CAP);
-        assert!(!processed.contains("id-0"), "oldest entries must be dropped");
+        assert!(
+            !processed.contains("id-0"),
+            "oldest entries must be dropped"
+        );
         assert!(processed.contains(&format!("id-{}", PROCESSED_IDS_CAP + 9)));
     }
 
@@ -356,12 +366,23 @@ mod tests {
             // including this item must be present, and nothing after it
             // (proving the loop hasn't secretly pre-committed later items).
             let processed = load_processed(&dir, "news-audio").await.unwrap();
-            assert_eq!(processed.len(), i + 1, "expected exactly {} processed ids after item {i}", i + 1);
+            assert_eq!(
+                processed.len(),
+                i + 1,
+                "expected exactly {} processed ids after item {i}",
+                i + 1
+            );
             for done in &delivered_ids[..=i] {
-                assert!(processed.contains(*done), "{done} should already be durable");
+                assert!(
+                    processed.contains(*done),
+                    "{done} should already be durable"
+                );
             }
             for pending in &delivered_ids[i + 1..] {
-                assert!(!processed.contains(*pending), "{pending} must not be durable yet");
+                assert!(
+                    !processed.contains(*pending),
+                    "{pending} must not be durable yet"
+                );
             }
         }
     }

@@ -71,8 +71,11 @@ pub type LlmCallFuture = Pin<Box<dyn Future<Output = Result<String>> + Send>>;
 
 /// One chat completion: `(messages, model, delta_tx)` -> full content.
 /// Deltas are streamed into `delta_tx` (when provided) as they arrive.
-pub type LlmCallFn =
-    Arc<dyn Fn(Vec<ChatMessage>, Option<String>, Option<UnboundedSender<String>>) -> LlmCallFuture + Send + Sync>;
+pub type LlmCallFn = Arc<
+    dyn Fn(Vec<ChatMessage>, Option<String>, Option<UnboundedSender<String>>) -> LlmCallFuture
+        + Send
+        + Sync,
+>;
 
 /// Model list for `GET /v1/models`.
 pub type ModelsFn = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
@@ -224,7 +227,13 @@ impl AiService {
         };
         let content = self
             .consumer
-            .request(&info.node_id, messages, model, self.request_timeout, delta_tx)
+            .request(
+                &info.node_id,
+                messages,
+                model,
+                self.request_timeout,
+                delta_tx,
+            )
             .await?;
         Ok((content, "p2p", Some(info.node_id)))
     }
@@ -326,9 +335,9 @@ async fn status(service: &Arc<AiService>) -> Result<Value> {
         .await
         .as_ref()
         .map(|server| server.addr().to_string());
-    let remote = service.consumer.provider().map(|info| {
-        json!({ "node_id": info.node_id, "models": info.models, "services": info.services })
-    });
+    let remote = service.consumer.provider().map(
+        |info| json!({ "node_id": info.node_id, "models": info.models, "services": info.services }),
+    );
     Ok(json!({
         "room": service.room,
         "node_id": service.node_id,
@@ -458,7 +467,9 @@ pub fn spawn_provide_autoresume(state: Arc<AppState>) {
         };
         match provide_start(&service, &state).await {
             Ok(result) => info!(%result, "ai: provide auto-resumed from persisted state"),
-            Err(err) => warn!(%err, "ai: provide was left enabled on the previous run, but auto-resume failed (likely an incomplete ai config, e.g. a dangling preset); providing is off until `ai provide start` succeeds"),
+            Err(err) => {
+                warn!(%err, "ai: provide was left enabled on the previous run, but auto-resume failed (likely an incomplete ai config, e.g. a dangling preset); providing is off until `ai provide start` succeeds")
+            }
         }
     });
 }
@@ -528,14 +539,21 @@ struct BuiltProvider {
 /// upstream catalog was never actually meaningful under that contract.
 fn resolve_advertised_models(
     cfg: &crate::config::AiConfig,
-) -> (Vec<String>, HashMap<String, crate::config::ResolvedAiPreset>) {
+) -> (
+    Vec<String>,
+    HashMap<String, crate::config::ResolvedAiPreset>,
+) {
     let mut models = Vec::new();
     let mut advertised: HashMap<String, crate::config::ResolvedAiPreset> = HashMap::new();
     if cfg.advertised_models.is_empty() {
         return (models, advertised);
     }
     let wanted: HashSet<&str> = cfg.advertised_models.iter().map(String::as_str).collect();
-    for preset in cfg.presets.iter().filter(|p| wanted.contains(p.id.as_str())) {
+    for preset in cfg
+        .presets
+        .iter()
+        .filter(|p| wanted.contains(p.id.as_str()))
+    {
         let label = preset.label.trim();
         let name = if !label.is_empty() {
             label.to_string()
@@ -562,7 +580,10 @@ fn resolve_advertised_models(
 /// [`Provider`] from them -- the shared core of [`provide_start`] (first
 /// build) and [`reload_provider_if_running`] (rebuild after a config
 /// change). Does not touch `service.provider`; callers install the result.
-async fn build_provider(service: &Arc<AiService>, cfg: &crate::config::AiConfig) -> Result<BuiltProvider> {
+async fn build_provider(
+    service: &Arc<AiService>,
+    cfg: &crate::config::AiConfig,
+) -> Result<BuiltProvider> {
     let resolved = crate::config::resolve_preset(cfg, None).context(
         "ai: no default LLM preset configured; set it up in the dashboard's \
          Settings panel, or with `mistl config set ai.providers <json>`, \
@@ -604,7 +625,12 @@ async fn build_provider(service: &Arc<AiService>, cfg: &crate::config::AiConfig)
 
     let tts_preset = voice_preset_provider(cfg, &cfg.tts_preset_id);
     let advertised_voices = resolve_advertised_voices(tts_preset.as_ref()).await;
-    log_voice_preset_diagnostics(cfg, "tts", &cfg.tts_preset_id, tts_preset.as_ref().map(|(_, resolved)| resolved));
+    log_voice_preset_diagnostics(
+        cfg,
+        "tts",
+        &cfg.tts_preset_id,
+        tts_preset.as_ref().map(|(_, resolved)| resolved),
+    );
     let tts_call = tts_preset.map(|(provider, resolved)| {
         let catalog = advertised_voices.clone();
         let call: TtsCallFn = Arc::new(move |text, model, voice, lang| {
@@ -628,7 +654,12 @@ async fn build_provider(service: &Arc<AiService>, cfg: &crate::config::AiConfig)
         call
     });
     let stt_preset = voice_preset_provider(cfg, &cfg.stt_preset_id);
-    log_voice_preset_diagnostics(cfg, "stt", &cfg.stt_preset_id, stt_preset.as_ref().map(|(_, resolved)| resolved));
+    log_voice_preset_diagnostics(
+        cfg,
+        "stt",
+        &cfg.stt_preset_id,
+        stt_preset.as_ref().map(|(_, resolved)| resolved),
+    );
     let stt_call = stt_preset.map(|(provider, resolved)| {
         let call: SttCallFn = Arc::new(move |audio, mime, model, file_name| {
             let provider = provider.clone();
@@ -672,7 +703,10 @@ async fn build_provider(service: &Arc<AiService>, cfg: &crate::config::AiConfig)
 fn voice_preset_provider(
     cfg: &crate::config::AiConfig,
     preset_id: &str,
-) -> Option<(crate::config::AiProviderConfig, crate::config::ResolvedAiPreset)> {
+) -> Option<(
+    crate::config::AiProviderConfig,
+    crate::config::ResolvedAiPreset,
+)> {
     let preset_id = preset_id.trim();
     if preset_id.is_empty() {
         return None;
@@ -723,7 +757,10 @@ fn voice_preset_provider(
 /// fallback order can be unit-tested against a mock upstream without
 /// standing up a full `AiService`.
 async fn resolve_advertised_voices(
-    tts_preset: Option<&(crate::config::AiProviderConfig, crate::config::ResolvedAiPreset)>,
+    tts_preset: Option<&(
+        crate::config::AiProviderConfig,
+        crate::config::ResolvedAiPreset,
+    )>,
 ) -> Vec<String> {
     let Some((provider, resolved)) = tts_preset else {
         return Vec::new();
@@ -743,7 +780,11 @@ async fn resolve_advertised_voices(
 /// / prefix without requiring the config or the catalog to enumerate every
 /// regional variant.
 fn lang_primary_subtag(lang: &str) -> String {
-    lang.split('-').next().unwrap_or("").trim().to_ascii_lowercase()
+    lang.split('-')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
 }
 
 /// Case-insensitive `lang_voices` lookup by primary subtag (mistllm-wire
@@ -959,12 +1000,20 @@ fn diagnose_voice_preset(
         .presets
         .iter()
         .find(|p| p.id == preset_id)
-        .map(|p| if p.kind.is_empty() { "chat" } else { p.kind.as_str() })
+        .map(|p| {
+            if p.kind.is_empty() {
+                "chat"
+            } else {
+                p.kind.as_str()
+            }
+        })
         .unwrap_or("chat");
     if kind == expected_kind {
         VoicePresetDiagnostic::Ok
     } else {
-        VoicePresetDiagnostic::KindMismatch { actual: kind.to_string() }
+        VoicePresetDiagnostic::KindMismatch {
+            actual: kind.to_string(),
+        }
     }
 }
 
@@ -991,7 +1040,10 @@ fn log_voice_preset_diagnostics(
     let trimmed = preset_id.trim();
     match diagnose_voice_preset(cfg, preset_id, resolved, kind) {
         VoicePresetDiagnostic::Unconfigured => {
-            debug!(kind, "ai: preset id for this service is unset - this provider will not offer it (request gets an immediate error reply instead of silently going unanswered)");
+            debug!(
+                kind,
+                "ai: preset id for this service is unset - this provider will not offer it (request gets an immediate error reply instead of silently going unanswered)"
+            );
             return;
         }
         VoicePresetDiagnostic::Dangling => {
@@ -1023,11 +1075,19 @@ fn log_voice_preset_diagnostics(
         // this just logs whether that fallback exists, not the final
         // advertised list.
         match resolved.voice.as_deref() {
-            Some(voice) => debug!(preset_id = trimmed, %voice, "ai: tts preset resolved; falls back to this voice if upstream voice discovery returns nothing"),
-            None => debug!(preset_id = trimmed, "ai: tts preset resolved but has no \"voice\" set - if upstream voice discovery also returns nothing, provider_hello will omit the voices catalog entirely"),
+            Some(voice) => {
+                debug!(preset_id = trimmed, %voice, "ai: tts preset resolved; falls back to this voice if upstream voice discovery returns nothing")
+            }
+            None => debug!(
+                preset_id = trimmed,
+                "ai: tts preset resolved but has no \"voice\" set - if upstream voice discovery also returns nothing, provider_hello will omit the voices catalog entirely"
+            ),
         }
     } else {
-        debug!(preset_id = trimmed, "ai: stt preset resolved; inbound stt_requests will be forwarded to its upstream transcription endpoint");
+        debug!(
+            preset_id = trimmed,
+            "ai: stt preset resolved; inbound stt_requests will be forwarded to its upstream transcription endpoint"
+        );
     }
 }
 
@@ -1197,7 +1257,10 @@ mod tests {
         let (models, advertised) = resolve_advertised_models(&ai);
         assert_eq!(models, vec!["Chat".to_string(), "raw-model-id".to_string()]);
         assert_eq!(advertised.get("Chat").unwrap().model, "gpt-4o");
-        assert_eq!(advertised.get("raw-model-id").unwrap().model, "raw-model-id");
+        assert_eq!(
+            advertised.get("raw-model-id").unwrap().model,
+            "raw-model-id"
+        );
     }
 
     #[test]
@@ -1235,10 +1298,17 @@ mod tests {
             lang_voices: HashMap::new(),
             kind: "chat".to_string(),
         });
-        ai.advertised_models = vec!["chat-default".to_string(), "chat-duplicate-name".to_string()];
+        ai.advertised_models = vec![
+            "chat-default".to_string(),
+            "chat-duplicate-name".to_string(),
+        ];
 
         let (models, advertised) = resolve_advertised_models(&ai);
-        assert_eq!(models, vec!["Chat".to_string()], "the duplicate name is dropped entirely");
+        assert_eq!(
+            models,
+            vec!["Chat".to_string()],
+            "the duplicate name is dropped entirely"
+        );
         assert_eq!(
             advertised.get("Chat").unwrap().model,
             "gpt-4o",
@@ -1303,8 +1373,14 @@ mod tests {
     #[test]
     fn diagnose_voice_preset_unconfigured_for_a_blank_id() {
         let ai = ai_with_chat_default_and_tts_preset();
-        assert_eq!(diagnose_voice_preset(&ai, "", None, "tts"), VoicePresetDiagnostic::Unconfigured);
-        assert_eq!(diagnose_voice_preset(&ai, "   ", None, "stt"), VoicePresetDiagnostic::Unconfigured);
+        assert_eq!(
+            diagnose_voice_preset(&ai, "", None, "tts"),
+            VoicePresetDiagnostic::Unconfigured
+        );
+        assert_eq!(
+            diagnose_voice_preset(&ai, "   ", None, "stt"),
+            VoicePresetDiagnostic::Unconfigured
+        );
     }
 
     #[test]
@@ -1343,18 +1419,24 @@ mod tests {
         let resolved = resolve_preset(&ai, Some("chat-default")).unwrap();
         assert_eq!(
             diagnose_voice_preset(&ai, "chat-default", Some(&resolved), "stt"),
-            VoicePresetDiagnostic::KindMismatch { actual: "chat".to_string() }
+            VoicePresetDiagnostic::KindMismatch {
+                actual: "chat".to_string()
+            }
         );
         // Same preset checked against "tts" also mismatches (it's "chat").
         assert_eq!(
             diagnose_voice_preset(&ai, "chat-default", Some(&resolved), "tts"),
-            VoicePresetDiagnostic::KindMismatch { actual: "chat".to_string() }
+            VoicePresetDiagnostic::KindMismatch {
+                actual: "chat".to_string()
+            }
         );
         // And a "tts"-kind preset checked against "stt" mismatches too.
         let tts_resolved = resolve_preset(&ai, Some("tts-real")).unwrap();
         assert_eq!(
             diagnose_voice_preset(&ai, "tts-real", Some(&tts_resolved), "stt"),
-            VoicePresetDiagnostic::KindMismatch { actual: "tts".to_string() }
+            VoicePresetDiagnostic::KindMismatch {
+                actual: "tts".to_string()
+            }
         );
     }
 
@@ -1381,7 +1463,9 @@ mod tests {
         );
         assert_eq!(
             diagnose_voice_preset(&ai, "legacy", Some(&resolved), "tts"),
-            VoicePresetDiagnostic::KindMismatch { actual: "chat".to_string() }
+            VoicePresetDiagnostic::KindMismatch {
+                actual: "chat".to_string()
+            }
         );
     }
 
@@ -1480,13 +1564,7 @@ mod tests {
         // "en-US" must match a lang_voices entry keyed just "en".
         let mut lang_voices = empty_lang_voices();
         lang_voices.insert("en".to_string(), "en-voice".to_string());
-        let voice = resolve_tts_voice(
-            None,
-            Some("en-US"),
-            &lang_voices,
-            &no_catalog(),
-            &None,
-        );
+        let voice = resolve_tts_voice(None, Some("en-US"), &lang_voices, &no_catalog(), &None);
         assert_eq!(voice.as_deref(), Some("en-voice"));
     }
 
@@ -1494,13 +1572,7 @@ mod tests {
     fn resolve_tts_voice_lang_voices_lookup_is_case_insensitive() {
         let mut lang_voices = empty_lang_voices();
         lang_voices.insert("EN".to_string(), "en-voice".to_string());
-        let voice = resolve_tts_voice(
-            None,
-            Some("en-us"),
-            &lang_voices,
-            &no_catalog(),
-            &None,
-        );
+        let voice = resolve_tts_voice(None, Some("en-us"), &lang_voices, &no_catalog(), &None);
         assert_eq!(voice.as_deref(), Some("en-voice"));
     }
 
@@ -1550,13 +1622,7 @@ mod tests {
         // "ja" itself.
         let mut lang_voices = empty_lang_voices();
         lang_voices.insert("ja".to_string(), "explicit-ja-voice".to_string());
-        let voice = resolve_tts_voice(
-            None,
-            Some("ja"),
-            &lang_voices,
-            &kokoro_catalog(),
-            &None,
-        );
+        let voice = resolve_tts_voice(None, Some("ja"), &lang_voices, &kokoro_catalog(), &None);
         assert_eq!(voice.as_deref(), Some("explicit-ja-voice"));
     }
 

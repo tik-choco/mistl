@@ -46,7 +46,10 @@ fn save(data_dir: &Path, entries: &[IndexEntry]) -> Result<()> {
 /// growing the index).
 pub(super) fn upsert(data_dir: &Path, entry: IndexEntry) -> Result<()> {
     let mut entries = load(data_dir)?;
-    match entries.iter_mut().find(|existing| existing.cid == entry.cid) {
+    match entries
+        .iter_mut()
+        .find(|existing| existing.cid == entry.cid)
+    {
         Some(existing) => *existing = entry,
         None => entries.push(entry),
     }

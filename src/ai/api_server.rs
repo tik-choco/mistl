@@ -74,7 +74,9 @@ impl ApiServer {
         let listener = TcpListener::bind(listen)
             .await
             .with_context(|| format!("binding api server to {listen}"))?;
-        let addr = listener.local_addr().context("reading bound api server address")?;
+        let addr = listener
+            .local_addr()
+            .context("reading bound api server address")?;
 
         let conns: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
         let conns_for_loop = conns.clone();
@@ -102,7 +104,11 @@ impl ApiServer {
             }
         });
 
-        Ok(Arc::new(ApiServer { addr, accept_handle, conns }))
+        Ok(Arc::new(ApiServer {
+            addr,
+            accept_handle,
+            conns,
+        }))
     }
 
     /// The actually-bound address.
@@ -174,7 +180,11 @@ fn parse_head(bytes: &[u8]) -> Option<RequestHead> {
         }
     }
 
-    Some(RequestHead { method, path, headers })
+    Some(RequestHead {
+        method,
+        path,
+        headers,
+    })
 }
 
 /// Read bytes from `stream` until the header terminator is found (capped at
@@ -186,20 +196,27 @@ async fn read_request_head(stream: &mut TcpStream) -> io::Result<Option<(Request
     let mut chunk = [0u8; 1024];
     loop {
         if let Some(pos) = find_header_end(&buf) {
-            let head = parse_head(&buf[..pos])
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "malformed request head"))?;
+            let head = parse_head(&buf[..pos]).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "malformed request head")
+            })?;
             let leftover = buf[pos..].to_vec();
             return Ok(Some((head, leftover)));
         }
         if buf.len() >= MAX_HEADER_BYTES {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "header section too large"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "header section too large",
+            ));
         }
         let n = stream.read(&mut chunk).await?;
         if n == 0 {
             if buf.is_empty() {
                 return Ok(None);
             }
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "connection closed mid-headers"));
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "connection closed mid-headers",
+            ));
         }
         buf.extend_from_slice(&chunk[..n]);
     }
@@ -208,7 +225,11 @@ async fn read_request_head(stream: &mut TcpStream) -> io::Result<Option<(Request
 /// Read the remaining body bytes (on top of any `leftover` already read
 /// during header parsing) until exactly `content_length` bytes are
 /// available.
-async fn read_body(stream: &mut TcpStream, mut leftover: Vec<u8>, content_length: usize) -> io::Result<Vec<u8>> {
+async fn read_body(
+    stream: &mut TcpStream,
+    mut leftover: Vec<u8>,
+    content_length: usize,
+) -> io::Result<Vec<u8>> {
     if leftover.len() >= content_length {
         leftover.truncate(content_length);
         return Ok(leftover);
@@ -217,7 +238,10 @@ async fn read_body(stream: &mut TcpStream, mut leftover: Vec<u8>, content_length
     while leftover.len() < content_length {
         let n = stream.read(&mut chunk).await?;
         if n == 0 {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "connection closed before body complete"));
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "connection closed before body complete",
+            ));
         }
         let take = n.min(content_length - leftover.len());
         leftover.extend_from_slice(&chunk[..take]);
@@ -225,7 +249,12 @@ async fn read_body(stream: &mut TcpStream, mut leftover: Vec<u8>, content_length
     Ok(leftover)
 }
 
-async fn write_json_response(stream: &mut TcpStream, status: u16, reason: &str, body: &Value) -> io::Result<()> {
+async fn write_json_response(
+    stream: &mut TcpStream,
+    status: u16,
+    reason: &str,
+    body: &Value,
+) -> io::Result<()> {
     let body_bytes = serde_json::to_vec(body).unwrap_or_else(|_| b"{}".to_vec());
     let head = format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -236,8 +265,19 @@ async fn write_json_response(stream: &mut TcpStream, status: u16, reason: &str, 
     stream.flush().await
 }
 
-async fn write_error(stream: &mut TcpStream, status: u16, reason: &str, message: &str) -> io::Result<()> {
-    write_json_response(stream, status, reason, &json!({"error": {"message": message}})).await
+async fn write_error(
+    stream: &mut TcpStream,
+    status: u16,
+    reason: &str,
+    message: &str,
+) -> io::Result<()> {
+    write_json_response(
+        stream,
+        status,
+        reason,
+        &json!({"error": {"message": message}}),
+    )
+    .await
 }
 
 /// Write one HTTP chunked-transfer frame (`payload` may be empty, which
@@ -251,7 +291,10 @@ async fn write_http_chunk(stream: &mut TcpStream, payload: &[u8]) -> io::Result<
 }
 
 fn unix_now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Random-ish id, independent of `protocol::random_id` (kept self-contained
@@ -303,23 +346,37 @@ async fn handle_connection(mut stream: TcpStream, call: LlmCallFn, models: Model
             Some(v) => match v.trim().parse() {
                 Ok(n) => n,
                 Err(_) => {
-                    let _ = write_error(&mut stream, 400, "Bad Request", "invalid Content-Length").await;
+                    let _ = write_error(&mut stream, 400, "Bad Request", "invalid Content-Length")
+                        .await;
                     return Ok(());
                 }
             },
             None => {
-                let _ = write_error(&mut stream, 411, "Length Required", "Content-Length required").await;
+                let _ = write_error(
+                    &mut stream,
+                    411,
+                    "Length Required",
+                    "Content-Length required",
+                )
+                .await;
                 return Ok(());
             }
         };
         if content_length > MAX_BODY_BYTES {
-            let _ = write_error(&mut stream, 413, "Payload Too Large", "request body too large").await;
+            let _ = write_error(
+                &mut stream,
+                413,
+                "Payload Too Large",
+                "request body too large",
+            )
+            .await;
             return Ok(());
         }
         match read_body(&mut stream, leftover, content_length).await {
             Ok(b) => b,
             Err(_) => {
-                let _ = write_error(&mut stream, 400, "Bad Request", "incomplete request body").await;
+                let _ =
+                    write_error(&mut stream, 400, "Bad Request", "incomplete request body").await;
                 return Ok(());
             }
         }
@@ -339,11 +396,21 @@ async fn handle_connection(mut stream: TcpStream, call: LlmCallFn, models: Model
     Ok(())
 }
 
-async fn handle_chat_completions(stream: &mut TcpStream, body: &[u8], call: &LlmCallFn) -> Result<()> {
+async fn handle_chat_completions(
+    stream: &mut TcpStream,
+    body: &[u8],
+    call: &LlmCallFn,
+) -> Result<()> {
     let req: ChatRequestBody = match serde_json::from_slice(body) {
         Ok(req) => req,
         Err(error) => {
-            let _ = write_error(stream, 400, "Bad Request", &format!("invalid request body: {error}")).await;
+            let _ = write_error(
+                stream,
+                400,
+                "Bad Request",
+                &format!("invalid request body: {error}"),
+            )
+            .await;
             return Ok(());
         }
     };
@@ -470,7 +537,9 @@ mod tests {
     }
 
     fn fake_call_err() -> LlmCallFn {
-        Arc::new(|_messages, _model, _delta_tx| Box::pin(async move { Err(anyhow::anyhow!("upstream exploded")) }))
+        Arc::new(|_messages, _model, _delta_tx| {
+            Box::pin(async move { Err(anyhow::anyhow!("upstream exploded")) })
+        })
     }
 
     fn fake_models() -> ModelsFn {
@@ -478,16 +547,24 @@ mod tests {
     }
 
     async fn start_test_server(call: LlmCallFn, models: ModelsFn) -> Arc<ApiServer> {
-        ApiServer::start("127.0.0.1:0", call, models).await.expect("server starts")
+        ApiServer::start("127.0.0.1:0", call, models)
+            .await
+            .expect("server starts")
     }
 
     /// Send `request` on a fresh connection to `addr` and read the full
     /// response until the peer closes the socket.
     async fn send_request(addr: SocketAddr, request: &str) -> Vec<u8> {
         let mut stream = TcpStream::connect(addr).await.expect("connect");
-        stream.write_all(request.as_bytes()).await.expect("write request");
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .expect("write request");
         let mut response = Vec::new();
-        stream.read_to_end(&mut response).await.expect("read response");
+        stream
+            .read_to_end(&mut response)
+            .await
+            .expect("read response");
         response
     }
 
@@ -496,12 +573,21 @@ mod tests {
             .windows(4)
             .position(|w| w == b"\r\n\r\n")
             .expect("response should have a header/body separator");
-        let head = std::str::from_utf8(&raw[..pos]).expect("head is utf8").to_string();
+        let head = std::str::from_utf8(&raw[..pos])
+            .expect("head is utf8")
+            .to_string();
         (head, &raw[pos + 4..])
     }
 
     fn status_code(head: &str) -> u16 {
-        head.lines().next().unwrap().split_whitespace().nth(1).unwrap().parse().unwrap()
+        head.lines()
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
+            .parse()
+            .unwrap()
     }
 
     /// Undo HTTP chunked transfer-encoding framing, returning the
@@ -509,7 +595,10 @@ mod tests {
     fn de_chunk(mut body: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
         loop {
-            let line_end = body.windows(2).position(|w| w == b"\r\n").expect("chunk size line");
+            let line_end = body
+                .windows(2)
+                .position(|w| w == b"\r\n")
+                .expect("chunk size line");
             let size_str = std::str::from_utf8(&body[..line_end]).unwrap().trim();
             let size = usize::from_str_radix(size_str, 16).expect("hex chunk size");
             body = &body[line_end + 2..];
@@ -532,7 +621,12 @@ mod tests {
         assert_eq!(status_code(&head), 200);
         let json: Value = serde_json::from_slice(body).expect("valid json");
         assert_eq!(json["object"], "list");
-        let ids: Vec<&str> = json["data"].as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap()).collect();
+        let ids: Vec<&str> = json["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_str().unwrap())
+            .collect();
         assert_eq!(ids, vec!["m1", "m2"]);
         assert_eq!(json["data"][0]["object"], "model");
         assert_eq!(json["data"][0]["owned_by"], "mistl");
@@ -541,7 +635,8 @@ mod tests {
     #[tokio::test]
     async fn post_chat_completions_non_stream_happy_path() {
         let server = start_test_server(fake_call_ok(), fake_models()).await;
-        let payload = json!({"messages": [{"role": "user", "content": "hi"}], "stream": false}).to_string();
+        let payload =
+            json!({"messages": [{"role": "user", "content": "hi"}], "stream": false}).to_string();
         let request = format!(
             "POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
             payload.len(),
@@ -570,7 +665,10 @@ mod tests {
         let raw = send_request(server.addr(), &request).await;
         let (head, body) = split_response(&raw);
         assert_eq!(status_code(&head), 200);
-        assert!(head.to_ascii_lowercase().contains("transfer-encoding: chunked"));
+        assert!(
+            head.to_ascii_lowercase()
+                .contains("transfer-encoding: chunked")
+        );
         assert!(head.to_ascii_lowercase().contains("text/event-stream"));
 
         let payload_bytes = de_chunk(body);
@@ -582,7 +680,11 @@ mod tests {
             .filter_map(|e| e.strip_prefix("data: "))
             .filter_map(|d| if d == "[DONE]" { None } else { Some(d) })
             .filter_map(|d| serde_json::from_str::<Value>(d).ok())
-            .filter_map(|v| v["choices"][0]["delta"]["content"].as_str().map(|s| s.to_string()))
+            .filter_map(|v| {
+                v["choices"][0]["delta"]["content"]
+                    .as_str()
+                    .map(|s| s.to_string())
+            })
             .collect();
         assert_eq!(deltas, vec!["Hel".to_string(), "lo".to_string()]);
 
@@ -593,9 +695,15 @@ mod tests {
                 .map(|v| v["choices"][0]["finish_reason"] == "stop")
                 .unwrap_or(false)
         });
-        assert!(has_stop_chunk, "expected a finish_reason=stop chunk, got: {events:?}");
+        assert!(
+            has_stop_chunk,
+            "expected a finish_reason=stop chunk, got: {events:?}"
+        );
 
-        assert!(events.iter().any(|e| *e == "data: [DONE]"), "expected [DONE] event, got: {events:?}");
+        assert!(
+            events.iter().any(|e| *e == "data: [DONE]"),
+            "expected [DONE] event, got: {events:?}"
+        );
     }
 
     #[tokio::test]
@@ -655,7 +763,11 @@ mod tests {
     #[tokio::test]
     async fn post_without_content_length_is_411() {
         let server = start_test_server(fake_call_ok(), fake_models()).await;
-        let raw = send_request(server.addr(), "POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\n\r\n").await;
+        let raw = send_request(
+            server.addr(),
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\n\r\n",
+        )
+        .await;
         let (head, _body) = split_response(&raw);
         assert_eq!(status_code(&head), 411);
     }

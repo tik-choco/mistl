@@ -28,7 +28,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow};
 use openh264::OpenH264API;
 use openh264::encoder::{
-    BitRate, EncodedBitStream, Encoder, EncoderConfig, FrameRate, IntraFramePeriod, RateControlMode, UsageType,
+    BitRate, EncodedBitStream, Encoder, EncoderConfig, FrameRate, IntraFramePeriod,
+    RateControlMode, UsageType,
 };
 use openh264::formats::YUVBuffer;
 use tokio::sync::mpsc;
@@ -170,7 +171,11 @@ impl VideoEncoder {
         let encoder = Encoder::with_api_config(OpenH264API::from_source(), config)
             .context("creating OpenH264 encoder for selftest video")?;
 
-        Ok(Self { encoder, width, height })
+        Ok(Self {
+            encoder,
+            width,
+            height,
+        })
     }
 
     /// Generates the synthetic test-pattern frame for `frame_index`, encodes
@@ -179,7 +184,10 @@ impl VideoEncoder {
     fn encode_frame(&mut self, frame_index: u64) -> Result<EncodedAu> {
         let yuv_bytes = generate_test_pattern_i420(self.width, self.height, frame_index);
         let yuv = YUVBuffer::from_vec(yuv_bytes, self.width as usize, self.height as usize);
-        let stream = self.encoder.encode(&yuv).context("encoding selftest video frame")?;
+        let stream = self
+            .encoder
+            .encode(&yuv)
+            .context("encoding selftest video frame")?;
         Ok(access_unit_from_stream(&stream))
     }
 }
@@ -197,9 +205,13 @@ fn access_unit_from_stream(stream: &EncodedBitStream<'_>) -> EncodedAu {
     let mut pps = None;
 
     for l in 0..stream.num_layers() {
-        let Some(layer) = stream.layer(l) else { continue };
+        let Some(layer) = stream.layer(l) else {
+            continue;
+        };
         for n in 0..layer.nal_count() {
-            let Some(nal) = layer.nal_unit(n) else { continue };
+            let Some(nal) = layer.nal_unit(n) else {
+                continue;
+            };
             au.extend_from_slice(nal);
 
             match nal_type(nal) {
@@ -342,7 +354,11 @@ struct SineWaveGenerator {
 
 impl SineWaveGenerator {
     fn new(sample_rate: u32, freq_hz: f32) -> Self {
-        Self { sample_rate, freq_hz, sample_index: 0 }
+        Self {
+            sample_rate,
+            freq_hz,
+            sample_index: 0,
+        }
     }
 
     /// Produces `samples_per_channel` interleaved stereo i16 samples
@@ -352,7 +368,8 @@ impl SineWaveGenerator {
         let mut pcm = Vec::with_capacity(samples_per_channel * 2);
         for i in 0..samples_per_channel {
             let t = (self.sample_index + i as u64) as f32 / self.sample_rate as f32;
-            let sample = (2.0 * std::f32::consts::PI * self.freq_hz * t).sin() * i16::MAX as f32 * 0.25;
+            let sample =
+                (2.0 * std::f32::consts::PI * self.freq_hz * t).sin() * i16::MAX as f32 * 0.25;
             let sample = sample as i16;
             pcm.push(sample); // left
             pcm.push(sample); // right
@@ -382,7 +399,10 @@ impl AacEncoder {
         })
         .map_err(|error| anyhow!("creating AAC encoder: {error}"))?;
 
-        Ok(Self { encoder, output_buf: [0u8; 4096] })
+        Ok(Self {
+            encoder,
+            output_buf: [0u8; 4096],
+        })
     }
 
     /// Encodes one `AAC_FRAME_SAMPLES`-samples/channel stereo PCM chunk
@@ -391,7 +411,9 @@ impl AacEncoder {
     /// (normal for its first frame or two of output, per `fdk-aac`).
     fn encode_chunk(&mut self, pcm: &[i16]) -> Result<Option<Vec<u8>>> {
         match self.encoder.encode(pcm, &mut self.output_buf) {
-            Ok(info) if info.output_size > 0 => Ok(Some(self.output_buf[..info.output_size].to_vec())),
+            Ok(info) if info.output_size > 0 => {
+                Ok(Some(self.output_buf[..info.output_size].to_vec()))
+            }
             Ok(_) => Ok(None),
             Err(error) => Err(anyhow!("AAC encode failed: {error}")),
         }
@@ -416,7 +438,8 @@ async fn audio_loop_aac(rtsp: Arc<RtspServer>) {
         }
     };
     let mut tone = SineWaveGenerator::new(rtp_out::AUDIO_CLOCK_RATE, TONE_HZ);
-    let frame_duration = Duration::from_secs_f64(AAC_FRAME_SAMPLES as f64 / f64::from(rtp_out::AUDIO_CLOCK_RATE));
+    let frame_duration =
+        Duration::from_secs_f64(AAC_FRAME_SAMPLES as f64 / f64::from(rtp_out::AUDIO_CLOCK_RATE));
     let mut ts: u32 = 0;
 
     info!("selftest: audio generator started (codec=aac)");
@@ -441,7 +464,11 @@ async fn audio_loop_aac(rtsp: Arc<RtspServer>) {
 /// Generates a sine tone and encodes it to Opus 960-sample (20ms) frames,
 /// sending them to `rtsp` paced to real time.
 async fn audio_loop_opus(rtsp: Arc<RtspServer>) {
-    let mut encoder = match opus::Encoder::new(rtp_out::AUDIO_CLOCK_RATE, opus::Channels::Stereo, opus::Application::Audio) {
+    let mut encoder = match opus::Encoder::new(
+        rtp_out::AUDIO_CLOCK_RATE,
+        opus::Channels::Stereo,
+        opus::Application::Audio,
+    ) {
         Ok(encoder) => encoder,
         Err(error) => {
             warn!(%error, "selftest: failed to set up Opus encoder; audio disabled");
@@ -504,9 +531,18 @@ mod tests {
         assert!(au.pps.is_some(), "first frame should carry PPS");
 
         let nal_types = scan_nal_types(&au.au);
-        assert!(nal_types.contains(&NAL_TYPE_SPS), "expected an SPS NAL, got {nal_types:?}");
-        assert!(nal_types.contains(&NAL_TYPE_PPS), "expected a PPS NAL, got {nal_types:?}");
-        assert!(nal_types.contains(&5), "expected an IDR slice NAL (type 5), got {nal_types:?}");
+        assert!(
+            nal_types.contains(&NAL_TYPE_SPS),
+            "expected an SPS NAL, got {nal_types:?}"
+        );
+        assert!(
+            nal_types.contains(&NAL_TYPE_PPS),
+            "expected a PPS NAL, got {nal_types:?}"
+        );
+        assert!(
+            nal_types.contains(&5),
+            "expected an IDR slice NAL (type 5), got {nal_types:?}"
+        );
     }
 
     #[test]
@@ -514,7 +550,10 @@ mod tests {
         let mut encoder = VideoEncoder::new(64, 64, 30).expect("creating video encoder");
         for frame_index in 0..5u64 {
             let au = encoder.encode_frame(frame_index).expect("encoding frame");
-            assert!(!au.au.is_empty(), "frame {frame_index} should produce a non-empty access unit");
+            assert!(
+                !au.au.is_empty(),
+                "frame {frame_index} should produce a non-empty access unit"
+            );
         }
     }
 
@@ -523,7 +562,10 @@ mod tests {
         let frame0 = generate_test_pattern_i420(64, 64, 0);
         let frame1 = generate_test_pattern_i420(64, 64, 5);
         assert_eq!(frame0.len(), frame1.len());
-        assert_ne!(frame0, frame1, "the test pattern should visibly differ between frame indices");
+        assert_ne!(
+            frame0, frame1,
+            "the test pattern should visibly differ between frame indices"
+        );
     }
 
     #[test]
@@ -542,13 +584,20 @@ mod tests {
             }
         }
 
-        assert!(emitted >= 1, "expected at least one AAC frame from ~250ms of PCM");
+        assert!(
+            emitted >= 1,
+            "expected at least one AAC frame from ~250ms of PCM"
+        );
     }
 
     #[test]
     fn opus_encoder_emits_a_frame_for_one_20ms_chunk() {
-        let mut encoder = opus::Encoder::new(rtp_out::AUDIO_CLOCK_RATE, opus::Channels::Stereo, opus::Application::Audio)
-            .expect("creating Opus encoder");
+        let mut encoder = opus::Encoder::new(
+            rtp_out::AUDIO_CLOCK_RATE,
+            opus::Channels::Stereo,
+            opus::Application::Audio,
+        )
+        .expect("creating Opus encoder");
         let mut tone = SineWaveGenerator::new(rtp_out::AUDIO_CLOCK_RATE, TONE_HZ);
 
         let pcm = tone.next_chunk(OPUS_FRAME_SAMPLES);
@@ -569,6 +618,9 @@ mod tests {
         };
         let b_combined = b.next_chunk(200);
 
-        assert_eq!(a_combined, b_combined, "two chunks back-to-back should equal one chunk of the combined length");
+        assert_eq!(
+            a_combined, b_combined,
+            "two chunks back-to-back should equal one chunk of the combined length"
+        );
     }
 }

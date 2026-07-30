@@ -267,7 +267,13 @@ impl Provider {
             Some(self.models.clone())
         };
         let voices = if self.tts.is_some() && !self.voices.is_empty() {
-            Some(self.voices.iter().take(MAX_ADVERTISED_VOICES).cloned().collect())
+            Some(
+                self.voices
+                    .iter()
+                    .take(MAX_ADVERTISED_VOICES)
+                    .cloned()
+                    .collect(),
+            )
         } else {
             None
         };
@@ -287,13 +293,32 @@ impl Provider {
             ProtocolMessage::ConsumerHello => {
                 (self.send)(&from, self.hello());
             }
-            ProtocolMessage::LlmRequest { id, messages, model } => {
+            ProtocolMessage::LlmRequest {
+                id,
+                messages,
+                model,
+            } => {
                 self.handle_llm_request(from, id, messages, model).await;
             }
-            ProtocolMessage::TtsRequest { id, text, model, voice, lang } => {
-                self.handle_tts_request(from, id, text, model, voice, lang).await;
+            ProtocolMessage::TtsRequest {
+                id,
+                text,
+                model,
+                voice,
+                lang,
+            } => {
+                self.handle_tts_request(from, id, text, model, voice, lang)
+                    .await;
             }
-            ProtocolMessage::SttRequest { id, seq, data, last, mime, model, file_name } => {
+            ProtocolMessage::SttRequest {
+                id,
+                seq,
+                data,
+                last,
+                mime,
+                model,
+                file_name,
+            } => {
                 self.handle_stt_request(from, id, seq, data, last, mime, model, file_name)
                     .await;
             }
@@ -568,8 +593,13 @@ impl Provider {
                     reasoning_effort: resolved.reasoning_effort,
                 };
                 Box::pin(async move {
-                    openai::stream_chat_completion(&upstream, &messages, Some(&call_model), Some(delta_tx))
-                        .await
+                    openai::stream_chat_completion(
+                        &upstream,
+                        &messages,
+                        Some(&call_model),
+                        Some(delta_tx),
+                    )
+                    .await
                 })
             }
             LlmCallResolution::Default => (self.call)(messages, model.clone(), Some(delta_tx)),
@@ -610,7 +640,15 @@ impl Provider {
         while delta_open {
             match delta_rx.recv().await {
                 Some(delta) => {
-                    self.record_chunk(&from, &id, &model, &started_at, delta, &mut seq, &mut char_count);
+                    self.record_chunk(
+                        &from,
+                        &id,
+                        &model,
+                        &started_at,
+                        delta,
+                        &mut seq,
+                        &mut char_count,
+                    );
                 }
                 None => delta_open = false,
             }
@@ -761,7 +799,9 @@ mod tests {
     }
 
     fn fake_call_error(message: &'static str) -> LlmCallFn {
-        Arc::new(move |_messages, _model, _delta_tx| Box::pin(async move { anyhow::bail!(message) }))
+        Arc::new(move |_messages, _model, _delta_tx| {
+            Box::pin(async move { anyhow::bail!(message) })
+        })
     }
 
     fn messages() -> Vec<ChatMessage> {
@@ -849,7 +889,10 @@ mod tests {
                 assert_eq!(to, "consumer1");
                 assert_eq!(id, "req1");
                 assert_eq!(message, "upstream boom");
-                assert_eq!(*code, None, "generic upstream failure should not carry a code");
+                assert_eq!(
+                    *code, None,
+                    "generic upstream failure should not carry a code"
+                );
             }
             other => panic!("unexpected message: {other:?}"),
         }
@@ -1117,9 +1160,15 @@ mod tests {
         // 1 voice_error + 2 llm chunks + 1 done.
         assert_eq!(sent.len(), 4);
         assert!(matches!(&sent[0].1, ProtocolMessage::VoiceError { id, .. } if id == "voice-req"));
-        assert!(matches!(&sent[1].1, ProtocolMessage::LlmResponseChunk { id, .. } if id == "llm-req"));
-        assert!(matches!(&sent[2].1, ProtocolMessage::LlmResponseChunk { id, .. } if id == "llm-req"));
-        assert!(matches!(&sent[3].1, ProtocolMessage::LlmResponseDone { id, .. } if id == "llm-req"));
+        assert!(
+            matches!(&sent[1].1, ProtocolMessage::LlmResponseChunk { id, .. } if id == "llm-req")
+        );
+        assert!(
+            matches!(&sent[2].1, ProtocolMessage::LlmResponseChunk { id, .. } if id == "llm-req")
+        );
+        assert!(
+            matches!(&sent[3].1, ProtocolMessage::LlmResponseDone { id, .. } if id == "llm-req")
+        );
 
         // The voice request left no log entry; only the llm_request did.
         let logs = provider.logs();
@@ -1141,7 +1190,10 @@ mod tests {
 
         assert_eq!(content, "x");
         assert_eq!(delta_rx.try_recv().unwrap(), "x");
-        assert!(sent.lock().unwrap().is_empty(), "call_upstream must not touch the network");
+        assert!(
+            sent.lock().unwrap().is_empty(),
+            "call_upstream must not touch the network"
+        );
     }
 
     fn sample_resolved_preset() -> ResolvedAiPreset {
@@ -1162,8 +1214,19 @@ mod tests {
         let call = fake_call_success(vec![], "");
         let mut advertised = HashMap::new();
         advertised.insert("Chat".to_string(), sample_resolved_preset());
-        let provider = Provider::new(send, call, vec!["Chat".into()], advertised, None, None, vec![]);
-        assert!(matches!(provider.resolve_llm_call(&None), LlmCallResolution::Default));
+        let provider = Provider::new(
+            send,
+            call,
+            vec!["Chat".into()],
+            advertised,
+            None,
+            None,
+            vec![],
+        );
+        assert!(matches!(
+            provider.resolve_llm_call(&None),
+            LlmCallResolution::Default
+        ));
     }
 
     #[test]
@@ -1186,7 +1249,15 @@ mod tests {
         let call = fake_call_success(vec![], "");
         let mut advertised = HashMap::new();
         advertised.insert("Chat".to_string(), sample_resolved_preset());
-        let provider = Provider::new(send, call, vec!["Chat".into()], advertised, None, None, vec![]);
+        let provider = Provider::new(
+            send,
+            call,
+            vec!["Chat".into()],
+            advertised,
+            None,
+            None,
+            vec![],
+        );
         match provider.resolve_llm_call(&Some("Chat".to_string())) {
             LlmCallResolution::Resolved(resolved) => assert_eq!(resolved.model, "gpt-4o"),
             _ => panic!("expected Resolved"),
@@ -1199,7 +1270,15 @@ mod tests {
         let call = fake_call_success(vec![], "");
         let mut advertised = HashMap::new();
         advertised.insert("Chat".to_string(), sample_resolved_preset());
-        let provider = Provider::new(send, call, vec!["Chat".into()], advertised, None, None, vec![]);
+        let provider = Provider::new(
+            send,
+            call,
+            vec!["Chat".into()],
+            advertised,
+            None,
+            None,
+            vec![],
+        );
         assert!(matches!(
             provider.resolve_llm_call(&Some("not-advertised".to_string())),
             LlmCallResolution::Reject
@@ -1214,7 +1293,15 @@ mod tests {
         let call = fake_call_error("default closure must not be used for a rejected model");
         let mut advertised = HashMap::new();
         advertised.insert("Chat".to_string(), sample_resolved_preset());
-        let provider = Provider::new(send, call, vec!["Chat".into()], advertised, None, None, vec![]);
+        let provider = Provider::new(
+            send,
+            call,
+            vec!["Chat".into()],
+            advertised,
+            None,
+            None,
+            vec![],
+        );
 
         provider
             .clone()
@@ -1234,7 +1321,10 @@ mod tests {
             (to, ProtocolMessage::LlmError { id, message, code }) => {
                 assert_eq!(to, "consumer1");
                 assert_eq!(id, "req1");
-                assert_eq!(message, "The requested model is not shared by this provider.");
+                assert_eq!(
+                    message,
+                    "The requested model is not shared by this provider."
+                );
                 assert_eq!(code.as_deref(), Some("model_not_shared"));
             }
             other => panic!("expected an llm_error reply, got: {other:?}"),
@@ -1303,7 +1393,8 @@ mod tests {
         });
 
         let (send, sent) = fake_send();
-        let call = fake_call_error("default closure must not be used for a resolved advertised model");
+        let call =
+            fake_call_error("default closure must not be used for a resolved advertised model");
         let mut advertised = HashMap::new();
         advertised.insert(
             "Chat".to_string(),
@@ -1317,7 +1408,15 @@ mod tests {
                 lang_voices: HashMap::new(),
             },
         );
-        let provider = Provider::new(send, call, vec!["Chat".into()], advertised, None, None, vec![]);
+        let provider = Provider::new(
+            send,
+            call,
+            vec!["Chat".into()],
+            advertised,
+            None,
+            None,
+            vec![],
+        );
 
         provider
             .clone()
@@ -1366,7 +1465,9 @@ mod tests {
     }
 
     fn fake_tts_error(message: &'static str) -> TtsCallFn {
-        Arc::new(move |_text, _model, _voice, _lang| Box::pin(async move { anyhow::bail!(message) }))
+        Arc::new(move |_text, _model, _voice, _lang| {
+            Box::pin(async move { anyhow::bail!(message) })
+        })
     }
 
     type TtsCallArgs = (String, Option<String>, Option<String>, Option<String>);
@@ -1427,7 +1528,11 @@ mod tests {
             ProtocolMessage::ProviderHello { services, .. } => {
                 assert_eq!(
                     services,
-                    Some(vec!["chat".to_string(), "tts".to_string(), "stt".to_string()])
+                    Some(vec![
+                        "chat".to_string(),
+                        "tts".to_string(),
+                        "stt".to_string()
+                    ])
                 );
             }
             other => panic!("expected ProviderHello, got {other:?}"),
@@ -1512,7 +1617,10 @@ mod tests {
             many_voices.clone(),
         );
         match provider.hello() {
-            ProtocolMessage::ProviderHello { voices: Some(voices), .. } => {
+            ProtocolMessage::ProviderHello {
+                voices: Some(voices),
+                ..
+            } => {
                 assert_eq!(voices.len(), MAX_ADVERTISED_VOICES);
                 assert_eq!(voices, many_voices[..MAX_ADVERTISED_VOICES].to_vec());
             }
@@ -1560,7 +1668,13 @@ mod tests {
         for (i, (to, msg)) in sent.iter().enumerate() {
             assert_eq!(to, "consumer1");
             match msg {
-                ProtocolMessage::TtsResponse { id, seq, data, last, mime } => {
+                ProtocolMessage::TtsResponse {
+                    id,
+                    seq,
+                    data,
+                    last,
+                    mime,
+                } => {
                     assert_eq!(id, "tts1");
                     assert_eq!(*seq, i as u64);
                     assert_eq!(mime, "audio/mpeg");
@@ -1601,7 +1715,11 @@ mod tests {
             )
             .await;
 
-        let (text, model, voice, lang) = captured.lock().unwrap().clone().expect("tts closure was called");
+        let (text, model, voice, lang) = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("tts closure was called");
         assert_eq!(text, "read this");
         assert_eq!(model, None);
         assert_eq!(voice, None);
@@ -1798,7 +1916,10 @@ mod tests {
             )
             .await;
 
-        assert!(captured.lock().unwrap().is_none(), "stt upstream must not be called");
+        assert!(
+            captured.lock().unwrap().is_none(),
+            "stt upstream must not be called"
+        );
         let sent = sent.lock().unwrap();
         assert_eq!(sent.len(), 1);
         match &sent[0] {

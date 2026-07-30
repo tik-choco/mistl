@@ -18,7 +18,8 @@ use anyhow::Context as _;
 use anyhow::Result;
 use openh264::OpenH264API;
 use openh264::encoder::{
-    BitRate, EncodedBitStream, Encoder, EncoderConfig, FrameRate, IntraFramePeriod, RateControlMode, UsageType,
+    BitRate, EncodedBitStream, Encoder, EncoderConfig, FrameRate, IntraFramePeriod,
+    RateControlMode, UsageType,
 };
 use openh264::formats::YUVBuffer;
 use tokio::sync::mpsc;
@@ -27,8 +28,8 @@ use windows_capture::frame::Frame;
 use windows_capture::graphics_capture_api::InternalCaptureControl;
 use windows_capture::monitor::Monitor;
 use windows_capture::settings::{
-    ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings, MinimumUpdateIntervalSettings,
-    SecondaryWindowSettings, Settings,
+    ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings,
+    MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
 };
 
 use super::rtsp::RtspServer;
@@ -223,7 +224,11 @@ impl GraphicsCaptureApiHandler for Capturer {
         })
     }
 
-    fn on_frame_arrived(&mut self, frame: &mut Frame, _capture_control: InternalCaptureControl) -> Result<(), Self::Error> {
+    fn on_frame_arrived(
+        &mut self,
+        frame: &mut Frame,
+        _capture_control: InternalCaptureControl,
+    ) -> Result<(), Self::Error> {
         // Frame pacing: encode at most `frame_rate` frames/sec, dropping the
         // rest. When the screen is static and no frames arrive at all, we
         // simply aren't called -- rtsp.rs's dummy SPS/PPS keepalive covers
@@ -272,9 +277,13 @@ fn access_unit_from_stream(stream: &EncodedBitStream<'_>) -> EncodedAu {
     let mut pps = None;
 
     for l in 0..stream.num_layers() {
-        let Some(layer) = stream.layer(l) else { continue };
+        let Some(layer) = stream.layer(l) else {
+            continue;
+        };
         for n in 0..layer.nal_count() {
-            let Some(nal) = layer.nal_unit(n) else { continue };
+            let Some(nal) = layer.nal_unit(n) else {
+                continue;
+            };
             au.extend_from_slice(nal);
 
             match nal_type(nal) {
@@ -326,7 +335,14 @@ fn even_floor(n: u32) -> u32 {
 /// ones `openh264`'s own `formats::rgb2yuv::write_yuv_scalar` uses, so this
 /// hand-rolled conversion stays numerically consistent with the crate's
 /// built-in (but RGB8-only, not BGRA-capable at full speed) helpers.
-fn bgra_to_i420(bgra: &[u8], width: u32, height: u32, stride: u32, out_w: u32, out_h: u32) -> Vec<u8> {
+fn bgra_to_i420(
+    bgra: &[u8],
+    width: u32,
+    height: u32,
+    stride: u32,
+    out_w: u32,
+    out_h: u32,
+) -> Vec<u8> {
     let (width, height, stride) = (width as usize, height as usize, stride as usize);
     let (out_w, out_h) = (out_w as usize, out_h as usize);
 
@@ -335,7 +351,11 @@ fn bgra_to_i420(bgra: &[u8], width: u32, height: u32, stride: u32, out_w: u32, o
         let sy = (y * height / out_h).min(height.saturating_sub(1));
         let base = sy * stride + sx * 4;
         // BGRA byte order: B, G, R, A.
-        (i32::from(bgra[base + 2]), i32::from(bgra[base + 1]), i32::from(bgra[base]))
+        (
+            i32::from(bgra[base + 2]),
+            i32::from(bgra[base + 1]),
+            i32::from(bgra[base]),
+        )
     };
 
     let mut yuv = vec![0u8; out_w * out_h * 3 / 2];

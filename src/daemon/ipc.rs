@@ -186,7 +186,9 @@ pub fn client_request(cmd: &str, args: Value) -> Result<Value> {
     } else {
         bail!(
             "{}",
-            response.error.unwrap_or_else(|| "unknown daemon error".into())
+            response
+                .error
+                .unwrap_or_else(|| "unknown daemon error".into())
         )
     }
 }

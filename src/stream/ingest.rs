@@ -141,9 +141,16 @@ fn handle_ts_packet(packet: TsPacket, video_pid: &mut Option<Pid>, splitter: &mu
     let pid = packet.header.pid;
     match packet.payload {
         Some(TsPayload::Pmt(pmt)) => {
-            if let Some(es) = pmt.es_info.iter().find(|es| es.stream_type == StreamType::H264) {
+            if let Some(es) = pmt
+                .es_info
+                .iter()
+                .find(|es| es.stream_type == StreamType::H264)
+            {
                 if *video_pid != Some(es.elementary_pid) {
-                    debug!(pid = es.elementary_pid.as_u16(), "stream: found H264 elementary stream");
+                    debug!(
+                        pid = es.elementary_pid.as_u16(),
+                        "stream: found H264 elementary stream"
+                    );
                 }
                 *video_pid = Some(es.elementary_pid);
             }
@@ -359,8 +366,8 @@ mod tests {
         use mpeg2ts::pes::PesHeader;
         use mpeg2ts::ts::payload::{Bytes as TsBytes, Pat, Pes, Pmt};
         use mpeg2ts::ts::{
-            ContinuityCounter, EsInfo, ProgramAssociation, TsHeader, TsPacketWriter,
-            TransportScramblingControl, VersionNumber, WriteTsPacket,
+            ContinuityCounter, EsInfo, ProgramAssociation, TransportScramblingControl, TsHeader,
+            TsPacketWriter, VersionNumber, WriteTsPacket,
         };
 
         let video_pid = Pid::new(0x100).unwrap();

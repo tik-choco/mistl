@@ -255,12 +255,18 @@ pub async fn share_folder(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
-        .or_else(|| root_path.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .or_else(|| {
+            root_path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+        })
         .unwrap_or_else(|| "shared-folder".to_string());
 
     let now = now_rfc3339();
     let mut path_index = PathIndex::default();
-    path_index.folder_ids.insert(String::new(), folder_id.clone());
+    path_index
+        .folder_ids
+        .insert(String::new(), folder_id.clone());
     let mut entry = SharedFolder {
         folder_id: folder_id.clone(),
         folder_name: folder_name.clone(),
@@ -273,7 +279,12 @@ pub async fn share_folder(
         last_folder_signature: None,
         created_at: now.clone(),
         last_published_at: None,
-        folders: vec![root_folder_record(folder_id.clone(), folder_name.clone(), room.clone(), now.clone())],
+        folders: vec![root_folder_record(
+            folder_id.clone(),
+            folder_name.clone(),
+            room.clone(),
+            now.clone(),
+        )],
         files: Vec::new(),
         path_index,
     };
@@ -289,7 +300,10 @@ pub async fn share_folder(
     {
         let _guard = TABLE_LOCK.lock().await;
         let mut table = read_table_file(store).await?;
-        if table.iter().any(|e| e.local_dir == root_path || e.folder_id == folder_id) {
+        if table
+            .iter()
+            .any(|e| e.local_dir == root_path || e.folder_id == folder_id)
+        {
             bail!("{} is already shared", root_path.display());
         }
         table.push(entry.clone());
@@ -298,7 +312,9 @@ pub async fn share_folder(
 
     let cid = entry.last_cid.clone().unwrap_or_default();
     let signature = entry.last_folder_signature.clone().unwrap_or_default();
-    if let Err(err) = announce_publish(&identity, &room, &folder_id, &folder_name, &cid, &signature).await {
+    if let Err(err) =
+        announce_publish(&identity, &room, &folder_id, &folder_name, &cid, &signature).await
+    {
         progress(&format!(
             "warning: initial announce failed ({err}); the background responder will retry"
         ));
@@ -314,7 +330,9 @@ pub async fn share_folder(
         "mistl",
     )?;
 
-    progress(&format!("shared {folder_name:?}: {files_published} file(s) published"));
+    progress(&format!(
+        "shared {folder_name:?}: {files_published} file(s) published"
+    ));
 
     Ok(ShareOutcome {
         share_url,
@@ -496,7 +514,13 @@ async fn handle_access_request(
         return Ok(());
     }
 
-    let grant = build_access_grant(&entry.passphrase, folder_id, request_id, &envelope.from, access_public_key)?;
+    let grant = build_access_grant(
+        &entry.passphrase,
+        folder_id,
+        request_id,
+        &envelope.from,
+        access_public_key,
+    )?;
     let response = super::folder_share::ShareEnvelope {
         type_: "folder-access-grant".to_string(),
         from: identity.did().to_string(),
@@ -546,7 +570,8 @@ fn build_access_grant(
     let peer_raw = URL_SAFE_NO_PAD
         .decode(requester_public_key_b64url.trim_end_matches('='))
         .context("requester access public key")?;
-    let peer_public = PublicKey::from_sec1_bytes(&peer_raw).context("requester access public key")?;
+    let peer_public =
+        PublicKey::from_sec1_bytes(&peer_raw).context("requester access public key")?;
 
     let secret = EphemeralSecret::random(&mut rand::rngs::OsRng);
     let our_public = secret.public_key().to_encoded_point(false);
@@ -555,7 +580,8 @@ fn build_access_grant(
 
     let mut iv = [0u8; 12];
     rand::thread_rng().fill_bytes(&mut iv);
-    let plaintext = serde_json::to_vec(&serde_json::json!({ "key": passphrase })).context("grant payload")?;
+    let plaintext =
+        serde_json::to_vec(&serde_json::json!({ "key": passphrase })).context("grant payload")?;
     let cipher = Aes256Gcm::new_from_slice(key_bytes.as_slice()).context("grant cipher key")?;
     let nonce = Nonce::from_slice(&iv);
     let cipher_text = cipher
@@ -574,11 +600,17 @@ fn build_access_grant(
 /// "tc-storage-folder-access-grant-v1\0folderId\0requestId\0targetNodeId"))`,
 /// matching `folderKeyProof.ts`'s `folderAccessGrantProof` exactly (hex, not
 /// base64 -- see the module doc).
-fn folder_access_grant_proof(passphrase: &str, folder_id: &str, request_id: &str, target_node_id: &str) -> String {
+fn folder_access_grant_proof(
+    passphrase: &str,
+    folder_id: &str,
+    request_id: &str,
+    target_node_id: &str,
+) -> String {
     type HmacSha256 = Hmac<Sha256>;
-    let message = format!("{ACCESS_GRANT_PROOF_PREFIX}\0{folder_id}\0{request_id}\0{target_node_id}");
-    let mut mac =
-        HmacSha256::new_from_slice(passphrase.trim().as_bytes()).expect("HMAC-SHA256 accepts any key length");
+    let message =
+        format!("{ACCESS_GRANT_PROOF_PREFIX}\0{folder_id}\0{request_id}\0{target_node_id}");
+    let mut mac = HmacSha256::new_from_slice(passphrase.trim().as_bytes())
+        .expect("HMAC-SHA256 accepts any key length");
     mac.update(message.as_bytes());
     let digest = mac.finalize().into_bytes();
     let mut out = String::with_capacity(digest.len() * 2);
@@ -623,7 +655,10 @@ async fn announce_folder_state(
     let signed = super::folder_share::sign_envelope(envelope, identity)?;
     let bytes = serde_json::to_vec(&signed).context("serializing folder-state envelope")?;
     broadcast_retrying(&entry.room_id, bytes, Duration::from_secs(10)).await?;
-    last_announced.insert(entry.folder_id.clone(), (signature, std::time::Instant::now()));
+    last_announced.insert(
+        entry.folder_id.clone(),
+        (signature, std::time::Instant::now()),
+    );
     Ok(())
 }
 
@@ -790,7 +825,11 @@ async fn republish(
         let Some(record) = entry.files.iter().find(|f| &f.id == file_id).cloned() else {
             continue;
         };
-        let data_url = format!("data:{};base64,{}", record.mime_type, BASE64_STANDARD.encode(data));
+        let data_url = format!(
+            "data:{};base64,{}",
+            record.mime_type,
+            BASE64_STANDARD.encode(data)
+        );
         let bundle_file = super::domain::FileRecord {
             data_url: Some(data_url),
             ..record
@@ -804,7 +843,9 @@ async fn republish(
         };
         let encrypted = super::crypto::encrypt_json(&file_bundle, &entry.passphrase)?;
         let bytes = serde_json::to_vec(&encrypted).context("serializing file bundle")?;
-        let cid = super::folder_share::p2p_storage_add(&format!("{file_id}.tc-file.enc.json"), bytes).await?;
+        let cid =
+            super::folder_share::p2p_storage_add(&format!("{file_id}.tc-file.enc.json"), bytes)
+                .await?;
         if let Some(record_mut) = entry.files.iter_mut().find(|f| &f.id == file_id) {
             record_mut.last_cid = Some(cid.clone());
             record_mut.last_share_cid = Some(cid);
@@ -821,7 +862,11 @@ async fn republish(
     };
     let encrypted = super::crypto::encrypt_json(&folder_bundle, &entry.passphrase)?;
     let bytes = serde_json::to_vec(&encrypted).context("serializing folder bundle")?;
-    let cid = super::folder_share::p2p_storage_add(&format!("{}.tc-folder.enc.json", entry.folder_id), bytes).await?;
+    let cid = super::folder_share::p2p_storage_add(
+        &format!("{}.tc-folder.enc.json", entry.folder_id),
+        bytes,
+    )
+    .await?;
 
     entry.last_cid = Some(cid);
     entry.last_folder_signature = Some(super::folder_sync::folder_signature(
@@ -862,7 +907,8 @@ fn rescan_local_dir(entry: &mut SharedFolder) -> Result<RescanResult> {
     let mut result = RescanResult::default();
 
     // -- folders: new subdirectories get fresh ids; vanished ones are tombstoned.
-    let mut current_folder_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut current_folder_paths: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
     current_folder_paths.insert(String::new());
     for dir in walked_dirs.iter().filter(|d| !d.rel_path.is_empty()) {
         current_folder_paths.insert(dir.rel_path.clone());
@@ -875,7 +921,10 @@ fn rescan_local_dir(entry: &mut SharedFolder) -> Result<RescanResult> {
             .folder_ids
             .get(dir.parent_rel_path.as_deref().unwrap_or(""))
             .cloned();
-        entry.path_index.folder_ids.insert(dir.rel_path.clone(), id.clone());
+        entry
+            .path_index
+            .folder_ids
+            .insert(dir.rel_path.clone(), id.clone());
         entry.folders.push(super::domain::FolderRecord {
             id,
             name: super::folder_share::sanitize_name(&dir.name),
@@ -914,7 +963,8 @@ fn rescan_local_dir(entry: &mut SharedFolder) -> Result<RescanResult> {
     }
 
     // -- files: fast path on (mtime, size); sha256-confirm otherwise.
-    let mut current_file_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut current_file_paths: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
     for wf in &walked_files {
         current_file_paths.insert(wf.rel_path.clone());
         let folder_id = entry
@@ -924,7 +974,8 @@ fn rescan_local_dir(entry: &mut SharedFolder) -> Result<RescanResult> {
             .cloned()
             .unwrap_or_else(|| entry.folder_id.clone());
 
-        if let Some((cached_mtime, cached_size)) = entry.path_index.file_stats.get(&wf.rel_path).copied()
+        if let Some((cached_mtime, cached_size)) =
+            entry.path_index.file_stats.get(&wf.rel_path).copied()
             && cached_mtime == wf.mtime_millis
             && cached_size == wf.size
             && entry.path_index.file_ids.contains_key(&wf.rel_path)
@@ -932,7 +983,8 @@ fn rescan_local_dir(entry: &mut SharedFolder) -> Result<RescanResult> {
             continue; // unchanged: mtime+size fast path, no re-hash needed
         }
 
-        let data = std::fs::read(&wf.abs_path).with_context(|| format!("reading {}", wf.abs_path.display()))?;
+        let data = std::fs::read(&wf.abs_path)
+            .with_context(|| format!("reading {}", wf.abs_path.display()))?;
         let checksum = sha256_hex(&data);
         entry
             .path_index
@@ -958,7 +1010,10 @@ fn rescan_local_dir(entry: &mut SharedFolder) -> Result<RescanResult> {
             result.changed = true;
         } else {
             let id = generate_uuid_v4();
-            entry.path_index.file_ids.insert(wf.rel_path.clone(), id.clone());
+            entry
+                .path_index
+                .file_ids
+                .insert(wf.rel_path.clone(), id.clone());
             entry.files.push(super::domain::FileRecord {
                 id: id.clone(),
                 folder_id,
@@ -1006,7 +1061,12 @@ fn rescan_local_dir(entry: &mut SharedFolder) -> Result<RescanResult> {
     Ok(result)
 }
 
-fn root_folder_record(folder_id: String, folder_name: String, room: String, now: String) -> super::domain::FolderRecord {
+fn root_folder_record(
+    folder_id: String,
+    folder_name: String,
+    room: String,
+    now: String,
+) -> super::domain::FolderRecord {
     super::domain::FolderRecord {
         id: folder_id,
         name: folder_name,
@@ -1061,7 +1121,12 @@ fn walk_shared_dir(root: &Path) -> Result<(Vec<WalkedDir>, Vec<WalkedFile>)> {
     Ok((dirs, files))
 }
 
-fn walk_recursive(current: &Path, current_rel: &str, dirs: &mut Vec<WalkedDir>, files: &mut Vec<WalkedFile>) -> Result<()> {
+fn walk_recursive(
+    current: &Path,
+    current_rel: &str,
+    dirs: &mut Vec<WalkedDir>,
+    files: &mut Vec<WalkedFile>,
+) -> Result<()> {
     let mut entries: Vec<std::fs::DirEntry> = std::fs::read_dir(current)
         .with_context(|| format!("reading directory {}", current.display()))?
         .collect::<std::io::Result<Vec<_>>>()
@@ -1206,14 +1271,18 @@ mod tests {
             room_ids: Vec::new(),
             export_dir: None,
         };
-        Store::open(&cfg, dir.to_path_buf()).await.expect("open store")
+        Store::open(&cfg, dir.to_path_buf())
+            .await
+            .expect("open store")
     }
 
     fn test_entry(local_dir: PathBuf, passphrase: &str) -> SharedFolder {
         let folder_id = generate_uuid_v4();
         let now = now_rfc3339();
         let mut path_index = PathIndex::default();
-        path_index.folder_ids.insert(String::new(), folder_id.clone());
+        path_index
+            .folder_ids
+            .insert(String::new(), folder_id.clone());
         SharedFolder {
             folder_id: folder_id.clone(),
             folder_name: "Test Folder".to_string(),
@@ -1248,13 +1317,25 @@ mod tests {
             let parts: Vec<&str> = id.split('-').collect();
             assert_eq!(parts.len(), 5, "{id}");
             assert_eq!(
-                [parts[0].len(), parts[1].len(), parts[2].len(), parts[3].len(), parts[4].len()],
+                [
+                    parts[0].len(),
+                    parts[1].len(),
+                    parts[2].len(),
+                    parts[3].len(),
+                    parts[4].len()
+                ],
                 [8, 4, 4, 4, 12],
                 "{id}"
             );
-            assert!(id.chars().all(|c| c.is_ascii_hexdigit() || c == '-'), "{id}");
+            assert!(
+                id.chars().all(|c| c.is_ascii_hexdigit() || c == '-'),
+                "{id}"
+            );
             assert!(parts[2].starts_with('4'), "version nibble: {id}");
-            assert!(matches!(parts[3].chars().next(), Some('8' | '9' | 'a' | 'b')), "variant bits: {id}");
+            assert!(
+                matches!(parts[3].chars().next(), Some('8' | '9' | 'a' | 'b')),
+                "variant bits: {id}"
+            );
         }
     }
 
@@ -1356,7 +1437,14 @@ mod tests {
         let requester = super::super::folder_share::create_access_request_key();
 
         // Owner side: this module's grant builder.
-        let grant = build_access_grant(passphrase, folder_id, request_id, target_node_id, &requester.public_b64url).unwrap();
+        let grant = build_access_grant(
+            passphrase,
+            folder_id,
+            request_id,
+            target_node_id,
+            &requester.public_b64url,
+        )
+        .unwrap();
 
         assert_eq!(grant.proof.len(), 64);
         assert!(grant.proof.chars().all(|c| c.is_ascii_hexdigit()));
@@ -1383,13 +1471,18 @@ mod tests {
         let entry = test_entry(PathBuf::from("/tmp/example"), "pw");
         let folder_id = entry.folder_id.clone();
 
-        write_table_file(&store, std::slice::from_ref(&entry)).await.unwrap();
+        write_table_file(&store, std::slice::from_ref(&entry))
+            .await
+            .unwrap();
 
         let store2 = test_store(dir.path()).await;
         let loaded = read_table_file(&store2).await.unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].folder_id, folder_id);
-        assert_eq!(loaded[0].passphrase, "pw", "raw table read keeps the passphrase");
+        assert_eq!(
+            loaded[0].passphrase, "pw",
+            "raw table read keeps the passphrase"
+        );
     }
 
     #[tokio::test]
@@ -1397,11 +1490,16 @@ mod tests {
         let dir = TempDir::new("blank");
         let store = test_store(dir.path()).await;
         let entry = test_entry(PathBuf::from("/tmp/example"), "super-secret");
-        write_table_file(&store, std::slice::from_ref(&entry)).await.unwrap();
+        write_table_file(&store, std::slice::from_ref(&entry))
+            .await
+            .unwrap();
 
         let listed = list_shared(&store).await.unwrap();
         assert_eq!(listed.len(), 1);
-        assert!(listed[0].passphrase.is_empty(), "passphrase must be blanked in list_shared output");
+        assert!(
+            listed[0].passphrase.is_empty(),
+            "passphrase must be blanked in list_shared output"
+        );
     }
 
     // `unshare` itself isn't exercised end-to-end here: it needs a real
@@ -1427,7 +1525,11 @@ mod tests {
         last_announced.insert(folder_id.clone(), (sig.clone(), std::time::Instant::now()));
 
         assert!(should_skip_folder_state(&last_announced, &folder_id, &sig));
-        assert!(!should_skip_folder_state(&last_announced, &folder_id, "sig-b"));
+        assert!(!should_skip_folder_state(
+            &last_announced,
+            &folder_id,
+            "sig-b"
+        ));
 
         last_announced.insert(
             folder_id.clone(),

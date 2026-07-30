@@ -11,9 +11,9 @@ use std::sync::{Mutex, OnceLock};
 use serde::Serialize;
 use tracing::field::{Field, Visit};
 use tracing::{Event, Subscriber};
+use tracing_subscriber::Layer;
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::registry::LookupSpan;
-use tracing_subscriber::Layer;
 
 const CAPACITY: usize = 1000;
 
@@ -53,7 +53,10 @@ impl RingBuffer {
     }
 
     fn clear(&self) {
-        self.entries.lock().expect("devlog buffer lock poisoned").clear();
+        self.entries
+            .lock()
+            .expect("devlog buffer lock poisoned")
+            .clear();
     }
 }
 
