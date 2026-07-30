@@ -166,13 +166,17 @@ watch: _ensure-mistlib _ensure-mistlib-consensus
 
 # --- quality ---------------------------------------------------------------
 
-# Format the whole workspace
+# Format this crate only. NOT `--all`: the mistlib/mistlib-consensus path
+# dependencies live in .mistlib-src/.mistlib-consensus-src, and `--all` reaches
+# into them and reformats upstream sources. That leaves the vendored clones
+# dirty, which makes `just fetch-mistlib*` hit a stash conflict and silently
+# keep the old commit -- how mistl once drifted 91 commits behind mistlib.
 fmt:
-    cargo fmt --all
+    cargo fmt -p mistl
 
-# Verify formatting (used by `dist`/CI)
+# Verify formatting (used by `dist`/CI). Same `-p mistl` scoping as `fmt`.
 fmt-check:
-    cargo fmt --all -- --check
+    cargo fmt -p mistl -- --check
 
 # Clippy with warnings promoted to errors
 lint:
