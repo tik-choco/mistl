@@ -100,13 +100,19 @@ windows-capture = "2.0.0"
 winreg = "0.52"
 
 # mistlib-consensus's crates depend on mistlib-core as a git dependency
-# (pinned to a rev of the same tik-choco-lab/mistlib-dev repo mistl vendors
-# via .mistlib-src), while mistl itself uses a path dependency on that local
-# checkout. Without unifying them, the two dependency graphs would each
+# (tik-choco-lab/mistlib, the public mirror of the mistlib-dev repo mistl
+# vendors via .mistlib-src), while mistl itself uses a path dependency on that
+# local checkout. Without unifying them, the two dependency graphs would each
 # compile their own copy of mistlib-core, and consensus-core's public API
 # (mistlib_core::types::NodeId, mistlib_core::runtime::AsyncRuntime) would be
 # a *different* type than the one in scope here -- a hard type error at the
-# consensus/mistlib integration boundary. This patch redirects every git
-# dependency on that URL (regardless of `rev`) to the local path checkout.
+# consensus/mistlib integration boundary. These patches redirect every git
+# dependency on either URL (regardless of `rev`/`tag`) to the local path
+# checkout. Both mirrors are listed because consensus moved its pin from
+# mistlib-dev to the public repo, and either may be what a given checkout of
+# .mistlib-consensus-src asks for.
+[patch."https://github.com/tik-choco-lab/mistlib.git"]
+mistlib-core = { path = ".mistlib-src/mistlib-core" }
+
 [patch."https://github.com/tik-choco-lab/mistlib-dev.git"]
 mistlib-core = { path = ".mistlib-src/mistlib-core" }
