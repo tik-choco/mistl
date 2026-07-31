@@ -736,13 +736,45 @@ impl Provider {
 
     /// Call the upstream directly, bypassing the network (used by the
     /// local API server / `ai chat` when this node provides).
+    ///
+    /// Resolves `model` through [`Provider::resolve_llm_call`] exactly like
+    /// the p2p path ([`Provider::handle_llm_request`]) does. Both surfaces
+    /// advertise the *same* names -- `/v1/models` is fed from the same
+    /// `advertised` table as `provider_hello.models` -- so an advertised
+    /// name has to mean the same thing whichever door it arrives at.
+    /// Without this the local API server forwarded the client's `model`
+    /// string to the upstream verbatim, and every name it had just
+    /// advertised (a preset *label*, e.g. `"Default"`) came back a 404 from
+    /// an upstream that only knows raw model ids.
     pub async fn call_upstream(
         &self,
         messages: Vec<super::protocol::ChatMessage>,
         model: Option<String>,
         delta_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     ) -> anyhow::Result<String> {
-        (self.call)(messages, model, delta_tx).await
+        match self.resolve_llm_call(&model) {
+            LlmCallResolution::Resolved(resolved) => {
+                // Same as the p2p path: a named preset may point at a
+                // different provider than `call` was built from, so call
+                // that preset's own connection info directly.
+                let call_model = resolved.model.clone();
+                let upstream = UpstreamConfig {
+                    base_url: resolved.base_url,
+                    api_key: resolved.api_key,
+                    model: Some(resolved.model),
+                    temperature: resolved.temperature,
+                    reasoning_effort: resolved.reasoning_effort,
+                };
+                openai::stream_chat_completion(&upstream, &messages, Some(&call_model), delta_tx)
+                    .await
+            }
+            LlmCallResolution::Default => (self.call)(messages, model, delta_tx).await,
+            // Named a model that is not in the advertised list. The p2p
+            // path answers `model_not_shared`; the local caller gets the
+            // same refusal as an error rather than an unrelated preset's
+            // answer or a leaked upstream 404.
+            LlmCallResolution::Reject => anyhow::bail!(MODEL_NOT_SHARED_MESSAGE),
+        }
     }
 
     /// Request log, newest first.
@@ -1206,6 +1238,64 @@ mod tests {
             voice: None,
             lang_voices: HashMap::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn call_upstream_resolves_an_advertised_name_rather_than_using_the_default_call() {
+        // The local API server advertises the same names as
+        // `provider_hello`, so one of those names must reach *that
+        // preset's* upstream. Before this was wired up the name went to
+        // the injected default `call`, whose success value masked the
+        // misrouting (and, against a real upstream, surfaced as a 404 for
+        // a model id the upstream had never heard of).
+        let (send, _sent) = fake_send();
+        let call = fake_call_success(vec!["from-default-call"], "from-default-call");
+        let mut advertised = HashMap::new();
+        advertised.insert("Chat".to_string(), sample_resolved_preset());
+        let provider = Provider::new(
+            send,
+            call,
+            vec!["Chat".into()],
+            advertised,
+            None,
+            None,
+            vec![],
+        );
+
+        let result = provider
+            .call_upstream(messages(), Some("Chat".to_string()), None)
+            .await;
+
+        // `sample_resolved_preset`'s base_url is unroutable, so this errors
+        // -- attempting it at all is the assertion: the default `call`
+        // would have returned `Ok("from-default-call")`.
+        assert!(
+            result.is_err(),
+            "an advertised name must go to its own preset's upstream, not the default call"
+        );
+    }
+
+    #[tokio::test]
+    async fn call_upstream_rejects_a_name_that_is_not_advertised() {
+        let (send, _sent) = fake_send();
+        let call = fake_call_success(vec!["x"], "x");
+        let mut advertised = HashMap::new();
+        advertised.insert("Chat".to_string(), sample_resolved_preset());
+        let provider = Provider::new(
+            send,
+            call,
+            vec!["Chat".into()],
+            advertised,
+            None,
+            None,
+            vec![],
+        );
+
+        let error = provider
+            .call_upstream(messages(), Some("not-shared".to_string()), None)
+            .await
+            .expect_err("an unadvertised name must be refused, not forwarded upstream");
+        assert!(error.to_string().contains(MODEL_NOT_SHARED_MESSAGE));
     }
 
     #[test]
