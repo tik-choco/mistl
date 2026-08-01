@@ -80,8 +80,28 @@ pub type LlmCallFn = Arc<
 /// Model list for `GET /v1/models`.
 pub type ModelsFn = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
 
+/// One text-to-speech call for `POST /v1/audio/speech`.
+pub type TtsCallFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<tts::TtsAudio>> + Send>>;
+/// `(params, lang)` — `lang` is a BCP-47 hint, the same one
+/// `tts_request.lang` carries over the wire, feeding the shared voice
+/// resolution chain.
+pub type TtsFn = Arc<dyn Fn(tts::TtsParams, Option<String>) -> TtsCallFuture + Send + Sync>;
+
+/// One transcription for `POST /v1/audio/transcriptions`.
+pub type SttCallFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send>>;
+pub type SttFn = Arc<dyn Fn(stt::SttParams) -> SttCallFuture + Send + Sync>;
+
 /// How long discovery waits for a `provider_hello` (mistai default).
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Bound on listing an upstream's voices from inside a synthesis request
+/// (see `AiService::synthesize`). Short on purpose: the catalog only feeds
+/// two fallback steps of the voice chain, so giving up on it costs a guess,
+/// while waiting on an upstream with no voice-listing endpoint would cost
+/// the whole request.
+const VOICE_CATALOG_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct AiService {
     room: String,
@@ -236,6 +256,113 @@ impl AiService {
             )
             .await?;
         Ok((content, "p2p", Some(info.node_id)))
+    }
+
+    /// Synthesize speech from this node's configured TTS preset.
+    ///
+    /// The voice counterpart of [`AiService::chat`], and deliberately only
+    /// half of it: this resolves the **local** `ai.tts_preset_id` and calls
+    /// its upstream. There is no p2p fallback yet — sending `tts_request`
+    /// as a *consumer* is still unimplemented (the provider half has been
+    /// there since the voice extension landed), so a node with no TTS
+    /// preset of its own has nothing to fall back to and says so rather
+    /// than hanging waiting for a peer it can't ask.
+    async fn synthesize(
+        &self,
+        state: &Arc<AppState>,
+        req: tts::TtsParams,
+        lang: Option<String>,
+    ) -> Result<tts::TtsAudio> {
+        let cfg = state.config().ai.clone();
+        let resolved = voice_preset_provider(&cfg, &cfg.tts_preset_id).context(
+            "ai: no TTS preset configured (set `ai.tts_preset_id` to a preset id; \
+             see `mistl config show`)",
+        )?;
+        let (provider, preset) = resolved.clone();
+
+        // The request's own model/voice win when given, exactly as they do
+        // over the wire (mistllm-wire's "provider voice/model respect
+        // rules"): a caller that names a voice gets that voice, and the
+        // preset only fills in what wasn't asked for.
+        //
+        // Voice specifically goes through `resolve_tts_voice` — the same
+        // chain the wire path uses — rather than reading `preset.voice`
+        // directly. Both doors advertise the same voices, so they have to
+        // mean the same thing by them: a local caller must not get "tts
+        // requires a voice" for a request the wire would have answered from
+        // `lang_voices` or from the catalog.
+        let request_voice = (!req.voice.trim().is_empty()).then(|| req.voice.clone());
+
+        // The catalog is consulted by only two *fallback* steps of that
+        // chain (the kokoro-shaped `lang` guess, and the last-resort first
+        // entry), and fetching it costs an upstream round trip. The wire
+        // path pays that once, when the provider is built; paying it here
+        // would mean paying it on every single synthesis — and, worse,
+        // hanging the request whenever that endpoint doesn't answer. So it
+        // is fetched only when one of those two steps can actually be
+        // reached, and never when the answer is already decided.
+        let needs_catalog = request_voice.is_none() && (lang.is_some() || preset.voice.is_none());
+        let catalog = if needs_catalog {
+            // Bounded: being configured against a TTS upstream with no
+            // voice-listing endpoint is a normal thing, and "no catalog" is
+            // a fine answer — waiting forever is not.
+            match tokio::time::timeout(
+                VOICE_CATALOG_TIMEOUT,
+                resolve_advertised_voices(Some(&resolved)),
+            )
+            .await
+            {
+                Ok(voices) => voices,
+                Err(_) => {
+                    tracing::warn!(
+                        timeout_secs = VOICE_CATALOG_TIMEOUT.as_secs(),
+                        "ai: timed out listing upstream voices; continuing without a catalog"
+                    );
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        };
+
+        let voice = resolve_tts_voice(
+            request_voice,
+            lang.as_deref(),
+            &preset.lang_voices,
+            &catalog,
+            &preset.voice,
+        )
+        .unwrap_or_default();
+
+        let req = tts::TtsParams {
+            model: if req.model.trim().is_empty() {
+                preset.model.clone()
+            } else {
+                req.model
+            },
+            voice,
+            ..req
+        };
+        tts::synthesize(&provider, req).await
+    }
+
+    /// Transcribe audio with this node's configured STT preset. Same
+    /// local-only shape, and the same reason, as [`AiService::synthesize`].
+    async fn transcribe(&self, state: &Arc<AppState>, req: stt::SttParams) -> Result<String> {
+        let cfg = state.config().ai.clone();
+        let (provider, preset) = voice_preset_provider(&cfg, &cfg.stt_preset_id).context(
+            "ai: no STT preset configured (set `ai.stt_preset_id` to a preset id; \
+             see `mistl config show`)",
+        )?;
+        let req = stt::SttParams {
+            model: if req.model.trim().is_empty() {
+                preset.model.clone()
+            } else {
+                req.model
+            },
+            ..req
+        };
+        stt::transcribe(&provider, req).await
     }
 }
 
@@ -1128,8 +1255,27 @@ async fn serve_start(service: &Arc<AiService>, state: &Arc<AppState>) -> Result<
         })
     };
 
+    let tts_fn: TtsFn = {
+        let service = service.clone();
+        let state = state.clone();
+        Arc::new(move |params, lang| {
+            let service = service.clone();
+            let state = state.clone();
+            Box::pin(async move { service.synthesize(&state, params, lang).await })
+        })
+    };
+    let stt_fn: SttFn = {
+        let service = service.clone();
+        let state = state.clone();
+        Arc::new(move |params| {
+            let service = service.clone();
+            let state = state.clone();
+            Box::pin(async move { service.transcribe(&state, params).await })
+        })
+    };
+
     let api_listen = state.config().ai.api_listen;
-    let server = ApiServer::start(&api_listen, call, models_fn)
+    let server = ApiServer::start(&api_listen, call, models_fn, tts_fn, stt_fn)
         .await
         .with_context(|| format!("ai: binding API server on {api_listen}"))?;
     let addr = server.addr();

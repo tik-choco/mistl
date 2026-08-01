@@ -31,6 +31,11 @@ if [ ! -d "$cache/.git" ]; then
     git clone "$MISTLIB_REPO" "$cache"
 fi
 
+# The clone is created only once, so a later MISTLIB_REPO change in .env would
+# otherwise keep fetching from the original remote. Re-point it on every run so
+# .env stays the single source of truth (public mistlib vs private mistlib-dev).
+git -C "$cache" remote set-url origin "$MISTLIB_REPO"
+
 git -C "$cache" config core.autocrlf false
 
 if ! git -C "$cache" fetch origin "$MISTLIB_REF"; then

@@ -39,6 +39,11 @@ if (-not (Test-Path (Join-Path $cache ".git"))) {
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 
+# See fetch-mistlib.ps1: re-point the remote so a MISTLIB_CONSENSUS_REPO change
+# in .env takes effect on an existing clone too.
+git -C $cache remote set-url origin $repo
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
 # LF working files show as phantom-modified under a global core.autocrlf=true;
 # force this clone to leave line endings alone.
 git -C $cache config core.autocrlf false

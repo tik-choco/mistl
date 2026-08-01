@@ -29,6 +29,12 @@ pub struct AppState {
     /// dashboard was left closed" both at startup (grace-period check) and
     /// at shutdown (deciding whether to persist `dashboard_open`).
     dashboard_seen: Mutex<Option<Instant>>,
+    /// Browsable URL of the dashboard for this run, set once the web server
+    /// is bound (`None` while the UI is disabled or failed to bind). Reported
+    /// by `daemon.status` so clients -- `mistl daemon start`, `mistl status`
+    /// -- can show where the UI actually is, including a `--host` override
+    /// that the persisted `ui.listen` doesn't know about.
+    dashboard_url: Mutex<Option<String>>,
 }
 
 impl AppState {
@@ -66,6 +72,22 @@ impl AppState {
             .expect("dashboard_seen lock poisoned") = Some(Instant::now());
     }
 
+    /// Record the dashboard URL this run is serving (see [`Self::dashboard_url`]).
+    pub fn set_dashboard_url(&self, url: String) {
+        *self
+            .dashboard_url
+            .lock()
+            .expect("dashboard_url lock poisoned") = Some(url);
+    }
+
+    /// The dashboard URL this run is serving, if the UI came up.
+    pub fn dashboard_url(&self) -> Option<String> {
+        self.dashboard_url
+            .lock()
+            .expect("dashboard_url lock poisoned")
+            .clone()
+    }
+
     /// Whether a dashboard request was seen within the last `window`.
     pub fn dashboard_seen_within(&self, window: Duration) -> bool {
         match *self
@@ -97,6 +119,7 @@ async fn daemon_main(host_override: Option<String>) -> Result<()> {
         shutdown: shutdown_tx,
         restart: AtomicBool::new(false),
         dashboard_seen: Mutex::new(None),
+        dashboard_url: Mutex::new(None),
     });
 
     let server = ipc::serve(state.clone()).await?;
@@ -110,7 +133,17 @@ async fn daemon_main(host_override: Option<String>) -> Result<()> {
     let web = if ui_config.enabled {
         match crate::web::serve(state.clone(), &listen).await {
             Ok(web) => {
-                info!(url = %web.url(), "web dashboard ready");
+                // The bind address (`web.url()`) and the URL to actually open
+                // differ when bound to a wildcard host (`--host 0.0.0.0`), so
+                // report the browsable one -- and print it plainly on stdout,
+                // not just as a log line, so `mistl daemon run` in a terminal
+                // tells you where the UI is. (In a background start stdout is
+                // /dev/null; the `info!` below is what lands in daemon.log,
+                // and `daemon.status` carries the URL back to the client.)
+                let url = crate::web::dashboard_url(&listen);
+                state.set_dashboard_url(url.clone());
+                println!("mistl dashboard: {url}");
+                info!(%url, bind = %web.url(), "web dashboard ready");
                 // Restore "the dashboard was open" across restarts: if
                 // `ui-state.json` says a tab was open when the previous run
                 // shut down, reopen it -- after a grace period that lets an
@@ -286,6 +319,12 @@ fn start_background_impl(quiet: bool, host: Option<&str>) -> Result<()> {
         );
     }
 
+    // Whether to expect a dashboard URL back from `daemon.status` below; a
+    // config we can't load is the daemon's problem to report, not ours.
+    let ui_enabled = Config::load()
+        .map(|config| config.ui.enabled)
+        .unwrap_or(false);
+
     let exe = std::env::current_exe().context("resolving current executable")?;
     let log_path = config::data_dir()?.join("daemon.log");
     let log = std::fs::File::create(&log_path)
@@ -322,7 +361,19 @@ fn start_background_impl(quiet: bool, host: Option<&str>) -> Result<()> {
         std::thread::sleep(std::time::Duration::from_millis(100));
         if let Ok(status) = ipc::client_request("daemon.status", json!({})) {
             if !quiet {
+                // The IPC socket comes up a moment before the web listener,
+                // so a status that answers immediately can still report no
+                // dashboard yet -- re-ask briefly rather than print a URL-less
+                // status for a UI that is about to be there.
+                let status = if ui_enabled {
+                    await_dashboard_url(status)
+                } else {
+                    status
+                };
                 println!("{}", serde_json::to_string_pretty(&status)?);
+                if let Some(url) = status.get("dashboard").and_then(Value::as_str) {
+                    println!("dashboard: {url}");
+                }
             }
             return Ok(());
         }
@@ -334,6 +385,35 @@ fn start_background_impl(quiet: bool, host: Option<&str>) -> Result<()> {
     );
 }
 
+/// Re-poll `daemon.status` for up to ~2s while it reports no dashboard URL,
+/// returning the first status that has one (or the last answer if none
+/// appears -- a UI that fails to bind reports `"dashboard": null` forever, and
+/// that must not stall the start). Only called when the UI is enabled; with
+/// `[ui] enabled = false` there is nothing to wait for.
+fn await_dashboard_url(status: Value) -> Value {
+    if has_dashboard_url(&status) {
+        return status;
+    }
+    let mut latest = status;
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        match ipc::client_request("daemon.status", json!({})) {
+            Ok(status) => {
+                latest = status;
+                if has_dashboard_url(&latest) {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    latest
+}
+
+fn has_dashboard_url(status: &Value) -> bool {
+    status.get("dashboard").is_some_and(|url| !url.is_null())
+}
+
 /// Route an IPC request to the owning module.
 pub async fn dispatch(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Value> {
     match cmd {
@@ -341,6 +421,8 @@ pub async fn dispatch(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<V
             "pid": std::process::id(),
             "uptime_secs": state.started_at.elapsed().as_secs(),
             "version": env!("CARGO_PKG_VERSION"),
+            // `null` when the UI is disabled or failed to bind.
+            "dashboard": state.dashboard_url(),
         })),
         "daemon.stop" => {
             state.request_shutdown();

@@ -1127,7 +1127,7 @@ fn open_dashboard() -> Result<()> {
     if daemon::ipc::client_request("daemon.status", json!({})).is_err() {
         daemon::start_background(None)?;
     }
-    let url = format!("http://{}/", config.ui.listen);
+    let url = crate::web::dashboard_url(&config.ui.listen);
 
     let opened = crate::web::browser::open_in_browser(&url);
 

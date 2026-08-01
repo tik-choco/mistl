@@ -38,6 +38,12 @@ if (-not (Test-Path (Join-Path $cache ".git"))) {
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 
+# The clone is created only once, so a later MISTLIB_REPO change in .env would
+# otherwise keep fetching from the original remote. Re-point it on every run so
+# .env stays the single source of truth (public mistlib vs private mistlib-dev).
+git -C $cache remote set-url origin $repo
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
 # LF working files show as phantom-modified under a global core.autocrlf=true;
 # force this clone to leave line endings alone.
 git -C $cache config core.autocrlf false
