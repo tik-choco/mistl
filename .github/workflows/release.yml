@@ -9,11 +9,14 @@
 # The chosen version is stamped into Cargo.toml before building, so
 # `mistl --version` matches the tag even without a manual bump.
 #
-# Requires one repository secret:
-#   MISTLIB_DEV_TOKEN - fine-grained PAT with Contents: Read on
-#                       tik-choco-lab/mistlib-dev (private path dependency,
-#                       checked out into .mistlib-src/ like the local
-#                       scripts/fetch-mistlib workflow does).
+# The mistlib / mistlib-consensus path dependencies are checked out into
+# .mistlib-src/ and .mistlib-consensus-src/ (the same locations the local
+# scripts/fetch-mistlib* put them, so Cargo.toml needs no CI special-case).
+# Both source repositories are public, so the default GITHUB_TOKEN is enough.
+# Optional repository secret:
+#   MISTLIB_DEV_TOKEN - fine-grained PAT with Contents: Read, only needed if
+#                       MISTLIB_REPO below is pointed back at the private
+#                       tik-choco-lab/mistlib-dev repository.
 
 name: release
 
@@ -33,8 +36,10 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  MISTLIB_REPO: tik-choco-lab/mistlib-dev
-  MISTLIB_REF: develop
+  # Public mistlib. Switch to tik-choco-lab/mistlib-dev + develop (and set the
+  # MISTLIB_DEV_TOKEN secret) to build against unreleased mistlib commits.
+  MISTLIB_REPO: tik-choco-lab/mistlib
+  MISTLIB_REF: main
   MISTLIB_CONSENSUS_REPO: tik-choco-lab/mistlib-consensus
   MISTLIB_CONSENSUS_REF: main
   # Runner cmake is 4.x; vendored libopus still declares an ancient minimum.
@@ -94,13 +99,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Private path dependency `.mistlib-src/` (same location the local
+      # Path dependency `.mistlib-src/` (same location the local
       # scripts/fetch-mistlib puts it, so Cargo.toml needs no CI special-case).
+      # The default token covers the public repo; MISTLIB_DEV_TOKEN takes over
+      # when MISTLIB_REPO points at the private mistlib-dev.
       - uses: actions/checkout@v4
         with:
           repository: ${{ env.MISTLIB_REPO }}
           ref: ${{ env.MISTLIB_REF }}
-          token: ${{ secrets.MISTLIB_DEV_TOKEN }}
+          token: ${{ secrets.MISTLIB_DEV_TOKEN || github.token }}
           path: .mistlib-src
 
       # Path dependency `.mistlib-consensus-src/` (same location the local
@@ -109,7 +116,7 @@ jobs:
         with:
           repository: ${{ env.MISTLIB_CONSENSUS_REPO }}
           ref: ${{ env.MISTLIB_CONSENSUS_REF }}
-          token: ${{ secrets.MISTLIB_DEV_TOKEN }}
+          token: ${{ secrets.MISTLIB_DEV_TOKEN || github.token }}
           path: .mistlib-consensus-src
 
       - name: Install Linux build deps

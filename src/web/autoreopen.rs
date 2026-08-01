@@ -49,46 +49,11 @@ pub fn spawn_dashboard_autoreopen(state: Arc<AppState>, listen: String) {
             return;
         }
 
-        let url = dashboard_url(&listen);
+        let url = crate::web::dashboard_url(&listen);
         if crate::web::browser::open_in_browser(&url) {
             info!(%url, "web: reopened the dashboard after restart");
         } else {
             warn!(%url, "web: failed to reopen the dashboard automatically; open the URL by hand");
         }
     });
-}
-
-/// Builds the dashboard URL to open from a resolved `ui.listen` string
-/// (`"host:port"`), replacing an unspecified bind host (`0.0.0.0` or `[::]`)
-/// with `127.0.0.1` -- the browser we're opening runs on this same machine,
-/// so it should always reach the dashboard over loopback even when the
-/// server itself is bound to listen on every interface (e.g. `--host
-/// 0.0.0.0` for LAN access).
-fn dashboard_url(listen: &str) -> String {
-    let (host, port) = listen.rsplit_once(':').unwrap_or((listen, "6480"));
-    let host = match host {
-        "0.0.0.0" | "[::]" | "::" => "127.0.0.1",
-        other => other,
-    };
-    format!("http://{host}:{port}/")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn dashboard_url_keeps_explicit_host() {
-        assert_eq!(dashboard_url("127.0.0.1:6480"), "http://127.0.0.1:6480/");
-    }
-
-    #[test]
-    fn dashboard_url_replaces_unspecified_ipv4_host() {
-        assert_eq!(dashboard_url("0.0.0.0:6480"), "http://127.0.0.1:6480/");
-    }
-
-    #[test]
-    fn dashboard_url_replaces_unspecified_ipv6_host() {
-        assert_eq!(dashboard_url("[::]:6480"), "http://127.0.0.1:6480/");
-    }
 }

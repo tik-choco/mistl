@@ -28,8 +28,10 @@ the MSVC runtime is statically linked — no external tools, DLLs, or installers
 
 ## Requirements
 
-- Rust (edition 2024) and git (with access to the private
-  [mistlib](https://github.com/tik-choco-lab/mistlib-dev) repository)
+- Rust (edition 2024) and git (to clone the
+  [mistlib](https://github.com/tik-choco-lab/mistlib) and
+  [mistlib-consensus](https://github.com/tik-choco-lab/mistlib-consensus)
+  source repositories)
 - [just](https://github.com/casey/just) (optional but recommended task runner)
 - [cmake](https://cmake.org/) on PATH at build time (libopus is compiled from source
   for the relay's audio pipeline). With cmake ≥ 4.0, also set
@@ -44,9 +46,17 @@ mistlib is a path dependency fetched into `.mistlib-src/` (a plain git clone,
 not committed) by `scripts/fetch-mistlib`, configured through `.env`:
 
 ```console
-$ cp .env.example .env        # set MISTLIB_REPO to a URL your git auth can clone
+$ cp .env.example .env        # defaults to the public mistlib; no credentials needed
 $ just release                # fetches mistlib on first build, then cargo build --release
 ```
+
+`MISTLIB_REPO`/`MISTLIB_REF` in `.env` select the source: the public
+[mistlib](https://github.com/tik-choco-lab/mistlib) (`main`, the default) or
+the private `mistlib-dev` (`develop`) for unreleased upstream commits — the
+example file carries both, one commented out. Changing them re-points the
+existing `.mistlib-src/` clone on the next fetch, so there is no need to delete
+it. `MISTLIB_CONSENSUS_REPO`/`_REF` work the same way for
+`.mistlib-consensus-src/`.
 
 Without `just`: run `scripts/fetch-mistlib.sh` (or `scripts\fetch-mistlib.ps1`
 on Windows) once, then `cargo build --release`. Re-run `just fetch-mistlib`
@@ -85,7 +95,7 @@ Client commands start the daemon automatically if it isn't running.
 ```console
 # Daemon management
 $ mistl status                # combined overview (daemon, stream, ai)
-$ mistl daemon start          # start in the background (also happens automatically)
+$ mistl daemon start          # start in the background (prints the dashboard URL)
 $ mistl daemon start --host 0.0.0.0  # also bind the dashboard for other devices on the LAN
 $ mistl daemon status
 $ mistl daemon stop

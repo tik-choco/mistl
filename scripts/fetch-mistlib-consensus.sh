@@ -32,6 +32,10 @@ if [ ! -d "$cache/.git" ]; then
     git clone "$MISTLIB_CONSENSUS_REPO" "$cache"
 fi
 
+# See fetch-mistlib.sh: re-point the remote so a MISTLIB_CONSENSUS_REPO change
+# in .env takes effect on an existing clone too.
+git -C "$cache" remote set-url origin "$MISTLIB_CONSENSUS_REPO"
+
 git -C "$cache" config core.autocrlf false
 
 if ! git -C "$cache" fetch origin "$MISTLIB_CONSENSUS_REF"; then

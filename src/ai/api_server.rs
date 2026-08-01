@@ -25,10 +25,30 @@
 //!     while the call future runs), then a final chunk with empty delta
 //!     and `"finish_reason":"stop"`, then `data: [DONE]\n\n`, then the
 //!     terminating zero-length HTTP chunk.
+//! - `POST /v1/audio/speech` -> body `{input, model?, voice?,
+//!   response_format?, speed?, lang?}`. Responds `200` with the **raw
+//!   audio** and the format's MIME type, not JSON -- the upstream returns
+//!   bytes and so does this. `model`/`voice` omitted or empty means "use the
+//!   TTS preset's", resolved through the same chain the wire path uses (see
+//!   `super::resolve_tts_voice`), so both doors mean the same thing by the
+//!   voices they advertise. `lang` is a **mistl extension** over OpenAI's
+//!   schema: the BCP-47 hint `tts_request.lang` carries, which an OpenAI
+//!   client simply never sends.
+//! - `POST /v1/audio/transcriptions` -> `multipart/form-data` with a `file`
+//!   part and an optional `model` field; responds `{"text": ...}`.
+//!   Multipart rather than a raw body because the point of this server is
+//!   that an unmodified OpenAI client can be pointed at it, and every such
+//!   client sends this endpoint that way.
 //! - Upstream/backend errors: before any bytes were streamed -> `502` with
 //!   `{"error":{"message":...}}` (or `400` for malformed requests); once
 //!   streaming has begun, log and terminate the stream.
 //! - Anything else -> `404`.
+//!
+//! Both audio endpoints are answered **only from this node's own
+//! `tts_preset_id`/`stt_preset_id`**. Unlike chat, there is no p2p
+//! fallback: sending `tts_request`/`stt_request` as a *consumer* is still
+//! unimplemented, so a node with no voice preset of its own says so rather
+//! than waiting on a peer it has no way to ask.
 //!
 //! ## HTTP parsing (keep it minimal but correct)
 //!
@@ -52,7 +72,7 @@ use tokio::task::JoinHandle;
 use tracing::warn;
 
 use super::protocol::ChatMessage;
-use super::{LlmCallFn, ModelsFn};
+use super::{LlmCallFn, ModelsFn, SttFn, TtsFn, stt, tts};
 
 /// Header section size cap (request-line + headers), matches doc.
 const MAX_HEADER_BYTES: usize = 16 * 1024;
@@ -70,7 +90,13 @@ pub struct ApiServer {
 impl ApiServer {
     /// Bind `listen` (e.g. "127.0.0.1:6478") and start serving; resolves
     /// once the socket is listening.
-    pub async fn start(listen: &str, call: LlmCallFn, models: ModelsFn) -> Result<Arc<ApiServer>> {
+    pub async fn start(
+        listen: &str,
+        call: LlmCallFn,
+        models: ModelsFn,
+        tts_call: TtsFn,
+        stt_call: SttFn,
+    ) -> Result<Arc<ApiServer>> {
         let listener = TcpListener::bind(listen)
             .await
             .with_context(|| format!("binding api server to {listen}"))?;
@@ -92,8 +118,12 @@ impl ApiServer {
                 };
                 let call = call.clone();
                 let models = models.clone();
+                let tts_call = tts_call.clone();
+                let stt_call = stt_call.clone();
                 let handle = tokio::spawn(async move {
-                    if let Err(error) = handle_connection(socket, call, models).await {
+                    if let Err(error) =
+                        handle_connection(socket, call, models, tts_call, stt_call).await
+                    {
                         warn!(%error, "api_server connection ended with error");
                     }
                 });
@@ -327,7 +357,13 @@ struct ChatRequestBody {
     stream: bool,
 }
 
-async fn handle_connection(mut stream: TcpStream, call: LlmCallFn, models: ModelsFn) -> Result<()> {
+async fn handle_connection(
+    mut stream: TcpStream,
+    call: LlmCallFn,
+    models: ModelsFn,
+    tts_call: TtsFn,
+    stt_call: SttFn,
+) -> Result<()> {
     let (head, leftover) = match read_request_head(&mut stream).await {
         Ok(Some(pair)) => pair,
         Ok(None) => return Ok(()),
@@ -389,11 +425,273 @@ async fn handle_connection(mut stream: TcpStream, call: LlmCallFn, models: Model
         let _ = write_json_response(&mut stream, 200, "OK", &body).await;
     } else if is_post && path == "/v1/chat/completions" {
         handle_chat_completions(&mut stream, &body, &call).await?;
+    } else if is_post && path == "/v1/audio/speech" {
+        handle_audio_speech(&mut stream, &body, &tts_call).await?;
+    } else if is_post && path == "/v1/audio/transcriptions" {
+        let content_type = head.header("content-type").unwrap_or_default().to_string();
+        handle_audio_transcriptions(&mut stream, &content_type, &body, &stt_call).await?;
     } else {
         let _ = write_error(&mut stream, 404, "Not Found", "not found").await;
     }
 
     Ok(())
+}
+
+/// `POST /v1/audio/speech`: OpenAI's shape -- `{model, input, voice,
+/// response_format?, speed?}` in, raw audio out (not JSON; the upstream
+/// returns bytes and so do we, with the format's own MIME type).
+async fn handle_audio_speech(stream: &mut TcpStream, body: &[u8], call: &TtsFn) -> Result<()> {
+    let req: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(err) => {
+            let _ = write_error(
+                stream,
+                400,
+                "Bad Request",
+                &format!("invalid request body: {err}"),
+            )
+            .await;
+            return Ok(());
+        }
+    };
+
+    let input = req.get("input").and_then(Value::as_str).unwrap_or_default();
+    if input.trim().is_empty() {
+        let _ = write_error(stream, 400, "Bad Request", "`input` is required").await;
+        return Ok(());
+    }
+
+    let params = tts::TtsParams {
+        // Empty means "whatever the preset says" -- resolved in
+        // `AiService::synthesize`, not here, so the wire path and this one
+        // fill in defaults the same way.
+        model: req
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        voice: req
+            .get("voice")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        input: input.to_string(),
+        format: req
+            .get("response_format")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        speed: req.get("speed").and_then(Value::as_f64),
+    };
+
+    // `lang` is a mistl extension, not part of OpenAI's schema: it is the
+    // same BCP-47 hint `tts_request.lang` carries over the wire, and an
+    // OpenAI client that never sends it simply gets the preset's own voice.
+    let lang = req.get("lang").and_then(Value::as_str).map(str::to_string);
+
+    match (call)(params, lang).await {
+        Ok(audio) => {
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                audio.mime,
+                audio.bytes.len()
+            );
+            stream.write_all(head.as_bytes()).await?;
+            stream.write_all(&audio.bytes).await?;
+        }
+        Err(err) => {
+            let _ = write_error(stream, 502, "Bad Gateway", &err.to_string()).await;
+        }
+    }
+    Ok(())
+}
+
+/// `POST /v1/audio/transcriptions`: OpenAI's shape -- `multipart/form-data`
+/// with a `file` part and a `model` field, transcript back as
+/// `{"text": "..."}`.
+///
+/// Multipart rather than a raw body because the whole point of this server
+/// is that an unmodified OpenAI client can be pointed at it, and every such
+/// client sends this endpoint as multipart.
+async fn handle_audio_transcriptions(
+    stream: &mut TcpStream,
+    content_type: &str,
+    body: &[u8],
+    call: &SttFn,
+) -> Result<()> {
+    let Some(boundary) = multipart_boundary(content_type) else {
+        let _ = write_error(
+            stream,
+            400,
+            "Bad Request",
+            "expected multipart/form-data with a boundary",
+        )
+        .await;
+        return Ok(());
+    };
+
+    let parts = parse_multipart(body, &boundary);
+    let Some(file) = parts.iter().find(|p| p.name == "file") else {
+        let _ = write_error(stream, 400, "Bad Request", "missing `file` part").await;
+        return Ok(());
+    };
+    if file.bytes.is_empty() {
+        let _ = write_error(stream, 400, "Bad Request", "`file` part is empty").await;
+        return Ok(());
+    }
+
+    let model = parts
+        .iter()
+        .find(|p| p.name == "model")
+        .map(|p| String::from_utf8_lossy(&p.bytes).trim().to_string())
+        .unwrap_or_default();
+
+    let params = stt::SttParams {
+        model,
+        audio: file.bytes.clone(),
+        mime: if file.content_type.is_empty() {
+            "application/octet-stream".to_string()
+        } else {
+            file.content_type.clone()
+        },
+        file_name: file.file_name.clone(),
+    };
+
+    match (call)(params).await {
+        Ok(text) => {
+            let _ = write_json_response(stream, 200, "OK", &json!({ "text": text })).await;
+        }
+        Err(err) => {
+            let _ = write_error(stream, 502, "Bad Gateway", &err.to_string()).await;
+        }
+    }
+    Ok(())
+}
+
+/// One `multipart/form-data` part, reduced to what this endpoint needs.
+#[derive(Debug, Clone)]
+struct MultipartPart {
+    name: String,
+    file_name: Option<String>,
+    content_type: String,
+    bytes: Vec<u8>,
+}
+
+/// Pull `boundary=...` out of a `Content-Type` header value, unquoting it.
+fn multipart_boundary(content_type: &str) -> Option<String> {
+    if !content_type
+        .to_ascii_lowercase()
+        .contains("multipart/form-data")
+    {
+        return None;
+    }
+    for param in content_type.split(';').skip(1) {
+        // `continue`, not `?`: a parameter list may hold flags with no `=`
+        // at all, and bailing out on the first of those would abandon the
+        // search before ever reaching the one being looked for.
+        let Some((key, value)) = param.split_once('=') else {
+            continue;
+        };
+        if key.trim().eq_ignore_ascii_case("boundary") {
+            let value = value.trim().trim_matches('"');
+            if value.is_empty() {
+                return None;
+            }
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+/// Minimal `multipart/form-data` reader: split on the boundary, then split
+/// each part into headers and bytes at the blank line.
+///
+/// Deliberately not a general implementation -- no nested multipart, no
+/// transfer encodings, no continuation lines. This endpoint receives one
+/// audio file and one or two short text fields from an OpenAI client, and a
+/// parser that only handles that is far easier to be sure of than one that
+/// pretends to handle RFC 2046 in full. A part it can't make sense of is
+/// skipped rather than failing the request; the caller then reports the
+/// missing `file` part, which is the actionable message either way.
+fn parse_multipart(body: &[u8], boundary: &str) -> Vec<MultipartPart> {
+    let delimiter = format!("--{boundary}").into_bytes();
+    let mut out = Vec::new();
+
+    for segment in split_on(body, &delimiter).into_iter().skip(1) {
+        // A segment starts with CRLF (or "--" on the closing delimiter) and
+        // ends with the CRLF preceding the next delimiter.
+        let segment = segment
+            .strip_prefix(b"--".as_slice())
+            .map_or(segment, |_| &[]);
+        let segment = segment.strip_prefix(b"\r\n".as_slice()).unwrap_or(segment);
+        let segment = segment.strip_suffix(b"\r\n".as_slice()).unwrap_or(segment);
+        if segment.is_empty() {
+            continue;
+        }
+
+        let Some(split) = find(segment, b"\r\n\r\n") else {
+            continue;
+        };
+        let (head, rest) = segment.split_at(split);
+        let bytes = rest[4..].to_vec();
+
+        let mut name = String::new();
+        let mut file_name = None;
+        let mut content_type = String::new();
+        for line in String::from_utf8_lossy(head).lines() {
+            let Some((key, value)) = line.split_once(':') else {
+                continue;
+            };
+            if key.trim().eq_ignore_ascii_case("content-disposition") {
+                name = quoted_param(value, "name").unwrap_or_default();
+                file_name = quoted_param(value, "filename");
+            } else if key.trim().eq_ignore_ascii_case("content-type") {
+                content_type = value.trim().to_string();
+            }
+        }
+        if name.is_empty() {
+            continue;
+        }
+        out.push(MultipartPart {
+            name,
+            file_name,
+            content_type,
+            bytes,
+        });
+    }
+    out
+}
+
+/// `name="value"` out of a header parameter list.
+fn quoted_param(value: &str, key: &str) -> Option<String> {
+    for param in value.split(';') {
+        // Same reason as `multipart_boundary`: `Content-Disposition` always
+        // leads with a bare `form-data`, so `?` here would give up before
+        // looking at a single named parameter.
+        let Some((k, v)) = param.split_once('=') else {
+            continue;
+        };
+        if k.trim().eq_ignore_ascii_case(key) {
+            return Some(v.trim().trim_matches('"').to_string());
+        }
+    }
+    None
+}
+
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn split_on<'a>(haystack: &'a [u8], needle: &[u8]) -> Vec<&'a [u8]> {
+    let mut out = Vec::new();
+    let mut rest = haystack;
+    while let Some(at) = find(rest, needle) {
+        out.push(&rest[..at]);
+        rest = &rest[at + needle.len()..];
+    }
+    out.push(rest);
+    out
 }
 
 async fn handle_chat_completions(
@@ -546,8 +844,34 @@ mod tests {
         Arc::new(|| vec!["m1".to_string(), "m2".to_string()])
     }
 
+    fn fake_tts() -> TtsFn {
+        Arc::new(|params: tts::TtsParams, _lang: Option<String>| {
+            Box::pin(async move {
+                Ok(tts::TtsAudio {
+                    // Echo the resolved voice back as the "audio", so a test
+                    // can assert what actually reached the synthesizer.
+                    bytes: format!("audio:{}:{}", params.voice, params.input).into_bytes(),
+                    mime: "audio/mpeg".to_string(),
+                })
+            })
+        })
+    }
+
+    fn fake_stt() -> SttFn {
+        Arc::new(|params: stt::SttParams| {
+            Box::pin(async move {
+                Ok(format!(
+                    "{}|{}|{}",
+                    params.model,
+                    params.file_name.unwrap_or_default(),
+                    String::from_utf8_lossy(&params.audio)
+                ))
+            })
+        })
+    }
+
     async fn start_test_server(call: LlmCallFn, models: ModelsFn) -> Arc<ApiServer> {
-        ApiServer::start("127.0.0.1:0", call, models)
+        ApiServer::start("127.0.0.1:0", call, models, fake_tts(), fake_stt())
             .await
             .expect("server starts")
     }
@@ -566,6 +890,169 @@ mod tests {
             .await
             .expect("read response");
         response
+    }
+
+    #[test]
+    fn multipart_boundary_is_read_quoted_or_bare() {
+        assert_eq!(
+            multipart_boundary("multipart/form-data; boundary=abc123"),
+            Some("abc123".to_string())
+        );
+        assert_eq!(
+            multipart_boundary("multipart/form-data; charset=utf-8; boundary=\"a b\""),
+            Some("a b".to_string())
+        );
+        // Case-insensitive, as headers are.
+        assert_eq!(
+            multipart_boundary("Multipart/Form-Data; BOUNDARY=xyz"),
+            Some("xyz".to_string())
+        );
+        // Not multipart, or multipart with nothing to split on.
+        assert!(multipart_boundary("application/json").is_none());
+        assert!(multipart_boundary("multipart/form-data").is_none());
+        assert!(multipart_boundary("multipart/form-data; boundary=").is_none());
+    }
+
+    /// The exact shape an OpenAI client sends this endpoint: one file part
+    /// with a filename and content type, plus a plain text field.
+    #[test]
+    fn parse_multipart_reads_a_file_part_and_a_text_field() {
+        let body = concat!(
+            "--B\r\n",
+            "Content-Disposition: form-data; name=\"file\"; filename=\"clip.wav\"\r\n",
+            "Content-Type: audio/wav\r\n",
+            "\r\n",
+            "RIFFDATA\r\n",
+            "--B\r\n",
+            "Content-Disposition: form-data; name=\"model\"\r\n",
+            "\r\n",
+            "whisper-1\r\n",
+            "--B--\r\n",
+        )
+        .as_bytes();
+
+        let parts = parse_multipart(body, "B");
+        assert_eq!(parts.len(), 2);
+
+        let file = parts.iter().find(|p| p.name == "file").expect("file part");
+        assert_eq!(file.file_name.as_deref(), Some("clip.wav"));
+        assert_eq!(file.content_type, "audio/wav");
+        // Byte-exact: an off-by-one in the delimiter handling would corrupt
+        // every clip while still "parsing" successfully.
+        assert_eq!(file.bytes, b"RIFFDATA");
+
+        let model = parts
+            .iter()
+            .find(|p| p.name == "model")
+            .expect("model part");
+        assert_eq!(model.bytes, b"whisper-1");
+    }
+
+    /// Binary audio must survive verbatim — including bytes that look like
+    /// CRLF or like the delimiter's own leading dashes.
+    #[test]
+    fn parse_multipart_preserves_binary_payloads() {
+        let mut body = Vec::new();
+        body.extend_from_slice(
+            b"--B\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.bin\"\r\n\r\n",
+        );
+        let payload: Vec<u8> = vec![0x00, 0x0d, 0x0a, 0x2d, 0x2d, 0xff, 0x00, 0x1a];
+        body.extend_from_slice(&payload);
+        body.extend_from_slice(b"\r\n--B--\r\n");
+
+        let parts = parse_multipart(&body, "B");
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].bytes, payload);
+    }
+
+    #[tokio::test]
+    async fn audio_speech_returns_the_synthesized_bytes() {
+        let server = start_test_server(fake_call_ok(), fake_models()).await;
+        let payload = json!({"model": "tts-1", "voice": "alloy", "input": "hi"}).to_string();
+        let raw = send_request(
+            server.addr(),
+            &format!(
+                "POST /v1/audio/speech HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{payload}",
+                payload.len()
+            ),
+        )
+        .await;
+
+        let (head, body) = split_response(&raw);
+        assert!(head.starts_with("HTTP/1.1 200 OK"), "{head}");
+        // Audio, not JSON — the upstream returns bytes and so does this.
+        assert!(
+            head.to_ascii_lowercase()
+                .contains("content-type: audio/mpeg"),
+            "{head}"
+        );
+        assert_eq!(body, b"audio:alloy:hi");
+    }
+
+    #[tokio::test]
+    async fn audio_speech_rejects_a_request_with_no_input() {
+        let server = start_test_server(fake_call_ok(), fake_models()).await;
+        let payload = json!({"model": "tts-1", "input": "   "}).to_string();
+        let raw = send_request(
+            server.addr(),
+            &format!(
+                "POST /v1/audio/speech HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{payload}",
+                payload.len()
+            ),
+        )
+        .await;
+        assert!(
+            String::from_utf8_lossy(&raw).starts_with("HTTP/1.1 400 Bad Request"),
+            "{}",
+            String::from_utf8_lossy(&raw)
+        );
+    }
+
+    #[tokio::test]
+    async fn audio_transcriptions_reads_a_multipart_upload() {
+        let server = start_test_server(fake_call_ok(), fake_models()).await;
+        let body = concat!(
+            "--B\r\n",
+            "Content-Disposition: form-data; name=\"file\"; filename=\"clip.wav\"\r\n",
+            "Content-Type: audio/wav\r\n",
+            "\r\n",
+            "RIFF\r\n",
+            "--B\r\n",
+            "Content-Disposition: form-data; name=\"model\"\r\n",
+            "\r\n",
+            "whisper-1\r\n",
+            "--B--\r\n",
+        );
+        let raw = send_request(
+            server.addr(),
+            &format!(
+                "POST /v1/audio/transcriptions HTTP/1.1\r\nHost: x\r\nContent-Type: multipart/form-data; boundary=B\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+        )
+        .await;
+
+        let (head, payload) = split_response(&raw);
+        assert!(head.starts_with("HTTP/1.1 200 OK"), "{head}");
+        let json: Value = serde_json::from_slice(payload).expect("json body");
+        // fake_stt echoes model|filename|bytes, so this asserts all three
+        // survived the parse in one go.
+        assert_eq!(json["text"], "whisper-1|clip.wav|RIFF");
+    }
+
+    #[tokio::test]
+    async fn audio_transcriptions_requires_multipart() {
+        let server = start_test_server(fake_call_ok(), fake_models()).await;
+        let raw = send_request(
+            server.addr(),
+            "POST /v1/audio/transcriptions HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
+        )
+        .await;
+        assert!(
+            String::from_utf8_lossy(&raw).starts_with("HTTP/1.1 400 Bad Request"),
+            "{}",
+            String::from_utf8_lossy(&raw)
+        );
     }
 
     fn split_response(raw: &[u8]) -> (String, &[u8]) {
