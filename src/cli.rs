@@ -1,8 +1,9 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 
 use crate::daemon;
+use crate::tunnel::forward_args;
 
 #[derive(Parser)]
 #[command(
@@ -76,6 +77,17 @@ pub enum Command {
     Bot {
         #[command(subcommand)]
         action: BotAction,
+    },
+    /// WebRTC P2P tunnel: TCP/UDP port forwarding and a stdio-command bridge
+    /// to a peer over a mistlib room (ported from the standalone `p2p`
+    /// tool). `serve`/`connect` add forwards directly (you already know you
+    /// want them); `approve`/`deny` and `accept`/`reject` answer the two
+    /// independent prompts a session can raise (an incoming connection
+    /// through a forward you're serving, and a peer asking *you* to forward
+    /// one of your own targets for them).
+    Tunnel {
+        #[command(subcommand)]
+        action: TunnelAction,
     },
     /// Open the web dashboard in the default browser (starts the daemon if needed)
     Ui,
@@ -610,6 +622,119 @@ pub enum BotAction {
     Status,
 }
 
+#[derive(Subcommand)]
+pub enum TunnelAction {
+    /// Show tunnel status: room, self id, peers, forwards, pending prompts,
+    /// trust list, and recent chat/notices
+    Status,
+    /// Start the tunnel session (joins/generates the configured room and
+    /// restores any persisted forwards). A no-op if already running.
+    Start,
+    /// Stop the tunnel session (leaves the room; forwards stay persisted
+    /// for the next `tunnel start`)
+    Stop,
+    /// Show or switch the tunnel's room
+    Room {
+        /// Room id to switch to (omit to show the current/configured room;
+        /// a fresh id is generated if this is blank and none is configured
+        /// yet)
+        id: Option<String>,
+        /// List recently used rooms instead of switching
+        #[arg(long)]
+        list: bool,
+        /// Always mint and switch to a brand-new room id, ignoring any
+        /// currently configured one (the CLI equivalent of the dashboard's
+        /// "new room" button, `tunnel.room.new`) rather than only
+        /// generating one if none is configured yet
+        #[arg(long)]
+        new: bool,
+    },
+    /// Serve one or more forward targets to peers in the tunnel's room
+    /// (starts the session first if it isn't already running). Each target
+    /// is `[tcp://|udp://]port` (listen and reach the same port, e.g. `22`)
+    /// or `[tcp://|udp://]listen:remote` (e.g. `10022:22`); default
+    /// protocol is tcp.
+    Serve {
+        /// Forward targets, e.g. `22` or `udp://5000` or `8080:80`
+        forwards: Vec<String>,
+    },
+    /// Connect into `room`, requesting one or more forwards from whichever
+    /// peer is serving them (starts/switches the session to `room` first).
+    /// Each target is `listen:remote` (e.g. `10022:22`, listen locally on
+    /// 10022, reach the peer's port 22), optionally suffixed `@peer-id` to
+    /// pin it to one specific peer when more than one is connected.
+    Connect {
+        /// Room id to join
+        room: String,
+        /// Forward targets, e.g. `10022:22` or `udp://19000:9000@peer-id`
+        forwards: Vec<String>,
+    },
+    /// List configured forwards and their state
+    Ls,
+    /// Remove a forward by its target (see `tunnel ls`)
+    Rm {
+        /// Forward target, e.g. `tcp:127.0.0.1:22`
+        target: String,
+    },
+    /// Approve a pending connection authorization (see `tunnel status`'s
+    /// `pending_auth` list)
+    Approve {
+        /// Pending authorization id
+        id: u64,
+        /// Also remember this decision, so future connections from the
+        /// same peer for the same forward are approved automatically
+        #[arg(long)]
+        remember: bool,
+    },
+    /// Deny a pending connection authorization
+    Deny {
+        /// Pending authorization id
+        id: u64,
+        /// Also remember this decision (deny automatically from now on)
+        #[arg(long)]
+        remember: bool,
+    },
+    /// Accept a peer's forward proposal (see `tunnel status`'s
+    /// `pending_forwards` list) -- serves it locally and notifies the peer
+    Accept {
+        /// Pending forward request id
+        req_id: u64,
+    },
+    /// Reject a peer's forward proposal
+    Reject {
+        /// Pending forward request id
+        req_id: u64,
+    },
+    /// Ask a peer to open a forward on *its* side (it becomes the server),
+    /// the mirror image of `tunnel serve`. The proposal lands in that peer's
+    /// pending list for its operator to accept or reject; until they answer
+    /// it shows under `tunnel status`'s `pending_outgoing`, and the local
+    /// connect-side forward is established automatically if they accept.
+    Propose {
+        /// Peer node id to ask (see `tunnel status`'s peer list)
+        peer_id: String,
+        /// Forward to request, e.g. `10022:22` or `udp://19000:9000`
+        forward: String,
+    },
+    /// Show the trust list, or revoke one entry
+    Trust {
+        /// Revoke one trust entry: `<peer_id>@<forward_key>` (see the PEER
+        /// and TARGET columns `tunnel trust` itself prints)
+        #[arg(long)]
+        revoke: Option<String>,
+    },
+    /// Send a chat message to every connected peer in the tunnel's room
+    Chat {
+        /// Message text
+        text: String,
+    },
+    /// Open the interactive terminal UI. Talks to the daemon over the same
+    /// IPC commands as every other `tunnel` subcommand (starts the daemon
+    /// first if it isn't running yet, same as the rest of this CLI) rather
+    /// than running an in-process session.
+    Tui,
+}
+
 /// Dispatch a parsed CLI invocation: either run the daemon, or act as a
 /// client sending one request to the running daemon over local IPC.
 pub fn dispatch(cli: Cli) -> Result<()> {
@@ -927,6 +1052,140 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             ),
             BotAction::Status => client_call("bot.status", json!({})),
         },
+        Command::Tunnel { action } => match action {
+            TunnelAction::Status => client_call("tunnel.status", json!({})),
+            TunnelAction::Start => client_call("tunnel.start", json!({})),
+            TunnelAction::Stop => client_call("tunnel.stop", json!({})),
+            TunnelAction::Room { id, list, new } => {
+                if list {
+                    client_call("tunnel.room.list", json!({}))
+                } else if new {
+                    let response = request("tunnel.room.new", json!({}))?;
+                    let room = response
+                        .get("room")
+                        .and_then(Value::as_str)
+                        .unwrap_or("(none)");
+                    println!("room: {room}");
+                    Ok(())
+                } else if let Some(id) = id {
+                    client_call("tunnel.room.set", json!({ "room": id }))
+                } else {
+                    let response = request("tunnel.status", json!({}))?;
+                    let room = response
+                        .get("room")
+                        .and_then(Value::as_str)
+                        .unwrap_or("(none)");
+                    println!("room: {room}");
+                    Ok(())
+                }
+            }
+            TunnelAction::Serve { forwards } => {
+                if forwards.is_empty() {
+                    bail!("provide at least one forward, e.g. `mistl tunnel serve 22`");
+                }
+                let started = request("tunnel.start", json!({}))?;
+                if let Some(room) = started.get("room").and_then(Value::as_str) {
+                    println!("room: {room}");
+                }
+                for f in &forwards {
+                    let (proto, addr, _fallback_port) = forward_args::parse_forward(f);
+                    let target = forward_args::forward_key(proto, addr);
+                    request(
+                        "tunnel.forward.add",
+                        json!({
+                            "direction": "serve",
+                            "proto": proto,
+                            "addr": addr,
+                            "listen_port": -1,
+                            "target": target,
+                        }),
+                    )?;
+                    println!("serving {target}");
+                }
+                Ok(())
+            }
+            TunnelAction::Connect { room, forwards } => {
+                if forwards.is_empty() {
+                    bail!(
+                        "provide at least one forward, e.g. `mistl tunnel connect <room> 10022:22`"
+                    );
+                }
+                request("tunnel.room.set", json!({ "room": room }))?;
+                request("tunnel.start", json!({}))?;
+                for f in &forwards {
+                    let (proto, listen_port, target) = forward_args::parse_connect_forward(f);
+                    request(
+                        "tunnel.forward.add",
+                        json!({
+                            "direction": "connect",
+                            "proto": proto,
+                            "addr": "",
+                            "listen_port": listen_port,
+                            "target": target,
+                        }),
+                    )?;
+                    println!("connecting {target} (local port {listen_port})");
+                }
+                Ok(())
+            }
+            TunnelAction::Ls => {
+                let response = request("tunnel.status", json!({}))?;
+                println!("{}", render_tunnel_forwards(&response));
+                Ok(())
+            }
+            TunnelAction::Rm { target } => {
+                client_call("tunnel.forward.remove", json!({ "target": target }))
+            }
+            TunnelAction::Propose { peer_id, forward } => {
+                // Parsed with the same connect-side grammar `tunnel connect`
+                // uses, so `10022:22` means the same thing in both.
+                let (proto, listen_port, target) = forward_args::parse_connect_forward(&forward);
+                client_call(
+                    "tunnel.forward.propose",
+                    json!({
+                        "peer_id": peer_id,
+                        "proto": proto,
+                        "listen_port": listen_port,
+                        "target": target,
+                    }),
+                )
+            }
+            TunnelAction::Approve { id, remember } => client_call(
+                "tunnel.auth.approve",
+                json!({ "id": id, "remember": remember }),
+            ),
+            TunnelAction::Deny { id, remember } => client_call(
+                "tunnel.auth.deny",
+                json!({ "id": id, "remember": remember }),
+            ),
+            TunnelAction::Accept { req_id } => {
+                client_call("tunnel.forward.accept", json!({ "req_id": req_id }))
+            }
+            TunnelAction::Reject { req_id } => {
+                client_call("tunnel.forward.reject", json!({ "req_id": req_id }))
+            }
+            TunnelAction::Trust { revoke } => match revoke {
+                Some(key) => {
+                    let (peer_id, forward_key) = key.split_once('@').with_context(|| {
+                        format!(
+                            "--revoke expects <peer_id>@<forward_key> (got {key:?}); \
+                             see the PEER and TARGET columns `mistl tunnel trust` prints"
+                        )
+                    })?;
+                    client_call(
+                        "tunnel.trust.revoke",
+                        json!({ "key": { "peer_id": peer_id, "forward_key": forward_key } }),
+                    )
+                }
+                None => {
+                    let response = request("tunnel.status", json!({}))?;
+                    println!("{}", render_tunnel_trust(&response));
+                    Ok(())
+                }
+            },
+            TunnelAction::Chat { text } => client_call("tunnel.chat.send", json!({ "text": text })),
+            TunnelAction::Tui => crate::tunnel::tui::run(),
+        },
         Command::Ui => open_dashboard(),
         Command::Status => status_overview(),
         Command::Config { action } => match action {
@@ -944,10 +1203,10 @@ pub fn dispatch(cli: Cli) -> Result<()> {
                 };
                 let response = request("config.set", json!({ "path": path, "value": value }))?;
                 println!("{}", serde_json::to_string_pretty(&response)?);
-                if let Some(applies) = response.get("applies").and_then(Value::as_str) {
-                    if applies != "next service start" {
-                        println!("note: this change takes effect after a {applies}");
-                    }
+                if let Some(applies) = response.get("applies").and_then(Value::as_str)
+                    && applies != "next service start"
+                {
+                    println!("note: this change takes effect after a {applies}");
                 }
                 Ok(())
             }
@@ -1941,6 +2200,93 @@ fn render_bot_run(run: &Value) -> String {
     if let Some(error) = run.get("error").and_then(Value::as_str) {
         lines.push(format!("    error: {error}"));
     }
+    lines.join("\n")
+}
+
+// -- `mistl tunnel`: human-readable forward/trust rendering ---------------
+//
+// Same `render_sched_ls`-style tab-separated table shape as the renderers
+// above. Both read `tunnel.status`'s `Snapshot::to_json()` fields
+// defensively (`unwrap_or_default`) rather than asserting they're present,
+// since the exact snapshot shape is produced by `crate::tunnel::session`
+// (see its module doc for the authoritative field list); a missing field
+// here just renders as an empty column instead of a panic.
+
+/// `mistl tunnel ls`: one row per entry in `tunnel.status`'s `forwards` list.
+fn render_tunnel_forwards(response: &Value) -> String {
+    let forwards = response
+        .get("forwards")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if forwards.is_empty() {
+        return "no forwards configured".to_string();
+    }
+    let mut lines =
+        vec!["DIRECTION\tPROTO\tADDR\tLISTEN\tTARGET\tSTATE\tCONNS\tTX\tRX".to_string()];
+    lines.extend(forwards.iter().map(|f| {
+        let direction = f
+            .get("direction")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let proto = f.get("proto").and_then(Value::as_str).unwrap_or_default();
+        let addr = f.get("addr").and_then(Value::as_str).unwrap_or_default();
+        let listen_port = f
+            .get("listen_port")
+            .and_then(Value::as_i64)
+            .unwrap_or_default();
+        let target = f.get("target").and_then(Value::as_str).unwrap_or_default();
+        let state = f.get("state").and_then(Value::as_str).unwrap_or_default();
+        let conns = f
+            .get("active_conns")
+            .and_then(Value::as_u64)
+            .unwrap_or_default();
+        let bytes_tx = f
+            .get("bytes_tx")
+            .and_then(Value::as_u64)
+            .unwrap_or_default();
+        let bytes_rx = f
+            .get("bytes_rx")
+            .and_then(Value::as_u64)
+            .unwrap_or_default();
+        format!(
+            "{direction}\t{proto}\t{addr}\t{listen_port}\t{target}\t{state}\t{conns}\t{bytes_tx}\t{bytes_rx}"
+        )
+    }));
+    lines.join("\n")
+}
+
+/// `mistl tunnel trust` (no `--revoke`): one row per entry in
+/// `tunnel.status`'s `trust` list, plus a reminder of the `--revoke` syntax
+/// (`<peer_id>@<forward_key>`, matched against the PEER/TARGET columns
+/// printed here -- see `TunnelAction::Trust`).
+fn render_tunnel_trust(response: &Value) -> String {
+    let trust = response
+        .get("trust")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if trust.is_empty() {
+        return "no trust entries".to_string();
+    }
+    let mut lines = vec!["PEER\tTARGET\tDECISION".to_string()];
+    lines.extend(trust.iter().map(|entry| {
+        let peer_id = entry
+            .get("peer_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let target = entry
+            .get("target")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let decision = entry
+            .get("decision")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        format!("{peer_id}\t{target}\t{decision}")
+    }));
+    lines.push(String::new());
+    lines.push("revoke with: mistl tunnel trust --revoke <peer_id>@<target>".to_string());
     lines.join("\n")
 }
 

@@ -1046,6 +1046,7 @@
     font-size: 12.5px;
   }
   .info-hint.neutral { background: var(--bg-alt); color: var(--text-dim); }
+  .info-hint.error { background: var(--err-dim); color: var(--err); }
   .info-hint a { color: inherit; font-weight: 600; }
 
   .settings-section { display: flex; flex-direction: column; gap: 6px; margin-bottom: 4px; }
@@ -1530,6 +1531,127 @@
   #scheduler-runs-table details summary { cursor: pointer; font-size: 12.5px; color: var(--text-dim); }
   #scheduler-runs-table details summary:hover { color: var(--accent); }
 
+  /* ---- tunnel panel ------------------------------------------------------
+     Port forwarding + remote command tunnels over the mesh network. Every
+     approval/trust row must make the exact peer id and target unmistakable
+     (this is the security surface), hence .tunnel-grant-peer/-target below
+     rather than leaving them at normal table-cell weight. */
+  .tunnel-session-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+  .tunnel-peer-list { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 4px; }
+  .tunnel-notices { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+  .tunnel-chat-row.mine td { background: var(--accent-dim); }
+  .tunnel-grant-peer, .tunnel-grant-target { font-weight: 700; overflow-wrap: anywhere; }
+
+  /* ---- tunnel: room/node id chips + "switch room" popover -- ports the
+     p2p standalone UI's header ergonomics (click-to-copy id chips, a
+     recent-rooms/join/new-room popover) into the panel itself, since mistl
+     has no per-panel header slot. Popover uses a native <details> so
+     open/close state needs no bespoke JS beyond outside-click/Escape. */
+  .tunnel-id-chip {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 6px;
+    border: none;
+    background: var(--bg-alt);
+    color: var(--text);
+    border-radius: 999px;
+    padding: 4px 12px;
+    font: inherit;
+    cursor: pointer;
+    transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+  }
+  .tunnel-id-chip:hover { background: var(--accent-dim); color: var(--accent); }
+  .tunnel-id-chip .tunnel-id-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    letter-spacing: 0.04em;
+  }
+  .tunnel-chip-row { position: relative; }
+  .tunnel-room-switch { position: relative; display: inline-flex; align-items: center; }
+  /* Reads as a button, not a stray glyph: this is the only entry point to
+     "New room" / recent rooms / join-by-id, so an unstyled disclosure
+     triangle would hide the panel's most-used action. */
+  .tunnel-room-switch > summary {
+    list-style: none;
+    width: 24px; height: 24px;
+    display: inline-flex; align-items: center; justify-content: center;
+    border: 1px solid var(--panel-border);
+    background: var(--bg-alt);
+    border-radius: 6px;
+    color: var(--text-dim);
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .tunnel-room-switch > summary::-webkit-details-marker { display: none; }
+  .tunnel-room-switch > summary:hover { background: var(--bg-alt); color: var(--text); }
+  .tunnel-room-switch[open] > summary { background: var(--accent-dim); color: var(--accent); }
+  .tunnel-room-switch-body {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    z-index: 20;
+    width: 280px;
+    max-width: calc(100vw - 48px);
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    box-shadow: var(--shadow);
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .tunnel-room-switch-section { padding-top: 8px; border-top: 1px solid var(--panel-border); }
+  .tunnel-room-switch-section:first-child { padding-top: 0; border-top: none; }
+  .tunnel-room-switch-heading {
+    font-size: 10px;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    letter-spacing: 0.04em;
+    font-weight: 700;
+    margin-bottom: 6px;
+  }
+  .tunnel-room-list { display: flex; flex-direction: column; max-height: 180px; overflow-y: auto; gap: 2px; }
+  .tunnel-room-list-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .tunnel-room-list-row:hover { background: var(--accent-dim); color: var(--accent); }
+  .tunnel-room-list-time { font-size: 11px; color: var(--text-faint); white-space: nowrap; flex: none; }
+  .tunnel-room-switch-section form.inline { margin: 0; }
+  .tunnel-room-switch-section > button { width: 100%; }
+  button.tunnel-peer-chip { border: none; font: inherit; font-weight: 600; cursor: pointer; }
+  button.tunnel-peer-chip:hover:not(:disabled) { transform: none; }
+
+  /* ---- tunnel: pending approvals card, pinned above the sub-tabs and
+     hidden entirely when there is nothing to act on, so an approval can
+     never be missed behind an unopened tab. */
+  .tunnel-pending-card {
+    border: 1px solid var(--accent);
+    border-radius: 10px;
+    padding: 14px 16px;
+    background: var(--panel);
+    box-shadow: var(--shadow-sm);
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .tunnel-pending-card h3 {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--text);
+    display: flex;
+    align-items: center;
+  }
+  .badge.tunnel-pending-badge { background: var(--accent-dim); color: var(--accent); margin-left: 8px; }
+
   /* ---- identity avatar (topbar) + profile avatar editor --------------- */
   .identity-avatar {
     width: 22px;
@@ -1673,6 +1795,7 @@
     <a href="#panel-store"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.7 4 3 9 3s9-1.3 9-3V5"/><path d="M3 12c0 1.7 4 3 9 3s9-1.3 9-3"/></svg><span data-i18n="nav.store">Store</span></a>
     <a href="#panel-scheduler"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l3 2"/><path d="M9 2h6"/></svg><span data-i18n="nav.scheduler">Scheduler</span></a>
     <a href="#panel-bot"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="2"/><circle cx="9" cy="14" r="1.2"/><circle cx="15" cy="14" r="1.2"/><path d="M12 8V4"/><circle cx="12" cy="3" r="1"/><path d="M2 13h2M20 13h2"/></svg><span data-i18n="nav.bot">Bot</span></a>
+    <a href="#panel-tunnel"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="2.5"/><circle cx="19" cy="12" r="2.5"/><path d="M7.5 12h9"/><path d="m14 9 3 3-3 3"/><path d="m10 9-3 3 3 3"/></svg><span data-i18n="nav.tunnel">Tunnel</span></a>
     <a href="#panel-profile"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/></svg><span data-i18n="nav.profile">Profile</span></a>
     <a href="#panel-update"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m8 11 4 4 4-4"/><path d="M4 17v2a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-2"/></svg><span data-i18n="nav.update">Updates</span></a>
     <a href="#panel-settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg><span data-i18n="nav.settings">Settings</span></a>
@@ -2408,6 +2531,262 @@
     </details>
   </section>
 
+  <section class="panel panel-span2" id="panel-tunnel">
+    <h2><span data-i18n="tunnel.title">Tunnel</span> <span class="spacer"></span>
+      <button data-role="refresh" data-target="tunnel" data-i18n="common.refresh">Refresh</button>
+    </h2>
+    <p class="muted" style="font-size: 12px;" data-i18n="tunnel.subtitle">Peer-to-peer TCP/UDP port forwarding and remote command tunnels over the mesh network. Every forward into this node and every remote command session requires an explicit approval from this node.</p>
+
+    <div class="tunnel-session-row">
+      <span class="pill" id="tunnel-state-pill"><span class="dot"></span><span id="tunnel-state-label" data-i18n="tunnel.state.unknown">unknown</span></span>
+      <button type="button" class="primary" id="btn-tunnel-start" data-i18n="tunnel.start">Start</button>
+      <button type="button" class="danger" id="btn-tunnel-stop" hidden data-i18n="tunnel.stop">Stop</button>
+      <span style="flex: 1 1 auto;"></span>
+      <span class="muted" id="tunnel-peer-count" style="font-size: 12px;">0 peers</span>
+    </div>
+
+    <div class="tunnel-session-row tunnel-chip-row">
+      <button type="button" class="tunnel-id-chip" id="tunnel-room-chip" data-i18n-title="tunnel.room.copyTitle" title="Click to copy room id">
+        <span class="tunnel-id-label" data-i18n="tunnel.room.label">room</span><span class="mono" id="tunnel-room-value">-</span>
+      </button>
+      <details class="tunnel-room-switch" id="tunnel-room-switch">
+        <summary data-i18n-title="tunnel.room.switchTitle" data-i18n-aria-label="tunnel.room.switchTitle" title="Switch room" aria-label="Switch room">&#9662;</summary>
+        <div class="tunnel-room-switch-body">
+          <div class="tunnel-room-switch-section">
+            <div class="tunnel-room-switch-heading" data-i18n="tunnel.room.recent">Recent rooms</div>
+            <div class="tunnel-room-list" id="tunnel-room-list"></div>
+            <div class="empty-note" id="tunnel-room-list-empty" data-i18n="tunnel.room.noRecent">No recent rooms yet.</div>
+          </div>
+          <div class="tunnel-room-switch-section">
+            <form class="inline" id="tunnel-room-connect-form">
+              <div class="field" style="flex: 1; min-width: 140px;">
+                <label for="tunnel-room-input" data-i18n="tunnel.room.joinLabel">Join room id</label>
+                <input type="text" id="tunnel-room-input" data-i18n-placeholder="tunnel.room.joinPlaceholder" placeholder="room id" autocomplete="off">
+              </div>
+              <button type="submit" class="primary" id="btn-tunnel-room-connect" data-i18n="tunnel.room.connect">Connect</button>
+            </form>
+          </div>
+          <div class="tunnel-room-switch-section">
+            <button type="button" id="btn-tunnel-room-new" data-i18n="tunnel.room.new">New room</button>
+          </div>
+        </div>
+      </details>
+      <button type="button" class="tunnel-id-chip" id="tunnel-node-chip" data-i18n-title="tunnel.node.copyTitle" title="Click to copy node id">
+        <span class="tunnel-id-label" data-i18n="tunnel.node.label">node</span><span class="mono" id="tunnel-self-id">-</span>
+      </button>
+    </div>
+
+    <div class="tunnel-pending-card" id="tunnel-pending-section" hidden>
+      <h3><span data-i18n="tunnel.pending.title">Pending</span><span class="badge tunnel-pending-badge" id="tunnel-pending-count"></span></h3>
+
+      <div>
+        <h4 style="margin: 0 0 4px; font-size: 12.5px; font-weight: 600;" data-i18n="tunnel.pending.auth.heading">Approvals needed</h4>
+        <p class="muted" style="font-size: 12px; margin: 0 0 8px;" data-i18n="tunnel.pending.auth.hint">A peer is asking to forward traffic to a target on this node. Check the exact peer and target below before approving.</p>
+        <div class="table-wrap">
+          <table id="tunnel-auth-table">
+            <thead><tr>
+              <th data-i18n="tunnel.table.peer">Peer</th>
+              <th data-i18n="tunnel.table.proto">Proto</th>
+              <th data-i18n="tunnel.table.target">Target</th>
+              <th data-i18n="tunnel.table.remoteAddr">Remote addr</th>
+              <th data-i18n="tunnel.table.actions">Actions</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+          <div class="empty-note" id="tunnel-auth-empty" data-i18n="tunnel.pending.auth.empty">No pending approvals.</div>
+        </div>
+      </div>
+
+      <div>
+        <h4 style="margin: 0 0 4px; font-size: 12.5px; font-weight: 600;" data-i18n="tunnel.pending.pf.heading">Incoming forward proposals</h4>
+        <p class="muted" style="font-size: 12px; margin: 0 0 8px;" data-i18n="tunnel.pending.pf.hint">A peer wants to open a new forward with this node. Accepting starts the forward; rejecting declines it.</p>
+        <div class="table-wrap">
+          <table id="tunnel-pf-table">
+            <thead><tr>
+              <th data-i18n="tunnel.table.peer">Peer</th>
+              <th data-i18n="tunnel.table.proto">Proto</th>
+              <th data-i18n="tunnel.table.remoteAddr">Remote addr</th>
+              <th data-i18n="tunnel.table.target">Target</th>
+              <th data-i18n="tunnel.table.actions">Actions</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+          <div class="empty-note" id="tunnel-pf-empty" data-i18n="tunnel.pending.pf.empty">No incoming forward proposals.</div>
+        </div>
+      </div>
+
+      <div>
+        <h4 style="margin: 0 0 4px; font-size: 12.5px; font-weight: 600;" data-i18n="tunnel.pending.po.heading">Outgoing (waiting on peer)</h4>
+        <div class="table-wrap">
+          <table id="tunnel-po-table">
+            <thead><tr>
+              <th data-i18n="tunnel.table.peer">Peer</th>
+              <th data-i18n="tunnel.table.target">Target</th>
+              <th data-i18n="tunnel.table.proto">Proto</th>
+              <th data-i18n="tunnel.table.local">Local</th>
+              <th data-i18n="tunnel.table.remote">Remote</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+          <div class="empty-note" id="tunnel-po-empty" data-i18n="tunnel.pending.po.empty">No outgoing proposals waiting on a peer.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="subtabs" role="tablist" aria-label="Tunnel sections">
+      <button type="button" data-subtab-target="peers" data-i18n="tunnel.tabs.peers">Peers &amp; forwards</button>
+      <button type="button" data-subtab-target="trust" data-i18n="tunnel.tabs.trust">Trust</button>
+      <button type="button" data-subtab-target="activity" data-i18n="tunnel.tabs.activity">Notices &amp; events</button>
+      <button type="button" data-subtab-target="chat" data-i18n="tunnel.tabs.chat">Chat</button>
+    </div>
+
+    <div class="subtab-page" data-subtab="peers">
+      <h3 style="margin: 0 0 8px;" data-i18n="tunnel.peers.heading">Connected peers</h3>
+      <div class="tunnel-peer-list" id="tunnel-peer-list"></div>
+      <div class="empty-note" id="tunnel-peer-empty" data-i18n="tunnel.peers.empty">No peers yet — share the room id.</div>
+
+      <hr class="sep">
+      <h3 style="margin: 0 0 8px;" data-i18n="tunnel.forwards.heading">Forwards</h3>
+      <div class="table-wrap">
+        <table id="tunnel-forwards-table">
+          <thead><tr>
+            <th data-i18n="tunnel.table.direction">Direction</th>
+            <th data-i18n="tunnel.table.proto">Proto</th>
+            <th data-i18n="tunnel.table.addr">Addr</th>
+            <th data-i18n="tunnel.table.port">Port</th>
+            <th data-i18n="tunnel.table.target">Target</th>
+            <th data-i18n="tunnel.table.state">State</th>
+            <th data-i18n="tunnel.table.conns">Conns</th>
+            <th data-i18n="tunnel.table.tx">Tx</th>
+            <th data-i18n="tunnel.table.rx">Rx</th>
+            <th data-i18n="tunnel.table.actions">Actions</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="empty-note" id="tunnel-forwards-empty" data-i18n="tunnel.forwards.empty">No forwards configured.</div>
+      </div>
+
+      <hr class="sep">
+      <h3 style="margin: 0 0 8px;" data-i18n="tunnel.forward.heading">Add a forward</h3>
+      <form class="inline" id="tunnel-forward-propose-form">
+        <div class="field">
+          <label for="tunnel-af-proto" data-i18n="tunnel.forward.protoLabel">Protocol</label>
+          <select id="tunnel-af-proto"><option value="tcp">tcp</option><option value="udp">udp</option></select>
+        </div>
+        <div class="field" style="flex: 1; min-width: 150px;">
+          <label for="tunnel-af-local" data-i18n="tunnel.forward.localLabel">Local address</label>
+          <input type="text" id="tunnel-af-local" data-i18n-placeholder="tunnel.forward.localPlaceholder" placeholder="127.0.0.1:8080" autocomplete="off">
+        </div>
+        <span class="muted" style="align-self: center; padding-bottom: 8px;">&rarr;</span>
+        <div class="field" style="flex: 1; min-width: 150px;">
+          <label for="tunnel-af-remote" data-i18n="tunnel.forward.remoteLabel">Remote</label>
+          <input type="text" id="tunnel-af-remote" data-i18n-placeholder="tunnel.forward.remotePlaceholder" placeholder="remote host:port" autocomplete="off">
+        </div>
+        <div class="field">
+          <label for="tunnel-af-peer" data-i18n="tunnel.forward.peerLabel">Peer</label>
+          <select id="tunnel-af-peer"><option value="" data-i18n="tunnel.forward.peerPlaceholder">— select peer —</option></select>
+        </div>
+        <button type="submit" class="primary" id="btn-tunnel-forward-propose" data-i18n="tunnel.forward.submit">Add forward</button>
+      </form>
+
+      <details class="settings-drawer" id="tunnel-forward-advanced">
+        <summary>
+          <span data-i18n="tunnel.forward.adv.toggle">Advanced: manual direction / listen port / target</span>
+          <span class="drawer-chevron" aria-hidden="true"></span>
+        </summary>
+        <div class="settings-drawer-body">
+          <form class="inline" id="tunnel-forward-form">
+            <div class="field">
+              <label for="tunnel-fwd-direction" data-i18n="tunnel.forward.adv.directionLabel">Direction</label>
+              <select id="tunnel-fwd-direction">
+                <option value="serve" data-i18n="tunnel.forward.adv.directionServe">Serve (accept from a peer, connect out to target)</option>
+                <option value="connect" data-i18n="tunnel.forward.adv.directionConnect">Connect (listen locally, tunnel to a peer)</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="tunnel-fwd-proto" data-i18n="tunnel.forward.adv.protoLabel">Protocol</label>
+              <select id="tunnel-fwd-proto"><option value="tcp">tcp</option><option value="udp">udp</option></select>
+            </div>
+            <div class="field">
+              <label for="tunnel-fwd-addr" data-i18n="tunnel.forward.adv.addrLabel">Bind address</label>
+              <input type="text" id="tunnel-fwd-addr" placeholder="127.0.0.1" autocomplete="off">
+            </div>
+            <div class="field">
+              <label for="tunnel-fwd-port" data-i18n="tunnel.forward.adv.portLabel">Listen port</label>
+              <input type="text" id="tunnel-fwd-port" inputmode="numeric" data-i18n-placeholder="tunnel.forward.adv.portPlaceholder" placeholder="0 = auto" autocomplete="off">
+            </div>
+            <div class="field" style="flex: 2; min-width: 200px;">
+              <label for="tunnel-fwd-target" data-i18n="tunnel.forward.adv.targetLabel">Target (host:port on the far side, or a name the peer recognizes)</label>
+              <input type="text" id="tunnel-fwd-target" data-i18n-placeholder="tunnel.forward.adv.targetPlaceholder" placeholder="127.0.0.1:22" autocomplete="off">
+            </div>
+            <button type="submit" class="primary" id="btn-tunnel-forward-add" data-i18n="tunnel.forward.adv.submit">Add forward (advanced)</button>
+          </form>
+        </div>
+      </details>
+    </div>
+
+    <div class="subtab-page" data-subtab="trust">
+      <h3 style="margin: 0 0 8px;" data-i18n="tunnel.trust.heading">Trust store</h3>
+      <p class="muted" style="font-size: 12px;" data-i18n="tunnel.trust.hint">Remembered allow/deny decisions for a peer + target pair, from approvals made with &quot;remember this decision&quot; checked. Revoking removes the remembered decision only -- it does not close an already-active forward.</p>
+      <div class="table-wrap">
+        <table id="tunnel-trust-table">
+          <thead><tr>
+            <th data-i18n="tunnel.table.peer">Peer</th>
+            <th data-i18n="tunnel.table.target">Target</th>
+            <th data-i18n="tunnel.table.decision">Decision</th>
+            <th data-i18n="tunnel.table.actions">Actions</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="empty-note" id="tunnel-trust-empty" data-i18n="tunnel.trust.empty">No remembered trust decisions.</div>
+      </div>
+    </div>
+
+    <div class="subtab-page" data-subtab="activity">
+      <h3 style="margin: 0 0 8px;" data-i18n="tunnel.activity.noticesHeading">Notices</h3>
+      <div class="tunnel-notices" id="tunnel-notices"></div>
+      <div class="empty-note" id="tunnel-notices-empty" data-i18n="tunnel.activity.noticesEmpty">No notices.</div>
+
+      <hr class="sep">
+      <h3 style="margin: 0 0 8px;" data-i18n="tunnel.activity.eventsHeading">Audit log</h3>
+      <div class="table-wrap">
+        <table id="tunnel-events-table">
+          <thead><tr>
+            <th data-i18n="tunnel.table.time">Time</th>
+            <th data-i18n="tunnel.table.peer">Peer</th>
+            <th data-i18n="tunnel.table.target">Target</th>
+            <th data-i18n="tunnel.table.decision">Decision</th>
+            <th data-i18n="tunnel.table.source">Source</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="empty-note" id="tunnel-events-empty" data-i18n="tunnel.activity.eventsEmpty">No events yet.</div>
+      </div>
+    </div>
+
+    <div class="subtab-page" data-subtab="chat">
+      <div class="table-wrap">
+        <table id="tunnel-chat-table">
+          <thead><tr>
+            <th data-i18n="tunnel.table.time">Time</th>
+            <th data-i18n="tunnel.table.peer">Peer</th>
+            <th data-i18n="tunnel.table.message">Message</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="empty-note" id="tunnel-chat-empty" data-i18n="tunnel.chat.empty">No chat messages yet.</div>
+      </div>
+      <hr class="sep">
+      <form class="inline" id="tunnel-chat-form">
+        <div class="field" style="flex: 1;">
+          <label for="tunnel-chat-input" data-i18n="tunnel.chat.inputLabel">Message</label>
+          <input type="text" id="tunnel-chat-input" autocomplete="off">
+        </div>
+        <button type="submit" class="primary" id="btn-tunnel-chat-send" data-i18n="common.send">Send</button>
+      </form>
+    </div>
+  </section>
+
   <section class="panel" id="panel-profile">
     <h2><span data-i18n="profile.title">Profile</span> <span class="spacer"></span>
       <button data-role="refresh" data-target="profile" data-i18n="common.refresh">Refresh</button>
@@ -2555,6 +2934,7 @@
       "nav.store": "Store",
       "nav.scheduler": "Scheduler",
       "nav.bot": "Bot",
+      "nav.tunnel": "Tunnel",
       "nav.profile": "Profile",
       "nav.settings": "Settings",
       "nav.update": "Updates",
@@ -2587,6 +2967,7 @@
       "profileHint.text": "Set a display name so others can recognize you.",
       "profileHint.button": "Set display name",
       "common.dismiss": "Dismiss",
+      "common.close": "Close",
       "common.refresh": "Refresh",
       "common.save": "Save",
       "common.add": "Add",
@@ -2602,6 +2983,8 @@
       "overview.stopping": "Daemon is stopping.",
       "overview.restartDaemon": "Restart daemon",
       "overview.restarting": "Daemon is restarting; the dashboard will reconnect automatically.",
+      "overview.restarted": "Daemon restarted (pid {pid}).",
+      "overview.restartUnconfirmed": "The daemon did not come back within 15s — check that this page is the live dashboard, then check daemon.log.",
       "overview.status": "status",
       "overview.unreachable": "daemon unreachable",
       "overview.pid": "pid",
@@ -3198,6 +3581,118 @@
       "settings.field.update.repo.desc": "owner/name of the GitHub repository releases are published to.",
       "settings.field.storage.blocks_dir.label": "Blocks directory",
       "settings.field.storage.blocks_dir.desc": "Directory for content-addressed blocks. Leave empty to use the default, <data_dir>/blocks.",
+
+      "tunnel.title": "Tunnel",
+      "tunnel.subtitle": "Peer-to-peer TCP/UDP port forwarding and remote command tunnels over the mesh network. Every forward into this node and every remote command session requires an explicit approval from this node.",
+      "tunnel.state.unknown": "unknown",
+      "tunnel.state.running": "running",
+      "tunnel.state.enabledNotRunning": "enabled, not running",
+      "tunnel.state.stopped": "stopped",
+      "tunnel.start": "Start",
+      "tunnel.stop": "Stop",
+      "tunnel.peerCount": "{count} peers",
+      "tunnel.room.label": "room",
+      "tunnel.room.copyTitle": "Click to copy room id",
+      "tunnel.node.label": "node",
+      "tunnel.node.copyTitle": "Click to copy node id",
+      "tunnel.room.switchTitle": "Switch room",
+      "tunnel.room.recent": "Recent rooms",
+      "tunnel.room.noRecent": "No recent rooms yet.",
+      "tunnel.room.joinLabel": "Join room id",
+      "tunnel.room.joinPlaceholder": "room id",
+      "tunnel.room.connect": "Connect",
+      "tunnel.room.new": "New room",
+      "tunnel.room.enterIdError": "Enter a room id.",
+      "tunnel.room.switched": "Switched to room {room}.",
+      "tunnel.room.switchConfirm": "Switching rooms disconnects {count} connected peer(s) and leaves existing forwards without their peer. Continue?",
+      "tunnel.pending.title": "Pending",
+      "tunnel.pending.auth.heading": "Approvals needed",
+      "tunnel.pending.auth.hint": "A peer is asking to forward traffic to a target on this node. Check the exact peer and target below before approving.",
+      "tunnel.pending.auth.empty": "No pending approvals.",
+      "tunnel.pending.pf.heading": "Incoming forward proposals",
+      "tunnel.pending.pf.hint": "A peer wants to open a new forward with this node. Accepting starts the forward; rejecting declines it.",
+      "tunnel.pending.pf.empty": "No incoming forward proposals.",
+      "tunnel.pending.po.heading": "Outgoing (waiting on peer)",
+      "tunnel.pending.po.empty": "No outgoing proposals waiting on a peer.",
+      "tunnel.tabs.peers": "Peers & forwards",
+      "tunnel.tabs.trust": "Trust",
+      "tunnel.tabs.activity": "Notices & events",
+      "tunnel.tabs.chat": "Chat",
+      "tunnel.peers.heading": "Connected peers",
+      "tunnel.peers.empty": "No peers yet — share the room id.",
+      "tunnel.forwards.heading": "Forwards",
+      "tunnel.forwards.empty": "No forwards configured.",
+      "tunnel.forward.heading": "Add a forward",
+      "tunnel.forward.protoLabel": "Protocol",
+      "tunnel.forward.localLabel": "Local address",
+      "tunnel.forward.localPlaceholder": "127.0.0.1:8080",
+      "tunnel.forward.remoteLabel": "Remote",
+      "tunnel.forward.remotePlaceholder": "remote host:port",
+      "tunnel.forward.peerLabel": "Peer",
+      "tunnel.forward.peerPlaceholder": "— select peer —",
+      "tunnel.forward.submit": "Add forward",
+      "tunnel.forward.adv.toggle": "Advanced: manual direction / listen port / target",
+      "tunnel.forward.adv.directionLabel": "Direction",
+      "tunnel.forward.adv.directionServe": "Serve (accept from a peer, connect out to target)",
+      "tunnel.forward.adv.directionConnect": "Connect (listen locally, tunnel to a peer)",
+      "tunnel.forward.adv.protoLabel": "Protocol",
+      "tunnel.forward.adv.addrLabel": "Bind address",
+      "tunnel.forward.adv.portLabel": "Listen port",
+      "tunnel.forward.adv.portPlaceholder": "0 = auto",
+      "tunnel.forward.adv.targetLabel": "Target (host:port on the far side, or a name the peer recognizes)",
+      "tunnel.forward.adv.targetPlaceholder": "127.0.0.1:22",
+      "tunnel.forward.adv.submit": "Add forward (advanced)",
+      "tunnel.trust.heading": "Trust store",
+      "tunnel.trust.hint": "Remembered allow/deny decisions for a peer + target pair, from approvals made with \"remember this decision\" checked. Revoking removes the remembered decision only -- it does not close an already-active forward.",
+      "tunnel.trust.empty": "No remembered trust decisions.",
+      "tunnel.activity.noticesHeading": "Notices",
+      "tunnel.activity.noticesEmpty": "No notices.",
+      "tunnel.activity.eventsHeading": "Audit log",
+      "tunnel.activity.eventsEmpty": "No events yet.",
+      "tunnel.chat.empty": "No chat messages yet.",
+      "tunnel.chat.inputLabel": "Message",
+      "tunnel.chat.you": "me",
+      "tunnel.table.peer": "Peer",
+      "tunnel.table.proto": "Proto",
+      "tunnel.table.target": "Target",
+      "tunnel.table.remoteAddr": "Remote addr",
+      "tunnel.table.actions": "Actions",
+      "tunnel.table.remember": "Remember",
+      "tunnel.table.direction": "Direction",
+      "tunnel.table.addr": "Addr",
+      "tunnel.table.port": "Port",
+      "tunnel.table.state": "State",
+      "tunnel.table.conns": "Conns",
+      "tunnel.table.tx": "Tx",
+      "tunnel.table.rx": "Rx",
+      "tunnel.table.local": "Local",
+      "tunnel.table.remote": "Remote",
+      "tunnel.table.decision": "Decision",
+      "tunnel.table.time": "Time",
+      "tunnel.table.source": "Source",
+      "tunnel.table.message": "Message",
+      "tunnel.action.approve": "Approve",
+      "tunnel.action.deny": "Deny",
+      "tunnel.action.accept": "Accept",
+      "tunnel.action.reject": "Reject",
+      "tunnel.action.remove": "Remove",
+      "tunnel.action.revoke": "Revoke",
+      "tunnel.confirm.removeForward": "Remove the forward to \"{target}\"?",
+      "tunnel.confirm.revokeTrust": "Revoke the remembered decision for peer \"{peer}\" -> target \"{target}\"?",
+      "tunnel.toast.forwardRemoved": "Forward removed.",
+      "tunnel.toast.approved": "Approved.",
+      "tunnel.toast.denied": "Denied.",
+      "tunnel.toast.accepted": "Accepted.",
+      "tunnel.toast.rejected": "Rejected.",
+      "tunnel.toast.trustRevoked": "Trust entry revoked.",
+      "tunnel.toast.started": "Tunnel started.",
+      "tunnel.toast.stopped": "Tunnel stopped.",
+      "tunnel.toast.forwardAdded": "Forward added.",
+      "tunnel.toast.forwardAddedAdv": "Forward added.",
+      "tunnel.error.localRequired": "Local address is required.",
+      "tunnel.error.remoteRequired": "Remote address is required.",
+      "tunnel.error.targetRequired": "Target is required.",
+      "tunnel.error.portInvalid": "Listen port must be a non-negative number.",
     },
     ja: {
       "pageTitle": "MISTL ダッシュボード",
@@ -3216,6 +3711,7 @@
       "nav.store": "ストア",
       "nav.scheduler": "スケジューラ",
       "nav.bot": "Bot",
+      "nav.tunnel": "トンネル",
       "nav.profile": "プロフィール",
       "nav.settings": "設定",
       "nav.update": "更新",
@@ -3248,6 +3744,7 @@
       "profileHint.text": "表示名を設定すると、他の人があなたを識別しやすくなります。",
       "profileHint.button": "表示名を設定",
       "common.dismiss": "閉じる",
+      "common.close": "閉じる",
       "common.refresh": "更新",
       "common.save": "保存",
       "common.add": "追加",
@@ -3263,6 +3760,8 @@
       "overview.stopping": "デーモンを停止しています。",
       "overview.restartDaemon": "デーモンを再起動",
       "overview.restarting": "デーモンを再起動しています。ダッシュボードは自動的に再接続します。",
+      "overview.restarted": "デーモンを再起動しました (pid {pid})。",
+      "overview.restartUnconfirmed": "15秒以内にデーモンが戻ってきませんでした。このページが実際のダッシュボードか確認し、daemon.logを確認してください。",
       "overview.status": "状態",
       "overview.unreachable": "デーモンに接続できません",
       "overview.pid": "pid",
@@ -3859,6 +4358,118 @@
       "settings.field.update.repo.desc": "リリースの公開元となるGitHubリポジトリの owner/name です。",
       "settings.field.storage.blocks_dir.label": "ブロックディレクトリ",
       "settings.field.storage.blocks_dir.desc": "コンテンツアドレス方式のブロックを保存するディレクトリです。空欄の場合はデフォルトの <data_dir>/blocks が使われます。",
+
+      "tunnel.title": "トンネル",
+      "tunnel.subtitle": "メッシュネットワーク経由のピアツーピア TCP/UDP ポートフォワーディングとリモートコマンドトンネルです。このノードへの転送とリモートコマンドセッションは、いずれもこのノードでの明示的な承認が必要です。",
+      "tunnel.state.unknown": "不明",
+      "tunnel.state.running": "稼働中",
+      "tunnel.state.enabledNotRunning": "有効 (未起動)",
+      "tunnel.state.stopped": "停止中",
+      "tunnel.start": "開始",
+      "tunnel.stop": "停止",
+      "tunnel.peerCount": "ピア {count} 件",
+      "tunnel.room.label": "ルーム",
+      "tunnel.room.copyTitle": "クリックしてルームIDをコピー",
+      "tunnel.node.label": "ノード",
+      "tunnel.node.copyTitle": "クリックしてノードIDをコピー",
+      "tunnel.room.switchTitle": "ルームを切り替え",
+      "tunnel.room.recent": "最近使ったルーム",
+      "tunnel.room.noRecent": "最近使ったルームはまだありません。",
+      "tunnel.room.joinLabel": "ルームIDで参加",
+      "tunnel.room.joinPlaceholder": "ルームID",
+      "tunnel.room.connect": "接続",
+      "tunnel.room.new": "新しいルーム",
+      "tunnel.room.enterIdError": "ルームIDを入力してください。",
+      "tunnel.room.switched": "ルーム {room} に切り替えました。",
+      "tunnel.room.switchConfirm": "ルームを切り替えると接続中の {count} 台のピアが切断され、既存のフォワードは相手を失います。続行しますか？",
+      "tunnel.pending.title": "承認待ち",
+      "tunnel.pending.auth.heading": "承認が必要です",
+      "tunnel.pending.auth.hint": "ピアがこのノード上のターゲットへのトラフィック転送を要求しています。承認する前に、ピアとターゲットを確認してください。",
+      "tunnel.pending.auth.empty": "承認待ちはありません。",
+      "tunnel.pending.pf.heading": "受信した転送提案",
+      "tunnel.pending.pf.hint": "ピアがこのノードとの新しい転送を開こうとしています。承認すると転送が開始され、拒否すると却下されます。",
+      "tunnel.pending.pf.empty": "受信した転送提案はありません。",
+      "tunnel.pending.po.heading": "送信中 (ピアの応答待ち)",
+      "tunnel.pending.po.empty": "ピアの応答待ちの送信提案はありません。",
+      "tunnel.tabs.peers": "ピアと転送",
+      "tunnel.tabs.trust": "信頼リスト",
+      "tunnel.tabs.activity": "通知とイベント",
+      "tunnel.tabs.chat": "チャット",
+      "tunnel.peers.heading": "接続中のピア",
+      "tunnel.peers.empty": "ピアはまだいません -- ルームIDを共有してください。",
+      "tunnel.forwards.heading": "転送",
+      "tunnel.forwards.empty": "転送は設定されていません。",
+      "tunnel.forward.heading": "転送を追加",
+      "tunnel.forward.protoLabel": "プロトコル",
+      "tunnel.forward.localLabel": "ローカルアドレス",
+      "tunnel.forward.localPlaceholder": "127.0.0.1:8080",
+      "tunnel.forward.remoteLabel": "リモート",
+      "tunnel.forward.remotePlaceholder": "リモートの host:port",
+      "tunnel.forward.peerLabel": "ピア",
+      "tunnel.forward.peerPlaceholder": "-- ピアを選択 --",
+      "tunnel.forward.submit": "転送を追加",
+      "tunnel.forward.adv.toggle": "詳細設定: 方向 / リッスンポート / ターゲットを手動指定",
+      "tunnel.forward.adv.directionLabel": "方向",
+      "tunnel.forward.adv.directionServe": "Serve (ピアからの接続を受け入れ、ターゲットへ接続する)",
+      "tunnel.forward.adv.directionConnect": "Connect (ローカルで待ち受け、ピア経由でトンネルする)",
+      "tunnel.forward.adv.protoLabel": "プロトコル",
+      "tunnel.forward.adv.addrLabel": "バインドアドレス",
+      "tunnel.forward.adv.portLabel": "リッスンポート",
+      "tunnel.forward.adv.portPlaceholder": "0 = 自動",
+      "tunnel.forward.adv.targetLabel": "ターゲット (相手側の host:port、またはピアが認識する名前)",
+      "tunnel.forward.adv.targetPlaceholder": "127.0.0.1:22",
+      "tunnel.forward.adv.submit": "転送を追加 (詳細設定)",
+      "tunnel.trust.heading": "信頼リスト",
+      "tunnel.trust.hint": "「この決定を記憶する」を有効にして承認した、ピア + ターゲットの組み合わせごとの許可/拒否の記憶です。取り消すと記憶した決定のみが削除され、すでに有効な転送は閉じられません。",
+      "tunnel.trust.empty": "記憶された信頼の決定はありません。",
+      "tunnel.activity.noticesHeading": "通知",
+      "tunnel.activity.noticesEmpty": "通知はありません。",
+      "tunnel.activity.eventsHeading": "監査ログ",
+      "tunnel.activity.eventsEmpty": "イベントはまだありません。",
+      "tunnel.chat.empty": "チャットメッセージはまだありません。",
+      "tunnel.chat.inputLabel": "メッセージ",
+      "tunnel.chat.you": "自分",
+      "tunnel.table.peer": "ピア",
+      "tunnel.table.proto": "プロトコル",
+      "tunnel.table.target": "ターゲット",
+      "tunnel.table.remoteAddr": "リモートアドレス",
+      "tunnel.table.actions": "操作",
+      "tunnel.table.remember": "記憶する",
+      "tunnel.table.direction": "方向",
+      "tunnel.table.addr": "アドレス",
+      "tunnel.table.port": "ポート",
+      "tunnel.table.state": "状態",
+      "tunnel.table.conns": "接続数",
+      "tunnel.table.tx": "送信",
+      "tunnel.table.rx": "受信",
+      "tunnel.table.local": "ローカル",
+      "tunnel.table.remote": "リモート",
+      "tunnel.table.decision": "決定",
+      "tunnel.table.time": "時刻",
+      "tunnel.table.source": "ソース",
+      "tunnel.table.message": "メッセージ",
+      "tunnel.action.approve": "承認",
+      "tunnel.action.deny": "拒否",
+      "tunnel.action.accept": "受け入れ",
+      "tunnel.action.reject": "却下",
+      "tunnel.action.remove": "削除",
+      "tunnel.action.revoke": "取り消す",
+      "tunnel.confirm.removeForward": "「{target}」への転送を削除しますか？",
+      "tunnel.confirm.revokeTrust": "ピア「{peer}」-> ターゲット「{target}」の記憶された決定を取り消しますか？",
+      "tunnel.toast.forwardRemoved": "転送を削除しました。",
+      "tunnel.toast.approved": "承認しました。",
+      "tunnel.toast.denied": "拒否しました。",
+      "tunnel.toast.accepted": "受け入れました。",
+      "tunnel.toast.rejected": "却下しました。",
+      "tunnel.toast.trustRevoked": "信頼の決定を取り消しました。",
+      "tunnel.toast.started": "トンネルを開始しました。",
+      "tunnel.toast.stopped": "トンネルを停止しました。",
+      "tunnel.toast.forwardAdded": "転送を追加しました。",
+      "tunnel.toast.forwardAddedAdv": "転送を追加しました。",
+      "tunnel.error.localRequired": "ローカルアドレスを入力してください。",
+      "tunnel.error.remoteRequired": "リモートアドレスを入力してください。",
+      "tunnel.error.targetRequired": "ターゲットを入力してください。",
+      "tunnel.error.portInvalid": "リッスンポートは 0 以上の数値で指定してください。",
     },
     zh: {
       "pageTitle": "MISTL 仪表盘",
@@ -3877,6 +4488,7 @@
       "nav.store": "存储",
       "nav.scheduler": "调度器",
       "nav.bot": "Bot",
+      "nav.tunnel": "隧道",
       "nav.profile": "个人资料",
       "nav.settings": "设置",
       "nav.update": "更新",
@@ -3909,6 +4521,7 @@
       "profileHint.text": "设置显示名称，方便他人识别你。",
       "profileHint.button": "设置显示名称",
       "common.dismiss": "关闭",
+      "common.close": "关闭",
       "common.refresh": "刷新",
       "common.save": "保存",
       "common.add": "添加",
@@ -3924,6 +4537,8 @@
       "overview.stopping": "守护进程正在停止。",
       "overview.restartDaemon": "重启守护进程",
       "overview.restarting": "守护进程正在重启，控制台将自动重新连接。",
+      "overview.restarted": "守护进程已重启 (pid {pid})。",
+      "overview.restartUnconfirmed": "15 秒内守护进程未恢复。请确认此页面是实际的控制台，然后检查 daemon.log。",
       "overview.status": "状态",
       "overview.unreachable": "无法连接到守护进程",
       "overview.pid": "pid",
@@ -4520,6 +5135,118 @@
       "settings.field.update.repo.desc": "发布版本所在的 GitHub 仓库，格式为 owner/name。",
       "settings.field.storage.blocks_dir.label": "区块目录",
       "settings.field.storage.blocks_dir.desc": "存放内容寻址区块的目录。留空则使用默认值 <data_dir>/blocks。",
+
+      "tunnel.title": "隧道",
+      "tunnel.subtitle": "通过 mesh 网络进行的点对点 TCP/UDP 端口转发和远程命令隧道。转发到此节点的每一次连接，以及每一次远程命令会话，都需要本节点的明确批准。",
+      "tunnel.state.unknown": "未知",
+      "tunnel.state.running": "运行中",
+      "tunnel.state.enabledNotRunning": "已启用（未运行）",
+      "tunnel.state.stopped": "已停止",
+      "tunnel.start": "启动",
+      "tunnel.stop": "停止",
+      "tunnel.peerCount": "{count} 个节点",
+      "tunnel.room.label": "房间",
+      "tunnel.room.copyTitle": "点击复制房间 ID",
+      "tunnel.node.label": "节点",
+      "tunnel.node.copyTitle": "点击复制节点 ID",
+      "tunnel.room.switchTitle": "切换房间",
+      "tunnel.room.recent": "最近使用的房间",
+      "tunnel.room.noRecent": "暂无最近使用的房间。",
+      "tunnel.room.joinLabel": "加入房间 ID",
+      "tunnel.room.joinPlaceholder": "房间 ID",
+      "tunnel.room.connect": "连接",
+      "tunnel.room.new": "新建房间",
+      "tunnel.room.enterIdError": "请输入房间 ID。",
+      "tunnel.room.switched": "已切换到房间 {room}。",
+      "tunnel.room.switchConfirm": "切换房间会断开 {count} 个已连接的对端，现有转发将失去对应的对端。是否继续？",
+      "tunnel.pending.title": "待处理",
+      "tunnel.pending.auth.heading": "需要批准",
+      "tunnel.pending.auth.hint": "有节点请求将流量转发到此节点上的目标。批准前请仔细核对节点和目标。",
+      "tunnel.pending.auth.empty": "没有待批准的请求。",
+      "tunnel.pending.pf.heading": "收到的转发提议",
+      "tunnel.pending.pf.hint": "有节点想与此节点建立新的转发。接受将启动转发，拒绝将驳回请求。",
+      "tunnel.pending.pf.empty": "没有收到的转发提议。",
+      "tunnel.pending.po.heading": "发出中（等待对方响应）",
+      "tunnel.pending.po.empty": "没有等待对方响应的发出提议。",
+      "tunnel.tabs.peers": "节点与转发",
+      "tunnel.tabs.trust": "信任列表",
+      "tunnel.tabs.activity": "通知与事件",
+      "tunnel.tabs.chat": "聊天",
+      "tunnel.peers.heading": "已连接的节点",
+      "tunnel.peers.empty": "暂无节点 -- 分享房间 ID 以邀请对方加入。",
+      "tunnel.forwards.heading": "转发",
+      "tunnel.forwards.empty": "尚未配置转发。",
+      "tunnel.forward.heading": "添加转发",
+      "tunnel.forward.protoLabel": "协议",
+      "tunnel.forward.localLabel": "本地地址",
+      "tunnel.forward.localPlaceholder": "127.0.0.1:8080",
+      "tunnel.forward.remoteLabel": "远端",
+      "tunnel.forward.remotePlaceholder": "远端 host:port",
+      "tunnel.forward.peerLabel": "节点",
+      "tunnel.forward.peerPlaceholder": "-- 选择节点 --",
+      "tunnel.forward.submit": "添加转发",
+      "tunnel.forward.adv.toggle": "高级选项：手动指定方向 / 监听端口 / 目标",
+      "tunnel.forward.adv.directionLabel": "方向",
+      "tunnel.forward.adv.directionServe": "Serve（接受节点的连接，并连接到目标）",
+      "tunnel.forward.adv.directionConnect": "Connect（本地监听，通过节点建立隧道）",
+      "tunnel.forward.adv.protoLabel": "协议",
+      "tunnel.forward.adv.addrLabel": "绑定地址",
+      "tunnel.forward.adv.portLabel": "监听端口",
+      "tunnel.forward.adv.portPlaceholder": "0 = 自动",
+      "tunnel.forward.adv.targetLabel": "目标（对端的 host:port，或节点可识别的名称）",
+      "tunnel.forward.adv.targetPlaceholder": "127.0.0.1:22",
+      "tunnel.forward.adv.submit": "添加转发（高级）",
+      "tunnel.trust.heading": "信任列表",
+      "tunnel.trust.hint": "勾选“记住此决定”后批准的节点 + 目标组合，会记录允许/拒绝的决定。撤销只会删除记住的决定，不会关闭已经生效的转发。",
+      "tunnel.trust.empty": "没有记住的信任决定。",
+      "tunnel.activity.noticesHeading": "通知",
+      "tunnel.activity.noticesEmpty": "暂无通知。",
+      "tunnel.activity.eventsHeading": "审计日志",
+      "tunnel.activity.eventsEmpty": "暂无事件。",
+      "tunnel.chat.empty": "暂无聊天消息。",
+      "tunnel.chat.inputLabel": "消息",
+      "tunnel.chat.you": "我",
+      "tunnel.table.peer": "节点",
+      "tunnel.table.proto": "协议",
+      "tunnel.table.target": "目标",
+      "tunnel.table.remoteAddr": "远端地址",
+      "tunnel.table.actions": "操作",
+      "tunnel.table.remember": "记住",
+      "tunnel.table.direction": "方向",
+      "tunnel.table.addr": "地址",
+      "tunnel.table.port": "端口",
+      "tunnel.table.state": "状态",
+      "tunnel.table.conns": "连接数",
+      "tunnel.table.tx": "发送",
+      "tunnel.table.rx": "接收",
+      "tunnel.table.local": "本地",
+      "tunnel.table.remote": "远端",
+      "tunnel.table.decision": "决定",
+      "tunnel.table.time": "时间",
+      "tunnel.table.source": "来源",
+      "tunnel.table.message": "消息",
+      "tunnel.action.approve": "批准",
+      "tunnel.action.deny": "拒绝",
+      "tunnel.action.accept": "接受",
+      "tunnel.action.reject": "驳回",
+      "tunnel.action.remove": "删除",
+      "tunnel.action.revoke": "撤销",
+      "tunnel.confirm.removeForward": "删除到“{target}”的转发吗？",
+      "tunnel.confirm.revokeTrust": "撤销节点“{peer}” -> 目标“{target}”记住的决定吗？",
+      "tunnel.toast.forwardRemoved": "转发已删除。",
+      "tunnel.toast.approved": "已批准。",
+      "tunnel.toast.denied": "已拒绝。",
+      "tunnel.toast.accepted": "已接受。",
+      "tunnel.toast.rejected": "已驳回。",
+      "tunnel.toast.trustRevoked": "信任记录已撤销。",
+      "tunnel.toast.started": "隧道已启动。",
+      "tunnel.toast.stopped": "隧道已停止。",
+      "tunnel.toast.forwardAdded": "转发已添加。",
+      "tunnel.toast.forwardAddedAdv": "转发已添加。",
+      "tunnel.error.localRequired": "请输入本地地址。",
+      "tunnel.error.remoteRequired": "请输入远端地址。",
+      "tunnel.error.targetRequired": "请输入目标。",
+      "tunnel.error.portInvalid": "监听端口必须是不小于 0 的数字。",
     }
   };
 
@@ -4797,7 +5524,8 @@
     sandboxItems: [],
     schedulerJobs: [],
     schedulerRuns: [],
-    update: null
+    update: null,
+    tunnel: null
   };
 
   function rerenderAllDynamic() {
@@ -4822,6 +5550,7 @@
     renderProfile(state.identity);
     renderSettings(state.config);
     renderUpdate();
+    renderTunnel(state.tunnel);
   }
 
   /* ---------- header ---------- */
@@ -4938,10 +5667,53 @@
     });
   });
 
+  /* Restart is the one action whose success can't be read off its own
+     response: the daemon answers `{restarting: true}` and only then tears
+     its sockets down, so a call that never reached a live daemon -- this
+     page opened from `file://`, a mocked `fetch`, a tab pointed at some
+     other origin -- looks exactly like a restart that worked. Confirm it
+     for real by remembering the pid we asked to restart and polling
+     `daemon.status` until a *different* pid answers. */
+  var RESTART_CONFIRM_TRIES = 30;      /* 30 x 500ms = ~15s */
+  var RESTART_CONFIRM_INTERVAL_MS = 500;
+
   function restartDaemon(trigger) {
+    var previousPid = state.daemon ? state.daemon.pid : null;
     runAction(trigger, "daemon.restart", {}, function () {
       showToast(t("overview.restarting"));
+      /* The status poll will fail while the daemon is down; mark it already
+         unreachable so that expected gap doesn't raise its own error toast
+         (see `daemonWasReachable`). */
+      daemonWasReachable = false;
+      confirmDaemonRestarted(previousPid);
     });
+  }
+
+  function confirmDaemonRestarted(previousPid) {
+    var tries = 0;
+    function check() {
+      tries++;
+      api("daemon.status", {}).then(function (data) {
+        /* Same pid = the old process is still answering (it has not shut
+           down yet), so keep waiting rather than declaring success. */
+        if (previousPid !== null && data.pid === previousPid) return again();
+        state.daemon = data;
+        state.daemonUptimeBase = data.uptime_secs;
+        state.daemonUptimeAt = Date.now();
+        daemonWasReachable = true;
+        renderDaemonPill();
+        renderOverview();
+        showToast(t("overview.restarted", { pid: data.pid }));
+      }, again);
+    }
+    function again() {
+      if (tries >= RESTART_CONFIRM_TRIES) {
+        showToast(t("overview.restartUnconfirmed"), "error");
+        return;
+      }
+      setTimeout(check, RESTART_CONFIRM_INTERVAL_MS);
+    }
+    setTimeout(check, RESTART_CONFIRM_INTERVAL_MS);
   }
 
   document.getElementById("btn-restart-daemon").addEventListener("click", function (e) {
@@ -8743,6 +9515,536 @@
 
   botResetForm();
 
+  /* ---------- tunnel ----------
+     Talks to the tunnel.* daemon IPC commands (see src/tunnel/mod.rs +
+     src/daemon/mod.rs dispatch). Every value read off tunnel.status is
+     defensively defaulted (|| []) so a shape drift degrades to an empty row
+     instead of a broken panel. Ergonomics (room/node id chips, a switch-room
+     popover, a pinned "Pending" card, a human-terms add-forward form) port
+     the standalone p2p crate's web UI into mistl's own panel/i18n/CSS
+     conventions -- see src/web/assets/index.html in the p2p crate for the
+     reference this was ported from. */
+
+  function fmtEpochMs(ms) {
+    if (typeof ms !== "number" || !isFinite(ms) || ms <= 0) return "-";
+    return new Date(ms).toLocaleString();
+  }
+
+  // A root `peers` entry may be a bare peer-id string (the shape this panel
+  // has always rendered) or, defensively, an object carrying `peer_id` --
+  // the exact shape isn't part of the frozen tunnel.status contract, unlike
+  // forwards[].peers[].
+  function tunnelPeerId(p) {
+    if (typeof p === "string") return p;
+    if (p && typeof p === "object" && typeof p.peer_id === "string") return p.peer_id;
+    return "";
+  }
+
+  var tunnelStatePill = document.getElementById("tunnel-state-pill");
+  var tunnelStateLabel = document.getElementById("tunnel-state-label");
+  var tunnelStartBtn = document.getElementById("btn-tunnel-start");
+  var tunnelStopBtn = document.getElementById("btn-tunnel-stop");
+  var tunnelPeerCountEl = document.getElementById("tunnel-peer-count");
+  var tunnelSelfIdEl = document.getElementById("tunnel-self-id");
+  var tunnelRoomValueEl = document.getElementById("tunnel-room-value");
+  var tunnelRoomChipBtn = document.getElementById("tunnel-room-chip");
+  var tunnelNodeChipBtn = document.getElementById("tunnel-node-chip");
+  var tunnelRoomSwitch = document.getElementById("tunnel-room-switch");
+  var tunnelRoomListEl = document.getElementById("tunnel-room-list");
+  var tunnelRoomListEmpty = document.getElementById("tunnel-room-list-empty");
+  var tunnelRoomConnectForm = document.getElementById("tunnel-room-connect-form");
+  var tunnelRoomConnectInput = document.getElementById("tunnel-room-input");
+  var tunnelRoomConnectBtn = document.getElementById("btn-tunnel-room-connect");
+  var tunnelRoomNewBtn = document.getElementById("btn-tunnel-room-new");
+  var tunnelPendingSection = document.getElementById("tunnel-pending-section");
+  var tunnelPendingCountEl = document.getElementById("tunnel-pending-count");
+  var tunnelPeerListEl = document.getElementById("tunnel-peer-list");
+  var tunnelPeerEmpty = document.getElementById("tunnel-peer-empty");
+  var tunnelForwardsTbody = document.querySelector("#tunnel-forwards-table tbody");
+  var tunnelForwardsEmpty = document.getElementById("tunnel-forwards-empty");
+  var tunnelForwardProposeForm = document.getElementById("tunnel-forward-propose-form");
+  var tunnelAfProtoSelect = document.getElementById("tunnel-af-proto");
+  var tunnelAfLocalInput = document.getElementById("tunnel-af-local");
+  var tunnelAfRemoteInput = document.getElementById("tunnel-af-remote");
+  var tunnelAfPeerSelect = document.getElementById("tunnel-af-peer");
+  var tunnelForwardProposeBtn = document.getElementById("btn-tunnel-forward-propose");
+  var tunnelForwardForm = document.getElementById("tunnel-forward-form");
+  var tunnelForwardAddBtn = document.getElementById("btn-tunnel-forward-add");
+  var tunnelAuthTbody = document.querySelector("#tunnel-auth-table tbody");
+  var tunnelAuthEmpty = document.getElementById("tunnel-auth-empty");
+  var tunnelPfTbody = document.querySelector("#tunnel-pf-table tbody");
+  var tunnelPfEmpty = document.getElementById("tunnel-pf-empty");
+  var tunnelPoTbody = document.querySelector("#tunnel-po-table tbody");
+  var tunnelPoEmpty = document.getElementById("tunnel-po-empty");
+  var tunnelTrustTbody = document.querySelector("#tunnel-trust-table tbody");
+  var tunnelTrustEmpty = document.getElementById("tunnel-trust-empty");
+  var tunnelNoticesEl = document.getElementById("tunnel-notices");
+  var tunnelNoticesEmpty = document.getElementById("tunnel-notices-empty");
+  var tunnelEventsTbody = document.querySelector("#tunnel-events-table tbody");
+  var tunnelEventsEmpty = document.getElementById("tunnel-events-empty");
+  var tunnelChatTbody = document.querySelector("#tunnel-chat-table tbody");
+  var tunnelChatEmpty = document.getElementById("tunnel-chat-empty");
+  var tunnelChatForm = document.getElementById("tunnel-chat-form");
+  var tunnelChatInput = document.getElementById("tunnel-chat-input");
+  var tunnelChatSendBtn = document.getElementById("btn-tunnel-chat-send");
+
+  function renderTunnelForwards(forwards) {
+    forwards = forwards || [];
+    tunnelForwardsTbody.innerHTML = "";
+    tunnelForwardsEmpty.style.display = forwards.length ? "none" : "block";
+    forwards.forEach(function (f) {
+      f = f || {};
+      var tr = el("tr", {});
+      tr.appendChild(el("td", { text: f.direction || "-" }));
+      tr.appendChild(el("td", { text: f.proto || "-" }));
+      tr.appendChild(el("td", { class: "mono", text: f.addr || "-" }));
+      tr.appendChild(el("td", { class: "mono", text: f.listen_port != null ? String(f.listen_port) : "-" }));
+      tr.appendChild(el("td", { class: "mono tunnel-grant-target", text: f.target || "-" }));
+      tr.appendChild(el("td", { text: f.state || "-" }));
+      tr.appendChild(el("td", { text: String(f.active_conns != null ? f.active_conns : 0) }));
+      tr.appendChild(el("td", { text: fmtBytes(f.bytes_out) }));
+      tr.appendChild(el("td", { text: fmtBytes(f.bytes_in) }));
+      var actionCell = el("td", {});
+      var rmBtn = el("button", { type: "button", class: "danger" });
+      rmBtn.textContent = t("tunnel.action.remove");
+      rmBtn.addEventListener("click", function () {
+        if (!confirm(t("tunnel.confirm.removeForward", { target: f.target || "" }))) return;
+        runAction(rmBtn, "tunnel.forward.remove", { target: f.target }, function () {
+          showToast(t("tunnel.toast.forwardRemoved"), "success");
+          pollTunnelStatus();
+        });
+      });
+      actionCell.appendChild(rmBtn);
+      tr.appendChild(actionCell);
+      tunnelForwardsTbody.appendChild(tr);
+    });
+  }
+
+  function renderTunnelAuth(items) {
+    items = items || [];
+    tunnelAuthTbody.innerHTML = "";
+    tunnelAuthEmpty.style.display = items.length ? "none" : "block";
+    items.forEach(function (item) {
+      item = item || {};
+      var tr = el("tr", {});
+      tr.appendChild(el("td", { class: "mono tunnel-grant-peer", text: item.peer_id || "-" }));
+      tr.appendChild(el("td", { text: item.proto || "-" }));
+      tr.appendChild(el("td", { class: "mono tunnel-grant-target", text: item.forward_key || "-" }));
+      tr.appendChild(el("td", { class: "mono", text: item.target_addr || "-" }));
+
+      var actionCell = el("td", {});
+      var rememberLabel = el("label", { class: "checkline", style: "margin-right: 8px;" });
+      var rememberInput = el("input", { type: "checkbox" });
+      rememberLabel.appendChild(rememberInput);
+      rememberLabel.appendChild(el("span", { text: t("tunnel.table.remember") }));
+      actionCell.appendChild(rememberLabel);
+
+      var approveBtn = el("button", { type: "button", class: "primary" });
+      approveBtn.textContent = t("tunnel.action.approve");
+      approveBtn.addEventListener("click", function () {
+        runAction(approveBtn, "tunnel.auth.approve", { id: item.id, remember: rememberInput.checked }, function () {
+          showToast(t("tunnel.toast.approved"), "success");
+          pollTunnelStatus();
+        });
+      });
+      actionCell.appendChild(approveBtn);
+
+      var denyBtn = el("button", { type: "button", class: "danger" });
+      denyBtn.textContent = t("tunnel.action.deny");
+      denyBtn.addEventListener("click", function () {
+        runAction(denyBtn, "tunnel.auth.deny", { id: item.id, remember: rememberInput.checked }, function () {
+          showToast(t("tunnel.toast.denied"), "success");
+          pollTunnelStatus();
+        });
+      });
+      actionCell.appendChild(denyBtn);
+
+      tr.appendChild(actionCell);
+      tunnelAuthTbody.appendChild(tr);
+    });
+  }
+
+  function renderTunnelPendingForwards(items) {
+    items = items || [];
+    tunnelPfTbody.innerHTML = "";
+    tunnelPfEmpty.style.display = items.length ? "none" : "block";
+    items.forEach(function (item) {
+      item = item || {};
+      var tr = el("tr", {});
+      tr.appendChild(el("td", { class: "mono tunnel-grant-peer", text: item.peer_id || "-" }));
+      tr.appendChild(el("td", { text: item.proto || "-" }));
+      tr.appendChild(el("td", { class: "mono", text: item.remote_addr || "-" }));
+      tr.appendChild(el("td", { class: "mono tunnel-grant-target", text: item.target || "-" }));
+      var actionCell = el("td", {});
+      var acceptBtn = el("button", { type: "button", class: "primary" });
+      acceptBtn.textContent = t("tunnel.action.accept");
+      acceptBtn.addEventListener("click", function () {
+        runAction(acceptBtn, "tunnel.forward.accept", { req_id: item.req_id }, function () {
+          showToast(t("tunnel.toast.accepted"), "success");
+          pollTunnelStatus();
+        });
+      });
+      actionCell.appendChild(acceptBtn);
+      var rejectBtn = el("button", { type: "button", class: "danger" });
+      rejectBtn.textContent = t("tunnel.action.reject");
+      rejectBtn.addEventListener("click", function () {
+        runAction(rejectBtn, "tunnel.forward.reject", { req_id: item.req_id }, function () {
+          showToast(t("tunnel.toast.rejected"), "success");
+          pollTunnelStatus();
+        });
+      });
+      actionCell.appendChild(rejectBtn);
+      tr.appendChild(actionCell);
+      tunnelPfTbody.appendChild(tr);
+    });
+  }
+
+  function renderTunnelPendingOutgoing(items) {
+    items = items || [];
+    tunnelPoTbody.innerHTML = "";
+    tunnelPoEmpty.style.display = items.length ? "none" : "block";
+    items.forEach(function (item) {
+      item = item || {};
+      var tr = el("tr", {});
+      tr.appendChild(el("td", { class: "mono", text: item.peer_id || "-" }));
+      tr.appendChild(el("td", { class: "mono", text: item.target || "-" }));
+      // The negotiator tracks no request id or send timestamp for outgoing
+      // proposals, so the listen port + remote address identify the row.
+      tr.appendChild(el("td", { text: item.proto || "-" }));
+      tr.appendChild(el("td", { class: "mono", text: item.local_addr || (item.listen_port ? String(item.listen_port) : "-") }));
+      tr.appendChild(el("td", { class: "mono", text: item.remote_addr || "-" }));
+      tunnelPoTbody.appendChild(tr);
+    });
+  }
+
+  function renderTunnelTrust(items) {
+    items = items || [];
+    tunnelTrustTbody.innerHTML = "";
+    tunnelTrustEmpty.style.display = items.length ? "none" : "block";
+    items.forEach(function (item) {
+      item = item || {};
+      var tr = el("tr", {});
+      tr.appendChild(el("td", { class: "mono tunnel-grant-peer", text: item.peer_id || "-" }));
+      tr.appendChild(el("td", { class: "mono tunnel-grant-target", text: item.forward_key || "-" }));
+      var decisionCell = el("td", {});
+      decisionCell.appendChild(el("span", { class: "badge " + (item.decision === "allow" ? "ok-badge" : "status-error"), text: item.decision || "-" }));
+      tr.appendChild(decisionCell);
+      // The trust store records no creation timestamp, so there is no
+      // "Since" column to fill.
+      var actionCell = el("td", {});
+      var revokeBtn = el("button", { type: "button", class: "danger" });
+      revokeBtn.textContent = t("tunnel.action.revoke");
+      revokeBtn.addEventListener("click", function () {
+        if (!confirm(t("tunnel.confirm.revokeTrust", { peer: item.peer_id || "", target: item.forward_key || "" }))) return;
+        runAction(revokeBtn, "tunnel.trust.revoke", { key: item.key }, function () {
+          showToast(t("tunnel.toast.trustRevoked"), "success");
+          pollTunnelStatus();
+        });
+      });
+      actionCell.appendChild(revokeBtn);
+      tr.appendChild(actionCell);
+      tunnelTrustTbody.appendChild(tr);
+    });
+  }
+
+  function renderTunnelNotices(items) {
+    items = items || [];
+    tunnelNoticesEl.innerHTML = "";
+    tunnelNoticesEmpty.style.display = items.length ? "none" : "block";
+    items.slice(-20).reverse().forEach(function (n) {
+      n = n || {};
+      var cls = "info-hint" + (n.kind === "error" ? " error" : " neutral");
+      var hint = el("div", { class: cls });
+      hint.appendChild(el("span", { text: fmtEpochMs(n.timestamp_ms) + " -- " + (n.text || "") }));
+      tunnelNoticesEl.appendChild(hint);
+    });
+  }
+
+  function renderTunnelEvents(items) {
+    items = items || [];
+    tunnelEventsTbody.innerHTML = "";
+    tunnelEventsEmpty.style.display = items.length ? "none" : "block";
+    items.slice(-100).reverse().forEach(function (ev) {
+      ev = ev || {};
+      var tr = el("tr", {});
+      tr.appendChild(el("td", { text: fmtEpochMs(ev.timestamp_ms) }));
+      tr.appendChild(el("td", { class: "mono", text: ev.peer_id || "-" }));
+      tr.appendChild(el("td", { class: "mono", text: ev.forward_key || "-" }));
+      tr.appendChild(el("td", { text: ev.decision || "-" }));
+      tr.appendChild(el("td", { text: ev.source || "-" }));
+      tunnelEventsTbody.appendChild(tr);
+    });
+  }
+
+  function renderTunnelChat(items) {
+    items = items || [];
+    tunnelChatTbody.innerHTML = "";
+    tunnelChatEmpty.style.display = items.length ? "none" : "block";
+    items.forEach(function (msg) {
+      msg = msg || {};
+      var tr = el("tr", { class: msg.mine ? "tunnel-chat-row mine" : "tunnel-chat-row" });
+      tr.appendChild(el("td", { text: fmtEpochMs(msg.timestamp_ms) }));
+      tr.appendChild(el("td", { class: "mono", text: msg.mine ? t("tunnel.chat.you") : (msg.peer_id || "-") }));
+      tr.appendChild(el("td", { text: msg.text || "" }));
+      tunnelChatTbody.appendChild(tr);
+    });
+    var wrap = tunnelChatTbody.closest(".table-wrap");
+    if (wrap) wrap.scrollTop = wrap.scrollHeight;
+  }
+
+  function renderTunnelRoomList(rooms) {
+    rooms = rooms || [];
+    tunnelRoomListEl.innerHTML = "";
+    tunnelRoomListEmpty.style.display = rooms.length ? "none" : "block";
+    rooms.forEach(function (r) {
+      r = r || {};
+      var row = el("div", { class: "tunnel-room-list-row", role: "menuitem", tabindex: "0", title: r.room || "" });
+      row.appendChild(el("span", { class: "mono", text: r.room || "-" }));
+      row.appendChild(el("span", { class: "tunnel-room-list-time", text: r.last_used_ms ? fmtEpochMs(r.last_used_ms) : "" }));
+      row.addEventListener("click", function () { switchTunnelRoom(r.room); });
+      tunnelRoomListEl.appendChild(row);
+    });
+  }
+
+  // Shared by the recent-room list, the "join this room id" form, and the
+  // room.set half of "New room": all call tunnel.room.set (or the caller has
+  // already called tunnel.room.new) and just need the same post-switch UI
+  // update (toast + close the popover + refresh status/room list).
+  function tunnelRoomSwitched(actualRoom) {
+    showToast(t("tunnel.room.switched", { room: actualRoom || "" }), "success");
+    if (tunnelRoomSwitch) tunnelRoomSwitch.removeAttribute("open");
+    pollTunnelStatus();
+    pollTunnelRoomList();
+  }
+
+  function switchTunnelRoom(room, button) {
+    if (!tunnelConfirmRoomChange()) return;
+    runAction(button || null, "tunnel.room.set", { room: room }, function (data) {
+      tunnelRoomSwitched((data && data.room) || room || "");
+    });
+  }
+
+  function renderTunnelPeerSelect(peers) {
+    var previous = tunnelAfPeerSelect.value;
+    tunnelAfPeerSelect.innerHTML = "";
+    tunnelAfPeerSelect.appendChild(el("option", { value: "", text: t("tunnel.forward.peerPlaceholder") }));
+    peers.forEach(function (p) {
+      var id = tunnelPeerId(p);
+      if (!id) return;
+      tunnelAfPeerSelect.appendChild(el("option", { value: id, title: id, text: truncateMiddle(id, 10, 6) }));
+    });
+    var stillPresent = peers.some(function (p) { return tunnelPeerId(p) === previous; });
+    if (stillPresent) {
+      tunnelAfPeerSelect.value = previous;
+    } else if (peers.length === 1) {
+      tunnelAfPeerSelect.value = tunnelPeerId(peers[0]);
+    } else {
+      tunnelAfPeerSelect.value = "";
+    }
+  }
+
+  function renderTunnel(data) {
+    state.tunnel = data;
+    if (!data) return;
+    var running = !!data.running;
+    tunnelStatePill.className = "pill " + (running ? "ok" : "err");
+    tunnelStateLabel.textContent = running
+      ? t("tunnel.state.running")
+      : (data.enabled ? t("tunnel.state.enabledNotRunning") : t("tunnel.state.stopped"));
+    tunnelStartBtn.hidden = running;
+    tunnelStopBtn.hidden = !running;
+    tunnelSelfIdEl.textContent = data.self_id || "-";
+    tunnelRoomValueEl.textContent = data.room || "-";
+
+    var peers = data.peers || [];
+    tunnelPeerCountEl.textContent = t("tunnel.peerCount", { count: peers.length });
+    tunnelPeerListEl.innerHTML = "";
+    tunnelPeerEmpty.style.display = peers.length ? "none" : "block";
+    peers.forEach(function (p) {
+      var id = tunnelPeerId(p);
+      var chip = el("button", { type: "button", class: "badge mono tunnel-peer-chip", title: id });
+      chip.textContent = id;
+      chip.addEventListener("click", function () { copyToClipboard(id); });
+      tunnelPeerListEl.appendChild(chip);
+    });
+    renderTunnelPeerSelect(peers);
+
+    var pendingAuth = data.pending_auth || [];
+    var pendingForwards = data.pending_forwards || [];
+    var pendingOutgoing = data.pending_outgoing || [];
+    var actionable = pendingAuth.length + pendingForwards.length;
+    var total = actionable + pendingOutgoing.length;
+    tunnelPendingSection.hidden = total === 0;
+    tunnelPendingCountEl.textContent = actionable > 0 ? String(actionable) : "";
+
+    renderTunnelForwards(data.forwards || []);
+    renderTunnelAuth(pendingAuth);
+    renderTunnelPendingForwards(pendingForwards);
+    renderTunnelPendingOutgoing(pendingOutgoing);
+    renderTunnelTrust(data.trust || []);
+    renderTunnelNotices(data.notices || []);
+    renderTunnelEvents(data.events || []);
+    renderTunnelChat(data.chat || []);
+  }
+
+  function pollTunnelStatus() {
+    return api("tunnel.status", {}).then(renderTunnel, function (err) {
+      showToast("tunnel.status: " + (err.message || String(err)), "error");
+    });
+  }
+
+  function pollTunnelRoomList() {
+    return api("tunnel.room.list", {}).then(function (data) {
+      renderTunnelRoomList((data && data.rooms) || []);
+    }, function () { /* non-fatal: recent-rooms list just stays empty */ });
+  }
+
+  document.querySelector('[data-target="tunnel"]').addEventListener("click", function (e) {
+    runAction(e.currentTarget, "tunnel.status", {}, renderTunnel);
+    pollTunnelRoomList();
+  });
+
+  tunnelStartBtn.addEventListener("click", function (e) {
+    runAction(e.currentTarget, "tunnel.start", {}, function () {
+      showToast(t("tunnel.toast.started"), "success");
+      pollTunnelStatus();
+    });
+  });
+
+  tunnelStopBtn.addEventListener("click", function (e) {
+    runAction(e.currentTarget, "tunnel.stop", {}, function () {
+      showToast(t("tunnel.toast.stopped"), "success");
+      pollTunnelStatus();
+    });
+  });
+
+  tunnelRoomChipBtn.addEventListener("click", function () {
+    copyToClipboard(tunnelRoomValueEl.textContent || "");
+  });
+
+  tunnelNodeChipBtn.addEventListener("click", function () {
+    copyToClipboard(tunnelSelfIdEl.textContent || "");
+  });
+
+  /* ---- room switch popover ----
+     A native <details> carries the open/closed state (no bespoke show/hide
+     JS needed for that part); its "toggle" event refreshes the recent-room
+     list whenever it opens, and outside-click/Escape close it the way the
+     p2p reference UI's popover does. */
+  if (tunnelRoomSwitch) {
+    tunnelRoomSwitch.addEventListener("toggle", function () {
+      if (tunnelRoomSwitch.hasAttribute("open")) pollTunnelRoomList();
+    });
+    document.addEventListener("click", function (e) {
+      if (tunnelRoomSwitch.hasAttribute("open") && !tunnelRoomSwitch.contains(e.target)) {
+        tunnelRoomSwitch.removeAttribute("open");
+      }
+    });
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" && tunnelRoomSwitch.hasAttribute("open")) {
+        tunnelRoomSwitch.removeAttribute("open");
+      }
+    });
+  }
+
+  // Switching rooms drops every currently-connected peer and leaves existing
+  // forwards without the peer that served them, so confirm it the same way
+  // removing a forward or revoking trust is confirmed -- but only when there
+  // is actually something to lose.
+  function tunnelConfirmRoomChange() {
+    var peers = (state.tunnel && state.tunnel.peers) || [];
+    if (!peers.length) return true;
+    return confirm(t("tunnel.room.switchConfirm", { count: peers.length }));
+  }
+
+  tunnelRoomNewBtn.addEventListener("click", function (e) {
+    if (!tunnelConfirmRoomChange()) return;
+    runAction(e.currentTarget, "tunnel.room.new", {}, function (data) {
+      tunnelRoomSwitched((data && data.room) || "");
+    });
+  });
+
+  tunnelRoomConnectForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    var room = tunnelRoomConnectInput.value.trim();
+    if (!room) {
+      showToast(t("tunnel.room.enterIdError"), "error");
+      return;
+    }
+    if (!tunnelConfirmRoomChange()) return;
+    runAction(tunnelRoomConnectBtn, "tunnel.room.set", { room: room }, function (data) {
+      tunnelRoomConnectInput.value = "";
+      tunnelRoomSwitched((data && data.room) || room);
+    });
+  });
+
+  /* ---- add a forward: human-terms form (tunnel.forward.propose) ----
+     No direction, no listen_port, no hand-built target -- the server picks
+     the connected peer automatically when exactly one is joined, and
+     otherwise returns an error (surfaced via the normal runAction error
+     toast) asking the caller to pick one from the Peer dropdown. */
+  tunnelForwardProposeForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    var proto = tunnelAfProtoSelect.value;
+    var local = tunnelAfLocalInput.value.trim();
+    var remote = tunnelAfRemoteInput.value.trim();
+    var peerId = tunnelAfPeerSelect.value;
+    if (!local) {
+      showToast(t("tunnel.error.localRequired"), "error");
+      return;
+    }
+    if (!remote) {
+      showToast(t("tunnel.error.remoteRequired"), "error");
+      return;
+    }
+    var args = { proto: proto, local: local, remote: remote };
+    if (peerId) args.peer_id = peerId;
+    runAction(tunnelForwardProposeBtn, "tunnel.forward.propose", args, function (data) {
+      showToast((data && data.message) || t("tunnel.toast.forwardAdded"), "success");
+      tunnelForwardProposeForm.reset();
+      pollTunnelStatus();
+    });
+  });
+
+  /* ---- add a forward: advanced/manual form (tunnel.forward.add) ----
+     Kept for direction/listen-port/named-target cases the human-terms form
+     above can't express; tucked behind a collapsed details drawer so it
+     doesn't compete with the common case. */
+  tunnelForwardForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    var direction = document.getElementById("tunnel-fwd-direction").value;
+    var proto = document.getElementById("tunnel-fwd-proto").value;
+    var addr = document.getElementById("tunnel-fwd-addr").value.trim();
+    var portRaw = document.getElementById("tunnel-fwd-port").value.trim();
+    var target = document.getElementById("tunnel-fwd-target").value.trim();
+    var port = portRaw === "" ? 0 : parseInt(portRaw, 10);
+    if (!target) {
+      showToast(t("tunnel.error.targetRequired"), "error");
+      return;
+    }
+    if (isNaN(port) || port < 0) {
+      showToast(t("tunnel.error.portInvalid"), "error");
+      return;
+    }
+    runAction(tunnelForwardAddBtn, "tunnel.forward.add", {
+      direction: direction, proto: proto, addr: addr, listen_port: port, target: target
+    }, function () {
+      showToast(t("tunnel.toast.forwardAddedAdv"), "success");
+      tunnelForwardForm.reset();
+      pollTunnelStatus();
+    });
+  });
+
+  tunnelChatForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    var text = tunnelChatInput.value.trim();
+    if (!text) return;
+    runAction(tunnelChatSendBtn, "tunnel.chat.send", { text: text }, function () {
+      tunnelChatInput.value = "";
+      pollTunnelStatus();
+    });
+  });
+
   /* ---------- profile ---------- */
 
   var profileKv = document.getElementById("profile-kv");
@@ -10169,6 +11471,10 @@
     pollBotList();
     pollBotLogs();
     pollBotItems();
+    /* tunnel forwards' active_conns/bytes and pending approvals change from
+       peer-driven events in the background, so poll unconditionally too,
+       same as scheduler/bot above. */
+    pollTunnelStatus();
   }
 
   /* Defer a scheduled render pass while a panel-switch entrance animation
@@ -10238,7 +11544,7 @@
 
   var PANEL_IDS = [
     "panel-overview", "panel-stream", "panel-ai",
-    "panel-mailbox", "panel-store", "panel-scheduler", "panel-bot", "panel-profile", "panel-update", "panel-settings"
+    "panel-mailbox", "panel-store", "panel-scheduler", "panel-bot", "panel-tunnel", "panel-profile", "panel-update", "panel-settings"
   ];
   var sideLinks = Array.prototype.slice.call(document.querySelectorAll("#sidenav a"));
 
@@ -10431,6 +11737,8 @@
   pollBotItems();
   pollConfig();
   pollUpdate();
+  pollTunnelStatus();
+  pollTunnelRoomList();
   initDevMode();
 })();
 </script>

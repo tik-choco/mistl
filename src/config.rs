@@ -25,6 +25,8 @@ pub struct Config {
     pub scheduler: SchedulerConfig,
     #[serde(default)]
     pub bot: BotConfig,
+    #[serde(default)]
+    pub tunnel: TunnelConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -689,6 +691,63 @@ pub struct WebhookHeader {
     pub value: String,
 }
 
+/// P2P WebRTC tunnel: TCP/UDP port forwarding and stdio bridging over a
+/// mistlib room, ported from the standalone `p2p` tool (see `crate::tunnel`).
+/// Mirrors `[scheduler]`/`[bot]`'s "master switch plus the rest is read live
+/// on demand" shape: `enabled` only gates whether the daemon auto-joins at
+/// startup (`crate::tunnel::spawn_background`) -- `mistl tunnel start` (and
+/// every other `tunnel.*` command) works regardless, exactly like manual
+/// `sched.*`/`bot.run` calls work regardless of their own `enabled` flags.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TunnelConfig {
+    /// Master switch: when `true`, `crate::tunnel::spawn_background` joins
+    /// `room_id` (generating and persisting one first if blank) at daemon
+    /// startup and restores any forwards saved under
+    /// `<data_dir>/tunnel/forward-store.json`. `false` (the default) means
+    /// nothing auto-joins; `mistl tunnel start`/the dashboard's tunnel panel
+    /// still start the session manually regardless of this flag.
+    pub enabled: bool,
+    /// mistlib room id the tunnel session joins. Blank (the default) means
+    /// "generate one on first start (`mistl tunnel start`/`tunnel room`) and
+    /// persist it here" -- see `crate::tunnel`'s `tunnel.room.set` handler.
+    pub room_id: String,
+    /// Auto-approve every inbound connection authorization request (the
+    /// per-connection "a peer wants to reach target X through this node"
+    /// prompt raised by an active `serve` forward -- see `crate::tunnel::auth`).
+    /// `false` (the default) means an unknown peer is denied unless
+    /// `allow_peers` names it or a prior trust decision already allows it.
+    pub auto_accept: bool,
+    /// Peer node ids auto-approved for connection authorization regardless
+    /// of `auto_accept` -- mirrors the upstream `p2p serve --allow-peer` flag.
+    pub allow_peers: Vec<String>,
+    /// Whether this node accepts an incoming stdio-bridge session (remote
+    /// command execution over the tunnel) at all. Defaults to **false**:
+    /// unlike TCP/UDP forwarding (which only ever reaches addresses this
+    /// node's own forward config explicitly names), a stdio session runs an
+    /// arbitrary local command (`stdio_command`) on a remote peer's behalf,
+    /// so it stays opt-in even when `auto_accept`/`allow_peers` would
+    /// otherwise let that peer's connection through.
+    pub stdio_enabled: bool,
+    /// Command (argv; first element is the executable) run for an accepted
+    /// stdio session. Empty by default; meaningless while `stdio_enabled` is
+    /// `false`.
+    pub stdio_command: Vec<String>,
+}
+
+impl Default for TunnelConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            room_id: String::new(),
+            auto_accept: false,
+            allow_peers: Vec::new(),
+            stdio_enabled: false,
+            stdio_command: Vec::new(),
+        }
+    }
+}
+
 fn project_dirs() -> Result<directories::ProjectDirs> {
     directories::ProjectDirs::from("com", "tik-choco", "mistl")
         .context("could not determine home directory")
@@ -835,6 +894,14 @@ pub fn applies_when(path: &str) -> &'static str {
         // tick (see `crate::bot::spawn_background`), so pipeline
         // add/edit/remove takes effect on the very next tick, not a restart.
         "bot.enabled" => "daemon restart",
+        // Same reasoning again -- `crate::tunnel::spawn_background` only
+        // auto-joins once at daemon startup. `tunnel.room_id`/`auto_accept`/
+        // `allow_peers`/`stdio_enabled`/`stdio_command` deliberately fall
+        // through to the "next service start" default below: they're read
+        // fresh by `tunnel.start`/each new inbound authorization, so a
+        // `mistl tunnel start` (or the next connection attempt) already *is*
+        // that "next start", no daemon restart required.
+        "tunnel.enabled" => "daemon restart",
         // These feed the running AI provider's upstream/model resolution.
         // `daemon::dispatch`'s `config.set` handler reloads it live right
         // after a save (see `ai::reload_provider_if_running`) when one is
@@ -2065,5 +2132,64 @@ mod tests {
         // are independent fields.
         assert_eq!(Config::default().ai.tts_preset_id, "");
         assert_eq!(Config::default().ai.stt_preset_id, "");
+    }
+
+    #[test]
+    fn tunnel_config_defaults_are_disabled_and_empty() {
+        let config = Config::default();
+        assert!(!config.tunnel.enabled);
+        assert_eq!(config.tunnel.room_id, "");
+        assert!(!config.tunnel.auto_accept);
+        assert!(config.tunnel.allow_peers.is_empty());
+        // Remote command execution must stay opt-in even after `enabled` and
+        // `auto_accept` are both turned on for TCP/UDP forwarding.
+        assert!(!config.tunnel.stdio_enabled);
+        assert!(config.tunnel.stdio_command.is_empty());
+    }
+
+    #[test]
+    fn tunnel_config_round_trips_through_toml() {
+        let mut config = Config::default();
+        config.tunnel.enabled = true;
+        config.tunnel.room_id = "abc12345".to_string();
+        config.tunnel.auto_accept = true;
+        config.tunnel.allow_peers = vec!["peer-a".to_string()];
+        config.tunnel.stdio_enabled = true;
+        config.tunnel.stdio_command = vec!["bash".to_string(), "-lc".to_string()];
+
+        let text = toml::to_string_pretty(&config).unwrap();
+        let reloaded: Config = toml::from_str(&text).unwrap();
+        assert!(reloaded.tunnel.enabled);
+        assert_eq!(reloaded.tunnel.room_id, "abc12345");
+        assert!(reloaded.tunnel.auto_accept);
+        assert_eq!(reloaded.tunnel.allow_peers, vec!["peer-a".to_string()]);
+        assert!(reloaded.tunnel.stdio_enabled);
+        assert_eq!(
+            reloaded.tunnel.stdio_command,
+            vec!["bash".to_string(), "-lc".to_string()]
+        );
+    }
+
+    #[test]
+    fn set_by_path_updates_tunnel_fields() {
+        let config = Config::default();
+        let updated = set_by_path(&config, "tunnel.room_id", json!("abc12345")).unwrap();
+        assert_eq!(updated.tunnel.room_id, "abc12345");
+        let updated = set_by_path(&updated, "tunnel.enabled", json!(true)).unwrap();
+        assert!(updated.tunnel.enabled);
+        let updated =
+            set_by_path(&updated, "tunnel.allow_peers", json!(["peer-a", "peer-b"])).unwrap();
+        assert_eq!(
+            updated.tunnel.allow_peers,
+            vec!["peer-a".to_string(), "peer-b".to_string()]
+        );
+    }
+
+    #[test]
+    fn applies_when_reports_tunnel_enabled_needs_a_restart_but_the_rest_does_not() {
+        assert_eq!(applies_when("tunnel.enabled"), "daemon restart");
+        assert_eq!(applies_when("tunnel.room_id"), "next service start");
+        assert_eq!(applies_when("tunnel.auto_accept"), "next service start");
+        assert_eq!(applies_when("tunnel.stdio_enabled"), "next service start");
     }
 }

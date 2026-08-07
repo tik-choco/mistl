@@ -88,6 +88,29 @@ impl AppState {
             .clone()
     }
 
+    /// A minimal [`AppState`] for unit tests: default config, no IPC server,
+    /// no web server, nothing spawned. Exists because every field here is
+    /// private and the only other constructor is [`daemon_main`], which
+    /// stands up the whole daemon -- far too much for a test that just needs
+    /// something to hand to a service function taking `&Arc<AppState>` (e.g.
+    /// `tunnel::session::SessionContext::switch_room`). The returned state's
+    /// shutdown channel has no receiver driving it, so `request_shutdown`
+    /// is a no-op rather than actually stopping anything.
+    #[cfg(test)]
+    pub fn for_test() -> Arc<Self> {
+        let (shutdown, _rx) = watch::channel(false);
+        // The receiver is dropped immediately: `watch::Sender::send` tolerates
+        // having no receivers, so `request_shutdown` stays harmless in tests.
+        Arc::new(Self {
+            config: std::sync::RwLock::new(Config::default()),
+            started_at: Instant::now(),
+            shutdown,
+            restart: AtomicBool::new(false),
+            dashboard_seen: Mutex::new(None),
+            dashboard_url: Mutex::new(None),
+        })
+    }
+
     /// Whether a dashboard request was seen within the last `window`.
     pub fn dashboard_seen_within(&self, window: Duration) -> bool {
         match *self
@@ -195,6 +218,14 @@ async fn daemon_main(host_override: Option<String>) -> Result<()> {
     // noticed" confusion). A no-op (quiet debug log) when it was never
     // enabled, and never fails daemon startup on its own.
     crate::ai::spawn_provide_autoresume(state.clone());
+
+    // WebRTC P2P tunnel (ported from the standalone `p2p` tool): joins
+    // `[tunnel] room_id` and restores persisted forwards only if `[tunnel]
+    // enabled = true`. A no-op (logged) otherwise -- `mistl tunnel start`
+    // (CLI, dashboard, or TUI) still starts it manually regardless, exactly
+    // like `crate::scheduler`/`crate::bot`'s own `enabled` flags gate only
+    // their background loops, not their manual commands.
+    crate::tunnel::spawn_background(state.clone());
 
     tokio::select! {
         _ = tokio::signal::ctrl_c() => info!("interrupted, shutting down"),
@@ -500,6 +531,7 @@ pub async fn dispatch(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<V
             Some("consensus") => crate::consensus::handle(cmd, args, state).await,
             Some("topology") => crate::topology::handle(cmd, args, state).await,
             Some("ai") => crate::ai::handle(cmd, args, state).await,
+            Some("tunnel") => crate::tunnel::handle(cmd, args, state).await,
             Some("update") => crate::update::handle(cmd, args, state).await,
             Some("install") | Some("autostart") => crate::install::handle(cmd, args, state).await,
             _ => bail!("unknown command: {cmd}"),

@@ -13,6 +13,11 @@ It integrates the [tc-storage](https://github.com/tik-choco/tc-storage) CLI and 
   p2p network
 - **mailbox** — p2p store-and-forward messaging ("p2p mail server"): when the recipient
   is offline, a bot node holds the deposit and forwards it once they come online
+- **tunnel** — P2P port forwarding over the mist network (Rust port of
+  [p2p](https://github.com/tik-choco-lab/p2p)): tunnel TCP/UDP through NAT to a peer,
+  with per-connection approval, a persisted trust store, and an audit log. Wire-compatible
+  with the standalone `p2p` binary, so a `mistl` node and a `p2p` node can tunnel to
+  each other
 - **ui** — embedded web dashboard (`mistl` with no args, or `mistl ui`): operate all
   of the above from a browser at `http://127.0.0.1:6480/`, bilingual EN/JA, with
   drag-and-drop file storage and live settings
@@ -137,6 +142,17 @@ $ mistl mailbox send <did|node-id> --file .\data.bin
 $ mistl mailbox fetch         # receive messages pending for me
 $ mistl mailbox ls            # deposits this node is holding as a bot
 
+# Tunnel (P2P port forwarding)
+$ mistl tunnel start          # join the configured room (generates one on first run)
+$ mistl tunnel room           # show the room id to hand to the other side
+$ mistl tunnel room --new     # issue a fresh room id and switch to it
+$ mistl tunnel room --list    # recently used rooms
+$ mistl tunnel serve 22       # offer local port 22 to peers in the room
+$ mistl tunnel connect <room> 10022:22   # from the other machine: local 10022 -> peer's 22
+$ mistl tunnel status         # peers, forwards, pending approvals, trust list
+$ mistl tunnel approve <id> --remember   # allow a peer's connection, and remember it
+$ mistl tunnel tui            # interactive terminal UI (talks to the daemon)
+
 # Web dashboard
 $ mistl ui                    # starts the daemon if needed, opens the browser
 
@@ -245,6 +261,14 @@ cascade = true                               # cascade distribution across relay
 [mailbox]
 # room_id = "my-private-room"               # default: "mistl-mailbox-v1"
 serve_as_bot = true                          # hold deposits for other peers
+
+[tunnel]
+enabled = false                              # join the tunnel room automatically at daemon start
+# room_id = "a1b2c3d4"                      # default: generated on first `tunnel start` and saved here
+auto_accept = false                          # approve every inbound connection without asking (use with care)
+# allow_peers = ["<node-id>"]               # auto-approve only these peers; anything else still prompts
+stdio_enabled = false                        # let approved peers run `stdio_command` on this machine
+# stdio_command = ["pwsh", "-NoLogo"]       # only used when stdio_enabled = true
 
 [ai]
 # room_id = "my-llm-room"                   # default: the mailbox room (see note)
