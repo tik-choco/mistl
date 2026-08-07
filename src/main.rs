@@ -13,6 +13,7 @@ mod scheduler;
 mod storage;
 mod stream;
 mod topology;
+mod tunnel;
 mod update;
 mod web;
 mod wiresign;

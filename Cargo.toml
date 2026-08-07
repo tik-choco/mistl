@@ -84,15 +84,45 @@ fdk-aac = "0.8"
 bincode = "1.3"
 async-trait = "0.1"
 
+# tunnel (P2P port forwarding, ported from the standalone `p2p` crate):
+# ratatui backs `mistl tunnel tui`, hex encodes generated room ids, and uuid
+# generates the per-connection / per-request ids the tunnel wire protocol
+# carries as opaque strings.
+ratatui = "0.29"
+hex = "0.4"
+uuid = { version = "1", features = ["v4"] }
+
 # self-update (GitHub Releases): version compare + atomic replace of the
 # running executable (handles the Windows "can't delete a running exe" dance).
 semver = "1"
 # crates.io package is `self-replace`; keep the `self_replace` import name.
 self_replace = { package = "self-replace", version = "1" }
 
+[dev-dependencies]
+# tunnel tests scope env vars (config/data dir overrides) per test, the same
+# way the upstream `p2p` crate's tests did.
+temp-env = "0.3"
+# `test-util` (not part of the `full` feature set the main dependency enables)
+# backs `Builder::start_paused` / `time::advance`, which the ported tunnel
+# tests use to drive retry backoff and peer-leave grace windows without
+# actually sleeping. Same dev-dependency the upstream `p2p` crate carried.
+tokio = { version = "1", features = ["test-util"] }
+
 [profile.release]
 lto = "thin"
 strip = true
+
+[profile.dev]
+# Windows `.pdb` files were 6.59 GB of this crate's 60.23 GB debug target dir
+# — full debuginfo is the most expensive single component of a debug build
+# here, and it goes almost entirely unused: debugging in this project is
+# `tracing` output, not a stepping debugger. `line-tables-only` keeps what
+# that style needs (file and line numbers in panics and backtraces) and drops
+# the variable/type information a symbolic debugger would want.
+#
+# Set it back to `true` for a session where you genuinely need to inspect
+# variables in WinDbg/VS; it costs a rebuild, not a redesign.
+debug = "line-tables-only"
 
 [target."cfg(windows)".dependencies]
 windows-capture = "2.0.0"

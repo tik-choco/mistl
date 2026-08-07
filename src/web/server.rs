@@ -356,6 +356,43 @@ fn host_is_allowed(host: &str, local_addr: &std::net::SocketAddr) -> bool {
     matches_local_addr(name, port, local_addr)
 }
 
+/// Whether a request must be refused by the dashboard's guards -- the CSRF
+/// header (`require_ui_header`, false only for the plain-navigation download
+/// endpoints that deliberately skip it) and the `Host` allowlist -- logging
+/// which one fired.
+///
+/// The logging is the whole point of routing every guard through here: a 403
+/// tells the browser only "forbidden" and left no trace at all in
+/// `daemon.log`, so a dashboard button that appeared to do nothing (a page
+/// opened from `file://`, a tab reaching the daemon under a hostname the
+/// allowlist doesn't cover) could not be told apart from a broken handler
+/// after the fact.
+fn is_guard_denied(
+    head: &RequestHead,
+    local_addr: &std::net::SocketAddr,
+    require_ui_header: bool,
+) -> bool {
+    let host = head.header("host").unwrap_or("");
+    if require_ui_header && head.header("x-mistl-ui").is_none() {
+        warn!(
+            path = %head.path,
+            %host,
+            "refused a dashboard request with no x-mistl-ui header (CSRF guard)"
+        );
+        return true;
+    }
+    if !host_is_allowed(host, local_addr) {
+        warn!(
+            path = %head.path,
+            %host,
+            bound = %local_addr,
+            "refused a dashboard request whose Host is not loopback or the bound address (DNS-rebinding guard)"
+        );
+        return true;
+    }
+    false
+}
+
 /// Whether `name` (an IP literal) and optional `port` match `local_addr` --
 /// i.e. the `Host` header claims exactly the address the connection was
 /// actually accepted on.
@@ -601,16 +638,11 @@ async fn handle_api_call(
     leftover: Vec<u8>,
     state: Arc<AppState>,
 ) -> io::Result<()> {
-    // CSRF guard: browsers can't attach a custom header cross-origin without
-    // a preflight, and we never answer preflights successfully.
-    if head.header("x-mistl-ui").is_none() {
-        return write_error(stream, 403, "Forbidden", "forbidden").await;
-    }
-    // DNS-rebinding guard: only accept requests whose Host names either a
-    // loopback address or the literal address this connection was accepted
-    // on (see `host_is_allowed`).
+    // CSRF guard (browsers can't attach a custom header cross-origin without
+    // a preflight, and we never answer preflights successfully) plus the
+    // DNS-rebinding Host guard -- both logged by `is_guard_denied`.
     let local_addr = stream.local_addr()?;
-    if !host_is_allowed(head.header("host").unwrap_or(""), &local_addr) {
+    if is_guard_denied(head, &local_addr, true) {
         return write_error(stream, 403, "Forbidden", "forbidden").await;
     }
 
@@ -678,11 +710,8 @@ async fn handle_store_upload(
     state: Arc<AppState>,
 ) -> io::Result<()> {
     // Same guards as /api/call: CSRF (custom header) + DNS-rebinding (Host).
-    if head.header("x-mistl-ui").is_none() {
-        return write_error(stream, 403, "Forbidden", "forbidden").await;
-    }
     let local_addr = stream.local_addr()?;
-    if !host_is_allowed(head.header("host").unwrap_or(""), &local_addr) {
+    if is_guard_denied(head, &local_addr, true) {
         return write_error(stream, 403, "Forbidden", "forbidden").await;
     }
 
@@ -807,7 +836,7 @@ async fn handle_store_download(
     state: Arc<AppState>,
 ) -> io::Result<()> {
     let local_addr = stream.local_addr()?;
-    if !host_is_allowed(head.header("host").unwrap_or(""), &local_addr) {
+    if is_guard_denied(head, &local_addr, false) {
         return write_error(stream, 403, "Forbidden", "forbidden").await;
     }
 
@@ -910,11 +939,8 @@ async fn handle_store_sandbox_upload(
     state: Arc<AppState>,
 ) -> io::Result<()> {
     // Same guards as /api/call: CSRF (custom header) + DNS-rebinding (Host).
-    if head.header("x-mistl-ui").is_none() {
-        return write_error(stream, 403, "Forbidden", "forbidden").await;
-    }
     let local_addr = stream.local_addr()?;
-    if !host_is_allowed(head.header("host").unwrap_or(""), &local_addr) {
+    if is_guard_denied(head, &local_addr, true) {
         return write_error(stream, 403, "Forbidden", "forbidden").await;
     }
 
@@ -1046,7 +1072,7 @@ async fn handle_store_sandbox_download(
     state: Arc<AppState>,
 ) -> io::Result<()> {
     let local_addr = stream.local_addr()?;
-    if !host_is_allowed(head.header("host").unwrap_or(""), &local_addr) {
+    if is_guard_denied(head, &local_addr, false) {
         return write_error(stream, 403, "Forbidden", "forbidden").await;
     }
 
@@ -1245,6 +1271,47 @@ mod tests {
         let local = addr("192.168.1.50:6480");
         assert!(!host_is_allowed("10.0.0.5:6480", &local));
         assert!(!host_is_allowed("192.168.1.50:9999", &local));
+    }
+
+    // -- is_guard_denied ------------------------------------------------------
+
+    fn head_with(headers: &[(&str, &str)]) -> RequestHead {
+        RequestHead {
+            method: "POST".into(),
+            path: "/api/call".into(),
+            headers: headers
+                .iter()
+                .map(|(k, v)| (k.to_ascii_lowercase(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn guard_passes_a_well_formed_dashboard_call() {
+        let head = head_with(&[("x-mistl-ui", "1"), ("host", "127.0.0.1:6480")]);
+        assert!(!is_guard_denied(&head, &addr("127.0.0.1:6480"), true));
+    }
+
+    #[test]
+    fn guard_denies_a_call_without_the_csrf_header() {
+        let head = head_with(&[("host", "127.0.0.1:6480")]);
+        assert!(is_guard_denied(&head, &addr("127.0.0.1:6480"), true));
+    }
+
+    #[test]
+    fn guard_denies_a_call_from_a_disallowed_host() {
+        let head = head_with(&[("x-mistl-ui", "1"), ("host", "evil.com")]);
+        assert!(is_guard_denied(&head, &addr("127.0.0.1:6480"), true));
+    }
+
+    #[test]
+    fn guard_without_the_header_requirement_still_enforces_host() {
+        // The download endpoints skip the CSRF header on purpose (a plain
+        // navigation can't attach one) but must keep the Host allowlist.
+        let head = head_with(&[("host", "127.0.0.1:6480")]);
+        assert!(!is_guard_denied(&head, &addr("127.0.0.1:6480"), false));
+        let head = head_with(&[("host", "evil.com")]);
+        assert!(is_guard_denied(&head, &addr("127.0.0.1:6480"), false));
     }
 
     // -- response framing -----------------------------------------------------
