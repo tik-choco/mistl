@@ -38,6 +38,7 @@ pub(crate) mod openai;
 pub(crate) mod protocol;
 mod provide_state;
 mod provider;
+mod serve_state;
 mod stt;
 pub mod tts;
 
@@ -448,6 +449,9 @@ pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Val
                 }
                 None => false,
             };
+            // An explicit, idempotent stop also clears the intent restored at
+            // daemon startup, even if the listener was already absent.
+            persist_serve_state(false);
             Ok(json!({ "serving": false, "was_running": stopped }))
         }
         _ => bail!("unknown command: {cmd}"),
@@ -597,6 +601,52 @@ pub fn spawn_provide_autoresume(state: Arc<AppState>) {
             Err(err) => {
                 warn!(%err, "ai: provide was left enabled on the previous run, but auto-resume failed (likely an incomplete ai config, e.g. a dangling preset); providing is off until `ai provide start` succeeds")
             }
+        }
+    });
+}
+
+fn persist_serve_state(enabled: bool) {
+    let result = crate::config::data_dir()
+        .context("ai: resolving the data directory")
+        .and_then(|dir| serve_state::write_state(&dir, serve_state::ServeState { enabled }));
+    if let Err(err) = result {
+        warn!(%err, enabled, "ai: failed to persist the API-server state; a daemon restart will not restore it correctly");
+    }
+}
+
+/// Restores the local OpenAI-compatible listener when it was left running
+/// before the daemon stopped. Failures are logged without preventing the
+/// rest of the daemon from starting.
+pub fn spawn_serve_autoresume(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        let data_dir = match crate::config::data_dir() {
+            Ok(dir) => dir,
+            Err(err) => {
+                warn!(%err, "ai: API-server auto-resume skipped -- could not resolve the data directory");
+                return;
+            }
+        };
+        let persisted = match serve_state::read_state(&data_dir) {
+            Ok(state) => state,
+            Err(err) => {
+                warn!(%err, "ai: API-server auto-resume skipped -- could not read its persisted state");
+                return;
+            }
+        };
+        if !persisted.enabled {
+            debug!("ai: API server was not left enabled; not auto-resuming");
+            return;
+        }
+        let service = match ensure_started(&state).await {
+            Ok(service) => service,
+            Err(err) => {
+                warn!(%err, "ai: API server was left enabled, but the AI service failed to start");
+                return;
+            }
+        };
+        match serve_start(&service, &state).await {
+            Ok(result) => info!(%result, "ai: API server auto-resumed from persisted state"),
+            Err(err) => warn!(%err, "ai: API server was left enabled, but auto-resume failed"),
         }
     });
 }
@@ -1280,6 +1330,10 @@ async fn serve_start(service: &Arc<AiService>, state: &Arc<AppState>) -> Result<
         .with_context(|| format!("ai: binding API server on {api_listen}"))?;
     let addr = server.addr();
     *guard = Some(server);
+
+    // Record intent only once bind has succeeded. A failed manual start must
+    // not overwrite the state from the last successful start/stop command.
+    persist_serve_state(true);
 
     Ok(json!({
         "serving": true,
