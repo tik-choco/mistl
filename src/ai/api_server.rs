@@ -39,9 +39,10 @@
 //!   Multipart rather than a raw body because the point of this server is
 //!   that an unmodified OpenAI client can be pointed at it, and every such
 //!   client sends this endpoint that way.
-//! - Upstream/backend errors: before any bytes were streamed -> `502` with
+//! - Upstream/backend errors: before any deltas were streamed -> `502` with
 //!   `{"error":{"message":...}}` (or `400` for malformed requests); once
-//!   streaming has begun, log and terminate the stream.
+//!   streaming has begun, emit an SSE `{"error":...}` event and terminate
+//!   the HTTP chunked body cleanly (without a success `[DONE]` event).
 //! - Anything else -> `404`.
 //!
 //! Both audio endpoints are answered **only from this node's own
@@ -78,6 +79,11 @@ use super::{LlmCallFn, ModelsFn, SttFn, TtsFn, stt, tts};
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 /// Body size cap.
 const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
+const SSE_RESPONSE_HEADER: &str = "HTTP/1.1 200 OK\r\n\
+                                   Content-Type: text/event-stream\r\n\
+                                   Transfer-Encoding: chunked\r\n\
+                                   Cache-Control: no-cache\r\n\
+                                   Connection: close\r\n\r\n";
 
 /// A running API server; dropping/stopping aborts the accept loop and all
 /// connection tasks.
@@ -747,25 +753,29 @@ async fn handle_chat_completions(
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
     let mut call_fut = Box::pin((call)(req.messages, req.model, Some(tx)));
 
-    let header = "HTTP/1.1 200 OK\r\n\
-                  Content-Type: text/event-stream\r\n\
-                  Transfer-Encoding: chunked\r\n\
-                  Cache-Control: no-cache\r\n\
-                  Connection: close\r\n\r\n";
-    stream.write_all(header.as_bytes()).await?;
-    stream.flush().await?;
-
     let mut done: Option<Result<String>> = None;
     let mut rx_closed = false;
+    // Do not commit a 200 response until the first delta is ready. If the
+    // backend fails before then we can still return a useful HTTP 502 rather
+    // than disguising the real error as an incomplete chunked response.
+    let mut stream_started = false;
 
     loop {
         if done.is_some() && rx_closed {
             break;
         }
         tokio::select! {
+            // A completed call may have enqueued its final delta in the same
+            // poll. Prefer draining ready deltas before observing the result.
+            biased;
             maybe_delta = rx.recv(), if !rx_closed => {
                 match maybe_delta {
                     Some(delta) => {
+                        if !stream_started {
+                            stream.write_all(SSE_RESPONSE_HEADER.as_bytes()).await?;
+                            stream.flush().await?;
+                            stream_started = true;
+                        }
                         let chunk = json!({
                             "id": id,
                             "object": "chat.completion.chunk",
@@ -791,6 +801,12 @@ async fn handle_chat_completions(
 
     match done.expect("loop only exits once the call future has resolved") {
         Ok(_content) => {
+            // A successful backend is allowed to produce no content. It is
+            // still a valid empty SSE completion, so commit the response now.
+            if !stream_started {
+                stream.write_all(SSE_RESPONSE_HEADER.as_bytes()).await?;
+                stream.flush().await?;
+            }
             let final_chunk = json!({
                 "id": id,
                 "object": "chat.completion.chunk",
@@ -808,7 +824,27 @@ async fn handle_chat_completions(
             write_http_chunk(stream, b"").await?;
         }
         Err(error) => {
-            warn!(%error, "api_server: backend error mid-stream, closing connection");
+            if !stream_started {
+                // No response bytes have been committed, so preserve the
+                // backend error as a normal OpenAI-shaped HTTP failure.
+                let _ = write_error(stream, 502, "Bad Gateway", &format!("{error:#}")).await;
+            } else {
+                // HTTP status is already committed. Surface the real error in
+                // band and always finish the chunked body; abruptly closing it
+                // makes clients report only "incomplete chunked read".
+                warn!("api_server: backend error mid-stream: {error:#}");
+                let event = format!(
+                    "data: {}\n\n",
+                    json!({
+                        "error": {
+                            "message": format!("{error:#}"),
+                            "type": "backend_error",
+                        }
+                    })
+                );
+                write_http_chunk(stream, event.as_bytes()).await?;
+                write_http_chunk(stream, b"").await?;
+            }
         }
     }
 
@@ -837,6 +873,20 @@ mod tests {
     fn fake_call_err() -> LlmCallFn {
         Arc::new(|_messages, _model, _delta_tx| {
             Box::pin(async move { Err(anyhow::anyhow!("upstream exploded")) })
+        })
+    }
+
+    fn fake_call_midstream_err() -> LlmCallFn {
+        Arc::new(|_messages, _model, delta_tx| {
+            Box::pin(async move {
+                if let Some(tx) = delta_tx {
+                    let _ = tx.send("partial".to_string());
+                }
+                // Make the first delta observable before the failure so the
+                // server has genuinely committed the 200/SSE response.
+                tokio::task::yield_now().await;
+                Err(anyhow::anyhow!("upstream failed after a delta"))
+            })
         })
     }
 
@@ -1090,6 +1140,7 @@ mod tests {
             let size = usize::from_str_radix(size_str, 16).expect("hex chunk size");
             body = &body[line_end + 2..];
             if size == 0 {
+                assert_eq!(body, b"\r\n", "zero chunk must terminate with CRLF");
                 break;
             }
             out.extend_from_slice(&body[..size]);
@@ -1190,6 +1241,82 @@ mod tests {
         assert!(
             events.iter().any(|e| *e == "data: [DONE]"),
             "expected [DONE] event, got: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_chat_completions_stream_error_before_first_delta_is_502() {
+        let server = start_test_server(fake_call_err(), fake_models()).await;
+        let payload = json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": true
+        })
+        .to_string();
+        let request = format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n{}",
+            payload.len(),
+            payload
+        );
+
+        let raw = send_request(server.addr(), &request).await;
+        let (head, body) = split_response(&raw);
+        assert_eq!(status_code(&head), 502, "{head}");
+        assert!(
+            !head
+                .to_ascii_lowercase()
+                .contains("transfer-encoding: chunked"),
+            "an immediate failure must not commit an SSE response: {head}"
+        );
+        let value: Value = serde_json::from_slice(body).expect("valid JSON error body");
+        assert_eq!(value["error"]["message"], "upstream exploded");
+    }
+
+    #[tokio::test]
+    async fn post_chat_completions_midstream_error_emits_sse_error_and_terminates_chunking() {
+        let server = start_test_server(fake_call_midstream_err(), fake_models()).await;
+        let payload = json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": true
+        })
+        .to_string();
+        let request = format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n{}",
+            payload.len(),
+            payload
+        );
+
+        let raw = send_request(server.addr(), &request).await;
+        let (head, body) = split_response(&raw);
+        assert_eq!(status_code(&head), 200, "{head}");
+        assert!(
+            head.to_ascii_lowercase()
+                .contains("transfer-encoding: chunked"),
+            "{head}"
+        );
+
+        // de_chunk also asserts that the terminating zero chunk is present;
+        // the old behavior failed here with an incomplete chunk-size line.
+        let text = String::from_utf8(de_chunk(body)).expect("SSE payload is UTF-8");
+        let events: Vec<Value> = text
+            .split("\n\n")
+            .filter_map(|event| event.strip_prefix("data: "))
+            .filter_map(|data| serde_json::from_str(data).ok())
+            .collect();
+        assert!(
+            events
+                .iter()
+                .any(|event| { event["choices"][0]["delta"]["content"] == "partial" }),
+            "expected the delta sent before failure: {text}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| { event["error"]["message"] == "upstream failed after a delta" }),
+            "expected a surfaced backend error: {text}"
+        );
+        assert!(
+            !text.contains("data: [DONE]"),
+            "a failed stream must not claim successful completion: {text}"
         );
     }
 

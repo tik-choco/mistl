@@ -219,6 +219,10 @@ async fn daemon_main(host_override: Option<String>) -> Result<()> {
     // enabled, and never fails daemon startup on its own.
     crate::ai::spawn_provide_autoresume(state.clone());
 
+    // Restore the local OpenAI-compatible API listener when it was left
+    // running. Its bind address still comes from the current config.
+    crate::ai::spawn_serve_autoresume(state.clone());
+
     // WebRTC P2P tunnel (ported from the standalone `p2p` tool): joins
     // `[tunnel] room_id` and restores persisted forwards only if `[tunnel]
     // enabled = true`. A no-op (logged) otherwise -- `mistl tunnel start`
