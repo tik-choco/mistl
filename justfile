@@ -32,6 +32,20 @@ _ensure-mistlib:
 _ensure-mistlib:
     @test -d .mistlib-src/.git || just fetch-mistlib
 
+# Point .mistlib-src at a snapshot copy of ../mistlib-dev instead of a git fetch —
+# lets you build against engine changes before they're committed/pushed anywhere.
+# Re-run after further mistlib-dev edits to refresh the snapshot.
+mistlib-local:
+    node scripts/mistlib-local.mjs on
+
+# Drop the local snapshot and go back to the git-fetched mistlib (MISTLIB_REPO/REF in .env)
+mistlib-npm:
+    node scripts/mistlib-local.mjs off
+
+# Show whether .mistlib-src is currently a local snapshot or a git clone
+mistlib-status:
+    node scripts/mistlib-local.mjs status
+
 # --- mistlib-consensus dependency -------------------------------------------
 
 # Fetch/update mistlib-consensus into .mistlib-consensus-src
