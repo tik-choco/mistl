@@ -9,6 +9,14 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cache="$root/.mistlib-src"
+git_dir="$cache/.git"
+
+# Never use `git -C "$cache"` here. If the cache disappears or is not a Git
+# worktree, Git walks up to mistl's own .git directory. Pinning both paths makes
+# every command fail closed instead of operating on the parent repository.
+cache_git() {
+    git --git-dir="$git_dir" --work-tree="$cache" "$@"
+}
 
 if [ -f "$cache/.mistlib-local-source" ]; then
     echo "mistlib: using local snapshot in .mistlib-src; skipping fetch"
@@ -31,47 +39,52 @@ if [ -z "$MISTLIB_REPO" ]; then
     exit 1
 fi
 
-if [ ! -d "$cache/.git" ]; then
+if [ ! -d "$git_dir" ]; then
     rm -rf "$cache"
     git clone "$MISTLIB_REPO" "$cache"
+fi
+
+if [ ! -d "$git_dir" ] || [ -L "$git_dir" ]; then
+    echo "error: $git_dir is not a safe, standalone Git directory" >&2
+    exit 1
 fi
 
 # The clone is created only once, so a later MISTLIB_REPO change in .env would
 # otherwise keep fetching from the original remote. Re-point it on every run so
 # .env stays the single source of truth (public mistlib vs private mistlib-dev).
-git -C "$cache" remote set-url origin "$MISTLIB_REPO"
+cache_git remote set-url origin "$MISTLIB_REPO"
 
-git -C "$cache" config core.autocrlf false
+cache_git config core.autocrlf false
 
-if ! git -C "$cache" fetch origin "$MISTLIB_REF"; then
-    echo "warning: could not fetch mistlib (offline?); keeping $(git -C "$cache" rev-parse --short HEAD)" >&2
+if ! cache_git fetch origin "$MISTLIB_REF"; then
+    echo "warning: could not fetch mistlib (offline?); keeping $(cache_git rev-parse --short HEAD)" >&2
     exit 0
 fi
 
-old=$(git -C "$cache" rev-parse HEAD)
-new=$(git -C "$cache" rev-parse FETCH_HEAD)
+old=$(cache_git rev-parse HEAD)
+new=$(cache_git rev-parse FETCH_HEAD)
 
 if [ "$old" = "$new" ]; then
-    echo "mistlib ($MISTLIB_REF @ $(git -C "$cache" rev-parse --short HEAD)) ready in .mistlib-src"
+    echo "mistlib ($MISTLIB_REF @ $(cache_git rev-parse --short HEAD)) ready in .mistlib-src"
     exit 0
 fi
 
 stashed=0
-if [ -n "$(git -C "$cache" status --porcelain)" ]; then
-    git -C "$cache" stash push --include-untracked -m "fetch auto-stash"
+if [ -n "$(cache_git status --porcelain)" ]; then
+    cache_git stash push --include-untracked -m "fetch auto-stash"
     stashed=1
 fi
 
-git -C "$cache" checkout --detach FETCH_HEAD
+cache_git checkout --detach FETCH_HEAD
 
 if [ "$stashed" -eq 1 ]; then
-    if ! git -C "$cache" stash pop; then
-        git -C "$cache" reset --hard
-        git -C "$cache" checkout --detach "$old"
-        git -C "$cache" stash pop
-        echo "warning: upstream update for mistlib conflicts with local uncommitted changes in .mistlib-src; staying on the previous commit ($(git -C "$cache" rev-parse --short "$old")). Commit/push or resolve those changes, then re-run 'just fetch-mistlib'." >&2
+    if ! cache_git stash pop; then
+        cache_git reset --hard
+        cache_git checkout --detach "$old"
+        cache_git stash pop
+        echo "warning: upstream update for mistlib conflicts with local uncommitted changes in .mistlib-src; staying on the previous commit ($(cache_git rev-parse --short "$old")). Commit/push or resolve those changes, then re-run 'just fetch-mistlib'." >&2
         exit 0
     fi
 fi
 
-echo "mistlib ($MISTLIB_REF @ $(git -C "$cache" rev-parse --short HEAD)) ready in .mistlib-src"
+echo "mistlib ($MISTLIB_REF @ $(cache_git rev-parse --short HEAD)) ready in .mistlib-src"

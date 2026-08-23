@@ -46,6 +46,10 @@ mistlib-npm:
 mistlib-status:
     node scripts/mistlib-local.mjs status
 
+# Regression test: dependency fetches must never discover or mutate mistl's .git
+test-fetch-safety:
+    node scripts/test-fetch-safety.mjs
+
 # --- mistlib-consensus dependency -------------------------------------------
 
 # Fetch/update mistlib-consensus into .mistlib-consensus-src

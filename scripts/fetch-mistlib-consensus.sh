@@ -9,6 +9,15 @@
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cache="$root/.mistlib-consensus-src"
+git_dir="$cache/.git"
+
+# Pin every command to the dependency clone. `git -C` may discover mistl's
+# parent .git directory when this cache is missing or concurrently replaced.
+cache_git() {
+    git --git-dir="$git_dir" --work-tree="$cache" "$@"
+}
+
 env_file="$root/.env"
 
 if [ ! -f "$env_file" ]; then
@@ -25,48 +34,51 @@ if [ -z "$MISTLIB_CONSENSUS_REPO" ]; then
     exit 1
 fi
 
-cache="$root/.mistlib-consensus-src"
-
-if [ ! -d "$cache/.git" ]; then
+if [ ! -d "$git_dir" ]; then
     rm -rf "$cache"
     git clone "$MISTLIB_CONSENSUS_REPO" "$cache"
 fi
 
+if [ ! -d "$git_dir" ] || [ -L "$git_dir" ]; then
+    echo "error: $git_dir is not a safe, standalone Git directory" >&2
+    exit 1
+fi
+
 # See fetch-mistlib.sh: re-point the remote so a MISTLIB_CONSENSUS_REPO change
 # in .env takes effect on an existing clone too.
-git -C "$cache" remote set-url origin "$MISTLIB_CONSENSUS_REPO"
+cache_git remote set-url origin "$MISTLIB_CONSENSUS_REPO"
 
-git -C "$cache" config core.autocrlf false
+cache_git config core.autocrlf false
 
-if ! git -C "$cache" fetch origin "$MISTLIB_CONSENSUS_REF"; then
-    echo "warning: could not fetch mistlib-consensus (offline?); keeping $(git -C "$cache" rev-parse --short HEAD)" >&2
+if ! cache_git fetch origin "$MISTLIB_CONSENSUS_REF"; then
+    echo "warning: could not fetch mistlib-consensus (offline?); keeping $(cache_git rev-parse --short HEAD)" >&2
     exit 0
 fi
 
-old=$(git -C "$cache" rev-parse HEAD)
-new=$(git -C "$cache" rev-parse FETCH_HEAD)
+old=$(cache_git rev-parse HEAD)
+new=$(cache_git rev-parse FETCH_HEAD)
 
 if [ "$old" = "$new" ]; then
-    echo "mistlib-consensus ($MISTLIB_CONSENSUS_REF @ $(git -C "$cache" rev-parse --short HEAD)) ready in .mistlib-consensus-src"
+    echo "mistlib-consensus ($MISTLIB_CONSENSUS_REF @ $(cache_git rev-parse --short HEAD)) ready in .mistlib-consensus-src"
     exit 0
 fi
 
 stashed=0
-if [ -n "$(git -C "$cache" status --porcelain)" ]; then
-    git -C "$cache" stash push --include-untracked -m "fetch auto-stash"
+if [ -n "$(cache_git status --porcelain)" ]; then
+    cache_git stash push --include-untracked -m "fetch auto-stash"
     stashed=1
 fi
 
-git -C "$cache" checkout --detach FETCH_HEAD
+cache_git checkout --detach FETCH_HEAD
 
 if [ "$stashed" -eq 1 ]; then
-    if ! git -C "$cache" stash pop; then
-        git -C "$cache" reset --hard
-        git -C "$cache" checkout --detach "$old"
-        git -C "$cache" stash pop
-        echo "warning: upstream update for mistlib-consensus conflicts with local uncommitted changes in .mistlib-consensus-src; staying on the previous commit ($(git -C "$cache" rev-parse --short "$old")). Commit/push or resolve those changes, then re-run 'just fetch-mistlib-consensus'." >&2
+    if ! cache_git stash pop; then
+        cache_git reset --hard
+        cache_git checkout --detach "$old"
+        cache_git stash pop
+        echo "warning: upstream update for mistlib-consensus conflicts with local uncommitted changes in .mistlib-consensus-src; staying on the previous commit ($(cache_git rev-parse --short "$old")). Commit/push or resolve those changes, then re-run 'just fetch-mistlib-consensus'." >&2
         exit 0
     fi
 fi
 
-echo "mistlib-consensus ($MISTLIB_CONSENSUS_REF @ $(git -C "$cache" rev-parse --short HEAD)) ready in .mistlib-consensus-src"
+echo "mistlib-consensus ($MISTLIB_CONSENSUS_REF @ $(cache_git rev-parse --short HEAD)) ready in .mistlib-consensus-src"
