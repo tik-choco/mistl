@@ -8,6 +8,14 @@
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $PSScriptRoot
+$cache = Join-Path $root ".mistlib-src"
+$localMarker = Join-Path $cache ".mistlib-local-source"
+
+if (Test-Path -LiteralPath $localMarker) {
+    Write-Host "mistlib: using local snapshot in .mistlib-src; skipping fetch"
+    exit 0
+}
+
 $envFile = Join-Path $root ".env"
 
 if (-not (Test-Path $envFile)) {
@@ -29,8 +37,6 @@ if (-not $repo) {
     Write-Host "error: MISTLIB_REPO is not set in .env"
     exit 1
 }
-
-$cache = Join-Path $root ".mistlib-src"
 
 if (-not (Test-Path (Join-Path $cache ".git"))) {
     if (Test-Path $cache) { Remove-Item -Recurse -Force $cache }

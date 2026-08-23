@@ -8,6 +8,13 @@
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cache="$root/.mistlib-src"
+
+if [ -f "$cache/.mistlib-local-source" ]; then
+    echo "mistlib: using local snapshot in .mistlib-src; skipping fetch"
+    exit 0
+fi
+
 env_file="$root/.env"
 
 if [ ! -f "$env_file" ]; then
@@ -23,8 +30,6 @@ if [ -z "$MISTLIB_REPO" ]; then
     echo "error: MISTLIB_REPO is not set in .env" >&2
     exit 1
 fi
-
-cache="$root/.mistlib-src"
 
 if [ ! -d "$cache/.git" ]; then
     rm -rf "$cache"
