@@ -39,8 +39,8 @@ use async_trait::async_trait;
 use mistlib_core::storage::PeerResolver;
 use mistlib_core::storage::protocol::{
     MSG_WANT, WantRegistry, build_have_payload, build_have_status_message, build_query_message,
-    have_chunk_count, parse_have_chunk_message, parse_have_message, parse_have_status_message,
-    parse_query_message, parse_want_message,
+    chunk_size_for_limit, have_chunk_count, parse_have_chunk_message, parse_have_message,
+    parse_have_status_message, parse_query_message, parse_want_message,
 };
 use mistlib_core::types::NodeId;
 
@@ -304,7 +304,10 @@ async fn reply_have(room: &str, from: &str, cid: &str) {
     let Ok(Some(data)) = store.get_local(cid).await else {
         return;
     };
-    let Some(total_chunks) = have_chunk_count(data.len()) else {
+    // The public app transport does not expose its negotiated per-peer
+    // message limit, so retain mistlib-core's conservative fallback size.
+    let chunk_size = chunk_size_for_limit(cid, None);
+    let Some(total_chunks) = have_chunk_count(data.len(), chunk_size) else {
         tracing::warn!(
             "storage: refusing to serve oversized block {cid} ({} bytes)",
             data.len()
@@ -312,7 +315,7 @@ async fn reply_have(room: &str, from: &str, cid: &str) {
         return;
     };
     for chunk_index in 0..total_chunks {
-        let msg = build_have_payload(cid, &data, chunk_index, total_chunks);
+        let msg = build_have_payload(cid, &data, chunk_index, total_chunks, chunk_size);
         let _ = crate::net::send_direct(room, from, msg).await;
         if chunk_index % 8 == 0 {
             tokio::task::yield_now().await;
