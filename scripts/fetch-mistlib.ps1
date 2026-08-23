@@ -9,7 +9,17 @@ $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $PSScriptRoot
 $cache = Join-Path $root ".mistlib-src"
+$gitDir = Join-Path $cache ".git"
 $localMarker = Join-Path $cache ".mistlib-local-source"
+
+# Never use `git -C $cache` here. If the cache disappears or is not a Git
+# worktree, Git walks up to mistl's own .git directory and destructive commands
+# such as remote set-url/stash/checkout operate on the parent repository.
+# An explicit git-dir/work-tree pair fails closed instead of discovering a
+# parent repository.
+function Invoke-CacheGit {
+    & git "--git-dir=$gitDir" "--work-tree=$cache" @args
+}
 
 if (Test-Path -LiteralPath $localMarker) {
     Write-Host "mistlib: using local snapshot in .mistlib-src; skipping fetch"
@@ -38,43 +48,50 @@ if (-not $repo) {
     exit 1
 }
 
-if (-not (Test-Path (Join-Path $cache ".git"))) {
+if (-not (Test-Path -LiteralPath $gitDir -PathType Container)) {
     if (Test-Path $cache) { Remove-Item -Recurse -Force $cache }
     git clone $repo $cache
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 
+$gitDirItem = Get-Item -LiteralPath $gitDir -ErrorAction SilentlyContinue
+if (-not $gitDirItem -or -not $gitDirItem.PSIsContainer -or
+    ($gitDirItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+    Write-Host "error: $gitDir is not a safe, standalone Git directory"
+    exit 1
+}
+
 # The clone is created only once, so a later MISTLIB_REPO change in .env would
 # otherwise keep fetching from the original remote. Re-point it on every run so
 # .env stays the single source of truth (public mistlib vs private mistlib-dev).
-git -C $cache remote set-url origin $repo
+Invoke-CacheGit remote set-url origin $repo
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # LF working files show as phantom-modified under a global core.autocrlf=true;
 # force this clone to leave line endings alone.
-git -C $cache config core.autocrlf false
+Invoke-CacheGit config core.autocrlf false
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-git -C $cache fetch origin $ref
+Invoke-CacheGit fetch origin $ref
 if ($LASTEXITCODE -ne 0) {
-    $shortHead = git -C $cache rev-parse --short HEAD
+    $shortHead = Invoke-CacheGit rev-parse --short HEAD
     Write-Host "warning: could not fetch mistlib (offline?); keeping $shortHead"
     exit 0
 }
 
-$old = git -C $cache rev-parse HEAD
-$new = git -C $cache rev-parse FETCH_HEAD
+$old = Invoke-CacheGit rev-parse HEAD
+$new = Invoke-CacheGit rev-parse FETCH_HEAD
 
 if ($old -eq $new) {
-    $commit = git -C $cache rev-parse --short HEAD
+    $commit = Invoke-CacheGit rev-parse --short HEAD
     Write-Host "mistlib ($ref @ $commit) ready in .mistlib-src"
     exit 0
 }
 
-$dirty = git -C $cache status --porcelain
+$dirty = Invoke-CacheGit status --porcelain
 $stashed = $false
 if ($dirty) {
-    git -C $cache stash push --include-untracked -m "fetch auto-stash"
+    Invoke-CacheGit stash push --include-untracked -m "fetch auto-stash"
     if ($LASTEXITCODE -ne 0) {
         Write-Host "error: failed to stash local changes in .mistlib-src"
         exit 1
@@ -82,24 +99,24 @@ if ($dirty) {
     $stashed = $true
 }
 
-git -C $cache checkout --detach FETCH_HEAD
+Invoke-CacheGit checkout --detach FETCH_HEAD
 if ($LASTEXITCODE -ne 0) {
     if ($stashed) {
-        git -C $cache reset --hard
-        git -C $cache checkout --detach $old
-        git -C $cache stash pop
+        Invoke-CacheGit reset --hard
+        Invoke-CacheGit checkout --detach $old
+        Invoke-CacheGit stash pop
     }
     Write-Host "error: failed to checkout FETCH_HEAD in .mistlib-src"
     exit 1
 }
 
 if ($stashed) {
-    git -C $cache stash pop
+    Invoke-CacheGit stash pop
     if ($LASTEXITCODE -ne 0) {
-        git -C $cache reset --hard
-        git -C $cache checkout --detach $old
-        git -C $cache stash pop
-        $oldShort = git -C $cache rev-parse --short $old
+        Invoke-CacheGit reset --hard
+        Invoke-CacheGit checkout --detach $old
+        Invoke-CacheGit stash pop
+        $oldShort = Invoke-CacheGit rev-parse --short $old
         Write-Host "warning: the upstream update to mistlib conflicts with local uncommitted changes in .mistlib-src."
         Write-Host "warning: staying on the previous commit $oldShort."
         Write-Host "warning: commit/push or resolve the local changes, then re-run 'just fetch-mistlib'."
@@ -107,5 +124,5 @@ if ($stashed) {
     }
 }
 
-$commit = git -C $cache rev-parse --short HEAD
+$commit = Invoke-CacheGit rev-parse --short HEAD
 Write-Host "mistlib ($ref @ $commit) ready in .mistlib-src"
