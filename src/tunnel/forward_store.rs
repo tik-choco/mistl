@@ -124,7 +124,7 @@ impl ForwardStore {
 /// `$P2P_CONFIG_DIR` (falling back to `%APPDATA%`/`$HOME/.config`) and joined
 /// `p2p/forwards.json`; mistl instead reuses the daemon's own per-user data
 /// directory so tunnel state lives alongside the rest of mistl's state
-/// (keys, blocks, mailbox spool) rather than in a separate app folder.
+/// (keys, blocks, relay wirelogs) rather than in a separate app folder.
 ///
 /// Kept infallible (`-> PathBuf`, not `-> Result<PathBuf>`) so callers don't
 /// change: if `data_dir()` fails (e.g. the platform's home directory can't

@@ -177,7 +177,7 @@ pub(super) async fn handle_payload(inner: Arc<RTCManagerInner>, peer_id: String,
 
     // Silently ignore anything that isn't our own P2pPayload envelope: this
     // handler receives every raw event for every room this process has
-    // joined, and mailbox (JSON tagged `t`) / ai (JSON with `v`+`type`)
+    // joined, and tc-chat (JSON tagged `type`) / ai (JSON with `v`+`type`)
     // payloads land on the same wire (see `TUNNEL_INTEGRATION_CONTRACT.md`
     // seam 2).
     let Ok(payload) = serde_json::from_slice::<P2pPayload>(&data) else {

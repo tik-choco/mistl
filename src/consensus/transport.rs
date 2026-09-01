@@ -1,9 +1,9 @@
 //! Wire envelopes for the consensus control plane, and the [`RaftTransport`]
 //! adapter that sends/receives them over `crate::net`'s shared transport.
 //!
-//! Two message shapes coexist on the wire with mailbox/ai traffic (and
-//! with tc-chat's own JSON messages, when this room is shared with
-//! browser peers), demuxed the same way every other `crate::net` handler
+//! Two message shapes coexist on the wire with ai/tunnel traffic (and with
+//! tc-chat's own JSON messages, when this room is shared with browser peers
+//! or the chat relay), demuxed the same way every other `crate::net` handler
 //! does: a JSON `t` tag, silently ignored when it doesn't match.
 //!
 //! - `mistl-raft-v1`: a bincode-serialized `RaftMessage`, base64-encoded,
@@ -155,14 +155,14 @@ mod tests {
 
     #[test]
     fn decode_ignores_foreign_message_shapes() {
-        // Mailbox-shaped JSON (tagged `t`, but not one of ours).
-        let mailbox_like = serde_json::to_vec(&json!({
-            "t": "mail",
+        // Foreign JSON that happens to carry a `t` tag that isn't ours.
+        let foreign_tagged = serde_json::to_vec(&json!({
+            "t": "something-else",
             "room": "room-a",
-            "envelope": {},
+            "body": {},
         }))
         .unwrap();
-        assert!(decode(&mailbox_like, "room-a").is_none());
+        assert!(decode(&foreign_tagged, "room-a").is_none());
 
         // ai-protocol-shaped JSON (no `t` field at all, uses `v`/`type`).
         let ai_like = serde_json::to_vec(&json!({ "v": 1, "type": "consumer_hello" })).unwrap();

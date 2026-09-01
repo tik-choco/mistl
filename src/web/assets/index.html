@@ -276,7 +276,7 @@
   .panel-span2 { grid-column: auto; }   /* legacy hook: single-view is full width */
 
   /* ---- in-panel sub-tabs ----
-     Long panels (Bot, Store, Mailbox, Scheduler) split their stacked
+     Long panels (Bot, Store, Scheduler) split their stacked
      sections into tab pages so one task doesn't require scrolling past all
      the others (same reasoning as tc-town's settings tabs). Markup
      contract, wired automatically by initSubTabs() -- no per-panel JS:
@@ -977,7 +977,7 @@
     background: var(--bg-alt);
   }
   .topology-room-item-head { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; }
-  /* Module badges (mailbox/ai/store/stream/cascade) reuse .badge but get a
+  /* Module badges (chat_relay/ai/store/stream/cascade) reuse .badge but get a
      tinted look so they read as "tags" rather than status pills. */
   .topology-room-module-badge { background: var(--accent-dim); color: var(--accent); }
   .topology-room-peers { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin-top: 6px; }
@@ -1001,7 +1001,7 @@
   .topology-room-chip.activity-flash { box-shadow: 0 0 0 2px var(--accent); animation: topology-activity-ring 1.4s ease-out; }
   @keyframes topology-activity-ring { 0% { box-shadow: 0 0 0 0 var(--accent); } 100% { box-shadow: 0 0 0 4px transparent; } }
 
-  /* ---- per-module topology mini-strips (Mailbox / AI / Store) ----
+  /* ---- per-module topology mini-strips (tc-chat relay / AI / Store) ----
      One compact row: the module's room id, connection-state dots for the
      process-wide peer set (per-room membership isn't observable -- the
      dots' tooltip says so), and a link to the full graph on Overview. */
@@ -1028,7 +1028,7 @@
   .topo-strip-dot.state-down { background: var(--err); }
   .topo-strip a { color: var(--accent); margin-left: auto; white-space: nowrap; }
   /* Store strip can list several room ids (storage.room_ids) instead of the
-     single room mailbox/ai show, so each gets its own click-to-copy chip,
+     single room chat_relay/ai show, so each gets its own click-to-copy chip,
      styled off .badge like .topology-room-chip on the full graph card. */
   .topo-strip-room-chip { cursor: pointer; margin: 2px 4px 2px 0; }
   .topo-strip-room-chip:hover { background: var(--accent-dim); color: var(--accent); }
@@ -1082,7 +1082,7 @@
   .ai-provider-row, .ai-preset-row { padding-bottom: 8px; border-bottom: 1px solid var(--panel-border); }
   .ai-provider-row:last-child, .ai-preset-row:last-child { border-bottom: none; padding-bottom: 0; }
 
-  /* ---- chip-style editor for "list" settings fields (mailbox.chat_rooms,
+  /* ---- chip-style editor for "list" settings fields (chat_relay.rooms,
      storage.room_ids) -- chips styled off .badge, each with its own remove
      button, plus an add row below. ---- */
   .chip-list-editor { display: flex; flex-direction: column; gap: 6px; flex: 1; min-width: 200px; }
@@ -1791,7 +1791,7 @@
     <a href="#panel-overview"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9.5 12 3l9 6.5"/><path d="M5 9.5V21h14V9.5"/></svg><span data-i18n="nav.overview">Overview</span></a>
     <a href="#panel-stream"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg><span data-i18n="nav.stream">Stream</span></a>
     <a href="#panel-ai"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3"/></svg><span data-i18n="nav.ai">AI</span></a>
-    <a href="#panel-mailbox"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.5 5h13l3.5 7v7a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-7z"/></svg><span data-i18n="nav.mailbox">Mailbox</span></a>
+    <a href="#panel-chat-relay"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg><span data-i18n="nav.chatRelay">tc-chat Relay</span></a>
     <a href="#panel-store"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.7 4 3 9 3s9-1.3 9-3V5"/><path d="M3 12c0 1.7 4 3 9 3s9-1.3 9-3"/></svg><span data-i18n="nav.store">Store</span></a>
     <a href="#panel-scheduler"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l3 2"/><path d="M9 2h6"/></svg><span data-i18n="nav.scheduler">Scheduler</span></a>
     <a href="#panel-bot"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="2"/><circle cx="9" cy="14" r="1.2"/><circle cx="15" cy="14" r="1.2"/><path d="M12 8V4"/><circle cx="12" cy="3" r="1"/><path d="M2 13h2M20 13h2"/></svg><span data-i18n="nav.bot">Bot</span></a>
@@ -1966,90 +1966,43 @@
     </details>
   </section>
 
-  <section class="panel panel-span2" id="panel-mailbox">
-    <h2><span data-i18n="mailbox.title">Mailbox</span> <span class="spacer"></span>
-      <button id="btn-mailbox-fetch" data-i18n="mailbox.fetchBtn">Fetch my messages</button>
-      <button data-role="refresh" data-target="mailbox-ls" data-i18n="mailbox.refreshHeld">Refresh held</button>
+  <section class="panel panel-span2" id="panel-chat-relay">
+    <h2><span data-i18n="chatRelay.title">tc-chat Relay</span> <span class="spacer"></span>
+      <button type="button" id="btn-chat-relay-refresh" data-i18n="chatRelay.log.refresh">Refresh</button>
     </h2>
-    <div class="topo-strip" id="topo-strip-mailbox">
+    <div class="topo-strip" id="topo-strip-chat-relay">
       <span class="topo-strip-label" data-i18n="topoStrip.room">room</span>
       <span class="mono" data-role="room">&mdash;</span>
       <span class="topo-strip-note" data-role="note" hidden></span>
       <span class="topo-strip-peers" data-role="peers"></span>
       <a href="#topology-card" data-i18n="topoStrip.viewFull">View full topology</a>
     </div>
-    <div class="subtabs" role="tablist" data-i18n-aria-label="mailbox.tabs.groupLabel" aria-label="Mailbox sections">
-      <button type="button" data-subtab-target="messages" data-i18n="mailbox.tabs.messages">Messages</button>
-      <button type="button" data-subtab-target="chatlog" data-i18n="mailbox.tabs.chatlog">tc-chat relay log</button>
-    </div>
-    <div class="subtab-page" data-subtab="messages">
-      <div class="table-wrap">
-        <table id="mailbox-held-table">
-          <thead><tr>
-            <th data-i18n="mailbox.heldCol.id">ID</th>
-            <th data-i18n="mailbox.heldCol.from">From</th>
-            <th data-i18n="mailbox.heldCol.to">To</th>
-            <th data-i18n="mailbox.heldCol.size">Size</th>
-            <th data-i18n="mailbox.heldCol.since">Held since</th>
-          </tr></thead>
-          <tbody></tbody>
-        </table>
-        <div class="empty-note" id="mailbox-held-empty" data-i18n="mailbox.heldEmpty">No held deposits &mdash; deposits are messages other nodes left here for their recipients to fetch later.</div>
-      </div>
-      <div class="table-wrap">
-        <table id="mailbox-fetch-table">
-          <thead><tr>
-            <th data-i18n="mailbox.fetchCol.id">ID</th>
-            <th data-i18n="mailbox.fetchCol.from">From</th>
-            <th data-i18n="mailbox.fetchCol.content">Content</th>
-          </tr></thead>
-          <tbody></tbody>
-        </table>
-        <div class="empty-note" id="mailbox-fetch-empty" data-i18n="mailbox.fetchEmpty">Nothing fetched yet. Click &quot;Fetch my messages&quot; to check for new mail.</div>
-      </div>
-      <hr class="sep">
-      <form class="inline" id="mailbox-send-form">
-        <div class="field" style="flex: 1; min-width: 160px;">
-          <label for="mailbox-to" data-i18n="mailbox.toLabel">To (DID or node id)</label>
-          <input type="text" id="mailbox-to" data-i18n-placeholder="mailbox.toPlaceholder" placeholder="did:key:z6Mk&hellip; or a 16-hex node id" autocomplete="off">
-        </div>
-        <div class="field" style="flex: 2;">
-          <label for="mailbox-message" data-i18n="mailbox.messageLabel">Message</label>
-          <input type="text" id="mailbox-message" autocomplete="off">
-        </div>
-        <button type="submit" class="primary" id="btn-mailbox-send" data-i18n="mailbox.send">Send</button>
-      </form>
-    </div>
-    <div class="subtab-page" data-subtab="chatlog">
-      <h3 style="margin: 0 0 8px;"><span data-i18n="mailbox.chatLog.title">tc-chat relay log</span></h3>
-      <div class="inline" style="align-items: flex-end;">
-        <div class="field" style="flex: 1; min-width: 160px;">
-          <label for="mailbox-chat-room" data-i18n="mailbox.chatLog.roomLabel">tc-chat room</label>
-          <select id="mailbox-chat-room"></select>
-        </div>
-        <button type="button" id="btn-mailbox-chat-refresh" data-i18n="mailbox.chatLog.refresh">Refresh</button>
-      </div>
-      <div class="table-wrap">
-        <table id="mailbox-chat-log-table">
-          <thead><tr>
-            <th data-i18n="mailbox.chatLog.col.time">Time</th>
-            <th data-i18n="mailbox.chatLog.col.from">From</th>
-            <th data-i18n="mailbox.chatLog.col.kind">Kind</th>
-            <th data-i18n="mailbox.chatLog.col.content">Content</th>
-          </tr></thead>
-          <tbody></tbody>
-        </table>
-        <div class="empty-note" id="mailbox-chat-log-empty" data-i18n="mailbox.chatLog.empty">No relayed tc-chat messages yet for this room.</div>
+    <div class="inline" style="align-items: flex-end;">
+      <div class="field" style="flex: 1; min-width: 160px;">
+        <label for="chat-relay-room" data-i18n="chatRelay.log.roomLabel">tc-chat room</label>
+        <select id="chat-relay-room"></select>
       </div>
     </div>
-    <div class="topology-slot" id="topology-slot-mailbox"></div>
-    <details class="settings-drawer" id="settings-drawer-mailbox">
+    <div class="table-wrap">
+      <table id="chat-relay-log-table">
+        <thead><tr>
+          <th data-i18n="chatRelay.log.col.time">Time</th>
+          <th data-i18n="chatRelay.log.col.from">From</th>
+          <th data-i18n="chatRelay.log.col.kind">Kind</th>
+          <th data-i18n="chatRelay.log.col.content">Content</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="empty-note" id="chat-relay-log-empty" data-i18n="chatRelay.log.empty">No relayed tc-chat messages yet for this room.</div>
+    </div>
+    <div class="topology-slot" id="topology-slot-chat-relay"></div>
+    <details class="settings-drawer" id="settings-drawer-chat-relay">
       <summary>
         <svg class="gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg>
-        <span data-i18n="settings.drawer.mailbox">Mailbox settings</span>
+        <span data-i18n="settings.drawer.chat_relay">tc-chat relay settings</span>
         <span class="drawer-chevron" aria-hidden="true"></span>
       </summary>
-      <div class="settings-drawer-body" id="settings-drawer-body-mailbox"></div>
+      <div class="settings-drawer-body" id="settings-drawer-body-chat-relay"></div>
     </details>
   </section>
 
@@ -2866,7 +2819,7 @@
       <p data-i18n="settings.developerDesc">Shows this daemon's detailed debug logs in real time, docked at the bottom of the dashboard.</p>
       <label class="checkline"><input type="checkbox" id="chk-dev-mode"> <span data-i18n="settings.developerLabel">Enable developer mode</span></label>
     </div>
-    <p class="muted" style="font-size: 12px;" data-i18n="settings.movedNote">Stream, AI, Mailbox, Storage and Identity settings now live inside their own tabs.</p>
+    <p class="muted" style="font-size: 12px;" data-i18n="settings.movedNote">Stream, AI, tc-chat relay, Storage and Identity settings now live inside their own tabs.</p>
     <hr class="sep">
     <div id="settings-body"></div>
   </section>
@@ -2930,7 +2883,7 @@
       "nav.overview": "Overview",
       "nav.stream": "Stream",
       "nav.ai": "AI",
-      "nav.mailbox": "Relay",
+      "nav.chatRelay": "tc-chat Relay",
       "nav.store": "Store",
       "nav.scheduler": "Scheduler",
       "nav.bot": "Bot",
@@ -3097,6 +3050,7 @@
       "topoStrip.peersCount": "{count} peers",
       "topoStrip.processWide": "Peers shown are process-wide (all joined rooms) — mistlib doesn't expose per-room membership.",
       "topoStrip.storeLocal": "local content store — no room",
+      "topoStrip.chatRelayOff": "tc-chat relay is off or has no rooms configured",
       "topoStrip.viewFull": "View topology",
       "ai.title": "AI",
       "ai.upstreamHint": "Set an OpenAI-compatible upstream in Settings to provide inference.",
@@ -3141,40 +3095,17 @@
       "ai.editor.defaultBadge": "default",
       "ai.editor.kindLabel": "Provides",
       "ai.tabs.groupLabel": "AI sections",
-      "mailbox.tabs.groupLabel": "Mailbox sections",
-      "mailbox.tabs.messages": "Messages",
-      "mailbox.tabs.chatlog": "tc-chat relay log",
-      "mailbox.title": "Relay",
-      "mailbox.fetchBtn": "Fetch my messages",
-      "mailbox.refreshHeld": "Refresh held",
-      "mailbox.heldCol.id": "ID",
-      "mailbox.heldCol.from": "From",
-      "mailbox.heldCol.to": "To",
-      "mailbox.heldCol.size": "Size",
-      "mailbox.heldCol.since": "Held since",
-      "mailbox.heldEmpty": "No held deposits — deposits are messages other nodes left here for their recipients to fetch later.",
-      "mailbox.fetchCol.id": "ID",
-      "mailbox.fetchCol.from": "From",
-      "mailbox.fetchCol.content": "Content",
-      "mailbox.fetchEmpty": "Nothing fetched yet. Click “Fetch my messages” to check for new mail.",
-      "mailbox.fileContent": "file: {name} ({size}, cid {cid})",
-      "mailbox.toLabel": "To (DID or node id)",
-      "mailbox.toPlaceholder": "did:key:z6Mk… or a 16-hex node id",
-      "mailbox.messageLabel": "Message",
-      "mailbox.send": "Send",
-      "mailbox.needBoth": "Recipient and message are both required.",
-      "mailbox.sentStatus": "Message {status} (id {id}).",
-      "mailbox.chatLog.title": "tc-chat relay log",
-      "mailbox.chatLog.roomLabel": "tc-chat room",
-      "mailbox.chatLog.refresh": "Refresh",
-      "mailbox.chatLog.col.time": "Time",
-      "mailbox.chatLog.col.from": "From",
-      "mailbox.chatLog.col.kind": "Kind",
-      "mailbox.chatLog.col.content": "Content",
-      "mailbox.chatLog.empty": "No relayed tc-chat messages yet for this room.",
-      "mailbox.chatLog.disabled": "tc-chat relay is off. Set rooms and enable it below (requires a daemon restart).",
-      "mailbox.chatLog.noRooms": "No tc-chat rooms configured yet.",
-      "mailbox.chatLog.notJoined": "not joined",
+      "chatRelay.title": "tc-chat Relay",
+      "chatRelay.log.roomLabel": "tc-chat room",
+      "chatRelay.log.refresh": "Refresh",
+      "chatRelay.log.col.time": "Time",
+      "chatRelay.log.col.from": "From",
+      "chatRelay.log.col.kind": "Kind",
+      "chatRelay.log.col.content": "Content",
+      "chatRelay.log.empty": "No relayed tc-chat messages yet for this room.",
+      "chatRelay.log.disabled": "tc-chat relay is off. Set rooms and enable it below (requires a daemon restart).",
+      "chatRelay.log.noRooms": "No tc-chat rooms configured yet.",
+      "chatRelay.log.notJoined": "not joined",
       "store.tabs.groupLabel": "Store sections",
       "store.tabs.files": "Files",
       "store.tabs.sandbox": "Sandbox",
@@ -3485,17 +3416,17 @@
       "settings.optionDefault": "(default)",
       "settings.drawer.stream": "Stream settings",
       "settings.drawer.ai": "AI settings",
-      "settings.drawer.mailbox": "Relay settings",
+      "settings.drawer.chat_relay": "tc-chat relay settings",
       "settings.drawer.storage": "Storage settings",
       "settings.drawer.identity": "Identity settings",
       "settings.drawer.scheduler": "Scheduler settings",
       "settings.drawer.bot": "Bot settings",
       "settings.advanced": "Advanced",
-      "settings.movedNote": "Stream, AI, Relay, Storage and Identity settings now live inside their own tabs.",
+      "settings.movedNote": "Stream, AI, tc-chat relay, Storage and Identity settings now live inside their own tabs.",
       "settings.section.identity": "Identity",
       "settings.section.storage": "Storage",
       "settings.section.stream": "Stream",
-      "settings.section.mailbox": "Relay",
+      "settings.section.chat_relay": "tc-chat Relay",
       "settings.section.ai": "AI",
       "settings.section.scheduler": "Scheduler",
       "settings.section.bot": "Bot",
@@ -3522,14 +3453,10 @@
       "settings.field.stream.audio_capture.desc": "Capture audio alongside video in the native capture pipeline.",
       "settings.field.stream.cascade.label": "Cascade distribution",
       "settings.field.stream.cascade.desc": "Elect a leader among relay nodes so followers relay from it instead of the sharer directly. Turn off to fall back to locking onto the first video track.",
-      "settings.field.mailbox.room_id.label": "Room id",
-      "settings.field.mailbox.room_id.desc": "tc-chat room used for mailbox delivery.",
-      "settings.field.mailbox.serve_as_bot.label": "Serve as bot",
-      "settings.field.mailbox.serve_as_bot.desc": "Answer mailbox room presence as an automated bot.",
-      "settings.field.mailbox.chat_rooms.label": "tc-chat rooms",
-      "settings.field.mailbox.chat_rooms.desc": "Comma-separated tc-chat room ids to relay. Persists and replays their signed chat traffic so messages keep arriving even without a tc-chat tab open. Requires a daemon restart.",
-      "settings.field.mailbox.chat_relay.label": "Enable tc-chat relay",
-      "settings.field.mailbox.chat_relay.desc": "Join the rooms above and act as a standing relay/bot for tc-chat messages. Requires a daemon restart.",
+      "settings.field.chat_relay.rooms.label": "tc-chat rooms",
+      "settings.field.chat_relay.rooms.desc": "Comma-separated tc-chat room ids to relay. Persists and replays their signed chat traffic so messages keep arriving even without a tc-chat tab open. Requires a daemon restart.",
+      "settings.field.chat_relay.enabled.label": "Enable tc-chat relay",
+      "settings.field.chat_relay.enabled.desc": "Join the rooms above and act as a standing relay/bot for tc-chat messages. Requires a daemon restart.",
       "settings.field.ai.room_id.label": "Room id",
       "settings.field.ai.room_id.desc": "tc-chat room used to discover AI providers and consumers.",
       "settings.field.ai.request_timeout_secs.label": "Request timeout (seconds)",
@@ -3707,7 +3634,7 @@
       "nav.overview": "概要",
       "nav.stream": "ストリーム",
       "nav.ai": "AI",
-      "nav.mailbox": "リレー",
+      "nav.chatRelay": "tc-chatリレー",
       "nav.store": "ストア",
       "nav.scheduler": "スケジューラ",
       "nav.bot": "Bot",
@@ -3874,6 +3801,7 @@
       "topoStrip.peersCount": "ピア {count} 件",
       "topoStrip.processWide": "表示されるピアはプロセス全体（参加中の全ルーム）の集計です — mistlib はルーム別の内訳を公開していません。",
       "topoStrip.storeLocal": "ローカルのコンテンツストア — ルームなし",
+      "topoStrip.chatRelayOff": "tc-chatリレーはオフ、またはルームが未設定です",
       "topoStrip.viewFull": "トポロジーを表示",
       "ai.title": "AI",
       "ai.upstreamHint": "推論を提供するには、設定でOpenAI互換のアップストリームを指定してください。",
@@ -3918,40 +3846,17 @@
       "ai.editor.defaultBadge": "デフォルト",
       "ai.editor.kindLabel": "提供内容",
       "ai.tabs.groupLabel": "AI セクション",
-      "mailbox.tabs.groupLabel": "メールボックスのセクション",
-      "mailbox.tabs.messages": "メッセージ",
-      "mailbox.tabs.chatlog": "tc-chatリレーログ",
-      "mailbox.title": "リレー",
-      "mailbox.fetchBtn": "メッセージを取得",
-      "mailbox.refreshHeld": "保留中を更新",
-      "mailbox.heldCol.id": "ID",
-      "mailbox.heldCol.from": "差出人",
-      "mailbox.heldCol.to": "宛先",
-      "mailbox.heldCol.size": "サイズ",
-      "mailbox.heldCol.since": "保留開始",
-      "mailbox.heldEmpty": "保留中のデポジットはありません。デポジットとは、他のノードが受信者のために一時的に預けたメッセージです。",
-      "mailbox.fetchCol.id": "ID",
-      "mailbox.fetchCol.from": "差出人",
-      "mailbox.fetchCol.content": "内容",
-      "mailbox.fetchEmpty": "まだ何も取得していません。「メッセージを取得」をクリックして新着を確認してください。",
-      "mailbox.fileContent": "ファイル: {name} ({size}、cid {cid})",
-      "mailbox.toLabel": "宛先 (DIDまたはノードID)",
-      "mailbox.toPlaceholder": "did:key:z6Mk… または16桁の16進ノードID",
-      "mailbox.messageLabel": "メッセージ",
-      "mailbox.send": "送信",
-      "mailbox.needBoth": "宛先とメッセージの両方を入力してください。",
-      "mailbox.sentStatus": "メッセージは{status} (id {id})。",
-      "mailbox.chatLog.title": "tc-chatリレーログ",
-      "mailbox.chatLog.roomLabel": "tc-chatルーム",
-      "mailbox.chatLog.refresh": "更新",
-      "mailbox.chatLog.col.time": "時刻",
-      "mailbox.chatLog.col.from": "差出人",
-      "mailbox.chatLog.col.kind": "種類",
-      "mailbox.chatLog.col.content": "内容",
-      "mailbox.chatLog.empty": "このルームで中継されたtc-chatメッセージはまだありません。",
-      "mailbox.chatLog.disabled": "tc-chatリレーはオフです。下でルームを設定して有効化してください(デーモンの再起動が必要です)。",
-      "mailbox.chatLog.noRooms": "tc-chatルームがまだ設定されていません。",
-      "mailbox.chatLog.notJoined": "未参加",
+      "chatRelay.title": "tc-chatリレー",
+      "chatRelay.log.roomLabel": "tc-chatルーム",
+      "chatRelay.log.refresh": "更新",
+      "chatRelay.log.col.time": "時刻",
+      "chatRelay.log.col.from": "差出人",
+      "chatRelay.log.col.kind": "種類",
+      "chatRelay.log.col.content": "内容",
+      "chatRelay.log.empty": "このルームで中継されたtc-chatメッセージはまだありません。",
+      "chatRelay.log.disabled": "tc-chatリレーはオフです。下でルームを設定して有効化してください(デーモンの再起動が必要です)。",
+      "chatRelay.log.noRooms": "tc-chatルームがまだ設定されていません。",
+      "chatRelay.log.notJoined": "未参加",
       "store.tabs.groupLabel": "ストアのセクション",
       "store.tabs.files": "ファイル",
       "store.tabs.sandbox": "サンドボックス",
@@ -4262,17 +4167,17 @@
       "settings.optionDefault": "(デフォルト)",
       "settings.drawer.stream": "ストリーム設定",
       "settings.drawer.ai": "AI設定",
-      "settings.drawer.mailbox": "リレー設定",
+      "settings.drawer.chat_relay": "tc-chatリレー設定",
       "settings.drawer.storage": "ストレージ設定",
       "settings.drawer.identity": "アイデンティティ設定",
       "settings.drawer.scheduler": "スケジューラ設定",
       "settings.drawer.bot": "Bot設定",
       "settings.advanced": "詳細設定",
-      "settings.movedNote": "ストリーム・AI・リレー・ストレージ・アイデンティティの設定は、各タブ内に移動しました。",
+      "settings.movedNote": "ストリーム・AI・tc-chatリレー・ストレージ・アイデンティティの設定は、各タブ内に移動しました。",
       "settings.section.identity": "本人情報",
       "settings.section.storage": "ストレージ",
       "settings.section.stream": "ストリーム",
-      "settings.section.mailbox": "リレー",
+      "settings.section.chat_relay": "tc-chatリレー",
       "settings.section.ai": "AI",
       "settings.section.scheduler": "スケジューラ",
       "settings.section.bot": "Bot",
@@ -4299,14 +4204,10 @@
       "settings.field.stream.audio_capture.desc": "ネイティブキャプチャパイプラインで映像と一緒に音声もキャプチャします。",
       "settings.field.stream.cascade.label": "カスケード配信",
       "settings.field.stream.cascade.desc": "中継ノード間でリーダーを選出し、フォロワーは共有元ではなくリーダーから中継します。オフにすると最初に見つかった映像トラックにロックする従来の動作に戻ります。",
-      "settings.field.mailbox.room_id.label": "ルームID",
-      "settings.field.mailbox.room_id.desc": "メールボックスの配送に使うtc-chatルームです。",
-      "settings.field.mailbox.serve_as_bot.label": "ボットとして応答",
-      "settings.field.mailbox.serve_as_bot.desc": "メールボックスのルームプレゼンスに自動応答ボットとして応答します。",
-      "settings.field.mailbox.chat_rooms.label": "tc-chatルーム",
-      "settings.field.mailbox.chat_rooms.desc": "中継するtc-chatルームIDをカンマ区切りで指定します。署名済みのチャットトラフィックを保存・再送信するため、tc-chatタブを開いていなくてもメッセージが届き続けます。デーモンの再起動が必要です。",
-      "settings.field.mailbox.chat_relay.label": "tc-chatリレーを有効化",
-      "settings.field.mailbox.chat_relay.desc": "上記のルームに参加し、tc-chatメッセージの常駐リレー/ボットとして動作します。デーモンの再起動が必要です。",
+      "settings.field.chat_relay.rooms.label": "tc-chatルーム",
+      "settings.field.chat_relay.rooms.desc": "中継するtc-chatルームIDをカンマ区切りで指定します。署名済みのチャットトラフィックを保存・再送信するため、tc-chatタブを開いていなくてもメッセージが届き続けます。デーモンの再起動が必要です。",
+      "settings.field.chat_relay.enabled.label": "tc-chatリレーを有効化",
+      "settings.field.chat_relay.enabled.desc": "上記のルームに参加し、tc-chatメッセージの常駐リレー/ボットとして動作します。デーモンの再起動が必要です。",
       "settings.field.ai.room_id.label": "ルームID",
       "settings.field.ai.room_id.desc": "AIプロバイダーと利用者を発見するために使うtc-chatルームです。",
       "settings.field.ai.request_timeout_secs.label": "リクエストタイムアウト (秒)",
@@ -4484,7 +4385,7 @@
       "nav.overview": "概览",
       "nav.stream": "串流",
       "nav.ai": "AI",
-      "nav.mailbox": "中继",
+      "nav.chatRelay": "tc-chat 中继",
       "nav.store": "存储",
       "nav.scheduler": "调度器",
       "nav.bot": "Bot",
@@ -4651,6 +4552,7 @@
       "topoStrip.peersCount": "{count} 个节点",
       "topoStrip.processWide": "所示节点为进程级统计（所有已加入的房间）— mistlib 不提供按房间的成员列表。",
       "topoStrip.storeLocal": "本地内容存储 — 无房间",
+      "topoStrip.chatRelayOff": "tc-chat 中继已关闭或未配置房间",
       "topoStrip.viewFull": "查看拓扑",
       "ai.title": "AI",
       "ai.upstreamHint": "在设置中配置 OpenAI 兼容的上游服务以提供推理。",
@@ -4695,40 +4597,17 @@
       "ai.editor.defaultBadge": "默认",
       "ai.editor.kindLabel": "提供内容",
       "ai.tabs.groupLabel": "AI 部分",
-      "mailbox.tabs.groupLabel": "邮箱部分",
-      "mailbox.tabs.messages": "消息",
-      "mailbox.tabs.chatlog": "tc-chat 中继日志",
-      "mailbox.title": "中继",
-      "mailbox.fetchBtn": "获取我的消息",
-      "mailbox.refreshHeld": "刷新暂存",
-      "mailbox.heldCol.id": "ID",
-      "mailbox.heldCol.from": "发件人",
-      "mailbox.heldCol.to": "收件人",
-      "mailbox.heldCol.size": "大小",
-      "mailbox.heldCol.since": "暂存时间",
-      "mailbox.heldEmpty": "没有暂存的存件 — 存件是其他节点为收件人暂时保留、待其稍后取回的消息。",
-      "mailbox.fetchCol.id": "ID",
-      "mailbox.fetchCol.from": "发件人",
-      "mailbox.fetchCol.content": "内容",
-      "mailbox.fetchEmpty": "尚未获取任何内容。点击“获取我的消息”以查看新邮件。",
-      "mailbox.fileContent": "文件：{name} ({size}，cid {cid})",
-      "mailbox.toLabel": "收件人 (DID 或节点 ID)",
-      "mailbox.toPlaceholder": "did:key:z6Mk… 或 16 位十六进制节点 ID",
-      "mailbox.messageLabel": "消息",
-      "mailbox.send": "发送",
-      "mailbox.needBoth": "收件人和消息内容均为必填。",
-      "mailbox.sentStatus": "消息{status} (id {id})。",
-      "mailbox.chatLog.title": "tc-chat 中继日志",
-      "mailbox.chatLog.roomLabel": "tc-chat 房间",
-      "mailbox.chatLog.refresh": "刷新",
-      "mailbox.chatLog.col.time": "时间",
-      "mailbox.chatLog.col.from": "发件人",
-      "mailbox.chatLog.col.kind": "类型",
-      "mailbox.chatLog.col.content": "内容",
-      "mailbox.chatLog.empty": "该房间尚无中继的 tc-chat 消息。",
-      "mailbox.chatLog.disabled": "tc-chat 中继已关闭。请在下方设置房间并启用(需要重启守护进程)。",
-      "mailbox.chatLog.noRooms": "尚未配置 tc-chat 房间。",
-      "mailbox.chatLog.notJoined": "未加入",
+      "chatRelay.title": "tc-chat 中继",
+      "chatRelay.log.roomLabel": "tc-chat 房间",
+      "chatRelay.log.refresh": "刷新",
+      "chatRelay.log.col.time": "时间",
+      "chatRelay.log.col.from": "发件人",
+      "chatRelay.log.col.kind": "类型",
+      "chatRelay.log.col.content": "内容",
+      "chatRelay.log.empty": "该房间尚无中继的 tc-chat 消息。",
+      "chatRelay.log.disabled": "tc-chat 中继已关闭。请在下方设置房间并启用(需要重启守护进程)。",
+      "chatRelay.log.noRooms": "尚未配置 tc-chat 房间。",
+      "chatRelay.log.notJoined": "未加入",
       "store.tabs.groupLabel": "存储部分",
       "store.tabs.files": "文件",
       "store.tabs.sandbox": "沙盒",
@@ -5039,17 +4918,17 @@
       "settings.optionDefault": "(默认)",
       "settings.drawer.stream": "串流设置",
       "settings.drawer.ai": "AI 设置",
-      "settings.drawer.mailbox": "中继设置",
+      "settings.drawer.chat_relay": "tc-chat 中继设置",
       "settings.drawer.storage": "存储设置",
       "settings.drawer.identity": "身份设置",
       "settings.drawer.scheduler": "调度器设置",
       "settings.drawer.bot": "Bot 设置",
       "settings.advanced": "高级",
-      "settings.movedNote": "串流、AI、中继、存储和身份设置现在位于各自的标签页中。",
+      "settings.movedNote": "串流、AI、tc-chat 中继、存储和身份设置现在位于各自的标签页中。",
       "settings.section.identity": "身份",
       "settings.section.storage": "存储",
       "settings.section.stream": "串流",
-      "settings.section.mailbox": "中继",
+      "settings.section.chat_relay": "tc-chat 中继",
       "settings.section.ai": "AI",
       "settings.section.scheduler": "调度器",
       "settings.section.bot": "Bot",
@@ -5076,14 +4955,10 @@
       "settings.field.stream.audio_capture.desc": "在原生采集管线中随视频一起采集音频。",
       "settings.field.stream.cascade.label": "级联分发",
       "settings.field.stream.cascade.desc": "在中继节点之间选举一个 leader，使 follower 从其中继而非直接从分享者中继。关闭后将回退为锁定遇到的第一条视频轨道。",
-      "settings.field.mailbox.room_id.label": "房间 ID",
-      "settings.field.mailbox.room_id.desc": "信箱投递所使用的 tc-chat 房间。",
-      "settings.field.mailbox.serve_as_bot.label": "以机器人身份响应",
-      "settings.field.mailbox.serve_as_bot.desc": "以自动机器人身份响应信箱房间的在线状态。",
-      "settings.field.mailbox.chat_rooms.label": "tc-chat 房间",
-      "settings.field.mailbox.chat_rooms.desc": "要中继的 tc-chat 房间 ID，以逗号分隔。会保存并重放已签名的聊天流量，即使未打开 tc-chat 标签页，消息也会持续送达。需要重启守护进程。",
-      "settings.field.mailbox.chat_relay.label": "启用 tc-chat 中继",
-      "settings.field.mailbox.chat_relay.desc": "加入上方房间，并作为 tc-chat 消息的常驻中继/机器人。需要重启守护进程。",
+      "settings.field.chat_relay.rooms.label": "tc-chat 房间",
+      "settings.field.chat_relay.rooms.desc": "要中继的 tc-chat 房间 ID，以逗号分隔。会保存并重放已签名的聊天流量，即使未打开 tc-chat 标签页，消息也会持续送达。需要重启守护进程。",
+      "settings.field.chat_relay.enabled.label": "启用 tc-chat 中继",
+      "settings.field.chat_relay.enabled.desc": "加入上方房间，并作为 tc-chat 消息的常驻中继/机器人。需要重启守护进程。",
       "settings.field.ai.room_id.label": "房间 ID",
       "settings.field.ai.room_id.desc": "用于发现 AI 提供方与使用方的 tc-chat 房间。",
       "settings.field.ai.request_timeout_secs.label": "请求超时 (秒)",
@@ -5515,11 +5390,9 @@
     topology: null,
     ai: null,
     config: null,
-    mailboxHeldItems: [],
-    mailboxFetchItems: [],
-    mailboxChatRooms: null,
-    mailboxChatLogRoom: null,
-    mailboxChatLogItems: [],
+    chatRelayRooms: null,
+    chatRelayLogRoom: null,
+    chatRelayLogItems: [],
     storeItems: [],
     sandboxItems: [],
     schedulerJobs: [],
@@ -5535,9 +5408,7 @@
     renderStream();
     renderTopology();
     renderAi();
-    renderMailboxHeld(state.mailboxHeldItems);
-    renderMailboxFetch(state.mailboxFetchItems);
-    renderMailboxChatRooms(state.mailboxChatRooms);
+    renderChatRelayRooms(state.chatRelayRooms);
     renderStore(state.storeItems);
     renderSandbox(state.sandboxItems);
     renderSchedulerJobs(state.schedulerJobs);
@@ -6969,7 +6840,7 @@
     cascadeSource.hidden = false;
   }
 
-  /* ---- per-module mini-strips (Mailbox / AI / Store panels) ----
+  /* ---- per-module mini-strips (tc-chat Relay / AI / Store panels) ----
      Shows the module's room id (from topology.status.modules -- the same
      config-or-default resolution the module itself uses) and the
      process-wide peer dots. Per-room peer membership is not observable
@@ -7007,27 +6878,27 @@
     renderTopoStripPeers(peersEl);
   }
 
-  /* Store differs from mailbox/ai: topology.status's modules.store is null
-     when storage.room_ids is empty (local-only), or {rooms: [{room,
-     joined}]} listing every room the store has joined at once (it can join
-     several, unlike the single-room mailbox/ai modules) -- so it needs its
-     own renderer rather than reusing renderTopoStrip's single-room shape.
-     Room ids render as small click-to-copy chips (like the full topology
-     card's .topology-room-chip), each labelled with its own joined state
-     since "joined" isn't uniform across a multi-room list. */
-  function renderStoreTopoStrip() {
-    var root = document.getElementById("topo-strip-store");
+  /* Store and chat_relay differ from ai: topology.status's modules.store
+     (and modules.chat_relay) is null when there's nothing to show --
+     storage.room_ids empty (local-only), or chat_relay.rooms empty/disabled
+     -- or {rooms: [{room, joined}]} listing every room the module has
+     joined at once (both can join several, unlike the single-room ai
+     module) -- so they need their own renderer rather than reusing
+     renderTopoStrip's single-room shape. Room ids render as small
+     click-to-copy chips (like the full topology card's .topology-room-chip),
+     each labelled with its own joined state since "joined" isn't uniform
+     across a multi-room list. */
+  function renderMultiRoomTopoStrip(stripId, info, localNoteKey) {
+    var root = document.getElementById(stripId);
     var roomEl = root.querySelector('[data-role="room"]');
     var noteEl = root.querySelector('[data-role="note"]');
     var peersEl = root.querySelector('[data-role="peers"]');
-    var data = state.topology;
-    var info = data && data.modules ? data.modules.store : null;
     var rooms = info && Array.isArray(info.rooms) ? info.rooms : [];
 
     roomEl.innerHTML = "";
     if (!rooms.length) {
       noteEl.hidden = false;
-      noteEl.textContent = t("topoStrip.storeLocal");
+      noteEl.textContent = t(localNoteKey);
       roomEl.textContent = "—";
     } else {
       noteEl.hidden = true;
@@ -7045,19 +6916,33 @@
     renderTopoStripPeers(peersEl);
   }
 
+  function renderStoreTopoStrip() {
+    var data = state.topology;
+    var info = data && data.modules ? data.modules.store : null;
+    renderMultiRoomTopoStrip("topo-strip-store", info, "topoStrip.storeLocal");
+  }
+
+  function renderChatRelayTopoStrip() {
+    var data = state.topology;
+    var info = data && data.modules ? data.modules.chat_relay : null;
+    renderMultiRoomTopoStrip("topo-strip-chat-relay", info, "topoStrip.chatRelayOff");
+  }
+
   function renderTopoStrips() {
-    renderTopoStrip("mailbox");
+    renderChatRelayTopoStrip();
     renderTopoStrip("ai");
     renderStoreTopoStrip();
   }
 
   /* Names the room the topology card's *current host panel* is showing, so
      the same re-parented card reads correctly no matter which panel it's
-     sitting in. Only panels backed by a networked module get a line (Stream
-     maps to "stream" for forward-compat -- topology.status's `modules` map
-     doesn't have a "stream" entry today, so that lookup simply misses and
-     the line stays hidden until/unless it's added). */
-  var TOPOLOGY_PANEL_MODULE = { "panel-stream": "stream", "panel-ai": "ai", "panel-mailbox": "mailbox" };
+     sitting in. Only panels backed by a single-room networked module get a
+     line (Stream maps to "stream" for forward-compat -- topology.status's
+     `modules` map doesn't have a "stream" entry today, so that lookup
+     simply misses and the line stays hidden until/unless it's added).
+     Multi-room modules (Store, chat_relay) aren't listed here since their
+     mini-strip already shows every room as its own chip. */
+  var TOPOLOGY_PANEL_MODULE = { "panel-stream": "stream", "panel-ai": "ai" };
 
   function renderTopologyContext() {
     if (!topologyContextEl) return;
@@ -7104,7 +6989,7 @@
          part of this signature (topoStrips render unconditionally on every
          call, unaffected by the dedup below). */
       roomPeers: data.room_peers || null,
-      moduleRoomInfo: data.modules ? [data.modules.mailbox, data.modules.ai, data.modules.store] : null,
+      moduleRoomInfo: data.modules ? [data.modules.chat_relay, data.modules.ai, data.modules.store] : null,
       streamRoom: (data.stream && data.stream.room) || null,
       consensusRoom: (data.consensus && data.consensus.room) || null,
       cascade: graph.cascade ? [graph.cascade.role, graph.cascade.leader, graph.cascade.self, graph.cascade.source, graph.relayPeersCount] : null,
@@ -7118,12 +7003,17 @@
 
   /* Which modules use a given room id, as short badge labels for the
      per-room breakdown below -- reuses each module's own user-facing panel
-     title (mailbox/ai/store/stream) plus the existing cascade label instead
-     of inventing a second set of i18n strings for the same concepts. */
+     title (chat_relay/ai/store/stream) plus the existing cascade label
+     instead of inventing a second set of i18n strings for the same
+     concepts. chat_relay now shares store's multi-room shape (it can relay
+     several rooms at once), so it's checked the same way. */
   function topologyModuleBadgesForRoom(data, room) {
     var badges = [];
     var modules = data.modules || {};
-    if (modules.mailbox && modules.mailbox.room === room) badges.push(t("mailbox.title"));
+    if (modules.chat_relay && Array.isArray(modules.chat_relay.rooms) &&
+        modules.chat_relay.rooms.some(function (r) { return r && r.room === room; })) {
+      badges.push(t("chatRelay.title"));
+    }
     if (modules.ai && modules.ai.room === room) badges.push(t("ai.title"));
     if (modules.store && Array.isArray(modules.store.rooms) &&
         modules.store.rooms.some(function (r) { return r && r.room === room; })) {
@@ -7511,102 +7401,15 @@
     }
   });
 
-  /* ---------- mailbox ---------- */
+  /* ---------- tc-chat relay log ---------- */
 
-  var mailboxHeldTbody = document.querySelector("#mailbox-held-table tbody");
-  var mailboxHeldEmpty = document.getElementById("mailbox-held-empty");
-  var mailboxFetchTbody = document.querySelector("#mailbox-fetch-table tbody");
-  var mailboxFetchEmpty = document.getElementById("mailbox-fetch-empty");
-
-  function renderMailboxHeld(items) {
-    items = items || [];
-    state.mailboxHeldItems = items;
-    mailboxHeldTbody.innerHTML = "";
-    mailboxHeldEmpty.style.display = items.length ? "none" : "block";
-    items.forEach(function (item) {
-      var tr = el("tr", {});
-      var idCell = el("td", {});
-      idCell.appendChild(copyButton(String(item.id), truncateMiddle(String(item.id), 10, 4), "mono"));
-      tr.appendChild(idCell);
-      var fromCell = el("td", {});
-      fromCell.appendChild(copyButton(String(item.from), truncateMiddle(String(item.from), 12, 6), "mono"));
-      tr.appendChild(fromCell);
-      var toCell = el("td", {});
-      toCell.appendChild(copyButton(String(item.to), truncateMiddle(String(item.to), 12, 6), "mono"));
-      tr.appendChild(toCell);
-      tr.appendChild(el("td", { text: fmtBytes(item.size) }));
-      tr.appendChild(el("td", { text: item.held_since || "-" }));
-      mailboxHeldTbody.appendChild(tr);
-    });
-  }
-
-  function renderMailboxFetch(items) {
-    items = items || [];
-    state.mailboxFetchItems = items;
-    mailboxFetchTbody.innerHTML = "";
-    mailboxFetchEmpty.style.display = items.length ? "none" : "block";
-    items.forEach(function (item) {
-      var tr = el("tr", {});
-      var idCell = el("td", {});
-      idCell.appendChild(copyButton(String(item.id), truncateMiddle(String(item.id), 10, 4), "mono"));
-      tr.appendChild(idCell);
-      var fromCell = el("td", {});
-      fromCell.appendChild(copyButton(String(item.from), truncateMiddle(String(item.from), 12, 6), "mono"));
-      tr.appendChild(fromCell);
-      var contentCell = el("td", {});
-      if (item.message !== undefined && item.message !== null) {
-        contentCell.textContent = item.message;
-      } else if (item.file) {
-        contentCell.textContent = t("mailbox.fileContent", { name: item.file.name, size: fmtBytes(item.file.size), cid: truncateMiddle(item.file.cid, 8, 4) });
-      } else {
-        contentCell.textContent = "-";
-      }
-      tr.appendChild(contentCell);
-      mailboxFetchTbody.appendChild(tr);
-    });
-  }
-
-  function pollMailboxLs() {
-    return api("mailbox.ls", {}).then(function (data) {
-      renderMailboxHeld(data);
-    }, function (err) {
-      showToast("mailbox.ls: " + err.message, "error");
-    });
-  }
-
-  document.querySelector('[data-target="mailbox-ls"]').addEventListener("click", function (e) {
-    runAction(e.currentTarget, "mailbox.ls", {}, renderMailboxHeld);
-  });
-
-  document.getElementById("btn-mailbox-fetch").addEventListener("click", function (e) {
-    runAction(e.currentTarget, "mailbox.fetch", {}, renderMailboxFetch);
-  });
-
-  document.getElementById("mailbox-send-form").addEventListener("submit", function (e) {
-    e.preventDefault();
-    var to = document.getElementById("mailbox-to").value.trim();
-    var message = document.getElementById("mailbox-message").value.trim();
-    if (!to || !message) {
-      showToast(t("mailbox.needBoth"), "error");
-      return;
-    }
-    var btn = document.getElementById("btn-mailbox-send");
-    runAction(btn, "mailbox.send", { to: to, message: message }, function (data) {
-      showToast(t("mailbox.sentStatus", { status: data.status, id: truncateMiddle(String(data.id), 8, 4) }), "success");
-      document.getElementById("mailbox-message").value = "";
-      pollMailboxLs();
-    });
-  });
-
-  /* ---------- mailbox: tc-chat relay log ---------- */
-
-  var mailboxChatRoomSelect = document.getElementById("mailbox-chat-room");
-  var mailboxChatLogTbody = document.querySelector("#mailbox-chat-log-table tbody");
-  var mailboxChatLogEmpty = document.getElementById("mailbox-chat-log-empty");
+  var chatRelayRoomSelect = document.getElementById("chat-relay-room");
+  var chatRelayLogTbody = document.querySelector("#chat-relay-log-table tbody");
+  var chatRelayLogEmpty = document.getElementById("chat-relay-log-empty");
   /* signature (lang + room list) of the options currently in the room
      select, so a poll doesn't rebuild it (and lose the user's selection)
      unless something actually changed */
-  var lastMailboxChatRoomsKey = null;
+  var lastChatRelayRoomsKey = null;
 
   function chatLogKindLabel(item) {
     if (item.type === "tc-chat:post") return item.kind || "post";
@@ -7633,12 +7436,12 @@
     return "-";
   }
 
-  function renderMailboxChatLog(items) {
+  function renderChatRelayLog(items) {
     items = items || [];
-    state.mailboxChatLogItems = items;
-    mailboxChatLogTbody.innerHTML = "";
-    mailboxChatLogEmpty.style.display = items.length ? "none" : "block";
-    if (items.length) mailboxChatLogEmpty.textContent = t("mailbox.chatLog.empty");
+    state.chatRelayLogItems = items;
+    chatRelayLogTbody.innerHTML = "";
+    chatRelayLogEmpty.style.display = items.length ? "none" : "block";
+    if (items.length) chatRelayLogEmpty.textContent = t("chatRelay.log.empty");
     items.forEach(function (item) {
       var tr = el("tr", {});
       var timeCell = el("td", {});
@@ -7651,56 +7454,56 @@
       tr.appendChild(fromCell);
       tr.appendChild(el("td", { text: chatLogKindLabel(item) }));
       tr.appendChild(el("td", { text: chatLogContent(item) }));
-      mailboxChatLogTbody.appendChild(tr);
+      chatRelayLogTbody.appendChild(tr);
     });
   }
 
-  function loadMailboxChatLog(room) {
-    if (!room) { renderMailboxChatLog([]); return Promise.resolve(); }
-    state.mailboxChatLogRoom = room;
-    return api("mailbox.chat.log", { room: room, limit: 100 }).then(renderMailboxChatLog, function (err) {
-      showToast("mailbox.chat.log: " + err.message, "error");
+  function loadChatRelayLog(room) {
+    if (!room) { renderChatRelayLog([]); return Promise.resolve(); }
+    state.chatRelayLogRoom = room;
+    return api("chat.log", { room: room, limit: 100 }).then(renderChatRelayLog, function (err) {
+      showToast("chat.log: " + err.message, "error");
     });
   }
 
-  function renderMailboxChatRooms(status) {
-    state.mailboxChatRooms = status;
+  function renderChatRelayRooms(status) {
+    state.chatRelayRooms = status;
     var rooms = (status && status.rooms) || [];
     var roomsKey = currentLang + "|" + JSON.stringify(rooms) + "|" + (status && status.enabled);
-    if (roomsKey === lastMailboxChatRoomsKey) return;
-    lastMailboxChatRoomsKey = roomsKey;
+    if (roomsKey === lastChatRelayRoomsKey) return;
+    lastChatRelayRoomsKey = roomsKey;
 
-    var prevSelected = mailboxChatRoomSelect.value;
-    mailboxChatRoomSelect.innerHTML = "";
+    var prevSelected = chatRelayRoomSelect.value;
+    chatRelayRoomSelect.innerHTML = "";
     if (!status || !status.enabled || !rooms.length) {
-      mailboxChatLogTbody.innerHTML = "";
-      mailboxChatLogEmpty.style.display = "block";
-      mailboxChatLogEmpty.textContent = rooms.length ? t("mailbox.chatLog.disabled") : t("mailbox.chatLog.noRooms");
+      chatRelayLogTbody.innerHTML = "";
+      chatRelayLogEmpty.style.display = "block";
+      chatRelayLogEmpty.textContent = rooms.length ? t("chatRelay.log.disabled") : t("chatRelay.log.noRooms");
       return;
     }
     rooms.forEach(function (r) {
-      var label = r.room + (r.joined ? "" : " (" + t("mailbox.chatLog.notJoined") + ")");
-      mailboxChatRoomSelect.appendChild(el("option", { value: r.room, text: label }));
+      var label = r.room + (r.joined ? "" : " (" + t("chatRelay.log.notJoined") + ")");
+      chatRelayRoomSelect.appendChild(el("option", { value: r.room, text: label }));
     });
     var toSelect = rooms.some(function (r) { return r.room === prevSelected; }) ? prevSelected : rooms[0].room;
-    mailboxChatRoomSelect.value = toSelect;
-    loadMailboxChatLog(toSelect);
+    chatRelayRoomSelect.value = toSelect;
+    loadChatRelayLog(toSelect);
   }
 
-  function pollMailboxChatRooms() {
-    return api("mailbox.chat.rooms", {}).then(renderMailboxChatRooms, function () {
-      renderMailboxChatRooms(null);
+  function pollChatRelayRooms() {
+    return api("chat.rooms", {}).then(renderChatRelayRooms, function () {
+      renderChatRelayRooms(null);
     });
   }
 
-  mailboxChatRoomSelect.addEventListener("change", function () {
-    loadMailboxChatLog(mailboxChatRoomSelect.value);
+  chatRelayRoomSelect.addEventListener("change", function () {
+    loadChatRelayLog(chatRelayRoomSelect.value);
   });
 
-  document.getElementById("btn-mailbox-chat-refresh").addEventListener("click", function (e) {
+  document.getElementById("btn-chat-relay-refresh").addEventListener("click", function (e) {
     withBusy(e.currentTarget, function () {
-      return pollMailboxChatRooms().then(function () {
-        return loadMailboxChatLog(mailboxChatRoomSelect.value);
+      return pollChatRelayRooms().then(function () {
+        return loadChatRelayLog(chatRelayRoomSelect.value);
       });
     });
   });
@@ -10255,11 +10058,9 @@
       { key: "audio_capture", labelKey: "settings.field.stream.audio_capture.label", descKey: "settings.field.stream.audio_capture.desc", type: "toggle", advanced: true },
       { key: "cascade", labelKey: "settings.field.stream.cascade.label", descKey: "settings.field.stream.cascade.desc", type: "toggle", advanced: true }
     ] },
-    { section: "mailbox", titleKey: "settings.section.mailbox", container: "settings-drawer-body-mailbox", fields: [
-      { key: "room_id", labelKey: "settings.field.mailbox.room_id.label", descKey: "settings.field.mailbox.room_id.desc", type: "text" },
-      { key: "serve_as_bot", labelKey: "settings.field.mailbox.serve_as_bot.label", descKey: "settings.field.mailbox.serve_as_bot.desc", type: "toggle" },
-      { key: "chat_rooms", labelKey: "settings.field.mailbox.chat_rooms.label", descKey: "settings.field.mailbox.chat_rooms.desc", type: "list" },
-      { key: "chat_relay", labelKey: "settings.field.mailbox.chat_relay.label", descKey: "settings.field.mailbox.chat_relay.desc", type: "toggle" }
+    { section: "chat_relay", titleKey: "settings.section.chat_relay", container: "settings-drawer-body-chat-relay", fields: [
+      { key: "rooms", labelKey: "settings.field.chat_relay.rooms.label", descKey: "settings.field.chat_relay.rooms.desc", type: "list" },
+      { key: "enabled", labelKey: "settings.field.chat_relay.enabled.label", descKey: "settings.field.chat_relay.enabled.desc", type: "toggle" }
     ] },
     { section: "ai", titleKey: "settings.section.ai", container: "settings-drawer-body-ai", fields: [
       { key: "room_id", labelKey: "settings.field.ai.room_id.label", descKey: "settings.field.ai.room_id.desc", type: "text", advanced: true },
@@ -10292,7 +10093,7 @@
   var SETTINGS_SECTION_PANEL = {
     stream: "panel-stream",
     ai: "panel-ai",
-    mailbox: "panel-mailbox",
+    chat_relay: "panel-chat-relay",
     storage: "panel-store",
     identity: "panel-profile",
     scheduler: "panel-scheduler",
@@ -10305,7 +10106,10 @@
     var input = document.getElementById(id);
     var section = id.replace(/^settings-/, "").split("-")[0];
     navigateTo(SETTINGS_SECTION_PANEL[section] || "panel-settings");
-    var drawer = document.getElementById("settings-drawer-" + section);
+    /* Config section names are snake_case (chat_relay), element ids are
+       kebab-case (settings-drawer-chat-relay), so try both spellings. */
+    var drawer = document.getElementById("settings-drawer-" + section) ||
+      document.getElementById("settings-drawer-" + section.replace(/_/g, "-"));
     if (drawer) drawer.open = true;
     if (input) {
       var details = input.closest ? input.closest("details") : null;
@@ -10428,7 +10232,7 @@
       // adds). Adding splits on commas so pasting "a, b" adds both, then
       // trims, drops empties and de-dupes against the current list. Wire
       // format is unchanged from the old comma-separated text field: a JSON
-      // string array (e.g. mailbox.chat_rooms: Vec<String>), and an empty
+      // string array (e.g. chat_relay.rooms: Vec<String>), and an empty
       // list still saves `[]`, not null -- the config field isn't optional.
       var listWrap = el("div", { class: "chip-list-editor" });
       var chipsEl = el("div", { class: "chip-list" });
@@ -11544,7 +11348,7 @@
 
   var PANEL_IDS = [
     "panel-overview", "panel-stream", "panel-ai",
-    "panel-mailbox", "panel-store", "panel-scheduler", "panel-bot", "panel-tunnel", "panel-profile", "panel-update", "panel-settings"
+    "panel-chat-relay", "panel-store", "panel-scheduler", "panel-bot", "panel-tunnel", "panel-profile", "panel-update", "panel-settings"
   ];
   var sideLinks = Array.prototype.slice.call(document.querySelectorAll("#sidenav a"));
 
@@ -11555,8 +11359,8 @@
 
   /* The topology card exists exactly once and is shown on five panels --
      Overview and Stream (primary network views, fold open by default) plus
-     AI, Mailbox and Store (fold collapsed by default, expanded on demand
-     from their mini-strips). Rather than duplicating markup/renderers --
+     AI, tc-chat Relay and Store (fold collapsed by default, expanded on
+     demand from their mini-strips). Rather than duplicating markup/renderers --
      which would need duplicate element ids and double rendering -- the
      single card is re-parented into the active panel's slot on navigation.
      The SVG, including its marker defs, survives same-document moves
@@ -11567,11 +11371,11 @@
     "panel-overview": document.getElementById("topology-slot-overview"),
     "panel-stream": document.getElementById("topology-slot-stream"),
     "panel-ai": document.getElementById("topology-slot-ai"),
-    "panel-mailbox": document.getElementById("topology-slot-mailbox"),
+    "panel-chat-relay": document.getElementById("topology-slot-chat-relay"),
     "panel-store": document.getElementById("topology-slot-store")
   };
   var topologyFoldEl = document.getElementById("topology-fold");
-  var topologyDefaultOpen = { "panel-overview": true, "panel-stream": true, "panel-ai": false, "panel-mailbox": false, "panel-store": false };
+  var topologyDefaultOpen = { "panel-overview": true, "panel-stream": true, "panel-ai": false, "panel-chat-relay": false, "panel-store": false };
   var topologyUserToggled = {};   /* panelId -> true once the user opens/closes the fold there */
   var topologyHostPanel = null;
 
@@ -11724,8 +11528,7 @@
   startPolling();
   startTicker();
   pollProfile();
-  pollMailboxLs();
-  pollMailboxChatRooms();
+  pollChatRelayRooms();
   pollStoreLs();
   pollSandboxLs();
   pollStoreSyncList();

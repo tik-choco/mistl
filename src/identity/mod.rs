@@ -52,7 +52,7 @@ impl Identity {
 
     /// Stable node id used with mistlib (derived from the DID): the first 16
     /// hex characters of `sha256(did)`. This exact derivation is a
-    /// cross-module contract shared with `crate::mailbox`.
+    /// cross-module contract shared with the daemon's p2p modules.
     pub fn node_id(&self) -> String {
         node_id_for_did(&self.did)
     }

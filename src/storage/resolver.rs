@@ -18,7 +18,7 @@
 //! activate it. So this module reimplements the same wire-level protocol on
 //! top of `net::send_broadcast`/`net::send_direct`/
 //! `net::register_room_handler` instead, exactly like mistl's other
-//! room-scoped protocols (mailbox, ai). mistlib-native's internal storage
+//! room-scoped protocols (ai, chat_relay). mistlib-native's internal storage
 //! handling still silently runs alongside this on every inbound message
 //! (see `mistlib-native/src/engine/network.rs::handle_storage_message`,
 //! called unconditionally before the raw event is *also* forwarded to

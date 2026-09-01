@@ -233,7 +233,7 @@ fn sandbox_relative_dir(local_dir: &Path, sandbox_root: &Path) -> Option<String>
 /// formatting (integral floats print without a decimal point), and the same
 /// descendant filtering + sort. One known divergence: the TS side sorts
 /// names with `localeCompare` while this uses plain `str::cmp` (same
-/// precedent as `mailbox::stable_json`); a mixed-case or non-ASCII name set
+/// precedent as `chat_relay::stable_json`); a mixed-case or non-ASCII name set
 /// that orders differently only costs one spurious re-import on the peer
 /// (the `lastCid` check gates repeats), so exact ICU collation isn't worth
 /// emulating.

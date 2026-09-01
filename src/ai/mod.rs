@@ -20,11 +20,10 @@
 //!
 //! `ai chat` is a one-shot version of the same backend selection.
 //!
-//! The AI room defaults to the mailbox room for backward-compat convenience
-//! (so a bare config still puts mailbox and ai in the same room), but this
-//! is no longer mandatory: `crate::net` supports multiple simultaneous
-//! rooms per process, so `[ai] room_id` may name a distinct room. Either
-//! way mailbox and ai protocols coexist by shape.
+//! The AI room falls back to `net::DEFAULT_ROOM` when `[ai] room_id` is
+//! unset. `crate::net` supports multiple simultaneous rooms per process, so
+//! `[ai] room_id` may name any room; the ai protocol coexists with the
+//! daemon's other room protocols by message shape.
 
 mod api_server;
 mod consumer;
@@ -130,7 +129,6 @@ async fn init_service(state: &Arc<AppState>) -> Result<Arc<AiService>> {
         .ai
         .room_id
         .clone()
-        .or_else(|| config.mailbox.room_id.clone())
         .unwrap_or_else(|| crate::net::DEFAULT_ROOM.to_string());
     let transport = crate::net::ensure_started(state, room)
         .await
@@ -555,7 +553,7 @@ fn persist_provide_state(enabled: bool) {
 /// `provide_start`/`ai.provide.stop`, including via the dashboard toggle --
 /// both go through the same `ai.provide.start`/`ai.provide.stop` IPC
 /// commands, see `provide_state`'s module doc). Spawned eagerly from
-/// `daemon::daemon_main`, the same way as `mailbox::chat_relay`'s and
+/// `daemon::daemon_main`, the same way as `chat_relay`'s and
 /// `storage::folder_owner`'s background tasks, rather than waited on lazily
 /// like the rest of the `ai` service (which only starts on the first
 /// `ai.*` IPC call) -- the whole point is providing coming back up without

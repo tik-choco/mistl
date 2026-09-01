@@ -27,18 +27,18 @@
 //! | [`chat`], [`stdio`], [`control_shell`] | side channels riding the same `RTCManager` (chat messages, a stdio command bridge, a line-oriented shell) |
 //! | [`tui`] | `mistl tunnel tui`: a daemon IPC client, not an in-process session (see its own module doc) |
 //!
-//! ## Sharing `crate::net` with mailbox/ai/stream
+//! ## Sharing `crate::net` with ai/chat_relay/stream
 //!
-//! Every other daemon service that talks p2p (`mailbox`, `ai`, `stream`)
+//! Every other daemon service that talks p2p (`ai`, `chat_relay`, `stream`)
 //! goes through the same [`crate::net`] transport, which fans mistlib's one
 //! process-wide raw-message handler out to every joined room. Nothing about
 //! that changes here: [`rtc::RTCManagerHandle`] joins its room via
 //! `net::ensure_started` like everyone else, and sends/receives through
 //! `net::send_direct`/`net::send_broadcast`/a registered room handler. The
-//! reason the tunnel's own traffic never collides with mailbox's or ai's on
-//! that shared byte stream is purely a matter of shape, the same way
-//! mailbox and ai already coexist: mailbox's JSON wire is tagged by a `t`
-//! field, ai's by `v` + `type`, and the tunnel's `P2pPayload`/
+//! reason the tunnel's own traffic never collides with ai's or the chat
+//! relay's on that shared byte stream is purely a matter of shape, the same
+//! way those already coexist: tc-chat wires are tagged by a `type` field
+//! naming a `tc-chat:*` kind, ai's by `v` + `type`, and the tunnel's `P2pPayload`/
 //! `wire::TunnelMessage` envelope is tagged by `kind` (an internally-tagged
 //! enum, `#[serde(tag = "kind")]`, snake_case, matching `p2p` byte-for-byte)
 //! -- three disjoint discriminants on the same raw byte stream, so each
@@ -56,7 +56,7 @@
 //! integration* around it:
 //!
 //! - the process-wide "is a tunnel session running right now" slot (at most
-//!   one at a time, unlike mailbox/ai/stream which each hold their own
+//!   one at a time, unlike ai/chat_relay/stream which each hold their own
 //!   independent long-lived singleton -- a tunnel's room/forwards/trust
 //!   state is one coherent thing a user starts and stops as a unit, not
 //!   several independent per-command services);
@@ -136,7 +136,7 @@ struct RunningSession {
 /// Process-wide tunnel session slot: `None` until a `tunnel.start` (manual,
 /// or automatic via [`spawn_background`]) succeeds, `None` again after a
 /// `tunnel.stop`. A `LazyLock<Mutex<..>>`, matching `crate::net`'s own
-/// `ROOMS` bookkeeping pattern. Unlike mailbox/ai/stream (each lazily
+/// `ROOMS` bookkeeping pattern. Unlike ai/stream (each lazily
 /// started by its own first matching IPC call, and then kept running for
 /// the rest of the process), the tunnel deliberately does *not* auto-start
 /// on an arbitrary `tunnel.*` command -- starting means joining a mistlib

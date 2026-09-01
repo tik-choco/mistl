@@ -9,7 +9,7 @@ use crate::tunnel::forward_args;
 #[command(
     name = "mistl",
     version,
-    about = "MISTL - unified P2P daemon: identity, storage, VRChat screen share, offline mailbox/relay, AI network",
+    about = "MISTL - unified P2P daemon: identity, storage, VRChat screen share, tc-chat relay, AI network",
     after_help = "Running `mistl` with no arguments opens the web dashboard \
                   (starts the daemon if needed) -- double-clicking mistl.exe does the same."
 )]
@@ -50,14 +50,11 @@ pub enum Command {
         #[command(subcommand)]
         action: StreamAction,
     },
-    /// P2P mail relay: store-and-forward messages/data for offline peers,
-    /// plus (when configured) a standing tc-chat room relay/bot so chat
-    /// messages keep arriving even without a tc-chat browser tab open.
-    /// Formerly named `mailbox`; that name still works (`mistl mailbox ...`).
-    #[command(visible_alias = "mailbox")]
-    Relay {
+    /// tc-chat relay: a standing relay/bot for configured tc-chat rooms, so
+    /// chat messages keep arriving even without a tc-chat browser tab open.
+    Chat {
         #[command(subcommand)]
-        action: RelayAction,
+        action: ChatAction,
     },
     /// P2P AI network: consume or provide LLM inference (mistai compatible)
     Ai {
@@ -442,28 +439,13 @@ pub enum StreamAction {
 }
 
 #[derive(Subcommand)]
-pub enum RelayAction {
-    /// Deposit data for a (possibly offline) recipient
-    Send {
-        /// Recipient DID or peer id
-        to: String,
-        /// File to send (stdin if omitted)
-        #[arg(short, long)]
-        file: Option<String>,
-        /// Inline text message
-        #[arg(short, long)]
-        message: Option<String>,
-    },
-    /// List messages held for me / by me
-    Ls,
-    /// Fetch pending messages
-    Fetch,
-    /// tc-chat rooms configured for relay (`mailbox.chat_rooms`), and
+pub enum ChatAction {
+    /// tc-chat rooms configured for relay (`chat_relay.rooms`), and
     /// whether each is currently joined
     Rooms,
     /// Recently relayed tc-chat messages for one room
-    ChatLog {
-        /// tc-chat room id (see `mailbox.chat_rooms` in settings)
+    Log {
+        /// tc-chat room id (see `chat_relay.rooms` in settings)
         room: String,
         /// Max number of entries to return (default 50)
         #[arg(short, long)]
@@ -948,21 +930,10 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             StreamAction::Stop => client_call("stream.stop", json!({})),
             StreamAction::Status => client_call("stream.status", json!({})),
         },
-        Command::Relay { action } => match action {
-            RelayAction::Send { to, file, message } => {
-                if file.is_none() && message.is_none() {
-                    bail!("provide --file or --message");
-                }
-                client_call(
-                    "mailbox.send",
-                    json!({ "to": to, "file": file, "message": message }),
-                )
-            }
-            RelayAction::Ls => client_call("mailbox.ls", json!({})),
-            RelayAction::Fetch => client_call("mailbox.fetch", json!({})),
-            RelayAction::Rooms => client_call("mailbox.chat.rooms", json!({})),
-            RelayAction::ChatLog { room, limit } => {
-                client_call("mailbox.chat.log", json!({ "room": room, "limit": limit }))
+        Command::Chat { action } => match action {
+            ChatAction::Rooms => client_call("chat.rooms", json!({})),
+            ChatAction::Log { room, limit } => {
+                client_call("chat.log", json!({ "room": room, "limit": limit }))
             }
         },
         Command::Ai { action } => match action {

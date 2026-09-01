@@ -35,7 +35,7 @@
 //!   announcement.
 //! - This module never answers other peers' `tc-news:history-request`s --
 //!   the bot is a consumer of the global-articles feed, not a relay of it
-//!   (unlike `crate::mailbox::chat_relay`, which *does* relay tc-chat). It
+//!   (unlike `crate::chat_relay`, which *does* relay tc-chat). It
 //!   also never re-broadcasts what it receives.
 //! - [`poll_candidates`] drops any wire whose `fromId` equals this bot's own
 //!   DID before resolving it, so a pipeline whose sink republishes into the
@@ -83,7 +83,7 @@
 //!   [`HISTORY_REQUEST_DELAY`], which -- happily -- already matches
 //!   tc-chat's own `REQUEST_DELAY_MS` (`useHistorySync.ts:28`) at 700ms.
 //! - Like the global-articles source, this bot never answers other peers'
-//!   `tc-chat:history-request`s (that's `crate::mailbox::chat_relay`'s job)
+//!   `tc-chat:history-request`s (that's `crate::chat_relay`'s job)
 //!   and skips this bot's own posts (`fromId` == this pipeline's own DID) --
 //!   done in [`poll_chat_candidates`], for the same "identity isn't cheaply
 //!   available in the sync room-handler callback" reason as the

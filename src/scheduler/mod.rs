@@ -119,7 +119,7 @@ where
 
 // ---------------------------------------------------------------------
 // Run log persistence: `<data_dir>/scheduler-runs.jsonl`, capped at
-// `RUN_LOG_CAP` most-recent records. Mirrors `mailbox::chat_relay`'s capped
+// `RUN_LOG_CAP` most-recent records. Mirrors `chat_relay`'s capped
 // JSONL append-log idiom (see its module doc around lines 374-446): atomic
 // temp-file+rename rewrite on every append.
 // ---------------------------------------------------------------------

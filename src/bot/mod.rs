@@ -798,7 +798,7 @@ async fn cmd_status(engine: &Arc<BotEngine>, state: &Arc<AppState>) -> Result<Va
 
 /// Collects every room id the daemon knows about -- the well-known
 /// global-articles room, rooms referenced anywhere in config (bot
-/// pipelines, `ai.room_id`, `storage.room_ids`, `mailbox.chat_rooms`), and
+/// pipelines, `ai.room_id`, `storage.room_ids`, `chat_relay.rooms`), and
 /// currently-joined rooms -- so the dashboard's pipeline form can offer a
 /// picker instead of a free-text field. Purely advisory: a pipeline may
 /// still name a room that isn't listed here.
@@ -818,7 +818,7 @@ async fn cmd_options(state: &Arc<AppState>) -> Result<Value> {
     for room in &config.storage.room_ids {
         add_room(room, &mut rooms);
     }
-    for room in &config.mailbox.chat_rooms {
+    for room in &config.chat_relay.rooms {
         add_room(room, &mut rooms);
     }
     for pipeline in &config.bot.pipelines {

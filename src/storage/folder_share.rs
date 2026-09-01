@@ -20,7 +20,7 @@
 //! id (web: `settings.nodeId`; CLI: `runtime.go`'s `nodeID =
 //! config.Identity.Did`), while mistl identifies itself on the mesh by
 //! `identity::Identity::node_id()` (first 16 hex chars of `sha256(did)`), a
-//! pre-existing convention shared with `mailbox`/`ai`/`stream`. This
+//! pre-existing convention shared with `ai`/`chat_relay`/`stream`. This
 //! asymmetry does not break the grant flow: neither owner implementation
 //! replies by addressing `request.from` directly. The web app sends every
 //! envelope to *all* stable mist peers in the room (`p2p.ts`

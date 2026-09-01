@@ -1,5 +1,6 @@
 mod ai;
 mod bot;
+mod chat_relay;
 mod cli;
 mod config;
 mod consensus;
@@ -7,7 +8,6 @@ mod daemon;
 mod devlog;
 mod identity;
 mod install;
-mod mailbox;
 mod net;
 mod scheduler;
 mod storage;

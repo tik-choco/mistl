@@ -1,10 +1,11 @@
 //! tc-chat relay: joins configured tc-chat rooms so signed `tc-chat:*` wires
 //! keep arriving -- and get answered/replayed to other late joiners -- even
 //! while no tc-chat browser tab is open on this machine. A standing
-//! relay/bot for tc-chat's own wire protocol, entirely independent of
-//! [`super::envelope`]'s p2p-mail protocol (which this module never touches;
-//! the two share only the `crate::net` transport and, for building outbound
-//! wire ids, [`super::envelope::random_id`]).
+//! relay/bot for tc-chat's own wire protocol, sharing only the `crate::net`
+//! transport with the daemon's other room-scoped protocols (`ai`, `storage`,
+//! `tunnel`, the stream relay).
+//!
+//! IPC surface: `chat.rooms` and `chat.log`, handled by [`handle`].
 //!
 //! ## Protocol (interop contract with tc-chat's web client)
 //!
@@ -15,7 +16,7 @@
 //!   (`tc-chat/cli/src/wire.rs`) still uses -- the web client (and thus real
 //!   users) speaks `tc-chat:post`.
 //! - `signature` is an Ed25519 signature, base64url-encoded *without*
-//!   padding, over the UTF-8 bytes of [`super::stable_json::stable_stringify`]
+//!   padding, over the UTF-8 bytes of [`stable_json::stable_stringify`]
 //!   applied to the wire with `signature` itself removed -- byte-identical to
 //!   tc-chat's `src/lib/wireSign.ts` `signingPayload`. It is keyed by
 //!   `fromId`, a `did:key:z...` string using the *same* did:key derivation as
@@ -44,7 +45,7 @@
 //!   process-singleton content store (`mistlib::app::storage_get`/`storage_add`,
 //!   wired up by `crate::net::start_engine`) -- a **different** store than
 //!   [`crate::storage`], which is mistl's own local, independently-configured
-//!   block store. `mailbox.chat.log` best-effort-resolves this for display;
+//!   block store. `chat.log` best-effort-resolves this for display;
 //!   see [`resolve_body_text`].
 //! - tc-chat peers' mistlib node ids are random per-session UUIDs unrelated
 //!   to their DID -- this module (like tc-chat itself) only ever identifies
@@ -54,8 +55,8 @@
 //!
 //! `crate::net::register_handler`'s raw-event fan-out doesn't tag which of
 //! this process's several joined rooms an event arrived from -- fine for
-//! `mailbox`'s own protocol (whose wires are self-contained and room-agnostic),
-//! but not fine here: with more than one `chat_rooms` entry configured, a
+//! the daemon's other room protocols (whose wires are self-contained and
+//! room-agnostic), but not fine here: with more than one `chat_relay.rooms` entry configured, a
 //! `tc-chat:post` wire carries no room id of its own (it relies entirely on
 //! room-scoped transport delivery), so two rooms could not be told apart from
 //! payload alone. This module instead uses
@@ -72,6 +73,8 @@
 //! on failure a few times with a short backoff -- the same idiom
 //! `crate::stream::relay`'s cascade republish uses.
 
+mod stable_json;
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -80,11 +83,44 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use rand::RngCore;
+use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use tokio::sync::{Mutex, OnceCell};
 use tracing::{debug, warn};
 
 use crate::daemon::AppState;
+
+/// Handle `chat.*` IPC commands:
+/// - `chat.rooms` `{}` -> `{enabled, rooms: [{room, joined}]}` (relay status)
+/// - `chat.log` `{room, limit?}` -> `[{id, type, fromId, fromName, timestamp, ...}]`
+///   (relayed tc-chat wires for `room`, oldest first; see [`chat_log`])
+pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Value> {
+    match cmd {
+        "chat.rooms" => rooms_status(state).await,
+        "chat.log" => {
+            let args: ChatLogArgs =
+                serde_json::from_value(args).context("chat.log: invalid arguments")?;
+            chat_log(state, &args.room, args.limit.unwrap_or(50)).await
+        }
+        _ => bail!("unknown chat command: {cmd}"),
+    }
+}
+
+#[derive(Deserialize)]
+struct ChatLogArgs {
+    room: String,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// Random lowercase-hex wire id (16 bytes -> 32 hex chars), matching the id
+/// shape tc-chat's own client generates.
+fn random_id() -> String {
+    let mut bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
 
 const WIRE_POST: &str = "tc-chat:post";
 const WIRE_REACTION: &str = "tc-chat:reaction";
@@ -106,27 +142,27 @@ const SEND_RETRY_ATTEMPTS: u32 = 3;
 const SEND_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// Lazily-initialized relay state, `None` when unconfigured
-/// (`mailbox.chat_relay = false`, or `mailbox.chat_rooms` empty).
+/// (`chat_relay.enabled = false`, or `chat_relay.rooms` empty).
 static SERVICE: OnceCell<Option<Arc<ChatRelayService>>> = OnceCell::const_new();
 
 pub struct ChatRelayService {
     /// This node's mistlib id, used only to recognize (and ignore) our own
     /// broadcast `tc-chat:history-request` echo.
     node_id: String,
-    /// Rooms actually joined: the subset of `config.mailbox.chat_rooms` that
+    /// Rooms actually joined: the subset of `config.chat_relay.rooms` that
     /// passed [`is_valid_room_id`] and joined successfully.
     rooms: Vec<String>,
     /// `<data_dir>/relay`; each room gets its own `<room>/wirelog.jsonl`.
     data_dir: PathBuf,
-    /// Guards wirelog file read-modify-write sequences, mirroring
-    /// `mailbox::service`'s `spool_lock`.
+    /// Guards wirelog file read-modify-write sequences so concurrent IPC
+    /// requests and inbound-wire appends never race on the same file.
     wirelog_lock: Mutex<()>,
     /// Per-`(room, requester)` last-replay time (see [`REPLAY_THROTTLE`]).
     replay_throttle: std::sync::Mutex<HashMap<(String, String), Instant>>,
     /// Handle to the daemon's own tokio runtime, captured so the (plain,
     /// non-async) room-handler callback -- invoked from mistlib's own
     /// dispatch thread, not ours -- can spawn async work back onto it. Same
-    /// reason `mailbox::service::MailboxService` captures one.
+    /// reason `crate::ai`'s and `crate::tunnel`'s services capture one.
     runtime: tokio::runtime::Handle,
 }
 
@@ -134,7 +170,7 @@ pub struct ChatRelayService {
 /// registration, catch-up history request) on first call. Returns `None`
 /// when unconfigured; callers should treat that as "relay disabled", not an
 /// error.
-pub async fn ensure_started(state: &Arc<AppState>) -> Result<Option<Arc<ChatRelayService>>> {
+async fn ensure_started(state: &Arc<AppState>) -> Result<Option<Arc<ChatRelayService>>> {
     let service = SERVICE
         .get_or_try_init(|| async { init_service(state).await })
         .await?;
@@ -143,7 +179,7 @@ pub async fn ensure_started(state: &Arc<AppState>) -> Result<Option<Arc<ChatRela
 
 /// Starts the relay in the background if configured, so it is already
 /// running for the whole daemon lifetime instead of only springing to life
-/// on the first `mailbox.chat.*` IPC call -- the point of the feature is
+/// on the first `chat.*` IPC call -- the point of the feature is
 /// receiving tc-chat traffic while nobody is asking. A fast no-op when
 /// unconfigured. Mirrors `crate::update::spawn_auto_update`'s "spawn once at
 /// daemon start, check my own config" shape.
@@ -156,8 +192,8 @@ pub fn spawn_background(state: Arc<AppState>) {
 }
 
 async fn init_service(state: &Arc<AppState>) -> Result<Option<Arc<ChatRelayService>>> {
-    let cfg = state.config().mailbox;
-    if !cfg.chat_relay || cfg.chat_rooms.is_empty() {
+    let cfg = state.config().chat_relay;
+    if !cfg.enabled || cfg.rooms.is_empty() {
         return Ok(None);
     }
 
@@ -173,7 +209,7 @@ async fn init_service(state: &Arc<AppState>) -> Result<Option<Arc<ChatRelayServi
         .with_context(|| format!("chat relay: creating {}", data_dir.display()))?;
 
     let mut rooms = Vec::new();
-    for room in &cfg.chat_rooms {
+    for room in &cfg.rooms {
         if !is_valid_room_id(room) {
             warn!(
                 room,
@@ -224,7 +260,7 @@ fn register_handler(service: Arc<ChatRelayService>) {
             return;
         }
         if !rooms.contains(room_id) {
-            return; // some other joined room (mailbox/ai/stream, or a
+            return; // some other joined room (ai/stream/tunnel, or a
             // tc-chat room this daemon isn't configured to relay)
         }
         let Ok(value) = serde_json::from_slice::<Value>(data) else {
@@ -298,7 +334,7 @@ fn verify_wire(obj: &Map<String, Value>) -> bool {
     let Some(signature) = obj.get("signature").and_then(Value::as_str) else {
         return false;
     };
-    let payload = super::stable_json::signing_payload(obj);
+    let payload = stable_json::signing_payload(obj);
     let Ok(sig_bytes) = URL_SAFE_NO_PAD.decode(signature) else {
         return false;
     };
@@ -357,7 +393,7 @@ async fn request_history(service: &Arc<ChatRelayService>, room: &str) {
     let _ = service; // reserved for future per-service bookkeeping (e.g. metrics)
     let wire = json!({
         "type": WIRE_HISTORY_REQUEST,
-        "id": super::envelope::random_id(),
+        "id": random_id(),
         "roomId": room,
     });
     let Ok(bytes) = serde_json::to_vec(&wire) else {
@@ -391,8 +427,7 @@ fn wirelog_path(data_dir: &Path, room: &str) -> PathBuf {
 }
 
 /// Reads `path`'s lines (one raw wire's original JSON bytes each), oldest
-/// first. Missing file reads as empty, like `mailbox::spool`'s
-/// `read_entries`.
+/// first. A missing file reads as empty.
 fn read_wirelog_lines(path: &Path) -> Result<Vec<Vec<u8>>> {
     if !path.exists() {
         return Ok(Vec::new());
@@ -406,8 +441,8 @@ fn read_wirelog_lines(path: &Path) -> Result<Vec<Vec<u8>>> {
 }
 
 /// Overwrites `path` with `lines`, one per line. Atomic-ish: temp file in the
-/// same directory then rename over the target, mirroring
-/// `mailbox::spool::write_entries`.
+/// same directory then rename over the target, so a crash mid-write can never
+/// leave a truncated log.
 fn write_wirelog_lines(path: &Path, lines: &[Vec<u8>]) -> Result<()> {
     let dir = path
         .parent()
@@ -473,29 +508,29 @@ async fn persist_wire(
     write_wirelog_lines(&path, &lines)
 }
 
-/// Backs `mailbox.chat.rooms`: configured rooms plus whether each is
+/// Backs `chat.rooms`: configured rooms plus whether each is
 /// currently joined.
-pub async fn rooms_status(state: &Arc<AppState>) -> Result<Value> {
-    let cfg = state.config().mailbox;
+async fn rooms_status(state: &Arc<AppState>) -> Result<Value> {
+    let cfg = state.config().chat_relay;
     let service = ensure_started(state).await?;
     let joined: Vec<String> = service
         .as_ref()
         .map(|s| s.rooms.clone())
         .unwrap_or_default();
     let items: Vec<Value> = cfg
-        .chat_rooms
+        .rooms
         .iter()
         .map(|room| json!({ "room": room, "joined": joined.contains(room) }))
         .collect();
-    Ok(json!({ "enabled": cfg.chat_relay, "rooms": items }))
+    Ok(json!({ "enabled": cfg.enabled, "rooms": items }))
 }
 
-/// Backs `mailbox.chat.log`: recently relayed posts/reactions/edits/deletes
+/// Backs `chat.log`: recently relayed posts/reactions/edits/deletes
 /// for `room`, oldest first (newest last). `limit` caps how many are
 /// returned, taken from the tail of the stored log.
-pub async fn chat_log(state: &Arc<AppState>, room: &str, limit: usize) -> Result<Value> {
+async fn chat_log(state: &Arc<AppState>, room: &str, limit: usize) -> Result<Value> {
     let service = ensure_started(state).await?.context(
-        "chat relay is not enabled (set mailbox.chat_relay = true and mailbox.chat_rooms, then restart the daemon)",
+        "chat relay is not enabled (set chat_relay.enabled = true and chat_relay.rooms, then restart the daemon)",
     )?;
     if !service.rooms.iter().any(|r| r == room) {
         bail!("room {room:?} is not a configured/joined chat relay room");
@@ -517,7 +552,7 @@ pub async fn chat_log(state: &Arc<AppState>, room: &str, limit: usize) -> Result
     Ok(json!(items))
 }
 
-/// Builds one `mailbox.chat.log` display item from a stored wire.
+/// Builds one `chat.log` display item from a stored wire.
 async fn describe_entry(value: Value) -> Value {
     let Value::Object(obj) = value else {
         return json!({});
@@ -572,7 +607,7 @@ async fn describe_entry(value: Value) -> Value {
 /// (`mistlib::app::storage_get` -- distinct from [`crate::storage`], mistl's
 /// own local block store; see the module doc). Returns `Value::Null` on any
 /// failure (peer offline, block not yet replicated, malformed body, ...), in
-/// which case `mailbox.chat.log` still returns the wire's metadata, just
+/// which case `chat.log` still returns the wire's metadata, just
 /// without resolved text.
 async fn resolve_body_text(cid: &str) -> Value {
     let cid = cid.to_string();
@@ -616,7 +651,7 @@ mod tests {
     /// `signWireFields` does, returning the exact wire bytes a peer would
     /// send.
     fn sign_wire(signing_key: &SigningKey, mut fields: Map<String, Value>) -> Vec<u8> {
-        let payload = super::super::stable_json::stable_stringify(&Value::Object(fields.clone()));
+        let payload = super::stable_json::stable_stringify(&Value::Object(fields.clone()));
         let signature = signing_key.sign(payload.as_bytes());
         fields.insert(
             "signature".to_string(),

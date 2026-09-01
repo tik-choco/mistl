@@ -8,12 +8,12 @@
 //! `register_raw_handler` callback, and wires up media-track delivery
 //! exactly once per process, while refcounting the rooms joined so far and
 //! only actually joining/leaving mistlib's engine when a room's count
-//! crosses 0. That lets independent daemon services (mailbox, ai, stream
+//! crosses 0. That lets independent daemon services (ai, chat_relay, stream
 //! relay) each live in their own room concurrently, or share one, without
 //! one service's [`leave_room`] call kicking another out of a room they
 //! both happen to use.
 //!
-//! Most callers (mailbox, ai, stream relay) join once at service start and
+//! Most callers (ai, chat_relay, stream relay) join once at service start and
 //! hold their room for the process lifetime, never calling [`leave_room`].
 //! Storage is the exception: it re-resolves its configured rooms on every
 //! command and calls [`leave_room`]/[`ensure_started`] to reconcile live,
@@ -21,7 +21,7 @@
 //!
 //! Modules coexist on the wire by shape: each handler parses inbound bytes
 //! against its own schema and silently ignores what it can't parse
-//! (mailbox wire messages are JSON tagged by `t`; the ai protocol is JSON
+//! (tc-chat wires are JSON tagged by `type`; the ai protocol is JSON
 //! with `v: 1` + `type`). This is unchanged by multi-room support, since
 //! the raw handler fan-out is still global across every joined room.
 
@@ -36,8 +36,8 @@ use tracing::warn;
 
 use crate::daemon::AppState;
 
-/// Default rendezvous room when neither `[mailbox]` nor `[ai]` configures
-/// one. Kept at the historical mailbox default for compatibility.
+/// Default rendezvous room used when `[ai] room_id` is unset. Kept at its
+/// historical value for wire compatibility with existing deployments.
 pub const DEFAULT_ROOM: &str = "mistl-mailbox-v1";
 
 /// Cap on any single mistlib network operation (connection lookup, send)
@@ -59,7 +59,7 @@ pub const EVENT_LEAVE: u32 = mistlib::EVENT_LEAVE;
 /// This pair matches every other tik-choco app -- see
 /// `protocol/docs/data-contracts/reference/mistSignaling.ts`, the canonical
 /// source for this family's value; keep the two in sync or cross-app rooms
-/// (mailbox, ai, stream relay, storage, the DID pairing room) silently split
+/// (ai, chat_relay, stream relay, storage, the DID pairing room) silently split
 /// into per-app islands where each side just sees an empty room. Not a
 /// secret: it ships in public JS bundles for the browser apps already.
 pub const MIST_INVITE_SALT: &str = "tik-choco-v1";
@@ -124,9 +124,9 @@ pub fn set_media_consumer(
 /// raw-handler registration) happens on the very first call across the
 /// whole process, regardless of which room it names. Every call -- first or
 /// not -- then joins `room` if this process hasn't joined it yet. Joining a
-/// room already joined by a different caller (e.g. mailbox and ai sharing
-/// the default room) is a no-op; joining a genuinely new room is legal and
-/// additive, so mailbox, ai, and the stream relay can each sit in their own
+/// room already joined by a different caller (e.g. ai and the chat relay
+/// sharing one room) is a no-op; joining a genuinely new room is legal and
+/// additive, so ai, chat_relay, and the stream relay can each sit in their own
 /// room at the same time.
 pub async fn ensure_started(state: &Arc<AppState>, room: String) -> Result<Arc<Transport>> {
     let engine = ENGINE
@@ -154,8 +154,8 @@ pub async fn ensure_started(state: &Arc<AppState>, room: String) -> Result<Arc<T
 /// Release this process's interest in `room`, taken out by an earlier
 /// [`ensure_started`] call. Only actually leaves the room (via
 /// `mistlib::app::leave_room_id`) once every holder has released it --
-/// refcounted so independent services sharing a room (e.g. mailbox and ai
-/// both defaulting to [`DEFAULT_ROOM`]) don't kick each other out. A no-op
+/// refcounted so independent services sharing a room (e.g. ai and the chat
+/// relay pointed at the same room) don't kick each other out. A no-op
 /// if this process never joined `room`, or already fully released it.
 pub async fn leave_room(room: &str) -> Result<()> {
     let mut rooms = ROOMS.lock().await;
@@ -300,7 +300,7 @@ pub fn activity_snapshot() -> Vec<ActivityEntry> {
 /// Register a room-aware handler: like [`register_handler`], but additionally
 /// told which room each event arrived from. Needed by callers that join more
 /// than one room and must tell them apart -- e.g. the tc-chat relay
-/// (`crate::mailbox::chat_relay`), which may join several tc-chat rooms and
+/// (`crate::chat_relay`), which may join several tc-chat rooms and
 /// must route an inbound wire to the right room's on-disk log.
 /// [`register_handler`]'s existing event stream is a fan-out across every
 /// joined room with no origin tag, so this is a second, independent
@@ -459,7 +459,7 @@ pub async fn room_connections() -> Vec<(String, Vec<(String, String)>)> {
 
 /// Rooms this process currently holds (refcount > 0), sorted for a
 /// deterministic result. Read for `topology.status`'s dashboard view --
-/// e.g. mailbox/ai/stream relay each sitting in their own room, or sharing
+/// e.g. chat_relay/ai/stream relay each sitting in their own room, or sharing
 /// one.
 pub async fn joined_rooms() -> Vec<String> {
     let rooms = ROOMS.lock().await;

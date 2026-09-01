@@ -14,7 +14,7 @@
 //!    `mistlib::init`/`init_with_config` and `mistlib::join_room` directly,
 //!    and read a `P2P_MISTLIB_CONFIG_JSON` env var to build an optional
 //!    signaling config override. mistl already has exactly one process-wide
-//!    mistlib engine shared by mailbox/ai/stream relay/etc
+//!    mistlib engine shared by ai/chat_relay/stream relay/etc
 //!    (`crate::net::ensure_started`, which configures signaling centrally in
 //!    `net::start_engine`), so that per-instance override has no meaning
 //!    here and is dropped entirely -- there is no `mistlib_config()`
@@ -31,7 +31,7 @@
 //!    and the registered closure ignores every event whose room doesn't
 //!    match this manager's *current* room (see `RTCManagerInner::room` in
 //!    `state.rs`) before ever handing it to `event::dispatch_event`. This
-//!    also covers mailbox/ai payloads arriving on the same wire:
+//!    also covers tc-chat/ai payloads arriving on the same wire:
 //!    `event::handle_payload` (ported unchanged) already silently drops
 //!    bytes that don't deserialize as a `payload::P2pPayload`.
 //! 3. **`send_payload` goes through `crate::net`.** An empty `peer_id` calls
@@ -41,7 +41,7 @@
 //! 4. **`close` only releases this manager's room.** `crate::net::leave_room`
 //!    is refcounted and never touches mistlib's single global raw-handler
 //!    slot -- unlike upstream's `mistlib::clear_raw_handler()`, which would
-//!    silence *every* module sharing the process (mailbox, ai, stream
+//!    silence *every* module sharing the process (ai, chat_relay, stream
 //!    relay, every other tunnel room). There is deliberately no
 //!    `clear_room_handler` call here or anywhere else in this file.
 //! 5. **The room lives on the manager, behind a lock**, so `switch_room` can
@@ -151,7 +151,7 @@ impl RTCManagerHandle {
 
         // `crate::net::register_room_handler` fans every event out to every
         // registered handler for *every* room this process has joined --
-        // mailbox, ai, stream relay, and every other `RTCManagerHandle`'s
+        // ai, chat_relay, stream relay, and every other `RTCManagerHandle`'s
         // room all share this one fan-out. A manager for one room must
         // ignore another room's traffic, so this closure reads
         // `inner.room` on every single event and drops anything that
@@ -164,7 +164,7 @@ impl RTCManagerHandle {
         // re-sends this manager's role once it completes.
         //
         // Bytes that pass the room filter but aren't this manager's own
-        // wire shape (mailbox JSON tagged `t`, ai JSON with `v`+`type`) are
+        // wire shape (tc-chat JSON tagged `type`, ai JSON with `v`+`type`) are
         // still silently ignored one layer down, in
         // `event::handle_payload`'s `P2pPayload` deserialize -- ported
         // unchanged from upstream.
@@ -441,11 +441,11 @@ impl RTCManagerHandle {
     /// Releases this manager's interest in its current room via
     /// `crate::net::leave_room` -- refcounted, so the underlying mistlib
     /// session is only actually torn down once every other holder of that
-    /// room (if any; e.g. mailbox/ai sharing it) has also released it.
+    /// room (if any; e.g. ai/chat_relay sharing it) has also released it.
     ///
     /// Deliberately **never** calls anything like upstream's
     /// `mistlib::clear_raw_handler()`: mistl's raw handler slot is
-    /// process-wide and shared by every module (mailbox, ai, stream relay,
+    /// process-wide and shared by every module (ai, chat_relay, stream relay,
     /// every other tunnel room), so clearing it here would silence all of
     /// them, not just this manager's traffic. There is no equivalent
     /// `clear_room_handler` to call either -- the room-filter closure
