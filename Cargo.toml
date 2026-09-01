@@ -2,7 +2,7 @@
 name = "mistl"
 version = "0.1.0"
 edition = "2024"
-description = "Unified P2P daemon CLI: identity (DID), storage, RTSP screen share for VRChat, and offline mailbox bot"
+description = "Unified P2P daemon CLI: identity (DID), storage, RTSP screen share for VRChat, and a standing tc-chat relay"
 license = "MPL-2.0"
 
 [dependencies]

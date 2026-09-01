@@ -69,7 +69,7 @@ fn items_path(data_dir: &Path) -> PathBuf {
 
 fn imported_path(data_dir: &Path, pipeline_id: &str) -> PathBuf {
     // Pipeline ids are user-chosen config keys; unlike
-    // `mailbox::chat_relay`'s room ids there is no shape gate on them here
+    // `chat_relay`'s room ids there is no shape gate on them here
     // (a pipeline id is never used to join a network room), so a
     // filesystem-unsafe id would produce an unusable path -- acceptable for
     // v1 since pipeline ids are locally authored via `config.toml`/`config
@@ -107,7 +107,7 @@ fn read_lines(path: &Path) -> Result<Vec<String>> {
 
 /// Overwrites `path` with `lines`, one per line: temp file in the same
 /// directory then rename over the target, mirroring
-/// `scheduler`/`mailbox::chat_relay`'s capped-log write idiom.
+/// `scheduler`/`chat_relay`'s capped-log write idiom.
 fn write_lines(path: &Path, lines: &[String]) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;

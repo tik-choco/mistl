@@ -8,7 +8,7 @@
 //! cid, mimeType, fileName, fileSize, type, surface, parentId, targetId,
 //! emoji, op, roomId, signature, ...).
 //!
-//! Used by [`super::chat_relay`] to reconstruct the exact signing payload of
+//! Used by [`super`] to reconstruct the exact signing payload of
 //! an inbound `tc-chat:*` wire so its signature can be verified against the
 //! sender's `did:key` (`crate::identity::verify`).
 

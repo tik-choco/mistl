@@ -14,7 +14,17 @@ pub struct Config {
     #[serde(default)]
     pub stream: StreamConfig,
     #[serde(default)]
-    pub mailbox: MailboxConfig,
+    pub chat_relay: ChatRelayConfig,
+    /// Legacy `[mailbox]` section, from before the p2p store-and-forward
+    /// mail feature was removed and the tc-chat relay became its own
+    /// module. Deserializable (so an old config.toml keeps loading, and its
+    /// relay settings survive the rename) but never re-serialized --
+    /// `Config::load` folds it into `chat_relay` via `migrate_legacy` on
+    /// first read, then `save()` drops the section from disk for good. Its
+    /// mail-only fields (`room_id`, `serve_as_bot`) are deliberately not
+    /// modelled: serde ignores them, which is exactly the intent.
+    #[serde(default, skip_serializing)]
+    pub mailbox: Option<LegacyMailboxConfig>,
     #[serde(default)]
     pub ai: AiConfig,
     #[serde(default)]
@@ -91,7 +101,7 @@ pub struct StorageConfig {
     /// Maximum store size in bytes before LRU eviction of remote blocks.
     pub capacity_bytes: u64,
     /// tc-chat rooms the store joins for peer block exchange. Independent of
-    /// `[mailbox] room_id`/`[ai] room_id`/`[stream] room` for the same reason
+    /// `[chat_relay] rooms`/`[ai] room_id`/`[stream] room` for the same reason
     /// those are independent of each other -- the p2p
     /// transport supports multiple simultaneous rooms per process, and here
     /// it's taken further: the store joins *all* listed rooms simultaneously
@@ -191,7 +201,7 @@ pub struct StreamConfig {
     /// see `stream::share`'s module doc) -- unified into one setting since
     /// a relay and a share pointed at different rooms would never see each
     /// other; the common case is one room shared by every participant.
-    /// Independent of `[mailbox] room_id` and `[ai] room_id` -- the p2p
+    /// Independent of `[chat_relay] rooms` and `[ai] room_id` -- the p2p
     /// transport supports multiple simultaneous rooms per process, so this
     /// can still name its own room, or reuse one of theirs.
     pub room: Option<String>,
@@ -235,36 +245,31 @@ impl Default for StreamConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// The two `[mailbox]` fields that outlived the mailbox module: the tc-chat
+/// relay's room list and master switch, now `[chat_relay] rooms`/`enabled`.
+/// See `Config::mailbox`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
-pub struct MailboxConfig {
-    /// Room id used for mailbox rendezvous with peers.
-    pub room_id: Option<String>,
-    /// Act as a mailbox bot: hold deposits addressed to offline peers.
-    pub serve_as_bot: bool,
-    /// tc-chat rooms to relay (join server-lessly on the user's behalf,
-    /// verify + persist signed `tc-chat:*` wires, and answer other peers'
-    /// `tc-chat:history-request` replays) -- see `crate::mailbox::chat_relay`.
-    /// Empty (the default) means the relay never joins anything, regardless
-    /// of `chat_relay`. Joined once at daemon start, like `room_id` above;
-    /// requires a daemon restart to take effect.
+pub struct LegacyMailboxConfig {
     pub chat_rooms: Vec<String>,
-    /// Master switch for the tc-chat relay described by `chat_rooms`. Kept
-    /// separate from `chat_rooms` being non-empty so a configured room list
-    /// can be temporarily disabled without clearing it. Requires a daemon
-    /// restart to take effect.
     pub chat_relay: bool,
 }
 
-impl Default for MailboxConfig {
-    fn default() -> Self {
-        Self {
-            room_id: None,
-            serve_as_bot: true,
-            chat_rooms: Vec::new(),
-            chat_relay: false,
-        }
-    }
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChatRelayConfig {
+    /// Master switch for the tc-chat relay described by `rooms`. Kept
+    /// separate from `rooms` being non-empty so a configured room list can
+    /// be temporarily disabled without clearing it. Requires a daemon
+    /// restart to take effect.
+    pub enabled: bool,
+    /// tc-chat rooms to relay (join server-lessly on the user's behalf,
+    /// verify + persist signed `tc-chat:*` wires, and answer other peers'
+    /// `tc-chat:history-request` replays) -- see `crate::chat_relay`.
+    /// Empty (the default) means the relay never joins anything, regardless
+    /// of `enabled`. Joined once at daemon start; requires a daemon restart
+    /// to take effect.
+    pub rooms: Vec<String>,
 }
 
 /// Connection-only settings for one upstream endpoint (the part shared
@@ -393,11 +398,10 @@ pub fn resolve_preset(ai: &AiConfig, preset_id: Option<&str>) -> Option<Resolved
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AiConfig {
-    /// Room id for the AI network. Defaults to the mailbox room for
-    /// backward-compat convenience when unset, but the p2p transport now
-    /// supports multiple simultaneous rooms per process, so this no longer
-    /// needs to match `[mailbox] room_id` -- set it explicitly to join an
-    /// existing mistai (tc-mistllm etc.) room distinct from mailbox's.
+    /// Room id for the AI network. Falls back to the shared default
+    /// rendezvous room (`net::DEFAULT_ROOM`) when unset; the p2p transport
+    /// supports multiple simultaneous rooms per process, so set this
+    /// explicitly to join an existing mistai (tc-mistllm etc.) room.
     pub room_id: Option<String>,
     /// Legacy pre-provider/preset upstream URL. Deserializable (so old
     /// config.toml files keep loading) but never re-serialized --
@@ -753,7 +757,7 @@ fn project_dirs() -> Result<directories::ProjectDirs> {
         .context("could not determine home directory")
 }
 
-/// Per-user data directory (daemon state, keys, blocks, mailbox spool).
+/// Per-user data directory (daemon state, keys, blocks, relay wirelogs).
 pub fn data_dir() -> Result<PathBuf> {
     let dirs = project_dirs()?;
     let dir = dirs.data_dir().to_path_buf();
@@ -874,7 +878,7 @@ pub fn applies_when(path: &str) -> &'static str {
         // The background updater re-reads config each tick, but its cadence
         // and enabled state are simplest to reason about across a restart.
         "update.auto_check" | "update.check_interval_hours" => "daemon restart",
-        // mailbox/ai/stream join their room once at service start and hold
+        // chat_relay/ai/stream join their rooms once at service start and hold
         // it for the process lifetime; before any p2p service ran it applies
         // on next start, but "daemon restart" is the safe universal answer.
         // `storage.room_ids` (and its legacy alias `storage.room_id`) is the
@@ -882,8 +886,8 @@ pub fn applies_when(path: &str) -> &'static str {
         // every call and hops rooms live, so it falls through to "next
         // service start" below (true immediately, since the next `store.*`
         // command *is* its next "start").
-        "mailbox.room_id" | "mailbox.chat_rooms" | "mailbox.chat_relay" | "ai.room_id"
-        | "stream.room" | "stream.relay_room" | "stream.share_room" => "daemon restart",
+        "chat_relay.rooms" | "chat_relay.enabled" | "ai.room_id" | "stream.room"
+        | "stream.relay_room" | "stream.share_room" => "daemon restart",
         // The background tick loop is only started once at daemon startup
         // (see `scheduler::spawn_background`); toggling it live would need
         // a way to stop an already-running loop, which isn't implemented.
@@ -957,7 +961,27 @@ impl Config {
         // `advertised_models` entries against `presets`.
         let advertised_changed = self.migrate_advertised_models();
         let stream_changed = self.migrate_legacy_stream_room();
-        ai_changed || advertised_changed || stream_changed
+        let mailbox_changed = self.migrate_legacy_mailbox();
+        ai_changed || advertised_changed || stream_changed || mailbox_changed
+    }
+
+    /// Folds a legacy `[mailbox]` section's `chat_rooms`/`chat_relay` into
+    /// `[chat_relay] rooms`/`enabled`, so a daemon that was relaying tc-chat
+    /// rooms before the rename keeps relaying them after it. Only applies to
+    /// an untouched `[chat_relay]` section: once the new section says
+    /// anything at all, it wins outright rather than being merged field by
+    /// field. Returns `true` whenever a legacy section was present, even if
+    /// nothing moved -- saving is what drops it from disk for good, the same
+    /// contract as `migrate_legacy_ai`/`migrate_legacy_stream_room`.
+    fn migrate_legacy_mailbox(&mut self) -> bool {
+        let Some(legacy) = self.mailbox.take() else {
+            return false;
+        };
+        if self.chat_relay.rooms.is_empty() && !self.chat_relay.enabled {
+            self.chat_relay.rooms = legacy.chat_rooms;
+            self.chat_relay.enabled = legacy.chat_relay;
+        }
+        true
     }
 
     /// Merges legacy `[ai]` fields (`upstream_url`/`upstream_api_key`/
@@ -1166,8 +1190,8 @@ mod tests {
         let config = Config::default();
         let updated = set_by_path(&config, "stream.frame_rate", json!(60)).unwrap();
         assert_eq!(updated.stream.frame_rate, 60);
-        let updated = set_by_path(&config, "mailbox.serve_as_bot", json!(false)).unwrap();
-        assert!(!updated.mailbox.serve_as_bot);
+        let updated = set_by_path(&config, "chat_relay.enabled", json!(true)).unwrap();
+        assert!(updated.chat_relay.enabled);
         let updated = set_by_path(&config, "ai.advertised_models", json!(["a", "b"])).unwrap();
         assert_eq!(updated.ai.advertised_models, vec!["a", "b"]);
     }
@@ -1490,26 +1514,51 @@ mod tests {
     }
 
     #[test]
-    fn mailbox_chat_relay_defaults_off() {
-        let config = Config::default();
-        assert!(config.mailbox.chat_rooms.is_empty());
-        assert!(!config.mailbox.chat_relay);
+    fn migrate_legacy_mailbox_moves_relay_settings_into_chat_relay() {
+        let mut config: Config = toml::from_str(
+            "[mailbox]\nroom_id = \"old-room\"\nserve_as_bot = true\nchat_rooms = [\"room-a\"]\nchat_relay = true\n",
+        )
+        .unwrap();
+        assert!(config.migrate_legacy());
+        assert_eq!(config.chat_relay.rooms, vec!["room-a"]);
+        assert!(config.chat_relay.enabled);
+        // Taken, so `save()` writes no `[mailbox]` section at all.
+        assert!(config.mailbox.is_none());
+        assert!(!toml::to_string_pretty(&config).unwrap().contains("mailbox"));
     }
 
     #[test]
-    fn set_by_path_updates_mailbox_chat_relay_fields() {
+    fn migrate_legacy_mailbox_never_overrides_a_configured_chat_relay() {
+        let mut config: Config = toml::from_str(
+            "[mailbox]\nchat_rooms = [\"old-room\"]\nchat_relay = true\n\n[chat_relay]\nrooms = [\"new-room\"]\nenabled = false\n",
+        )
+        .unwrap();
+        assert!(config.migrate_legacy());
+        assert_eq!(config.chat_relay.rooms, vec!["new-room"]);
+        assert!(!config.chat_relay.enabled);
+    }
+
+    #[test]
+    fn chat_relay_defaults_off() {
+        let config = Config::default();
+        assert!(config.chat_relay.rooms.is_empty());
+        assert!(!config.chat_relay.enabled);
+    }
+
+    #[test]
+    fn set_by_path_updates_chat_relay_fields() {
         let config = Config::default();
         let updated =
-            set_by_path(&config, "mailbox.chat_rooms", json!(["room-a", "room-b"])).unwrap();
-        assert_eq!(updated.mailbox.chat_rooms, vec!["room-a", "room-b"]);
-        let updated = set_by_path(&updated, "mailbox.chat_relay", json!(true)).unwrap();
-        assert!(updated.mailbox.chat_relay);
+            set_by_path(&config, "chat_relay.rooms", json!(["room-a", "room-b"])).unwrap();
+        assert_eq!(updated.chat_relay.rooms, vec!["room-a", "room-b"]);
+        let updated = set_by_path(&updated, "chat_relay.enabled", json!(true)).unwrap();
+        assert!(updated.chat_relay.enabled);
     }
 
     #[test]
-    fn applies_when_mailbox_chat_relay_settings_require_a_restart() {
-        assert_eq!(applies_when("mailbox.chat_rooms"), "daemon restart");
-        assert_eq!(applies_when("mailbox.chat_relay"), "daemon restart");
+    fn applies_when_chat_relay_settings_require_a_restart() {
+        assert_eq!(applies_when("chat_relay.rooms"), "daemon restart");
+        assert_eq!(applies_when("chat_relay.enabled"), "daemon restart");
     }
 
     #[test]
@@ -1540,13 +1589,13 @@ mod tests {
 
     #[test]
     fn applies_when_storage_room_ids_does_not_require_a_restart() {
-        // Unlike mailbox/ai/stream room settings, storage's rooms are
+        // Unlike chat_relay/ai/stream room settings, storage's rooms are
         // re-resolved live on every `store.*` call (see `storage::store`),
         // so changing them should never tell the user to restart the daemon.
         // Both the current field name and its legacy alias answer the same.
         assert_eq!(applies_when("storage.room_ids"), "next service start");
         assert_eq!(applies_when("storage.room_id"), "next service start");
-        assert_eq!(applies_when("mailbox.room_id"), "daemon restart");
+        assert_eq!(applies_when("chat_relay.rooms"), "daemon restart");
     }
 
     #[test]

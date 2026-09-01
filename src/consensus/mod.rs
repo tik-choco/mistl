@@ -296,7 +296,7 @@ async fn hello_loop(consensus: Arc<RelayConsensus>) {
 
 /// Sends the hello to every node `crate::net` currently sees as connected
 /// (there is no room-scoped connected-node list -- see `crate::net`'s
-/// module docs -- so, like the mailbox/ai precedents, this may also reach
+/// module docs -- so, like the ai/chat_relay precedents, this may also reach
 /// peers in this process's *other* joined rooms; `send_direct` is scoped
 /// to `room` regardless, so it simply fails silently for anyone not
 /// actually reachable there).

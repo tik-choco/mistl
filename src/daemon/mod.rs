@@ -189,12 +189,12 @@ async fn daemon_main(host_override: Option<String>) -> Result<()> {
     // enabled, stage a newer binary (applied on the next daemon start).
     crate::update::spawn_auto_update(state.clone());
 
-    // tc-chat room relay/bot: starts only if `[mailbox] chat_relay` and
-    // `chat_rooms` are configured (a no-op otherwise). Spawned eagerly here
-    // -- rather than lazily on first `mailbox.chat.*` IPC call, like
-    // mailbox/ai/stream's own services -- because the whole point is
-    // receiving tc-chat traffic while nobody is asking.
-    crate::mailbox::chat_relay::spawn_background(state.clone());
+    // tc-chat room relay/bot: starts only if `[chat_relay] enabled` and
+    // `rooms` are configured (a no-op otherwise). Spawned eagerly here --
+    // rather than lazily on first `chat.*` IPC call, like ai/stream's own
+    // services -- because the whole point is receiving tc-chat traffic
+    // while nobody is asking.
+    crate::chat_relay::spawn_background(state.clone());
 
     // tc-storage folder-share sync (requester side) and owner
     // responder/announcer: both no-ops unless syncs/shares are persisted.
@@ -529,7 +529,7 @@ pub async fn dispatch(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<V
             Some("profile") | Some("key") => crate::identity::handle(cmd, args, state).await,
             Some("store") => crate::storage::handle(cmd, args, state).await,
             Some("stream") => crate::stream::handle(cmd, args, state).await,
-            Some("mailbox") => crate::mailbox::handle(cmd, args, state).await,
+            Some("chat") => crate::chat_relay::handle(cmd, args, state).await,
             Some("sched") => crate::scheduler::handle(cmd, args, state).await,
             Some("bot") => crate::bot::handle(cmd, args, state).await,
             Some("consensus") => crate::consensus::handle(cmd, args, state).await,

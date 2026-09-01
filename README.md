@@ -11,8 +11,10 @@ It integrates the [tc-storage](https://github.com/tik-choco/tc-storage) CLI and 
   port of mistlink), from local screen capture or relayed from a
   [tc-chat](https://github.com/tik-choco/tc-chat) screen share (video + audio) over the
   p2p network
-- **mailbox** — p2p store-and-forward messaging ("p2p mail server"): when the recipient
-  is offline, a bot node holds the deposit and forwards it once they come online
+- **chat_relay** — joins configured [tc-chat](https://github.com/tik-choco/tc-chat)
+  rooms server-lessly, verifies and persists signed `tc-chat:*` wires, and answers
+  other peers' history-request replays, so chat keeps arriving even with no tc-chat
+  browser tab open
 - **tunnel** — P2P port forwarding over the mist network (Rust port of
   [p2p](https://github.com/tik-choco-lab/p2p)): tunnel TCP/UDP through NAT to a peer,
   with per-connection approval, a persisted trust store, and an audit log. Wire-compatible
@@ -136,11 +138,10 @@ $ mistl stream selftest --audio aac   # synthetic video+audio feed for local tes
 $ mistl stream status
 $ mistl stream stop
 
-# Mailbox
-$ mistl mailbox send <did|node-id> --message "hello"
-$ mistl mailbox send <did|node-id> --file .\data.bin
-$ mistl mailbox fetch         # receive messages pending for me
-$ mistl mailbox ls            # deposits this node is holding as a bot
+# Chat relay
+$ mistl chat rooms            # rooms currently joined by the chat relay
+$ mistl chat log <room>       # replay persisted history for a room
+$ mistl chat log <room> --limit 50
 
 # Tunnel (P2P port forwarding)
 $ mistl tunnel start          # join the configured room (generates one on first run)
@@ -193,7 +194,7 @@ transcodes the audio to AAC (what AVPro plays over RTSP), and serves both tracks
 the RTSP URL. Paste the printed URL into any AVPro-based VRChat video player.
 Note: the p2p transport supports multiple simultaneous rooms per process, so
 `stream.room` (shared by both `stream relay` and `stream share`) can name its
-own room independent of `mailbox.room_id` and `ai.room_id` -- or reuse one of
+own room independent of `chat_relay.rooms` and `ai.room_id` -- or reuse one of
 them if you'd rather keep everything in one room.
 
 **Any number of viewers (mesh + cascade):** VRChat's AVPro can only play a URL,
@@ -223,13 +224,25 @@ selftest` — a synthetic video+audio feed that exercises the exact two-track
 RTSP output VRChat consumes, so you can confirm the playback path locally
 (ffprobe/ffplay) without a live p2p share.
 
-`mailbox send` returns one of three `status` values:
+### Standing tc-chat relay
 
-| status | meaning |
-| --- | --- |
-| `delivered` | recipient was online; delivered directly |
-| `deposited` | deposited with a connected bot node |
-| `queued` | no reachable peers; saved to the local outbox for retry |
+With `[chat_relay] enabled = true` and one or more `rooms`, the daemon joins
+those tc-chat rooms at startup (once per daemon run — changing either setting
+needs a restart) and stays in them for as long as it runs. It verifies every
+inbound signed `tc-chat:*` wire against the sender's `did:key`, appends it
+verbatim to a per-room log under `<data_dir>/relay/<room>/wirelog.jsonl`, and
+answers other peers' `tc-chat:history-request` broadcasts by replaying that
+log — so a tab joining later catches up even if nobody else was online.
+Replayed wires keep their original signature, so receivers re-verify them
+exactly like live traffic: the relay is never trusted, only present.
+
+`mistl chat rooms` shows the configured rooms and whether each is currently
+joined; `mistl chat log <room>` prints the tail of that room's stored wires
+(the same view the dashboard's tc-chat Relay panel renders).
+
+These two settings used to live in the (now removed) `[mailbox]` section as
+`chat_rooms`/`chat_relay`; a config.toml still carrying them is migrated to
+`[chat_relay]` on the next daemon start, and the old section is dropped.
 
 ## Configuration
 
@@ -258,9 +271,9 @@ max_width = 1920                             # native backend: downscale wider s
 audio_codec = "aac"                          # relay audio track: "aac" (AVPro) or "opus"
 cascade = true                               # cascade distribution across relay nodes (see below)
 
-[mailbox]
-# room_id = "my-private-room"               # default: "mistl-mailbox-v1"
-serve_as_bot = true                          # hold deposits for other peers
+[chat_relay]
+enabled = false                              # join configured tc-chat rooms at daemon start (requires restart)
+rooms = []                                   # tc-chat room(s) to relay (requires restart)
 
 [tunnel]
 enabled = false                              # join the tunnel room automatically at daemon start
@@ -271,7 +284,7 @@ stdio_enabled = false                        # let approved peers run `stdio_com
 # stdio_command = ["pwsh", "-NoLogo"]       # only used when stdio_enabled = true
 
 [ai]
-# room_id = "my-llm-room"                   # default: the mailbox room (see note)
+# room_id = "my-llm-room"                   # default: the default rendezvous room (see note)
 # default_preset_id = "default"             # which [[ai.presets]] entry `ai provide`/`ai serve` use by default
 # tts_preset_id = "tts-default"             # which preset answers inbound tts_request; unset = TTS not offered
 # stt_preset_id = "stt-default"             # which preset answers inbound stt_request; unset = STT not offered
@@ -302,14 +315,16 @@ enabled = true                               # serve the dashboard from the daem
 listen = "127.0.0.1:6480"                    # keep on loopback (no auth)
 ```
 
-Note: storage, mailbox, ai, and stream relay can each join their **own** room --
+Note: storage, chat_relay, ai, and stream relay can each join their **own** room --
 the p2p transport supports multiple simultaneous rooms per process. `[ai] room_id`
-defaults to the mailbox room for convenience when unset; set it explicitly to
-join a different room, e.g. an existing mistai app room. `[storage] room_ids` has
-no such fallback -- leave it unset (or empty) to keep the store purely local (no
-network join at all). Unlike the other room settings, `room_ids` is a list: the
-store joins **all** listed rooms simultaneously, and the list can be changed at
-any time without a daemon restart. The legacy single-room form (`room_id =
+defaults to the default rendezvous room (`"mistl-mailbox-v1"`, kept for wire
+compatibility with existing deployments) for convenience when unset; set it
+explicitly to join a different room, e.g. an existing mistai app room.
+`[storage] room_ids` has no such fallback -- leave it unset (or empty) to keep
+the store purely local (no network join at all). Unlike the other room
+settings, `room_ids` is a list: the store joins **all** listed rooms
+simultaneously, and the list can be changed at any time without a daemon
+restart. The legacy single-room form (`room_id =
 "my-room"`) still parses, loading as a one-element `room_ids` list.
 
 Data lives in `%APPDATA%\tik-choco\mistl\data\` (keys, blocks, spools, logs).
@@ -400,7 +415,7 @@ mistl <subcommand>  --(JSON over loopback TCP)-->  mistl daemon run
                                                      │    └─ pairing.rs     (mistlib-room code pairing, issuer side)
                                                      ├─ storage   (mistlib StorageEngine + NativeBlockStore)
                                                      ├─ stream    (screen capture or p2p WebRTC relay → RTP → RTSP server)
-                                                     ├─ mailbox   (signed envelope spools over net)
+                                                     ├─ chat_relay (verifies/persists tc-chat wires over net)
                                                      ├─ ai        (mistai protocol v1 over net + local OpenAI-compatible HTTP)
                                                      ├─ web       (embedded dashboard + /api/call bridge into the same router)
                                                      └─ net       (shared mistlib WebRTC/Nostr transport: one engine, one room)
@@ -421,13 +436,11 @@ mistl <subcommand>  --(JSON over loopback TCP)-->  mistl daemon run
 - `ai` speaks mistai protocol v1 on the wire (`provider_hello` / `llm_request` /
   `llm_response_chunk` with seq reordering / `llm_response_done`), so browser-based
   mistai consumers and providers in the same room interoperate; the `net` module
-  multiplexes mailbox and ai traffic over mistlib's single raw-message handler by
-  message shape
+  multiplexes `ai`, `chat_relay`, and the other room protocols over mistlib's
+  single raw-message handler by message shape
 
 ## Known limitations (v0.1)
 
-- `mailbox` file sends forward only the envelope (cid/name/size); p2p block transfer of
-  the file bytes is not implemented yet
 - `stream` local capture is video-only (audio_capture is ignored); relayed shares carry
   audio. Inbound NACK is not implemented (loss shows until the next keyframe; the relay
   requests one every 5s)
