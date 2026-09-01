@@ -40,6 +40,11 @@ fn main() -> Result<()> {
         .with(devlog_layer)
         .init();
 
+    tracing::info!(
+        mistlib_version = mistlib::build_info::get_version(),
+        "mistlib version"
+    );
+
     let args = cli::Cli::parse();
     cli::dispatch(args)
 }
