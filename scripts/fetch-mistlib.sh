@@ -39,6 +39,19 @@ if [ -z "$MISTLIB_REPO" ]; then
     exit 1
 fi
 
+# See fetch-mistlib-consensus.sh: a Windows-style absolute path (C:\...) pointing
+# at a sibling checkout is a local path to the host's native Git, but the Git
+# inside WSL (`just release-linux`) reads it as scp-like host:path and tries to
+# ssh to a host named "C". `wslpath` exists only under WSL, which is exactly when
+# the translation applies.
+case "$MISTLIB_REPO" in
+    [A-Za-z]:[\\/]*)
+        if command -v wslpath >/dev/null 2>&1; then
+            MISTLIB_REPO=$(wslpath -u "$MISTLIB_REPO")
+        fi
+        ;;
+esac
+
 if [ ! -d "$git_dir" ]; then
     rm -rf "$cache"
     git clone "$MISTLIB_REPO" "$cache"
