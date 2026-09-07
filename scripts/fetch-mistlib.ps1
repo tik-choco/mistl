@@ -54,7 +54,9 @@ if (-not (Test-Path -LiteralPath $gitDir -PathType Container)) {
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 
-$gitDirItem = Get-Item -LiteralPath $gitDir -ErrorAction SilentlyContinue
+# See fetch-mistlib-consensus.ps1: without -Force, Get-Item skips the Hidden
+# .git directory Git creates on Windows and this check fails on every clone.
+$gitDirItem = Get-Item -LiteralPath $gitDir -Force -ErrorAction SilentlyContinue
 if (-not $gitDirItem -or -not $gitDirItem.PSIsContainer -or
     ($gitDirItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
     Write-Host "error: $gitDir is not a safe, standalone Git directory"

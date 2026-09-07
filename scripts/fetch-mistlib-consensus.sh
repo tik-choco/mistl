@@ -34,6 +34,23 @@ if [ -z "$MISTLIB_CONSENSUS_REPO" ]; then
     exit 1
 fi
 
+# A Windows-style absolute path (C:\...) in .env -- what you write to clone from
+# a sibling checkout instead of the network -- is a valid local path to the
+# host's native Git, but this script also runs inside WSL (`just release-linux`),
+# where Git reads "C:\..." as scp-like host:path syntax and tries to ssh to a
+# host named "C". Translate it to the /mnt/c mount there. `wslpath` exists only
+# under WSL, which is exactly when the translation applies: Git Bash on the host
+# drives native Git and must keep the path as written. The `remote set-url`
+# below runs on every invocation, so alternating host and WSL builds each
+# re-point the clone at the form their own Git understands.
+case "$MISTLIB_CONSENSUS_REPO" in
+    [A-Za-z]:[\\/]*)
+        if command -v wslpath >/dev/null 2>&1; then
+            MISTLIB_CONSENSUS_REPO=$(wslpath -u "$MISTLIB_CONSENSUS_REPO")
+        fi
+        ;;
+esac
+
 if [ ! -d "$git_dir" ]; then
     rm -rf "$cache"
     git clone "$MISTLIB_CONSENSUS_REPO" "$cache"

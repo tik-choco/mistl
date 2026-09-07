@@ -102,13 +102,17 @@ release: fetch-mistlib fetch-mistlib-consensus
     cargo build --release
     ./target/release/{{bin}} daemon start || true
 
-# Full release: format check, lint (deny warnings), test, then build
-dist: fmt-check lint test release
+# Validate the current dependency checkout without updating it.
+verify: _ensure-mistlib _ensure-mistlib-consensus fmt-check lint test test-fetch-safety
+
+# Fetch BEFORE validation; build the same checkout without another fetch.
+# This does not start or stop the user's daemon.
+dist: fetch-mistlib fetch-mistlib-consensus verify
+    cargo build --release --locked
     @echo "release binary: target/release/{{bin}}"
 
 # Copy the release exe into ./dist for handoff
-package: release
-    cargo run --quiet --release -- --version || true
+package: dist
     just _copy-exe
 
 [windows]
@@ -167,7 +171,7 @@ check: _ensure-mistlib _ensure-mistlib-consensus
 
 # Run the test suite
 test: _ensure-mistlib _ensure-mistlib-consensus
-    cargo test
+    cargo test --locked
 
 # Rebuild (debug) and restart the daemon on every src/ change; the dashboard
 # HTML gets a debug-only live-reload poll (src/web/server.rs) so a browser
@@ -198,7 +202,7 @@ fmt-check:
 
 # Clippy with warnings promoted to errors
 lint:
-    cargo clippy --all-targets -- -D warnings
+    cargo clippy --all-targets --locked -- -D warnings
 
 # --- housekeeping ----------------------------------------------------------
 

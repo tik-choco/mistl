@@ -45,7 +45,11 @@ if (-not (Test-Path -LiteralPath $gitDir -PathType Container)) {
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 
-$gitDirItem = Get-Item -LiteralPath $gitDir -ErrorAction SilentlyContinue
+# -Force is required, not optional: Git on Windows marks .git Hidden, and
+# Get-Item skips hidden items without it -- returning $null and failing this
+# check on every ordinary clone. The check itself still rejects a missing item,
+# a file, or a reparse point.
+$gitDirItem = Get-Item -LiteralPath $gitDir -Force -ErrorAction SilentlyContinue
 if (-not $gitDirItem -or -not $gitDirItem.PSIsContainer -or
     ($gitDirItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
     Write-Host "error: $gitDir is not a safe, standalone Git directory"
