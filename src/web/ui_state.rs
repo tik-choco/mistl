@@ -10,9 +10,11 @@
 //! `crate::web::autoreopen` reads this at daemon startup and, if
 //! `dashboard_open`, reopens the dashboard in the default browser.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 /// On-disk shape of `<data_dir>/ui-state.json`. A single flag today; kept
@@ -27,71 +29,45 @@ pub struct UiState {
     pub dashboard_open: bool,
 }
 
+/// `<data_dir>` file this module's state lives in.
+const FILE_NAME: &str = "ui-state.json";
+
+/// Only the round-trip test below needs the resolved path; reads and
+/// writes go through [`crate::statefile`] by file name.
+#[cfg(test)]
 fn state_path(data_dir: &Path) -> PathBuf {
-    data_dir.join("ui-state.json")
+    data_dir.join(FILE_NAME)
 }
 
-/// Reads the persisted flag. A missing file is the expected "dashboard has
-/// never been open on this machine" state and reads as
-/// `dashboard_open: false`, not an error (mirrors
-/// `ai::provide_state::read_state`'s missing-file handling). A *present but
-/// corrupt* file is surfaced as an `Err` instead of silently defaulting --
-/// unlike a missing file, that indicates something wrote a bad file, which
-/// is worth a caller-visible `warn!` rather than quietly skipping
-/// auto-reopen with no trace of why.
+/// Reads the persisted flag from `ui-state.json`. The missing/empty/corrupt
+/// handling is [`crate::statefile`]'s shared contract: a missing file means
+/// the dashboard has never been open on this machine and reads as the
+/// default, while a *present but corrupt* file is surfaced as an `Err` so
+/// the caller can `warn!` rather than silently skip.
 pub fn read_state(data_dir: &Path) -> Result<UiState> {
-    let path = state_path(data_dir);
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(UiState::default());
-        }
-        Err(err) => return Err(err).with_context(|| format!("reading {}", path.display())),
-    };
-    if text.trim().is_empty() {
-        return Ok(UiState::default());
-    }
-    serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+    crate::statefile::read(data_dir, FILE_NAME)
 }
 
-/// Atomically writes the flag (`<path>.tmp` -> rename), the same idiom as
-/// `ai::provide_state::write_state`.
+/// Atomically writes the flag to `ui-state.json`.
 pub fn write_state(data_dir: &Path, state: UiState) -> Result<()> {
-    let path = state_path(data_dir);
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    }
-    let text = serde_json::to_string_pretty(&state).context("serializing ui state")?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, &text).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, &path)
-        .with_context(|| format!("renaming {} into {}", tmp.display(), path.display()))?;
-    Ok(())
+    crate::statefile::write(data_dir, FILE_NAME, &state)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn scratch_dir(name: &str) -> PathBuf {
+    /// The missing/empty/corrupt-file contract and the atomic write are
+    /// [`crate::statefile`]'s and are tested once there. What is specific to
+    /// this module -- and what `web::autoreopen` depends on -- is
+    /// that it round-trips through *its own* `ui-state.json`.
+    #[test]
+    fn round_trips_the_flag_through_its_own_state_file() {
         let suffix: u64 = rand::random();
-        let dir = std::env::temp_dir().join(format!("mistl-ui-state-test-{name}-{suffix:016x}"));
+        let dir = std::env::temp_dir().join(format!("mistl-ui-state-test-{suffix:016x}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
 
-    #[test]
-    fn read_state_missing_file_defaults_to_closed() {
-        let dir = scratch_dir("missing");
-        let state = read_state(&dir).unwrap();
-        assert_eq!(state, UiState::default());
-        assert!(!state.dashboard_open);
-    }
-
-    #[test]
-    fn write_then_read_round_trips_dashboard_open_true() {
-        let dir = scratch_dir("roundtrip");
         write_state(
             &dir,
             UiState {
@@ -99,20 +75,12 @@ mod tests {
             },
         )
         .unwrap();
-        let state = read_state(&dir).unwrap();
-        assert!(state.dashboard_open);
-    }
+        assert!(
+            state_path(&dir).exists(),
+            "expected ui-state.json to be written"
+        );
+        assert!(read_state(&dir).unwrap().dashboard_open);
 
-    #[test]
-    fn writing_false_clears_a_previously_open_flag() {
-        let dir = scratch_dir("clear");
-        write_state(
-            &dir,
-            UiState {
-                dashboard_open: true,
-            },
-        )
-        .unwrap();
         write_state(
             &dir,
             UiState {
@@ -120,37 +88,8 @@ mod tests {
             },
         )
         .unwrap();
-        let state = read_state(&dir).unwrap();
-        assert!(!state.dashboard_open);
-    }
+        assert!(!read_state(&dir).unwrap().dashboard_open);
 
-    #[test]
-    fn read_state_surfaces_a_corrupt_file_as_an_error_instead_of_silently_defaulting() {
-        let dir = scratch_dir("corrupt");
-        std::fs::write(state_path(&dir), b"not json").unwrap();
-        let err = read_state(&dir).unwrap_err();
-        assert!(err.to_string().contains("parsing"));
-    }
-
-    #[test]
-    fn read_state_treats_an_empty_file_as_closed() {
-        let dir = scratch_dir("empty");
-        std::fs::write(state_path(&dir), b"").unwrap();
-        let state = read_state(&dir).unwrap();
-        assert!(!state.dashboard_open);
-    }
-
-    #[test]
-    fn write_state_creates_missing_parent_directories() {
-        let dir = scratch_dir("nested").join("nested").join("dirs");
-        assert!(!dir.exists());
-        write_state(
-            &dir,
-            UiState {
-                dashboard_open: true,
-            },
-        )
-        .unwrap();
-        assert!(read_state(&dir).unwrap().dashboard_open);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
