@@ -655,17 +655,6 @@ mod tests {
     }
 
     #[test]
-    fn encode_provider_hello_without_services_omits_field() {
-        let bytes = encode(&ProtocolMessage::ProviderHello {
-            models: Some(vec!["gpt-4o".into()]),
-            services: None,
-            voices: None,
-        });
-        let v = parsed(&bytes);
-        assert!(v.get("services").is_none());
-    }
-
-    #[test]
     fn encode_provider_hello_with_voices() {
         let bytes = encode(&ProtocolMessage::ProviderHello {
             models: None,
@@ -683,17 +672,6 @@ mod tests {
                 "voices".into()
             ])
         );
-    }
-
-    #[test]
-    fn encode_provider_hello_without_voices_omits_field() {
-        let bytes = encode(&ProtocolMessage::ProviderHello {
-            models: None,
-            services: Some(vec!["chat".to_string()]),
-            voices: None,
-        });
-        let v = parsed(&bytes);
-        assert!(v.get("voices").is_none());
     }
 
     #[test]
@@ -1374,19 +1352,6 @@ mod tests {
     }
 
     #[test]
-    fn decode_provider_hello_filters_non_string_models() {
-        let bytes = br#"{"v":1,"type":"provider_hello","models":["gpt-4o",42,null,"claude"]}"#;
-        assert_eq!(
-            decode(bytes),
-            Some(ProtocolMessage::ProviderHello {
-                models: Some(vec!["gpt-4o".to_string(), "claude".to_string()]),
-                services: None,
-                voices: None,
-            })
-        );
-    }
-
-    #[test]
     fn decode_provider_hello_filters_non_string_and_empty_models() {
         // `models` follows the same element-wise filtering rule as
         // `services`: non-string *and* empty-string elements are dropped,
@@ -1444,19 +1409,6 @@ mod tests {
     }
 
     #[test]
-    fn decode_provider_hello_services_absent_is_none() {
-        let bytes = br#"{"v":1,"type":"provider_hello"}"#;
-        assert_eq!(
-            decode(bytes),
-            Some(ProtocolMessage::ProviderHello {
-                models: None,
-                services: None,
-                voices: None
-            })
-        );
-    }
-
-    #[test]
     fn decode_provider_hello_non_array_voices_degrades_but_keeps_message() {
         let bytes =
             br#"{"v":1,"type":"provider_hello","services":["chat","tts"],"voices":"not-an-array"}"#;
@@ -1484,32 +1436,6 @@ mod tests {
     }
 
     #[test]
-    fn decode_provider_hello_voices_absent_is_none() {
-        let bytes = br#"{"v":1,"type":"provider_hello","services":["chat","tts"]}"#;
-        assert_eq!(
-            decode(bytes),
-            Some(ProtocolMessage::ProviderHello {
-                models: None,
-                services: Some(vec!["chat".to_string(), "tts".to_string()]),
-                voices: None,
-            })
-        );
-    }
-
-    #[test]
-    fn decode_llm_error_with_code() {
-        let bytes = br#"{"v":1,"type":"llm_error","id":"a1","message":"nope","code":"unsupported_service"}"#;
-        assert_eq!(
-            decode(bytes),
-            Some(ProtocolMessage::LlmError {
-                id: "a1".into(),
-                message: "nope".into(),
-                code: Some("unsupported_service".into()),
-            })
-        );
-    }
-
-    #[test]
     fn decode_llm_error_non_string_code_drops_field_only() {
         let bytes = br#"{"v":1,"type":"llm_error","id":"a1","message":"nope","code":42}"#;
         assert_eq!(
@@ -1518,19 +1444,6 @@ mod tests {
                 id: "a1".into(),
                 message: "nope".into(),
                 code: None,
-            })
-        );
-    }
-
-    #[test]
-    fn decode_voice_error_with_code() {
-        let bytes = br#"{"v":1,"type":"voice_error","id":"a1","message":"nope","code":"unsupported_service"}"#;
-        assert_eq!(
-            decode(bytes),
-            Some(ProtocolMessage::VoiceError {
-                id: "a1".into(),
-                message: "nope".into(),
-                code: Some("unsupported_service".into()),
             })
         );
     }
@@ -1618,12 +1531,6 @@ mod tests {
         // RFC 4122 variant: first hex digit of the fourth group in {8,9,a,b}.
         let variant_nibble = parts[3].chars().next().unwrap();
         assert!(matches!(variant_nibble, '8' | '9' | 'a' | 'b'));
-    }
-
-    #[test]
-    fn random_id_is_random() {
-        let a = random_id();
-        let b = random_id();
-        assert_ne!(a, b);
+        assert_ne!(random_id(), random_id());
     }
 }

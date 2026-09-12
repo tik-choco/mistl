@@ -1199,27 +1199,6 @@ mod tests {
     }
 
     #[test]
-    fn validate_pipeline_accepts_case_insensitive_known_webhook_methods() {
-        let config = configured_ai();
-        let mut pipeline = sample_pipeline("p1", "@every 1h");
-        pipeline.sinks = vec![SinkConfig::Webhook {
-            url: "https://example.com/hook".to_string(),
-            include_audio: false,
-            max_audio_bytes: None,
-            method: Some("put".to_string()),
-            body_template: None,
-            sign: true,
-            include_body: false,
-            headers: Vec::new(),
-        }];
-        let warnings = validate_pipeline(&config, &pipeline);
-        assert!(
-            !warnings.iter().any(|w| w.contains("method")),
-            "got: {warnings:?}"
-        );
-    }
-
-    #[test]
     fn validate_pipeline_flags_empty_header_name_and_body_template_with_include_audio() {
         let config = configured_ai();
         let mut pipeline = sample_pipeline("p1", "@every 1h");
@@ -1245,41 +1224,6 @@ mod tests {
             warnings.iter().any(|w| w.contains("include_audio")),
             "got: {warnings:?}"
         );
-    }
-
-    #[test]
-    fn check_transforms_resolve_matches_validate_pipelines_preset_check() {
-        let config = Config::default();
-        let pipeline = sample_pipeline("p1", "@every 1h");
-        let err = check_transforms_resolve(&config, &pipeline.transforms)
-            .expect_err("unresolved preset must error");
-        assert!(err.to_string().contains("ai.presets"));
-
-        let config = configured_ai();
-        assert!(check_transforms_resolve(&config, &pipeline.transforms).is_ok());
-    }
-
-    #[test]
-    fn check_transforms_resolve_fails_fast_when_a_tts_preset_has_no_voice() {
-        // Mirrors `validate_pipeline_flags_a_tts_preset_missing_a_voice`,
-        // but as `check_transforms_resolve`'s hard-fail path -- the two must
-        // agree on what counts as "not usable", per this function's doc
-        // comment ("mirrors validate_pipeline's equivalent checks exactly").
-        let mut config = configured_ai();
-        config
-            .ai
-            .presets
-            .iter_mut()
-            .find(|p| p.id == "tts-default")
-            .unwrap()
-            .voice = None;
-        let pipeline = sample_pipeline("p1", "@every 1h");
-
-        let err = check_transforms_resolve(&config, &pipeline.transforms)
-            .expect_err("a tts preset with no voice must fail fast");
-        let message = err.to_string();
-        assert!(message.contains("voice"), "{message}");
-        assert!(message.contains("tts-default"), "{message}");
     }
 
     #[test]

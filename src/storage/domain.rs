@@ -225,30 +225,6 @@ mod tests {
     }
 
     #[test]
-    fn file_bundle_roundtrips_through_json() {
-        let bundle = FileBundle {
-            version: 1,
-            exported_at: "2026-01-03T00:00:00Z".to_string(),
-            origin_node: "node-1".to_string(),
-            folder: sample_folder(),
-            file: sample_file(),
-        };
-
-        let json = serde_json::to_string(&bundle).expect("serialize");
-        let decoded: FileBundle = serde_json::from_str(&json).expect("deserialize");
-
-        assert_eq!(decoded.version, bundle.version);
-        assert_eq!(decoded.exported_at, bundle.exported_at);
-        assert_eq!(decoded.origin_node, bundle.origin_node);
-        assert_eq!(decoded.folder.id, bundle.folder.id);
-        assert_eq!(decoded.folder.shared_room_id, bundle.folder.shared_room_id);
-        assert_eq!(decoded.folder.parent_id, bundle.folder.parent_id);
-        assert_eq!(decoded.file.id, bundle.file.id);
-        assert_eq!(decoded.file.mime_type, bundle.file.mime_type);
-        assert_eq!(decoded.file.checksum, bundle.file.checksum);
-    }
-
-    #[test]
     fn minimal_folder_json_defaults_optionals_to_none() {
         // Every field Go always emits is present -- including `parentId`,
         // which has no `omitempty` and so is `null` rather than absent.

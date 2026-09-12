@@ -131,15 +131,6 @@ async fn trust_remove_deletes_entry() {
 }
 
 #[tokio::test]
-async fn trust_commands_require_store() {
-    let controller = ForwardController::new_inert();
-
-    let err = execute_line(&controller, "trust list").await.unwrap_err();
-
-    assert!(err.to_string().contains("trust commands are unavailable"));
-}
-
-#[tokio::test]
 async fn events_render_auth_audit_log() {
     let controller = ForwardController::new_inert();
     let audit_log = AuthAuditLog::default();
@@ -169,12 +160,22 @@ async fn events_render_auth_audit_log() {
 }
 
 #[tokio::test]
-async fn events_require_audit_log() {
+async fn commands_requiring_an_absent_dependency_are_rejected() {
     let controller = ForwardController::new_inert();
 
-    let err = execute_line(&controller, "events").await.unwrap_err();
+    let cases: &[(&str, &str)] = &[
+        ("trust list", "trust commands are unavailable"),
+        ("events", "events are unavailable"),
+        ("pending", "pending auth commands are unavailable"),
+    ];
 
-    assert!(err.to_string().contains("events are unavailable"));
+    for (line, expected_message) in cases {
+        let err = execute_line(&controller, line).await.unwrap_err();
+        assert!(
+            err.to_string().contains(expected_message),
+            "line {line:?}: expected error containing {expected_message:?}, got {err}"
+        );
+    }
 }
 
 #[tokio::test]

@@ -780,7 +780,7 @@ mod tests {
     }
 
     #[test]
-    fn new_wire_id_is_unique_across_calls() {
+    fn new_wire_id_has_the_expected_prefix_and_is_unique_across_calls() {
         let a = new_wire_id();
         let b = new_wire_id();
         assert_ne!(a, b);

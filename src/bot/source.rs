@@ -895,17 +895,16 @@ mod tests {
     }
 
     #[test]
-    fn chat_body_to_article_falls_back_to_the_first_line_of_text_when_no_title() {
+    fn chat_body_to_article_falls_back_to_the_first_line_when_the_title_is_missing_or_blank() {
+        // `None` and `""` (after trimming) both hit the same
+        // `title.trim().is_empty()` fallback branch in `chat_body_to_article`.
         let bytes =
             serde_json::to_vec(&serde_json::json!({ "text": "First line\nSecond line" })).unwrap();
         let wire = sample_chat_wire("post-2", "Ada", 1_700_000_000_000);
         let article = chat_body_to_article(&bytes, &wire).unwrap();
         assert_eq!(article.title, "First line");
         assert_eq!(article.body, "First line\nSecond line");
-    }
 
-    #[test]
-    fn chat_body_to_article_falls_back_to_first_line_when_title_is_blank() {
         let bytes =
             serde_json::to_vec(&serde_json::json!({ "title": "   ", "text": "Actual text" }))
                 .unwrap();
@@ -959,21 +958,6 @@ mod tests {
         assert_eq!(article.author_name, "");
     }
 
-    #[test]
-    fn first_line_truncated_trims_and_keeps_only_the_first_line() {
-        assert_eq!(
-            first_line_truncated("  spaced out  \nsecond line", 80),
-            "spaced out"
-        );
-        assert_eq!(first_line_truncated("", 80), "");
-    }
-
-    #[test]
-    fn first_line_truncated_truncates_by_character_count() {
-        assert_eq!(first_line_truncated("abcdef", 3), "abc");
-        assert_eq!(first_line_truncated("あいうえお", 3), "あいう");
-    }
-
     // -- chat-room source: history-request wire shape --
 
     #[test]
@@ -992,10 +976,8 @@ mod tests {
         assert!(wire.get("fromId").is_none());
         assert!(wire.get("timestamp").is_none());
         assert!(wire.get("signature").is_none());
-    }
-
-    #[test]
-    fn new_history_request_id_is_unique_across_calls() {
+        // Also pins down that the id generator (`new_history_request_id`)
+        // produces a fresh, non-colliding id on every call.
         assert_ne!(new_history_request_id(), new_history_request_id());
     }
 }

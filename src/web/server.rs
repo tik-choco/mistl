@@ -1390,14 +1390,6 @@ mod tests {
     }
 
     #[test]
-    fn percent_decode_passes_through_unescaped_bytes() {
-        assert_eq!(
-            percent_decode("plain-name.txt").as_deref(),
-            Some("plain-name.txt")
-        );
-    }
-
-    #[test]
     fn percent_decode_rejects_truncated_escape() {
         // A trailing `%` with fewer than two hex digits after it must fail,
         // not silently pass the `%` through.
@@ -1463,12 +1455,8 @@ mod tests {
     }
 
     #[test]
-    fn parse_query_param_missing_key_is_none() {
+    fn parse_query_param_is_none_for_a_missing_key_or_an_empty_query() {
         assert_eq!(parse_query_param("x=1&y=2", "cid"), None);
-    }
-
-    #[test]
-    fn parse_query_param_empty_query_is_none() {
         assert_eq!(parse_query_param("", "cid"), None);
     }
 

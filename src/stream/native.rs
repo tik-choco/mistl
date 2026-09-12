@@ -405,33 +405,27 @@ mod tests {
     }
 
     #[test]
-    fn bgra_to_i420_white_is_luma_235_chroma_128() {
-        let bgra = solid_bgra(255, 255, 255, 2, 2);
-        let yuv = bgra_to_i420(&bgra, 2, 2, 2 * 4, 2, 2);
-        assert_eq!(&yuv[0..4], &[235, 235, 235, 235]);
-        assert_eq!(yuv[4], 128);
-        assert_eq!(yuv[5], 128);
-    }
-
-    #[test]
-    fn bgra_to_i420_black_is_luma_16_chroma_128() {
-        let bgra = solid_bgra(0, 0, 0, 2, 2);
-        let yuv = bgra_to_i420(&bgra, 2, 2, 2 * 4, 2, 2);
-        assert_eq!(&yuv[0..4], &[16, 16, 16, 16]);
-        assert_eq!(yuv[4], 128);
-        assert_eq!(yuv[5], 128);
-    }
-
-    #[test]
-    fn bgra_to_i420_red_matches_bt601_reference_values() {
-        // Matches openh264's own formats::yuv test for pure red (255,0,0):
-        // y=81, u=90, v=239 -- confirms our hand-rolled coefficients agree
-        // with the crate's built-in RGB8->YUV conversion.
-        let bgra = solid_bgra(0, 0, 255, 2, 2);
-        let yuv = bgra_to_i420(&bgra, 2, 2, 2 * 4, 2, 2);
-        assert_eq!(&yuv[0..4], &[81, 81, 81, 81]);
-        assert_eq!(yuv[4], 90);
-        assert_eq!(yuv[5], 239);
+    fn bgra_to_i420_matches_bt601_reference_values() {
+        // Red matches openh264's own formats::yuv test for pure red
+        // (255,0,0): y=81, u=90, v=239 -- confirms our hand-rolled
+        // coefficients agree with the crate's built-in RGB8->YUV conversion.
+        // White and black are the degenerate full-luma-range cases.
+        let cases: [(&str, u8, u8, u8, u8, u8, u8); 3] = [
+            ("white", 255, 255, 255, 235, 128, 128),
+            ("black", 0, 0, 0, 16, 128, 128),
+            ("red", 0, 0, 255, 81, 90, 239),
+        ];
+        for (name, b, g, r, expected_y, expected_u, expected_v) in cases {
+            let bgra = solid_bgra(b, g, r, 2, 2);
+            let yuv = bgra_to_i420(&bgra, 2, 2, 2 * 4, 2, 2);
+            assert_eq!(
+                &yuv[0..4],
+                &[expected_y, expected_y, expected_y, expected_y],
+                "{name}: unexpected luma"
+            );
+            assert_eq!(yuv[4], expected_u, "{name}: unexpected U chroma");
+            assert_eq!(yuv[5], expected_v, "{name}: unexpected V chroma");
+        }
     }
 
     #[test]

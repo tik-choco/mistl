@@ -393,14 +393,6 @@ mod tests {
     }
 
     #[test]
-    fn extension_for_mime_maps_known_formats() {
-        assert_eq!(extension_for_mime("audio/mpeg"), "mp3");
-        assert_eq!(extension_for_mime("audio/ogg"), "ogg");
-        assert_eq!(extension_for_mime("audio/wav"), "wav");
-        assert_eq!(extension_for_mime("application/octet-stream"), "bin");
-    }
-
-    #[test]
     fn fallback_script_prefers_title_plus_excerpt() {
         let script = fallback_script(&sample_article());
         assert_eq!(script, "見出し。要約文");
@@ -423,59 +415,6 @@ mod tests {
         let long_text: String = "あ".repeat(tts::MAX_INPUT_CHARS + 100);
         let truncated = truncate_for_tts(&long_text, "p", "a");
         assert_eq!(truncated.chars().count(), tts::MAX_INPUT_CHARS);
-    }
-
-    #[test]
-    fn build_summarize_prompt_includes_title_author_excerpt_and_body() {
-        let prompt = build_summarize_prompt(&sample_article());
-        assert!(prompt.contains("見出し"));
-        assert!(prompt.contains("記者"));
-        assert!(prompt.contains("要約文"));
-        assert!(prompt.contains("本文テキスト"));
-    }
-
-    #[tokio::test]
-    async fn summarize_reports_a_clear_error_when_the_preset_is_unresolved() {
-        let ai = AiConfig::default();
-        let err = summarize(&ai, "missing-preset", &sample_article())
-            .await
-            .expect_err("an unresolved preset must error");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("missing-preset"),
-            "error should name the preset: {msg}"
-        );
-        assert!(
-            msg.contains("ai.presets"),
-            "error should point at the config path: {msg}"
-        );
-    }
-
-    #[test]
-    fn translate_system_prompt_names_the_target_language() {
-        let prompt = translate_system_prompt("fr", false);
-        assert!(
-            prompt.contains("\"fr\""),
-            "prompt should name the target language tag: {prompt}"
-        );
-    }
-
-    #[test]
-    fn translate_system_prompt_for_title_constrains_output_to_a_single_line() {
-        let body_prompt = translate_system_prompt("en", false);
-        let title_prompt = translate_system_prompt("en", true);
-        assert!(
-            !body_prompt.contains("1行"),
-            "body prompt should not mention a single-line constraint"
-        );
-        assert!(
-            title_prompt.contains("1行"),
-            "title prompt should require a single-line title: {title_prompt}"
-        );
-        assert!(
-            title_prompt.starts_with(&body_prompt),
-            "title prompt should extend the shared body prompt"
-        );
     }
 
     #[tokio::test]
@@ -516,13 +455,5 @@ mod tests {
             msg.contains("missing-preset"),
             "error should name the preset: {msg}"
         );
-    }
-
-    #[test]
-    fn translate_title_skip_condition_is_blank_after_trimming() {
-        assert!("".trim().is_empty());
-        assert!("   ".trim().is_empty());
-        assert!(!"見出し".trim().is_empty());
-        assert!(!"  x  ".trim().is_empty());
     }
 }

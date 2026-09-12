@@ -53,26 +53,20 @@ fn connect_forward_applies_node_scope_to_target() {
 }
 
 #[test]
-fn split_node_scope_splits_on_last_at() {
-    assert_eq!(
-        split_node_scope("tcp:127.0.0.1:22@node-a"),
-        ("tcp:127.0.0.1:22", Some("node-a"))
-    );
-}
+fn split_node_scope_handles_scoped_unscoped_and_degenerate_inputs() {
+    let cases: &[(&str, (&str, Option<&str>))] = &[
+        (
+            "tcp:127.0.0.1:22@node-a",
+            ("tcp:127.0.0.1:22", Some("node-a")),
+        ),
+        ("tcp:22", ("tcp:22", None)),
+        ("tcp:22@", ("tcp:22@", None)),
+        ("@x", ("@x", None)),
+    ];
 
-#[test]
-fn split_node_scope_leaves_unscoped_target_unchanged() {
-    assert_eq!(split_node_scope("tcp:22"), ("tcp:22", None));
-}
-
-#[test]
-fn split_node_scope_treats_empty_scope_as_unscoped() {
-    assert_eq!(split_node_scope("tcp:22@"), ("tcp:22@", None));
-}
-
-#[test]
-fn split_node_scope_treats_empty_base_as_unscoped() {
-    assert_eq!(split_node_scope("@x"), ("@x", None));
+    for (input, expected) in cases {
+        assert_eq!(split_node_scope(input), *expected, "input: {input:?}");
+    }
 }
 
 #[test]

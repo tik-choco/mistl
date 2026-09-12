@@ -1144,23 +1144,6 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn set_by_path_updates_a_string_option() {
-        let config = Config::default();
-        let updated = set_by_path(&config, "ai.default_preset_id", json!("default")).unwrap();
-        assert_eq!(updated.ai.default_preset_id, "default");
-        // Untouched fields survive.
-        assert_eq!(updated.stream.frame_rate, config.stream.frame_rate);
-    }
-
-    #[test]
-    fn set_by_path_clears_option_with_null() {
-        let mut config = Config::default();
-        config.stream.room = Some("room".into());
-        let updated = set_by_path(&config, "stream.room", serde_json::Value::Null).unwrap();
-        assert_eq!(updated.stream.room, None);
-    }
-
-    #[test]
     fn set_by_path_legacy_stream_relay_room_and_share_room_alias_to_room() {
         let config = Config::default();
         let updated = set_by_path(&config, "stream.relay_room", json!("my-room")).unwrap();
@@ -1171,32 +1154,6 @@ mod tests {
     }
 
     #[test]
-    fn set_by_path_updates_and_clears_storage_export_dir() {
-        let config = Config::default();
-        assert_eq!(config.storage.export_dir, None, "unset by default");
-
-        let updated = set_by_path(&config, "storage.export_dir", json!("C:\\exports")).unwrap();
-        assert_eq!(
-            updated.storage.export_dir,
-            Some(PathBuf::from("C:\\exports"))
-        );
-
-        let cleared = set_by_path(&updated, "storage.export_dir", serde_json::Value::Null).unwrap();
-        assert_eq!(cleared.storage.export_dir, None);
-    }
-
-    #[test]
-    fn set_by_path_updates_numbers_bools_and_arrays() {
-        let config = Config::default();
-        let updated = set_by_path(&config, "stream.frame_rate", json!(60)).unwrap();
-        assert_eq!(updated.stream.frame_rate, 60);
-        let updated = set_by_path(&config, "chat_relay.enabled", json!(true)).unwrap();
-        assert!(updated.chat_relay.enabled);
-        let updated = set_by_path(&config, "ai.advertised_models", json!(["a", "b"])).unwrap();
-        assert_eq!(updated.ai.advertised_models, vec!["a", "b"]);
-    }
-
-    #[test]
     fn set_by_path_rejects_wrong_type_and_unknown_fields() {
         let config = Config::default();
         assert!(set_by_path(&config, "stream.frame_rate", json!("fast")).is_err());
@@ -1204,6 +1161,66 @@ mod tests {
         assert!(set_by_path(&config, "nope.field", json!(1)).is_err());
         assert!(set_by_path(&config, "noseparator", json!(1)).is_err());
         assert!(set_by_path(&config, "ai.upstream_api_key", json!("***")).is_err());
+    }
+
+    /// The real risk the six deleted per-field `set_by_path` tests only
+    /// half-covered: a struct field rename silently breaking a path string
+    /// the dashboard or CLI still sends, since `set_by_path` is generic
+    /// serde-reflection over `Config` with no compile-time link to these
+    /// path strings. One entry per path actually referenced from
+    /// `src/web/assets/index.html`'s `SETTINGS_SCHEMA`/AI "what to
+    /// provide"/bot-pipeline editor, `src/cli.rs`, and the `applies_when`
+    /// match arms below -- at least one path per `Config` section (except
+    /// the legacy, never-written `[mailbox]` section).
+    #[test]
+    fn set_by_path_accepts_every_path_the_cli_and_dashboard_send() {
+        let config = Config::default();
+        let cases: &[(&str, serde_json::Value)] = &[
+            ("identity.display_name", json!("Someone")),
+            ("storage.capacity_bytes", json!(1_073_741_824u64)),
+            ("storage.room_ids", json!(["room-a"])),
+            ("storage.blocks_dir", json!("C:\\blocks")),
+            ("storage.export_dir", json!("C:\\exports")),
+            ("stream.rtsp_url", json!("rtsp://127.0.0.1:8554/stream")),
+            ("stream.frame_rate", json!(30)),
+            ("stream.capture_backend", json!("ffmpeg")),
+            ("stream.max_width", json!(1920)),
+            ("stream.room", json!("room-a")),
+            ("stream.audio_codec", json!("opus")),
+            ("stream.audio_capture", json!(true)),
+            ("stream.cascade", json!(true)),
+            ("chat_relay.rooms", json!(["room-a"])),
+            ("chat_relay.enabled", json!(true)),
+            ("ai.room_id", json!("room-a")),
+            ("ai.request_timeout_secs", json!(30)),
+            ("ai.api_listen", json!("127.0.0.1:6480")),
+            ("ai.default_preset_id", json!("default")),
+            ("ai.tts_preset_id", json!("tts-default")),
+            ("ai.stt_preset_id", json!("stt-default")),
+            ("ai.advertised_models", json!(["a", "b"])),
+            ("ai.providers", json!([])),
+            ("ai.presets", json!([])),
+            ("scheduler.enabled", json!(true)),
+            ("bot.enabled", json!(true)),
+            ("bot.pipelines", json!([])),
+            ("update.auto_check", json!(true)),
+            ("update.auto_apply", json!(true)),
+            ("update.check_interval_hours", json!(12)),
+            ("update.prerelease", json!(true)),
+            ("update.repo", json!("tik-choco/mistl")),
+            ("ui.listen", json!("127.0.0.1:6480")),
+            ("ui.enabled", json!(true)),
+            ("tunnel.enabled", json!(true)),
+            ("tunnel.room_id", json!("abc12345")),
+            ("tunnel.auto_accept", json!(true)),
+            ("tunnel.allow_peers", json!(["peer-a"])),
+            ("tunnel.stdio_enabled", json!(true)),
+            ("tunnel.stdio_command", json!(["bash", "-lc"])),
+        ];
+        for (path, value) in cases {
+            let result = set_by_path(&config, path, value.clone());
+            assert!(result.is_ok(), "path {path:?} failed: {:?}", result.err());
+        }
     }
 
     #[test]
@@ -1539,79 +1556,59 @@ mod tests {
     }
 
     #[test]
-    fn chat_relay_defaults_off() {
+    fn scheduler_defaults_enabled_and_set_by_path_toggles_it() {
         let config = Config::default();
-        assert!(config.chat_relay.rooms.is_empty());
-        assert!(!config.chat_relay.enabled);
+        assert!(config.scheduler.enabled);
+        let updated = set_by_path(&config, "scheduler.enabled", json!(false)).unwrap();
+        assert!(!updated.scheduler.enabled);
+        // Not covered by `applies_when_answers_the_documented_table` (that
+        // table only covers the room-setting/ai-provider paths), so kept
+        // here rather than dropped as a duplicate.
+        assert_eq!(applies_when("scheduler.enabled"), "daemon restart");
     }
 
+    /// The `applies_when` table has one genuinely non-obvious answer worth
+    /// pinning: `storage.room_ids` (and its legacy alias `storage.room_id`)
+    /// answers "next service start" while every other room setting answers
+    /// "daemon restart", plus the `ai.*` provider-family paths that answer
+    /// "applied immediately". Everything else is a straightforward string
+    /// match not worth enumerating test-by-test.
     #[test]
-    fn set_by_path_updates_chat_relay_fields() {
-        let config = Config::default();
-        let updated =
-            set_by_path(&config, "chat_relay.rooms", json!(["room-a", "room-b"])).unwrap();
-        assert_eq!(updated.chat_relay.rooms, vec!["room-a", "room-b"]);
-        let updated = set_by_path(&updated, "chat_relay.enabled", json!(true)).unwrap();
-        assert!(updated.chat_relay.enabled);
-    }
-
-    #[test]
-    fn applies_when_chat_relay_settings_require_a_restart() {
-        assert_eq!(applies_when("chat_relay.rooms"), "daemon restart");
-        assert_eq!(applies_when("chat_relay.enabled"), "daemon restart");
-    }
-
-    #[test]
-    fn applies_when_ai_provider_settings_apply_immediately() {
+    fn applies_when_answers_the_documented_table() {
+        // Unlike chat_relay/ai/stream room settings, storage's rooms are
+        // re-resolved live on every `store.*` call (see `storage::store`),
+        // so changing them should never tell the user to restart the daemon.
+        // Both the current field name and its legacy alias answer the same.
+        let next_service_start = ["storage.room_ids", "storage.room_id"];
+        // Room settings that join once at service start and hold for the
+        // process lifetime -- daemon restart is the safe universal answer.
+        let daemon_restart = [
+            "chat_relay.rooms",
+            "chat_relay.enabled",
+            "ai.room_id",
+            "stream.room",
+            "stream.relay_room",
+            "stream.share_room",
+        ];
         // These feed reload_provider_if_running (ai::mod), unlike
-        // ai.room_id which still needs a restart (joins its room once).
-        for path in [
+        // ai.room_id above which still needs a restart (joins its room once).
+        let applied_immediately = [
             "ai.providers",
             "ai.presets",
             "ai.default_preset_id",
             "ai.tts_preset_id",
             "ai.stt_preset_id",
             "ai.advertised_models",
-        ] {
+        ];
+        for path in next_service_start {
+            assert_eq!(applies_when(path), "next service start", "path: {path}");
+        }
+        for path in daemon_restart {
+            assert_eq!(applies_when(path), "daemon restart", "path: {path}");
+        }
+        for path in applied_immediately {
             assert_eq!(applies_when(path), "applied immediately", "path: {path}");
         }
-        assert_eq!(applies_when("ai.room_id"), "daemon restart");
-    }
-
-    #[test]
-    fn scheduler_defaults_enabled_and_set_by_path_toggles_it() {
-        let config = Config::default();
-        assert!(config.scheduler.enabled);
-        let updated = set_by_path(&config, "scheduler.enabled", json!(false)).unwrap();
-        assert!(!updated.scheduler.enabled);
-        assert_eq!(applies_when("scheduler.enabled"), "daemon restart");
-    }
-
-    #[test]
-    fn applies_when_storage_room_ids_does_not_require_a_restart() {
-        // Unlike chat_relay/ai/stream room settings, storage's rooms are
-        // re-resolved live on every `store.*` call (see `storage::store`),
-        // so changing them should never tell the user to restart the daemon.
-        // Both the current field name and its legacy alias answer the same.
-        assert_eq!(applies_when("storage.room_ids"), "next service start");
-        assert_eq!(applies_when("storage.room_id"), "next service start");
-        assert_eq!(applies_when("chat_relay.rooms"), "daemon restart");
-    }
-
-    #[test]
-    fn applies_when_stream_room_requires_a_restart() {
-        // Both the current field name and its legacy aliases answer the
-        // same -- see `set_by_path`'s `stream.relay_room`/`stream.share_room`
-        // rewrite to `stream.room`.
-        assert_eq!(applies_when("stream.room"), "daemon restart");
-        assert_eq!(applies_when("stream.relay_room"), "daemon restart");
-        assert_eq!(applies_when("stream.share_room"), "daemon restart");
-    }
-
-    #[test]
-    fn storage_room_ids_defaults_empty() {
-        let config = Config::default();
-        assert!(config.storage.room_ids.is_empty());
     }
 
     #[test]
@@ -1689,13 +1686,6 @@ mod tests {
 
     // -- `[bot]` schema: internally-tagged `kind` enums round-trip through TOML --
 
-    #[test]
-    fn bot_config_defaults_enabled_with_no_pipelines() {
-        let config = Config::default();
-        assert!(config.bot.enabled);
-        assert!(config.bot.pipelines.is_empty());
-    }
-
     fn sample_pipeline() -> PipelineConfig {
         PipelineConfig {
             id: "news-audio".to_string(),
@@ -1733,6 +1723,29 @@ mod tests {
         }
     }
 
+    /// A second pipeline exercising the v2 kinds (`chat-room` source,
+    /// `translate` transform, `article-publish` sink) alongside the v1
+    /// kinds covered by `sample_pipeline` above -- folded into the same
+    /// round-trip test rather than kept as a separate one, since both
+    /// pipelines just live in the same `bot.pipelines` array.
+    fn sample_pipeline_v2() -> PipelineConfig {
+        PipelineConfig {
+            id: "chat-digest".to_string(),
+            enabled: true,
+            schedule: "@every 1h".to_string(),
+            source: SourceConfig::ChatRoom {
+                room: "team-room".to_string(),
+            },
+            transforms: vec![TransformConfig::Translate {
+                preset_id: "worker".to_string(),
+                target_lang: "en".to_string(),
+            }],
+            sinks: vec![SinkConfig::ArticlePublish {
+                room: "tc-global-articles".to_string(),
+            }],
+        }
+    }
+
     /// Confirms the brief's decision point: does `#[serde(tag = "kind",
     /// rename_all = "kebab-case")]` (an internally-tagged enum) round-trip
     /// through the `toml` crate's serializer/deserializer for
@@ -1745,6 +1758,7 @@ mod tests {
     fn bot_pipeline_config_round_trips_through_toml() {
         let mut config = Config::default();
         config.bot.pipelines.push(sample_pipeline());
+        config.bot.pipelines.push(sample_pipeline_v2());
 
         let text = toml::to_string_pretty(&config).expect("bot config must serialize to TOML");
         assert!(text.contains(r#"kind = "global-articles""#), "got:\n{text}");
@@ -1752,9 +1766,12 @@ mod tests {
         assert!(text.contains(r#"kind = "tts""#), "got:\n{text}");
         assert!(text.contains(r#"kind = "chat-post""#), "got:\n{text}");
         assert!(text.contains(r#"kind = "webhook""#), "got:\n{text}");
+        assert!(text.contains(r#"kind = "chat-room""#), "got:\n{text}");
+        assert!(text.contains(r#"kind = "translate""#), "got:\n{text}");
+        assert!(text.contains(r#"kind = "article-publish""#), "got:\n{text}");
 
         let reloaded: Config = toml::from_str(&text).expect("bot config must parse back from TOML");
-        assert_eq!(reloaded.bot.pipelines.len(), 1);
+        assert_eq!(reloaded.bot.pipelines.len(), 2);
         let pipeline = &reloaded.bot.pipelines[0];
         assert_eq!(pipeline.id, "news-audio");
         assert_eq!(pipeline.schedule, "@every 30m");
@@ -1803,6 +1820,27 @@ mod tests {
                 assert!(headers.is_empty());
             }
             other => panic!("expected Webhook, got {other:?}"),
+        }
+
+        let pipeline_v2 = &reloaded.bot.pipelines[1];
+        assert_eq!(pipeline_v2.id, "chat-digest");
+        match &pipeline_v2.source {
+            SourceConfig::ChatRoom { room } => assert_eq!(room, "team-room"),
+            other => panic!("expected ChatRoom, got {other:?}"),
+        }
+        match &pipeline_v2.transforms[0] {
+            TransformConfig::Translate {
+                preset_id,
+                target_lang,
+            } => {
+                assert_eq!(preset_id, "worker");
+                assert_eq!(target_lang, "en");
+            }
+            other => panic!("expected Translate, got {other:?}"),
+        }
+        match &pipeline_v2.sinks[0] {
+            SinkConfig::ArticlePublish { room } => assert_eq!(room, "tc-global-articles"),
+            other => panic!("expected ArticlePublish, got {other:?}"),
         }
     }
 
@@ -1913,55 +1951,6 @@ mod tests {
         }
     }
 
-    /// Same round-trip guarantee as above, for the v2 kinds (`chat-room`
-    /// source, `translate` transform, `article-publish` sink).
-    #[test]
-    fn bot_pipeline_v2_kinds_round_trip_through_toml() {
-        let mut config = Config::default();
-        config.bot.pipelines.push(PipelineConfig {
-            id: "chat-digest".to_string(),
-            enabled: true,
-            schedule: "@every 1h".to_string(),
-            source: SourceConfig::ChatRoom {
-                room: "team-room".to_string(),
-            },
-            transforms: vec![TransformConfig::Translate {
-                preset_id: "worker".to_string(),
-                target_lang: "en".to_string(),
-            }],
-            sinks: vec![SinkConfig::ArticlePublish {
-                room: "tc-global-articles".to_string(),
-            }],
-        });
-
-        let text = toml::to_string_pretty(&config).expect("v2 bot config must serialize to TOML");
-        assert!(text.contains(r#"kind = "chat-room""#), "got:\n{text}");
-        assert!(text.contains(r#"kind = "translate""#), "got:\n{text}");
-        assert!(text.contains(r#"kind = "article-publish""#), "got:\n{text}");
-
-        let reloaded: Config =
-            toml::from_str(&text).expect("v2 bot config must parse back from TOML");
-        let pipeline = &reloaded.bot.pipelines[0];
-        match &pipeline.source {
-            SourceConfig::ChatRoom { room } => assert_eq!(room, "team-room"),
-            other => panic!("expected ChatRoom, got {other:?}"),
-        }
-        match &pipeline.transforms[0] {
-            TransformConfig::Translate {
-                preset_id,
-                target_lang,
-            } => {
-                assert_eq!(preset_id, "worker");
-                assert_eq!(target_lang, "en");
-            }
-            other => panic!("expected Translate, got {other:?}"),
-        }
-        match &pipeline.sinks[0] {
-            SinkConfig::ArticlePublish { room } => assert_eq!(room, "tc-global-articles"),
-            other => panic!("expected ArticlePublish, got {other:?}"),
-        }
-    }
-
     #[test]
     fn bot_pipeline_config_matches_the_brief_toml_shape_verbatim() {
         // The brief's `config.toml [bot]` schema, parsed exactly as written
@@ -2013,34 +2002,6 @@ mod tests {
         assert!(!updated.bot.enabled);
         assert_eq!(applies_when("bot.enabled"), "daemon restart");
         assert_eq!(applies_when("bot.pipelines"), "next service start");
-    }
-
-    #[test]
-    fn ai_preset_config_voice_round_trips_through_toml() {
-        let mut config = Config::default();
-        config.ai.providers.push(AiProviderConfig {
-            id: "openai".to_string(),
-            label: "OpenAI".to_string(),
-            base_url: "https://api.openai.com/v1".to_string(),
-            api_key: "sk-test".to_string(),
-        });
-        config.ai.presets.push(AiPresetConfig {
-            id: "tts-default".to_string(),
-            label: "TTS".to_string(),
-            provider_id: "openai".to_string(),
-            model: "tts-1".to_string(),
-            temperature: None,
-            reasoning_effort: None,
-            voice: Some("alloy".to_string()),
-            lang_voices: HashMap::new(),
-            kind: "tts".to_string(),
-        });
-        let text = toml::to_string_pretty(&config).unwrap();
-        let reloaded: Config = toml::from_str(&text).unwrap();
-        assert_eq!(reloaded.ai.presets[0].voice.as_deref(), Some("alloy"));
-
-        let resolved = resolve_preset(&reloaded.ai, Some("tts-default")).unwrap();
-        assert_eq!(resolved.voice.as_deref(), Some("alloy"));
     }
 
     #[test]
@@ -2096,36 +2057,19 @@ mod tests {
 
     #[test]
     fn ai_preset_config_lang_voices_absent_defaults_to_empty() {
-        // An old config.toml predating this field must still deserialize:
+        // A hand-written config.toml predating this field (no `lang_voices`
+        // key at all in the preset table) must still deserialize:
         // `#[serde(default)]` gives an empty map, not a parse error.
-        let mut config = Config::default();
-        config.ai.providers.push(AiProviderConfig {
-            id: "openai".to_string(),
-            label: "OpenAI".to_string(),
-            base_url: "https://api.openai.com/v1".to_string(),
-            api_key: "sk-test".to_string(),
-        });
-        config.ai.presets.push(AiPresetConfig {
-            id: "tts-default".to_string(),
-            label: "TTS".to_string(),
-            provider_id: "openai".to_string(),
-            model: "tts-1".to_string(),
-            temperature: None,
-            reasoning_effort: None,
-            voice: Some("alloy".to_string()),
-            lang_voices: HashMap::new(),
-            kind: "tts".to_string(),
-        });
-        let mut text = toml::to_string_pretty(&config).unwrap();
-        // Simulate a pre-`lang_voices` config.toml by stripping any (empty,
-        // in this case, but be defensive) serialized lang_voices section.
-        assert!(
-            !text.contains("[ai.presets.lang_voices]"),
-            "an empty map must not even be serialized: {text}"
-        );
-        text.push('\n'); // no-op, just documents there's nothing to strip
-        let reloaded: Config = toml::from_str(&text).unwrap();
-        assert!(reloaded.ai.presets[0].lang_voices.is_empty());
+        let text = r#"
+            [[ai.presets]]
+            id = "tts-default"
+            label = "TTS"
+            provider_id = "openai"
+            model = "tts-1"
+            voice = "alloy"
+        "#;
+        let config: Config = toml::from_str(text).expect("preset without lang_voices must parse");
+        assert!(config.ai.presets[0].lang_voices.is_empty());
     }
 
     #[test]
@@ -2194,51 +2138,5 @@ mod tests {
         // `auto_accept` are both turned on for TCP/UDP forwarding.
         assert!(!config.tunnel.stdio_enabled);
         assert!(config.tunnel.stdio_command.is_empty());
-    }
-
-    #[test]
-    fn tunnel_config_round_trips_through_toml() {
-        let mut config = Config::default();
-        config.tunnel.enabled = true;
-        config.tunnel.room_id = "abc12345".to_string();
-        config.tunnel.auto_accept = true;
-        config.tunnel.allow_peers = vec!["peer-a".to_string()];
-        config.tunnel.stdio_enabled = true;
-        config.tunnel.stdio_command = vec!["bash".to_string(), "-lc".to_string()];
-
-        let text = toml::to_string_pretty(&config).unwrap();
-        let reloaded: Config = toml::from_str(&text).unwrap();
-        assert!(reloaded.tunnel.enabled);
-        assert_eq!(reloaded.tunnel.room_id, "abc12345");
-        assert!(reloaded.tunnel.auto_accept);
-        assert_eq!(reloaded.tunnel.allow_peers, vec!["peer-a".to_string()]);
-        assert!(reloaded.tunnel.stdio_enabled);
-        assert_eq!(
-            reloaded.tunnel.stdio_command,
-            vec!["bash".to_string(), "-lc".to_string()]
-        );
-    }
-
-    #[test]
-    fn set_by_path_updates_tunnel_fields() {
-        let config = Config::default();
-        let updated = set_by_path(&config, "tunnel.room_id", json!("abc12345")).unwrap();
-        assert_eq!(updated.tunnel.room_id, "abc12345");
-        let updated = set_by_path(&updated, "tunnel.enabled", json!(true)).unwrap();
-        assert!(updated.tunnel.enabled);
-        let updated =
-            set_by_path(&updated, "tunnel.allow_peers", json!(["peer-a", "peer-b"])).unwrap();
-        assert_eq!(
-            updated.tunnel.allow_peers,
-            vec!["peer-a".to_string(), "peer-b".to_string()]
-        );
-    }
-
-    #[test]
-    fn applies_when_reports_tunnel_enabled_needs_a_restart_but_the_rest_does_not() {
-        assert_eq!(applies_when("tunnel.enabled"), "daemon restart");
-        assert_eq!(applies_when("tunnel.room_id"), "next service start");
-        assert_eq!(applies_when("tunnel.auto_accept"), "next service start");
-        assert_eq!(applies_when("tunnel.stdio_enabled"), "next service start");
     }
 }

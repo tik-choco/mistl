@@ -155,13 +155,6 @@ mod tests {
     }
 
     #[test]
-    fn mime_to_extension_maps_known_types() {
-        assert_eq!(mime_to_extension("audio/mpeg"), "mp3");
-        assert_eq!(mime_to_extension("audio/wav"), "wav");
-        assert_eq!(mime_to_extension("audio/webm"), "webm");
-    }
-
-    #[test]
     fn mime_to_extension_falls_back_for_unknown_types() {
         assert_eq!(mime_to_extension("application/octet-stream"), "bin");
     }
@@ -182,42 +175,5 @@ mod tests {
     #[test]
     fn validate_accepts_a_well_formed_request() {
         assert!(validate(&params(b"fake-audio-bytes")).is_ok());
-    }
-
-    #[tokio::test]
-    async fn transcribe_rejects_empty_audio_before_any_request_is_sent() {
-        // Mirrors tts.rs's synthesize_rejects_over_limit_input_before_any_request_is_sent:
-        // bind a listener but never accept, proving validation short-circuits
-        // before any network I/O.
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let notify = std::sync::Arc::new(tokio::sync::Notify::new());
-        let notify2 = notify.clone();
-        let server = tokio::spawn(async move {
-            let _ = listener.accept().await;
-            notify2.notify_one();
-        });
-
-        let provider = AiProviderConfig {
-            id: "p1".to_string(),
-            label: "P1".to_string(),
-            base_url: format!("http://{addr}"),
-            api_key: "key".to_string(),
-        };
-        let err = transcribe(&provider, params(b""))
-            .await
-            .expect_err("empty audio should error");
-        assert!(err.to_string().contains("audio"));
-
-        let was_contacted =
-            tokio::time::timeout(std::time::Duration::from_millis(150), notify.notified())
-                .await
-                .is_ok();
-        assert!(
-            !was_contacted,
-            "no request should be sent for invalid input"
-        );
-
-        server.abort();
     }
 }

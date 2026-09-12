@@ -354,14 +354,18 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_block_with_no_rooms_in_scope_returns_none_immediately() {
+        // Both an explicit empty-rooms scope and no scope at all (e.g. a
+        // hypothetical future caller of the trait method directly, which
+        // falls back to the same "no rooms" empty scope via
+        // `SCOPE.try_with`'s `unwrap_or`) hit the exact same early return in
+        // `resolve_block`: an empty room list is resolved as "nothing to
+        // query" up front, before the per-call timeout wrapper even starts
+        // waiting on anything. Must not actually wait out the 30s budget.
         let resolver = RoomPeerResolver::new();
         let scope = ResolveScope {
             rooms: Vec::new(),
             timeout: Duration::from_secs(30),
         };
-        // Must not actually wait out the 30s budget: an empty room list is
-        // resolved as "nothing to query" up front, before the per-call
-        // timeout wrapper even starts waiting on anything.
         let result = tokio::time::timeout(
             Duration::from_millis(200),
             with_scope(scope, resolver.resolve_block("bsome-cid")),
@@ -369,14 +373,7 @@ mod tests {
         .await
         .expect("resolve_block should return promptly with no rooms in scope");
         assert_eq!(result, None);
-    }
 
-    #[tokio::test]
-    async fn resolve_block_outside_any_scope_returns_none_immediately() {
-        // No `with_scope` at all (e.g. a hypothetical future caller of the
-        // trait method directly): falls back to the same "no rooms" empty
-        // scope rather than panicking or hanging.
-        let resolver = RoomPeerResolver::new();
         let result = tokio::time::timeout(
             Duration::from_millis(200),
             resolver.resolve_block("bsome-other-cid"),

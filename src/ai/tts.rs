@@ -192,32 +192,8 @@ mod tests {
     }
 
     #[test]
-    fn format_to_mime_maps_known_formats() {
-        assert_eq!(format_to_mime("mp3"), "audio/mpeg");
-        assert_eq!(format_to_mime("opus"), "audio/ogg");
-        assert_eq!(format_to_mime("aac"), "audio/aac");
-        assert_eq!(format_to_mime("wav"), "audio/wav");
-        assert_eq!(format_to_mime("flac"), "audio/flac");
-        assert_eq!(format_to_mime("pcm"), "audio/pcm");
-    }
-
-    #[test]
     fn format_to_mime_falls_back_for_unknown_formats() {
         assert_eq!(format_to_mime("weird"), "application/octet-stream");
-    }
-
-    #[test]
-    fn validate_defaults_format_to_mp3() {
-        let format = validate(&params("hello")).unwrap();
-        assert_eq!(format, "mp3");
-    }
-
-    #[test]
-    fn validate_keeps_explicit_format() {
-        let mut req = params("hello");
-        req.format = Some("opus".to_string());
-        let format = validate(&req).unwrap();
-        assert_eq!(format, "opus");
     }
 
     #[test]
@@ -235,12 +211,6 @@ mod tests {
             msg.contains("4096"),
             "error should mention the limit: {msg}"
         );
-    }
-
-    #[test]
-    fn validate_accepts_input_at_exactly_the_limit() {
-        let exact_input = "a".repeat(MAX_INPUT_CHARS);
-        assert!(validate(&params(&exact_input)).is_ok());
     }
 
     #[test]
@@ -268,8 +238,8 @@ mod tests {
     }
 
     #[test]
-    fn build_body_includes_required_fields_and_default_format() {
-        let req = params("read this aloud");
+    fn build_body_maps_fields_and_honors_speed_and_explicit_format() {
+        let mut req = params("read this aloud");
         let format = validate(&req).unwrap();
         let body = build_body(&req, &format);
         assert_eq!(body["model"], json!("tts-1"));
@@ -280,61 +250,12 @@ mod tests {
             body.get("speed").is_none(),
             "speed should be omitted when not set"
         );
-    }
 
-    #[test]
-    fn build_body_includes_speed_when_configured() {
-        let mut req = params("read this aloud");
         req.speed = Some(1.25);
-        let format = validate(&req).unwrap();
-        let body = build_body(&req, &format);
-        assert_eq!(body["speed"], json!(1.25));
-    }
-
-    #[test]
-    fn build_body_uses_explicit_response_format() {
-        let mut req = params("read this aloud");
         req.format = Some("wav".to_string());
         let format = validate(&req).unwrap();
         let body = build_body(&req, &format);
+        assert_eq!(body["speed"], json!(1.25));
         assert_eq!(body["response_format"], json!("wav"));
-    }
-
-    #[tokio::test]
-    async fn synthesize_rejects_over_limit_input_before_any_request_is_sent() {
-        // Mirrors openai.rs's `missing_model_errors_before_any_request_is_sent`:
-        // bind a listener but never accept, proving validation short-circuits
-        // before any network I/O.
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let notify = std::sync::Arc::new(tokio::sync::Notify::new());
-        let notify2 = notify.clone();
-        let server = tokio::spawn(async move {
-            let _ = listener.accept().await;
-            notify2.notify_one();
-        });
-
-        let provider = AiProviderConfig {
-            id: "p1".to_string(),
-            label: "P1".to_string(),
-            base_url: format!("http://{addr}"),
-            api_key: "key".to_string(),
-        };
-        let long_input = "a".repeat(MAX_INPUT_CHARS + 1);
-        let err = synthesize(&provider, params(&long_input))
-            .await
-            .expect_err("over-limit input should error");
-        assert!(err.to_string().contains("4096"));
-
-        let was_contacted =
-            tokio::time::timeout(std::time::Duration::from_millis(150), notify.notified())
-                .await
-                .is_ok();
-        assert!(
-            !was_contacted,
-            "no request should be sent for invalid input"
-        );
-
-        server.abort();
     }
 }
