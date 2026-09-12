@@ -191,21 +191,26 @@ mod tests {
         }
     }
 
+    /// Small and large values in one test: the payload size is not something
+    /// this module branches on, and each extra `encrypt_json`/`decrypt_json`
+    /// pair costs two 210000-iteration PBKDF2 derivations. Both values go
+    /// through a single key derivation each here rather than two tests'
+    /// worth.
     #[test]
-    fn roundtrip_small_struct() {
-        let value = sample();
-        let payload = encrypt_json(&value, "correct horse battery staple").unwrap();
-        let decrypted: Sample = decrypt_json(&payload, "correct horse battery staple").unwrap();
-        assert_eq!(decrypted, value);
-    }
-
-    #[test]
-    fn roundtrip_large_json_value() {
+    fn roundtrip_preserves_small_and_large_values() {
         #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
         struct Big {
             entries: Vec<Sample>,
             blob: String,
         }
+
+        let passphrase = "correct horse battery staple";
+
+        let small = sample();
+        let payload = encrypt_json(&small, passphrase).unwrap();
+        let decrypted: Sample = decrypt_json(&payload, passphrase).unwrap();
+        assert_eq!(decrypted, small);
+
         let big = Big {
             entries: (0..500)
                 .map(|i| Sample {
@@ -216,8 +221,8 @@ mod tests {
                 .collect(),
             blob: "x".repeat(100_000),
         };
-        let payload = encrypt_json(&big, "a very long passphrase indeed").unwrap();
-        let decrypted: Big = decrypt_json(&payload, "a very long passphrase indeed").unwrap();
+        let payload = encrypt_json(&big, passphrase).unwrap();
+        let decrypted: Big = decrypt_json(&payload, passphrase).unwrap();
         assert_eq!(decrypted, big);
     }
 
@@ -239,8 +244,33 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// A correctly-shaped payload for the `validate()` tests below.
+    ///
+    /// Built as a literal rather than via `encrypt_json`: `validate()` never
+    /// decrypts anything -- it only checks identifiers, an iteration range
+    /// and base64 field lengths -- so deriving a real key here would spend a
+    /// 210000-iteration PBKDF2 per test on a value that is immediately
+    /// mutated into an invalid one. `encrypt_json_produces_spec_compliant_payload`
+    /// is what pins the real encryptor's output *to* this shape, so these
+    /// literals cannot drift away from reality unnoticed.
     fn valid_payload() -> EncryptedPayload {
-        encrypt_json(&sample(), "validation passphrase").unwrap()
+        EncryptedPayload {
+            version: 1,
+            algorithm: "AES-GCM".to_string(),
+            kdf: "PBKDF2-SHA256".to_string(),
+            iterations: ITERATIONS,
+            salt: STANDARD.encode([0u8; SALT_LEN]),
+            iv: STANDARD.encode([0u8; IV_LEN]),
+            cipher_text: STANDARD.encode([0u8; 32]),
+        }
+    }
+
+    #[test]
+    fn valid_payload_fixture_passes_validation() {
+        // Guards the fixture itself: if `validate()` grows a new rule, this
+        // fails loudly instead of every `validate_rejects_*` test below
+        // silently passing for the wrong reason.
+        valid_payload().validate().unwrap();
     }
 
     #[test]
