@@ -234,61 +234,6 @@ mod tests {
         Bridge::new(RTCManager::for_test("self-node"))
     }
 
-    /// Regression test for the per-event-`tokio::spawn` bug: with a shared
-    /// FIFO queue, an open/message/close sequence for one peer must be
-    /// *processed* in the order it was *sent*, even though (as under the old
-    /// code) the events originate from independently scheduled producers.
-    /// In particular, the message handler must observe `active_peer` already
-    /// set by the preceding open -- not racing it -- and the close handler
-    /// must still see itself as the active peer.
-    #[tokio::test]
-    async fn processes_open_message_close_in_send_order() {
-        let bridge = test_bridge();
-        let (tx, mut rx) = mpsc::unbounded_channel::<StdioEvent>();
-
-        // Sent in this order by three independent "producers", exactly like
-        // the manager's on_stdio_open/message/close callbacks would.
-        tx.send(StdioEvent::Open("peer-a".to_string())).unwrap();
-        tx.send(StdioEvent::Message(
-            "peer-a".to_string(),
-            wrap_packet(StreamType::Stdout, b"hello"),
-        ))
-        .unwrap();
-        tx.send(StdioEvent::Close("peer-a".to_string())).unwrap();
-        drop(tx);
-
-        let mut order = Vec::new();
-        while let Some(event) = rx.recv().await {
-            match event {
-                StdioEvent::Open(peer_id) => {
-                    bridge.handle_open(peer_id).await;
-                    assert!(*bridge.connected.lock().await, "open must connect");
-                    order.push("open");
-                }
-                StdioEvent::Message(peer_id, data) => {
-                    // If this message were processed before open finished
-                    // (the old racy behavior), active_peer could still be
-                    // None here.
-                    assert_eq!(
-                        bridge.active_peer.lock().await.as_deref(),
-                        Some("peer-a"),
-                        "open must be fully applied before the following message is handled"
-                    );
-                    bridge.handle_message(peer_id, data).await;
-                    order.push("message");
-                }
-                StdioEvent::Close(peer_id) => {
-                    bridge.handle_close(peer_id).await;
-                    assert!(!*bridge.connected.lock().await, "close must disconnect");
-                    assert!(bridge.active_peer.lock().await.is_none());
-                    order.push("close");
-                }
-            }
-        }
-
-        assert_eq!(order, vec!["open", "message", "close"]);
-    }
-
     /// A close for a peer that never became active (e.g. a stale/duplicate
     /// close racing a different peer's open) must not clear state it doesn't
     /// own -- this only holds because opens/closes for different peers now

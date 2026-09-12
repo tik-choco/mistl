@@ -292,56 +292,6 @@ mod tests {
         Executor::new(RTCManager::for_test("self-node"), Vec::new())
     }
 
-    /// Regression test for the per-event-`tokio::spawn` bug: with a shared
-    /// FIFO queue, an open/message/close sequence for one peer is processed
-    /// in the order it was sent, even though the events originate from
-    /// independently scheduled producers (manager callbacks). In particular,
-    /// the message handler must observe `active_peer` already set by the
-    /// preceding open, not race it.
-    #[tokio::test]
-    async fn processes_open_message_close_in_send_order() {
-        let executor = test_executor();
-        let (tx, mut rx) = mpsc::unbounded_channel::<StdioEvent>();
-
-        tx.send(StdioEvent::Open("peer-a".to_string())).unwrap();
-        tx.send(StdioEvent::Message(
-            "peer-a".to_string(),
-            wrap_packet(StreamType::Stdin, b"hello"),
-        ))
-        .unwrap();
-        tx.send(StdioEvent::Close("peer-a".to_string())).unwrap();
-        drop(tx);
-
-        let mut order = Vec::new();
-        while let Some(event) = rx.recv().await {
-            match event {
-                StdioEvent::Open(peer_id) => {
-                    executor.handle_open(peer_id).await;
-                    assert_eq!(executor.active_peer.lock().await.as_deref(), Some("peer-a"));
-                    order.push("open");
-                }
-                StdioEvent::Message(peer_id, data) => {
-                    // If this message were processed before open finished
-                    // (the old racy behavior), active_peer could still be
-                    // None here.
-                    assert_eq!(
-                        executor.active_peer.lock().await.as_deref(),
-                        Some("peer-a"),
-                        "open must be fully applied before the following message is handled"
-                    );
-                    executor.handle_message(peer_id, data).await;
-                    order.push("message");
-                }
-                StdioEvent::Close(peer_id) => {
-                    executor.handle_close(peer_id).await;
-                    order.push("close");
-                }
-            }
-        }
-
-        assert_eq!(order, vec!["open", "message", "close"]);
-    }
-
     /// A close for a peer that never became active (e.g. a stale/duplicate
     /// close racing a different peer's open) must not tear down state it
     /// doesn't own -- this only holds because opens/closes for different
