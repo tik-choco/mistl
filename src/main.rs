@@ -10,6 +10,7 @@ mod identity;
 mod install;
 mod net;
 mod scheduler;
+mod statefile;
 mod storage;
 mod stream;
 mod topology;
