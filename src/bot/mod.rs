@@ -558,16 +558,14 @@ fn validate_pipeline(config: &Config, pipeline: &PipelineConfig) -> Vec<String> 
                          `mistl config set bot.pipelines <json>`"
                     ));
                 }
-                if let Some(method) = method {
-                    let is_known = ["post", "put", "patch"]
-                        .iter()
-                        .any(|known| method.eq_ignore_ascii_case(known));
-                    if !is_known {
-                        warnings.push(format!(
-                            "{prefix}.sinks[kind=\"webhook\"].method {method:?} is not one of \
-                             post/put/patch; requests will be sent as POST"
-                        ));
-                    }
+                if let Some(method) = method
+                    && !sink::is_known_webhook_method(method)
+                {
+                    let known = sink::KNOWN_WEBHOOK_METHODS.join("/");
+                    warnings.push(format!(
+                        "{prefix}.sinks[kind=\"webhook\"].method {method:?} is not one of \
+                         {known}; requests will be sent as POST"
+                    ));
                 }
                 if headers.iter().any(|header| header.name.trim().is_empty()) {
                     warnings.push(format!(
@@ -1195,6 +1193,72 @@ mod tests {
         assert!(
             warnings.iter().any(|w| w.contains("method")),
             "got: {warnings:?}"
+        );
+    }
+
+    /// The guard that was missing while `validate_pipeline` and
+    /// `sink::parse_webhook_method` each kept their own list of accepted
+    /// methods: the two could drift, leaving the validator silent about a
+    /// method that still dispatches as POST, or warning about one that
+    /// works. Walks every entry in the shared `KNOWN_WEBHOOK_METHODS` and
+    /// asserts the validator and the dispatcher agree on it, then does the
+    /// same for a method outside the list.
+    #[test]
+    fn validator_and_sink_agree_on_which_webhook_methods_are_known() {
+        let config = configured_ai();
+
+        let webhook_pipeline = |method: &str| {
+            let mut pipeline = sample_pipeline("p1", "@every 1h");
+            pipeline.sinks = vec![SinkConfig::Webhook {
+                url: "https://example.com/hook".to_string(),
+                include_audio: false,
+                max_audio_bytes: None,
+                method: Some(method.to_string()),
+                body_template: None,
+                sign: true,
+                include_body: false,
+                headers: Vec::new(),
+            }];
+            pipeline
+        };
+
+        for known in sink::KNOWN_WEBHOOK_METHODS {
+            // Both spellings, since every check on this path is
+            // case-insensitive.
+            for spelling in [known.to_string(), known.to_ascii_uppercase()] {
+                assert!(
+                    sink::is_known_webhook_method(&spelling),
+                    "{spelling:?} is in KNOWN_WEBHOOK_METHODS but is_known_webhook_method rejects it"
+                );
+
+                let warnings = validate_pipeline(&config, &webhook_pipeline(&spelling));
+                assert!(
+                    !warnings.iter().any(|w| w.contains("method")),
+                    "{spelling:?} is a known method but the validator warned: {warnings:?}"
+                );
+
+                // A known method must reach dispatch as itself, not silently
+                // degrade to the POST fallback.
+                let dispatched = sink::parse_webhook_method(Some(&spelling));
+                assert_eq!(
+                    dispatched.as_str().to_ascii_lowercase(),
+                    known,
+                    "{spelling:?} is a known method but dispatches as {dispatched}"
+                );
+            }
+        }
+
+        let unknown = "DELETE";
+        assert!(!sink::is_known_webhook_method(unknown));
+        let warnings = validate_pipeline(&config, &webhook_pipeline(unknown));
+        assert!(
+            warnings.iter().any(|w| w.contains("method")),
+            "an unknown method must be flagged: {warnings:?}"
+        );
+        assert_eq!(
+            sink::parse_webhook_method(Some(unknown)),
+            reqwest::Method::POST,
+            "an unknown method must fall back to POST"
         );
     }
 

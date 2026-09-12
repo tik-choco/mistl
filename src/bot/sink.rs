@@ -476,12 +476,27 @@ fn render_webhook_template(
     result
 }
 
+/// The `SinkConfig::Webhook.method` values that are recognized as anything
+/// other than a bare `POST`. This is the single source of truth shared by
+/// `parse_webhook_method` (below) and `bot::validate_pipeline`'s "not one of
+/// post/put/patch" warning -- keeping both derived from the same list is what
+/// keeps the warning in step with actual dispatch behavior.
+pub(crate) const KNOWN_WEBHOOK_METHODS: [&str; 3] = ["post", "put", "patch"];
+
+/// Case-insensitively checks whether `method` is one of `KNOWN_WEBHOOK_METHODS`.
+pub(crate) fn is_known_webhook_method(method: &str) -> bool {
+    KNOWN_WEBHOOK_METHODS
+        .iter()
+        .any(|known| method.eq_ignore_ascii_case(known))
+}
+
 /// Resolves `SinkConfig::Webhook.method` to a `reqwest::Method`:
-/// case-insensitive `post`/`put`/`patch`, defaulting to (and treating any
-/// unrecognized value as) `POST` -- the "not one of post/put/patch" case is
-/// flagged as a config validation warning by `bot::validate_pipeline`, not
+/// case-insensitive `post`/`put`/`patch` (see `KNOWN_WEBHOOK_METHODS`),
+/// defaulting to (and treating any unrecognized value as) `POST` -- the "not
+/// one of post/put/patch" case is flagged as a config validation warning by
+/// `bot::validate_pipeline` (via `is_known_webhook_method`), not
 /// re-checked/logged here.
-fn parse_webhook_method(method: Option<&str>) -> reqwest::Method {
+pub(crate) fn parse_webhook_method(method: Option<&str>) -> reqwest::Method {
     match method.map(str::trim) {
         Some(m) if m.eq_ignore_ascii_case("put") => reqwest::Method::PUT,
         Some(m) if m.eq_ignore_ascii_case("patch") => reqwest::Method::PATCH,
