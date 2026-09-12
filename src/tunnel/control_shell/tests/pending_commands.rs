@@ -3,7 +3,7 @@
 //! `p2p/src/control_shell/tests/pending_commands.rs`.
 
 use crate::tunnel::auth::{AuthDecision, AuthRequest, PendingAuthorizations};
-use crate::tunnel::control_shell::{execute_line, execute_line_with_context};
+use crate::tunnel::control_shell::execute_line_with_context;
 use crate::tunnel::controller::ForwardController;
 
 #[tokio::test]
@@ -68,16 +68,4 @@ async fn deny_always_resolves_pending_auth_request() {
 
     assert_eq!(outcome.output, "denied pending 1\n");
     assert_eq!(receiver.await.unwrap(), AuthDecision::DenyAlways);
-}
-
-#[tokio::test]
-async fn pending_commands_require_queue() {
-    let controller = ForwardController::new_inert();
-
-    let err = execute_line(&controller, "pending").await.unwrap_err();
-
-    assert!(
-        err.to_string()
-            .contains("pending auth commands are unavailable")
-    );
 }

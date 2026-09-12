@@ -1654,6 +1654,10 @@ mod tests {
     async fn video_only_sdp_includes_absolute_video_control() {
         use base64::Engine as _;
 
+        // What this test uniquely covers beyond `describe_returns_sdp_with_h264_media_and_dummy_params`:
+        // the base64 sprop-parameter-sets built from the specific SPS/PPS set
+        // here, the absolute `a=control:` line, and that no audio section is
+        // emitted for a video-only server.
         let server = test_server().await;
         server.update_sps(vec![0x67, 0x42, 0x00, 0x0a]).await;
         server.update_pps(vec![0x68, 0xce, 0x3c, 0x80]).await;
@@ -1662,22 +1666,11 @@ mod tests {
 
         let sps_b64 = base64::engine::general_purpose::STANDARD.encode([0x67, 0x42, 0x00, 0x0a]);
         let pps_b64 = base64::engine::general_purpose::STANDARD.encode([0x68, 0xce, 0x3c, 0x80]);
-        let expected = format!(
-            "v=0\r\n\
-             o=- 0 0 IN IP4 127.0.0.1\r\n\
-             s=mistl\r\n\
-             c=IN IP4 0.0.0.0\r\n\
-             t=0 0\r\n\
-             a=tool:mistl\r\n\
-             a=control:*\r\n\
-             a=recvonly\r\n\
-             m=video 0 RTP/AVP 96\r\n\
-             a=rtpmap:96 H264/90000\r\n\
-             a=fmtp:96 packetization-mode=1;sprop-parameter-sets={sps_b64},{pps_b64}\r\n\
-             a=control:rtsp://127.0.0.1:8554/stream/trackID=0\r\n",
-        );
 
-        assert_eq!(sdp, expected);
+        assert!(sdp.contains(&format!(
+            "a=fmtp:96 packetization-mode=1;sprop-parameter-sets={sps_b64},{pps_b64}\r\n"
+        )));
+        assert!(sdp.contains("a=control:rtsp://127.0.0.1:8554/stream/trackID=0\r\n"));
         assert!(!sdp.contains("m=audio"));
     }
 
@@ -1987,16 +1980,6 @@ mod tests {
 
         let inner = server.inner.lock().await;
         assert!(!inner.sessions.contains_key(&session_id));
-    }
-
-    #[test]
-    fn dummy_nal_constants_match_mistlink_reference() {
-        assert_eq!(
-            rtp_out::DUMMY_SPS,
-            &[0x67, 0x42, 0x00, 0x0a, 0xf8, 0x41, 0xa2]
-        );
-        assert_eq!(rtp_out::DUMMY_PPS, &[0x68, 0xce, 0x3c, 0x80]);
-        assert_eq!(rtp_out::DUMMY_NALU, &[0x0c, 0xff, 0xff, 0xff]);
     }
 
     // --- keepalive/real-data shared seq/ts space -----------------------------

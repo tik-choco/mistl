@@ -618,106 +618,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn temperature_included_when_configured() {
+    async fn request_body_and_headers_include_every_configured_option() {
         let body = r#"{"choices":[{"message":{"content":"ok"}}]}"#;
         let (base_url, server) = mock_server(json_response(200, "OK", body), Duration::ZERO).await;
 
-        let config = cfg(base_url, Some("gpt-test"), Some(0.75));
-        stream_chat_completion(&config, &one_message(), None, None)
-            .await
-            .expect("request should succeed");
-
-        let raw = server.await.unwrap();
-        let (_headers, req_body) = split_request(&raw);
-        let value: Value = serde_json::from_str(&req_body).expect("request body should be JSON");
-        assert_eq!(value["temperature"], json!(0.75));
-        assert_eq!(value["model"], json!("gpt-test"));
-        assert_eq!(value["stream"], json!(true));
-    }
-
-    #[tokio::test]
-    async fn temperature_omitted_when_not_configured() {
-        let body = r#"{"choices":[{"message":{"content":"ok"}}]}"#;
-        let (base_url, server) = mock_server(json_response(200, "OK", body), Duration::ZERO).await;
-
-        let config = cfg(base_url, Some("gpt-test"), None);
-        stream_chat_completion(&config, &one_message(), None, None)
-            .await
-            .expect("request should succeed");
-
-        let raw = server.await.unwrap();
-        let (_headers, req_body) = split_request(&raw);
-        let value: Value = serde_json::from_str(&req_body).expect("request body should be JSON");
-        assert!(
-            value.get("temperature").is_none(),
-            "temperature should be omitted: {value}"
-        );
-    }
-
-    #[tokio::test]
-    async fn reasoning_effort_included_when_configured() {
-        let body = r#"{"choices":[{"message":{"content":"ok"}}]}"#;
-        let (base_url, server) = mock_server(json_response(200, "OK", body), Duration::ZERO).await;
-
-        let mut config = cfg(base_url, Some("gpt-test"), None);
+        let mut config = cfg(base_url, Some("config-model"), Some(0.75));
         config.reasoning_effort = Some("high".to_string());
-        stream_chat_completion(&config, &one_message(), None, None)
-            .await
-            .expect("request should succeed");
-
-        let raw = server.await.unwrap();
-        let (_headers, req_body) = split_request(&raw);
-        let value: Value = serde_json::from_str(&req_body).expect("request body should be JSON");
-        assert_eq!(value["reasoning_effort"], json!("high"));
-    }
-
-    #[tokio::test]
-    async fn reasoning_effort_omitted_when_not_configured() {
-        let body = r#"{"choices":[{"message":{"content":"ok"}}]}"#;
-        let (base_url, server) = mock_server(json_response(200, "OK", body), Duration::ZERO).await;
-
-        let config = cfg(base_url, Some("gpt-test"), None);
-        stream_chat_completion(&config, &one_message(), None, None)
-            .await
-            .expect("request should succeed");
-
-        let raw = server.await.unwrap();
-        let (_headers, req_body) = split_request(&raw);
-        let value: Value = serde_json::from_str(&req_body).expect("request body should be JSON");
-        assert!(
-            value.get("reasoning_effort").is_none(),
-            "reasoning_effort should be omitted: {value}"
-        );
-    }
-
-    #[tokio::test]
-    async fn per_request_model_overrides_config_model() {
-        let body = r#"{"choices":[{"message":{"content":"ok"}}]}"#;
-        let (base_url, server) = mock_server(json_response(200, "OK", body), Duration::ZERO).await;
-
-        let config = cfg(base_url, Some("config-model"), None);
         stream_chat_completion(&config, &one_message(), Some("override-model"), None)
             .await
             .expect("request should succeed");
 
         let raw = server.await.unwrap();
-        let (_headers, req_body) = split_request(&raw);
-        let value: Value = serde_json::from_str(&req_body).unwrap();
-        assert_eq!(value["model"], json!("override-model"));
-    }
-
-    #[tokio::test]
-    async fn authorization_header_is_always_sent() {
-        let body = r#"{"choices":[{"message":{"content":"ok"}}]}"#;
-        let (base_url, server) = mock_server(json_response(200, "OK", body), Duration::ZERO).await;
-
-        let config = cfg(base_url, Some("gpt-test"), None);
-        stream_chat_completion(&config, &one_message(), None, None)
-            .await
-            .expect("request should succeed");
-
-        let raw = server.await.unwrap();
-        let (headers, _body) = split_request(&raw);
+        let (headers, req_body) = split_request(&raw);
+        let value: Value = serde_json::from_str(&req_body).expect("request body should be JSON");
+        assert_eq!(
+            value["model"],
+            json!("override-model"),
+            "per-request model should override the config model"
+        );
+        assert_eq!(value["temperature"], json!(0.75));
+        assert_eq!(value["reasoning_effort"], json!("high"));
+        assert_eq!(value["stream"], json!(true));
         assert!(
             headers
                 .to_lowercase()
@@ -727,18 +648,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authorization_header_sent_even_with_empty_key() {
+    async fn request_body_omits_unset_options_and_still_sends_authorization() {
         let body = r#"{"choices":[{"message":{"content":"ok"}}]}"#;
         let (base_url, server) = mock_server(json_response(200, "OK", body), Duration::ZERO).await;
 
-        let mut config = cfg(base_url, Some("gpt-test"), None);
+        let mut config = cfg(base_url, Some("config-model"), None);
         config.api_key = String::new();
         stream_chat_completion(&config, &one_message(), None, None)
             .await
             .expect("request should succeed");
 
         let raw = server.await.unwrap();
-        let (headers, _body) = split_request(&raw);
+        let (headers, req_body) = split_request(&raw);
+        let value: Value = serde_json::from_str(&req_body).expect("request body should be JSON");
+        assert_eq!(value["model"], json!("config-model"));
+        assert!(
+            value.get("temperature").is_none(),
+            "temperature should be omitted: {value}"
+        );
+        assert!(
+            value.get("reasoning_effort").is_none(),
+            "reasoning_effort should be omitted: {value}"
+        );
         assert!(
             headers.to_lowercase().contains("authorization: bearer"),
             "Authorization header should be sent even with an empty key: {headers}"

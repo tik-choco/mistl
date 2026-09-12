@@ -1354,29 +1354,57 @@ mod tests {
     // -- `store.sandbox.export` default destination ------------------------
 
     #[test]
-    fn default_export_path_falls_back_to_downloads_dir_when_unconfigured() {
-        let data_dir = Path::new("/data");
-        let path = default_export_path("MyFolder/sub/a.txt", "a.txt", None, data_dir);
-        assert_eq!(path, data_dir.join("downloads").join("a.txt"));
-    }
+    fn default_export_path_resolves_each_configured_and_unconfigured_case() {
+        struct Case {
+            name: &'static str,
+            sandbox_relative: &'static str,
+            file_name: &'static str,
+            export_dir: Option<&'static str>,
+            data_dir: &'static str,
+            expected: &'static str,
+        }
 
-    #[test]
-    fn default_export_path_preserves_subdirectories_under_export_dir() {
-        let export_dir = Path::new("/export");
-        let path = default_export_path(
-            "MyFolder/sub/a.txt",
-            "a.txt",
-            Some(export_dir),
-            Path::new("/data"),
-        );
-        assert_eq!(path, Path::new("/export/MyFolder/sub/a.txt"));
-    }
+        let cases = [
+            Case {
+                name: "falls back to downloads dir when unconfigured",
+                sandbox_relative: "MyFolder/sub/a.txt",
+                file_name: "a.txt",
+                export_dir: None,
+                data_dir: "/data",
+                expected: "/data/downloads/a.txt",
+            },
+            Case {
+                name: "preserves subdirectories under export dir",
+                sandbox_relative: "MyFolder/sub/a.txt",
+                file_name: "a.txt",
+                export_dir: Some("/export"),
+                data_dir: "/data",
+                expected: "/export/MyFolder/sub/a.txt",
+            },
+            Case {
+                name: "handles a root-level sandbox file",
+                sandbox_relative: "a.txt",
+                file_name: "a.txt",
+                export_dir: Some("/export"),
+                data_dir: "/data",
+                expected: "/export/a.txt",
+            },
+        ];
 
-    #[test]
-    fn default_export_path_handles_a_root_level_sandbox_file() {
-        let export_dir = Path::new("/export");
-        let path = default_export_path("a.txt", "a.txt", Some(export_dir), Path::new("/data"));
-        assert_eq!(path, Path::new("/export/a.txt"));
+        for case in cases {
+            let export_dir = case.export_dir.map(Path::new);
+            let data_dir = Path::new(case.data_dir);
+            let path =
+                default_export_path(case.sandbox_relative, case.file_name, export_dir, data_dir);
+            assert_eq!(
+                path,
+                Path::new(case.expected),
+                "case `{}`: expected {:?}, got {:?}",
+                case.name,
+                case.expected,
+                path
+            );
+        }
     }
 
     #[test]
@@ -1483,35 +1511,48 @@ mod tests {
     }
 
     #[test]
-    fn resolve_default_browse_dir_prefers_an_existing_export_dir() {
-        let export = TempDir::new("browse-dirs-export");
-        let data_dir = TempDir::new("browse-dirs-data");
-        let export_path = export.path();
-        let data_dir_path = data_dir.path();
-        let resolved = resolve_default_browse_dir(Some(&export_path), &data_dir_path);
-        assert_eq!(resolved, export_path);
-    }
+    fn resolve_default_browse_dir_prefers_export_dir_then_falls_back() {
+        // Case 1: an existing export dir always wins.
+        {
+            let export = TempDir::new("browse-dirs-export");
+            let data_dir = TempDir::new("browse-dirs-data");
+            let export_path = export.path();
+            let data_dir_path = data_dir.path();
+            let resolved = resolve_default_browse_dir(Some(&export_path), &data_dir_path);
+            assert_eq!(
+                resolved, export_path,
+                "case `prefers an existing export dir`: expected the export dir itself"
+            );
+        }
 
-    #[test]
-    fn resolve_default_browse_dir_falls_back_when_export_dir_does_not_exist() {
-        let data_dir = TempDir::new("browse-dirs-data-fallback");
-        let data_dir_path = data_dir.path();
-        let missing_export = data_dir_path.join("does-not-exist");
-        let resolved = resolve_default_browse_dir(Some(&missing_export), &data_dir_path);
-        // Falls through to the home dir (if resolvable) or else `data_dir`;
-        // either way it must not be the nonexistent export dir.
-        assert_ne!(resolved, missing_export);
-    }
+        // Case 2: a configured but nonexistent export dir is skipped.
+        {
+            let data_dir = TempDir::new("browse-dirs-data-fallback");
+            let data_dir_path = data_dir.path();
+            let missing_export = data_dir_path.join("does-not-exist");
+            let resolved = resolve_default_browse_dir(Some(&missing_export), &data_dir_path);
+            // Falls through to the home dir (if resolvable) or else
+            // `data_dir`; either way it must not be the nonexistent export
+            // dir.
+            assert_ne!(
+                resolved, missing_export,
+                "case `falls back when export dir does not exist`: must not return the missing export dir"
+            );
+        }
 
-    #[test]
-    fn resolve_default_browse_dir_falls_back_to_data_dir_when_unconfigured_and_no_home() {
-        // With no export dir at all, the function still returns *some*
-        // existing-in-principle directory -- when a home dir is resolvable
-        // (true on this dev machine) that wins over `data_dir`, but the
-        // result is never empty and is always an absolute-looking path.
-        let data_dir = TempDir::new("browse-dirs-data-nohome");
-        let data_dir_path = data_dir.path();
-        let resolved = resolve_default_browse_dir(None, &data_dir_path);
-        assert!(!resolved.as_os_str().is_empty());
+        // Case 3: with no export dir at all, the function still returns
+        // *some* existing-in-principle directory -- when a home dir is
+        // resolvable (true on this dev machine) that wins over `data_dir`,
+        // but the result is never empty and is always an absolute-looking
+        // path.
+        {
+            let data_dir = TempDir::new("browse-dirs-data-nohome");
+            let data_dir_path = data_dir.path();
+            let resolved = resolve_default_browse_dir(None, &data_dir_path);
+            assert!(
+                !resolved.as_os_str().is_empty(),
+                "case `falls back to data dir when unconfigured and no home`: result must not be empty"
+            );
+        }
     }
 }

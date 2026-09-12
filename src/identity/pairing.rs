@@ -436,58 +436,35 @@ async fn handle_pair_request(state: &Arc<AppState>, room: &str, msg: Value) {
 mod tests {
     use super::*;
 
+    /// One pass over `normalize_code`'s whole character-mapping loop. The
+    /// cases that carry real intent: `I`/`L` fold to `1` and `O` to `0`
+    /// (confusable glyphs a user may mistype off a screen), while `U` has no
+    /// remapping -- it is deliberately outside the alphabet, so it is simply
+    /// dropped like any other out-of-alphabet character.
     #[test]
-    fn normalize_code_uppercases_and_strips_hyphens() {
-        assert_eq!(
-            normalize_code("abcd-1234-efgh-5678"),
-            Some("ABCD1234EFGH5678".to_string())
-        );
-        assert_eq!(
-            normalize_code("ABCD-1234-EFGH-5678"),
-            Some("ABCD1234EFGH5678".to_string())
-        );
-    }
+    fn normalize_code_maps_confusable_glyphs_and_drops_everything_else() {
+        let accepted = [
+            ("abcd-1234-efgh-5678", "ABCD1234EFGH5678"),
+            ("ABCD-1234-EFGH-5678", "ABCD1234EFGH5678"),
+            ("AB CD-12*34#EFGH$5678", "ABCD1234EFGH5678"),
+            ("ABCD1234EFGH567U8", "ABCD1234EFGH5678"),
+            ("IIIIIIIIIIIIIIII", "1111111111111111"),
+            ("llllllllllllllll", "1111111111111111"),
+            ("oooooooooooooooo", "0000000000000000"),
+        ];
+        for (input, expected) in accepted {
+            assert_eq!(
+                normalize_code(input),
+                Some(expected.to_string()),
+                "input: {input:?}"
+            );
+        }
 
-    #[test]
-    fn normalize_code_maps_i_l_to_1_and_o_to_0() {
-        assert_eq!(
-            normalize_code("IIIIIIIIIIIIIIII"),
-            Some("1111111111111111".to_string())
-        );
-        assert_eq!(
-            normalize_code("llllllllllllllll"),
-            Some("1111111111111111".to_string())
-        );
-        assert_eq!(
-            normalize_code("oooooooooooooooo"),
-            Some("0000000000000000".to_string())
-        );
-    }
-
-    #[test]
-    fn normalize_code_drops_non_alphabet_characters() {
-        assert_eq!(
-            normalize_code("AB CD-12*34#EFGH$5678"),
-            Some("ABCD1234EFGH5678".to_string())
-        );
-    }
-
-    #[test]
-    fn normalize_code_drops_u_as_meaningless_noise() {
-        // Unlike I/L/O, 'U' has no defined remapping (deliberately excluded
-        // from the alphabet), so it's just dropped like any other
-        // out-of-alphabet character.
-        assert_eq!(
-            normalize_code("ABCD1234EFGH567U8"),
-            Some("ABCD1234EFGH5678".to_string())
-        );
-    }
-
-    #[test]
-    fn normalize_code_rejects_wrong_length() {
-        assert_eq!(normalize_code("ABCD1234"), None);
-        assert_eq!(normalize_code("ABCD1234EFGH5678ABCD1234"), None);
-        assert_eq!(normalize_code(""), None);
+        // Length is checked after normalization, so a too-short, too-long or
+        // empty code is rejected outright rather than padded or truncated.
+        for input in ["ABCD1234", "ABCD1234EFGH5678ABCD1234", ""] {
+            assert_eq!(normalize_code(input), None, "input: {input:?}");
+        }
     }
 
     #[test]

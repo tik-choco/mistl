@@ -282,15 +282,9 @@ mod tests {
             id.chars()
                 .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
         );
-    }
-
-    #[test]
-    fn random_uuid_like_is_not_constant() {
         // Not a proof of randomness, just a guard against an accidental
         // all-zero buffer or similar degenerate implementation.
-        let a = random_uuid_like();
-        let b = random_uuid_like();
-        assert_ne!(a, b);
+        assert_ne!(random_uuid_like(), random_uuid_like());
     }
 
     #[tokio::test]

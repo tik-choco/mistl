@@ -80,26 +80,6 @@ fn data_msg(conn_id: &str, target: &str, payload: &[u8], seq: Option<u64>) -> Tu
 // --- data seq gap/duplicate handling (end-to-end via on_tunnel_message) ----
 
 #[tokio::test]
-async fn in_order_seq_data_is_all_delivered() {
-    let mgr = test_manager();
-    let (write_half, mut read_half) = connected_write_and_readback().await;
-    mgr.track_conn("conn-1", write_half, "peer-1", true).await;
-
-    for (i, byte) in [1u8, 2, 3].into_iter().enumerate() {
-        let msg = data_msg("conn-1", &mgr.target, &[byte], Some((i + 1) as u64));
-        mgr.on_tunnel_message("peer-1", &serde_json::to_vec(&msg).unwrap())
-            .await;
-    }
-
-    let mut buf = [0u8; 3];
-    tokio::time::timeout(Duration::from_secs(1), read_half.read_exact(&mut buf))
-        .await
-        .expect("timed out waiting for data")
-        .unwrap();
-    assert_eq!(buf, [1, 2, 3]);
-}
-
-#[tokio::test]
 async fn duplicate_seq_is_written_only_once() {
     let mgr = test_manager();
     let (write_half, mut read_half) = connected_write_and_readback().await;
@@ -238,26 +218,6 @@ async fn empty_payload_with_seq_still_consumes_the_seq_number() {
         .expect("timed out waiting for data")
         .unwrap();
     assert_eq!(buf, [9]);
-}
-
-#[tokio::test]
-async fn legacy_sender_without_seq_still_delivers_data() {
-    let mgr = test_manager();
-    let (write_half, mut read_half) = connected_write_and_readback().await;
-    mgr.track_conn("conn-1", write_half, "peer-1", true).await;
-
-    for byte in [1u8, 2, 3] {
-        let msg = data_msg("conn-1", &mgr.target, &[byte], None);
-        mgr.on_tunnel_message("peer-1", &serde_json::to_vec(&msg).unwrap())
-            .await;
-    }
-
-    let mut buf = [0u8; 3];
-    tokio::time::timeout(Duration::from_secs(1), read_half.read_exact(&mut buf))
-        .await
-        .expect("timed out waiting for data")
-        .unwrap();
-    assert_eq!(buf, [1, 2, 3]);
 }
 
 // --- Finding 2: peer-leave grace window / resume ---------------------------

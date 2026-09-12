@@ -1913,40 +1913,26 @@ mod tests {
     // -- resolve_voice_call_model: request model vs. preset model ---------
 
     #[test]
-    fn resolve_voice_call_model_honors_a_matching_request_model_tts() {
+    fn resolve_voice_call_model_honors_a_matching_request_model() {
         let model = resolve_voice_call_model(Some("irodori-tts".to_string()), "irodori-tts", "tts");
         assert_eq!(model, "irodori-tts");
-    }
 
-    #[test]
-    fn resolve_voice_call_model_falls_back_on_a_mismatched_request_model_tts() {
-        // The regression this guards: a consumer selecting an advertised ad
-        // card can echo back its *label* (e.g. "TTS") as `model` rather than
-        // a real upstream model id -- that must never be forwarded as-is.
-        let model = resolve_voice_call_model(Some("TTS".to_string()), "irodori-tts", "tts");
-        assert_eq!(model, "irodori-tts");
-    }
-
-    #[test]
-    fn resolve_voice_call_model_falls_back_when_omitted_tts() {
-        let model = resolve_voice_call_model(None, "irodori-tts", "tts");
-        assert_eq!(model, "irodori-tts");
-    }
-
-    #[test]
-    fn resolve_voice_call_model_honors_a_matching_request_model_stt() {
         let model = resolve_voice_call_model(Some("whisper-1".to_string()), "whisper-1", "stt");
         assert_eq!(model, "whisper-1");
     }
 
     #[test]
-    fn resolve_voice_call_model_falls_back_on_a_mismatched_request_model_stt() {
+    fn resolve_voice_call_model_falls_back_on_a_mismatched_or_omitted_request_model() {
+        // The regression this guards: a consumer selecting an advertised ad
+        // card can echo back its *label* (e.g. "TTS") as `model` rather than
+        // a real upstream model id -- that must never be forwarded as-is.
+        let model = resolve_voice_call_model(Some("TTS".to_string()), "irodori-tts", "tts");
+        assert_eq!(model, "irodori-tts");
+        let model = resolve_voice_call_model(None, "irodori-tts", "tts");
+        assert_eq!(model, "irodori-tts");
+
         let model = resolve_voice_call_model(Some("STT".to_string()), "whisper-1", "stt");
         assert_eq!(model, "whisper-1");
-    }
-
-    #[test]
-    fn resolve_voice_call_model_falls_back_when_omitted_stt() {
         let model = resolve_voice_call_model(None, "whisper-1", "stt");
         assert_eq!(model, "whisper-1");
     }

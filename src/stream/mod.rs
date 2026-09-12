@@ -519,18 +519,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_known_backend_names() {
-        assert_eq!(
-            CaptureBackend::parse("native").unwrap(),
-            CaptureBackend::Native
-        );
-        assert_eq!(
-            CaptureBackend::parse("ffmpeg").unwrap(),
-            CaptureBackend::Ffmpeg
-        );
-    }
-
-    #[test]
     fn rejects_unknown_backend_name() {
         let message = CaptureBackend::parse("obs").unwrap_err().to_string();
         assert!(message.contains("obs"), "{message}");
@@ -540,6 +528,14 @@ mod tests {
 
     #[test]
     fn as_str_roundtrips_through_parse() {
+        assert_eq!(
+            CaptureBackend::parse("native").unwrap(),
+            CaptureBackend::Native
+        );
+        assert_eq!(
+            CaptureBackend::parse("ffmpeg").unwrap(),
+            CaptureBackend::Ffmpeg
+        );
         for backend in [CaptureBackend::Native, CaptureBackend::Ffmpeg] {
             assert_eq!(CaptureBackend::parse(backend.as_str()).unwrap(), backend);
         }

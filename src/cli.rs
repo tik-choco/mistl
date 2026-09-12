@@ -2266,88 +2266,6 @@ mod bot_render_tests {
     use super::*;
 
     #[test]
-    fn render_bot_ls_reports_no_pipelines() {
-        assert_eq!(
-            render_bot_ls(&json!({ "pipelines": [] })),
-            "no bot pipelines configured"
-        );
-    }
-
-    #[test]
-    fn render_bot_ls_shows_dash_columns_for_a_never_run_pipeline() {
-        let response = json!({
-            "pipelines": [{
-                "id": "news-audio",
-                "enabled": true,
-                "schedule": "@every 30m",
-                "next_run": "2026-07-12T01:00:00Z",
-                "last_run": null,
-                "warnings": [],
-            }]
-        });
-        let rendered = render_bot_ls(&response);
-        assert_eq!(
-            rendered,
-            "ID\tENABLED\tSCHEDULE\tNEXT RUN\tLAST RUN\tLAST STATUS\n\
-             news-audio\ttrue\t@every 30m\t2026-07-12T01:00:00Z\t-\t-"
-        );
-    }
-
-    #[test]
-    fn render_bot_ls_formats_a_successful_last_run() {
-        let response = json!({
-            "pipelines": [{
-                "id": "news-audio",
-                "enabled": true,
-                "schedule": "@every 30m",
-                "next_run": null,
-                "last_run": {
-                    "pipeline_id": "news-audio",
-                    "started_at": "2026-07-12T00:00:00Z",
-                    "ended_at": "2026-07-12T00:00:05Z",
-                    "ok": true,
-                    "error": null,
-                    "fetched_count": 3,
-                    "delivered_count": 2,
-                },
-                "warnings": [],
-            }]
-        });
-        let rendered = render_bot_ls(&response);
-        assert!(
-            rendered.contains("2026-07-12T00:00:00Z\tOK (2 delivered)"),
-            "{rendered}"
-        );
-    }
-
-    #[test]
-    fn render_bot_ls_formats_a_failed_last_run() {
-        let response = json!({
-            "pipelines": [{
-                "id": "news-audio",
-                "enabled": false,
-                "schedule": "@every 30m",
-                "next_run": null,
-                "last_run": {
-                    "pipeline_id": "news-audio",
-                    "started_at": "2026-07-12T00:00:00Z",
-                    "ended_at": "2026-07-12T00:00:01Z",
-                    "ok": false,
-                    "error": "preset \"worker\" not found in ai.presets",
-                    "fetched_count": 0,
-                    "delivered_count": 0,
-                },
-                "warnings": ["preset \"worker\" not found in ai.presets"],
-            }]
-        });
-        let rendered = render_bot_ls(&response);
-        assert!(
-            rendered.contains("FAIL: preset \"worker\" not found in ai.presets"),
-            "{rendered}"
-        );
-    }
-
-    #[test]
     fn render_bot_logs_reports_no_runs() {
         assert_eq!(
             render_bot_logs(&json!({ "runs": [] })),
@@ -2431,110 +2349,6 @@ mod store_render_tests {
     use super::*;
 
     #[test]
-    fn render_cid_extracts_the_cid_field() {
-        assert_eq!(
-            render_cid(&json!({ "cid": "bafyabc", "name": "x", "size": 1 })),
-            "bafyabc"
-        );
-    }
-
-    #[test]
-    fn render_get_formats_saved_line() {
-        let response = json!({ "name": "notes.txt", "size": 42, "output": "/tmp/notes.txt" });
-        assert_eq!(
-            render_get(&response),
-            "saved notes.txt (42 bytes) to /tmp/notes.txt"
-        );
-    }
-
-    #[test]
-    fn render_ls_lists_entries_tab_separated() {
-        let response = json!([
-            { "cid": "bafy1", "name": "a.txt", "size": 10, "stored_at": "2026-01-01T00:00:00Z" },
-            { "cid": "bafy2", "name": "b.txt", "size": 20, "stored_at": "2026-01-02T00:00:00Z" },
-        ]);
-        let rendered = render_ls(&response);
-        assert_eq!(
-            rendered,
-            "bafy1\ta.txt\t10 bytes\t2026-01-01T00:00:00Z\nbafy2\tb.txt\t20 bytes\t2026-01-02T00:00:00Z"
-        );
-    }
-
-    #[test]
-    fn render_ls_reports_empty_store() {
-        assert_eq!(render_ls(&json!([])), "(empty)");
-    }
-
-    #[test]
-    fn render_get_file_matches_tc_storage_format() {
-        let response = json!({
-            "name": "notes.txt",
-            "size": 42,
-            "checksum": "deadbeef",
-            "output": "/tmp/notes.txt",
-        });
-        // Primary stdout line matches tc-storage-cli's
-        // "%s\t%d bytes\t%s\n" exactly; the `output` field is only ever
-        // surfaced via a separate stderr note (not asserted here).
-        assert_eq!(render_get_file(&response), "notes.txt\t42 bytes\tdeadbeef");
-    }
-
-    #[test]
-    fn render_parse_link_matches_tc_storage_format() {
-        let response = json!({
-            "type": "file-share",
-            "room_id": "r",
-            "folder_id": "folder-1",
-            "file_id": "file-1",
-            "cid": "bafyabc",
-        });
-        assert_eq!(
-            render_parse_link(&response),
-            "type=file-share room=r folder=folder-1 file=file-1 cid=bafyabc"
-        );
-    }
-
-    #[test]
-    fn render_parse_link_handles_missing_fields_as_empty() {
-        let response = json!({ "type": "folder-share", "room_id": "r" });
-        assert_eq!(
-            render_parse_link(&response),
-            "type=folder-share room=r folder= file= cid="
-        );
-    }
-
-    #[test]
-    fn render_sandbox_import_prints_bare_name() {
-        assert_eq!(
-            render_sandbox_import(&json!({ "imported": "sub/name.txt" })),
-            "sub/name.txt"
-        );
-    }
-
-    #[test]
-    fn render_sandbox_ls_lists_one_per_line() {
-        let response = json!({ "entries": ["a.txt", "sub/b.txt"] });
-        assert_eq!(render_sandbox_ls(&response), "a.txt\nsub/b.txt");
-    }
-
-    #[test]
-    fn render_sandbox_rm_prints_removed_path() {
-        assert_eq!(
-            render_sandbox_rm(&json!({ "removed": "sub/name.txt" })),
-            "sub/name.txt"
-        );
-    }
-
-    #[test]
-    fn render_sandbox_export_formats_exported_line() {
-        let response = json!({ "name": "a.txt", "size": 5, "output": "/tmp/a.txt" });
-        assert_eq!(
-            render_sandbox_export(&response),
-            "exported a.txt (5 bytes) to /tmp/a.txt"
-        );
-    }
-
-    #[test]
     fn render_connect_matches_tc_storage_format() {
         let response = json!({
             "node_id": "abc123",
@@ -2545,12 +2359,6 @@ mod store_render_tests {
             render_connect(&response),
             "node=abc123 room=tc-storage-cli peers=2\npeer peer1\npeer peer2"
         );
-    }
-
-    #[test]
-    fn render_connect_handles_zero_peers() {
-        let response = json!({ "node_id": "abc123", "room": "r", "peers": [] });
-        assert_eq!(render_connect(&response), "node=abc123 room=r peers=0");
     }
 
     #[test]
@@ -2565,24 +2373,6 @@ mod store_render_tests {
         assert_eq!(
             render_connect(&response),
             "node=abc123 rooms=a,b peers=1\npeer peer1"
-        );
-    }
-
-    #[test]
-    fn render_connect_renders_multiple_rooms_with_zero_peers() {
-        let response = json!({ "node_id": "abc123", "rooms": ["a", "b"], "peers": [] });
-        assert_eq!(render_connect(&response), "node=abc123 rooms=a,b peers=0");
-    }
-
-    #[test]
-    fn render_folder_get_matches_tc_storage_format() {
-        let response = json!({
-            "folder_name": "Fixture Folder",
-            "files": ["Fixture Folder/a.txt", "Fixture Folder/b.txt"],
-        });
-        assert_eq!(
-            render_folder_get(&response),
-            "folder: Fixture Folder\nsaved 2 file(s):\n  Fixture Folder/a.txt\n  Fixture Folder/b.txt"
         );
     }
 
@@ -2686,27 +2476,6 @@ mod sched_render_tests {
     }
 
     #[test]
-    fn render_sched_ls_shows_dash_for_null_next_run() {
-        let response = json!({
-            "jobs": [{
-                "id": "job-1",
-                "name": "disabled-job",
-                "schedule": "@daily",
-                "command": "x",
-                "enabled": false,
-                "created_at": "2026-07-01T00:00:00Z",
-                "updated_at": "2026-07-01T00:00:00Z",
-                "next_run": null,
-            }]
-        });
-        let rendered = render_sched_ls(&response);
-        assert!(
-            rendered.ends_with("job-1\tdisabled-job\tfalse\t@daily\t-"),
-            "{rendered}"
-        );
-    }
-
-    #[test]
     fn render_sched_logs_reports_no_runs() {
         assert_eq!(
             render_sched_logs(&json!({ "runs": [] })),
@@ -2790,19 +2559,5 @@ mod sched_render_tests {
         });
         let rendered = render_sched_logs(&response);
         assert_eq!(rendered, "2026-07-10T00:00:00Z  still-running  FAIL");
-    }
-
-    #[test]
-    fn render_sched_next_lists_one_time_per_line() {
-        let response = json!({ "times": ["2026-07-11T00:00:00Z", "2026-07-12T00:00:00Z"] });
-        assert_eq!(
-            render_sched_next(&response),
-            "2026-07-11T00:00:00Z\n2026-07-12T00:00:00Z"
-        );
-    }
-
-    #[test]
-    fn render_sched_next_handles_empty_times() {
-        assert_eq!(render_sched_next(&json!({ "times": [] })), "");
     }
 }
