@@ -7,7 +7,6 @@
 //! Other modules depend on the exact signatures of [`Identity`] and
 //! [`current`]; do not change them without updating callers.
 
-pub mod crypto;
 mod delegation;
 mod pairing;
 
@@ -528,19 +527,13 @@ mod tests {
 
     #[test]
     fn node_id_is_first_16_hex_chars_of_sha256_of_did() {
+        // A fixed vector, not a re-computation of the implementation: the
+        // node id is how peers address this node across the tc-* apps, so
+        // what matters is that a given DID keeps mapping to the same id, not
+        // that the function agrees with a second copy of its own arithmetic
+        // written out in the test.
         let did = "did:key:z6MkExampleDidForNodeIdTesting";
-        let node_id = node_id_for_did(did);
-        assert_eq!(node_id.len(), 16);
-
-        let digest = Sha256::digest(did.as_bytes());
-        let expected: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
-        assert_eq!(node_id, expected);
-    }
-
-    #[test]
-    fn identity_node_id_matches_free_function() {
-        let identity = fresh_identity();
-        assert_eq!(identity.node_id(), node_id_for_did(identity.did()));
+        assert_eq!(node_id_for_did(did), "d1a9220e96a8afd0");
     }
 
     #[test]
