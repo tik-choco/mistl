@@ -2,3 +2,8 @@
 # checkout there breaks on the shebang/`set -eu` line ("Illegal option --").
 # Force LF on checkout regardless of core.autocrlf.
 *.sh text eol=lf
+
+# Rust sources are LF in this repo (core.autocrlf is off, so whatever a tool
+# writes is what gets committed). Without this, an editor or script that
+# writes CRLF on Windows turns a one-line change into a whole-file diff.
+*.rs text eol=lf
