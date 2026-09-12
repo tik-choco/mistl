@@ -125,7 +125,7 @@ fn format_number(n: &Number) -> String {
 
 /// Every field of `wire` except `signature`, stably stringified. Mirrors
 /// `signingPayload` in `wireSign.ts`.
-fn signing_payload(wire: &Map<String, Value>) -> String {
+pub(crate) fn signing_payload(wire: &Map<String, Value>) -> String {
     let mut unsigned = wire.clone();
     unsigned.remove("signature");
     stable_stringify(&Value::Object(unsigned))

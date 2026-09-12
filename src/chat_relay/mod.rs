@@ -16,7 +16,7 @@
 //!   (`tc-chat/cli/src/wire.rs`) still uses -- the web client (and thus real
 //!   users) speaks `tc-chat:post`.
 //! - `signature` is an Ed25519 signature, base64url-encoded *without*
-//!   padding, over the UTF-8 bytes of [`stable_json::stable_stringify`]
+//!   padding, over the UTF-8 bytes of [`crate::wiresign::stable_stringify`]
 //!   applied to the wire with `signature` itself removed -- byte-identical to
 //!   tc-chat's `src/lib/wireSign.ts` `signingPayload`. It is keyed by
 //!   `fromId`, a `did:key:z...` string using the *same* did:key derivation as
@@ -72,8 +72,6 @@
 //! first broadcast (mirroring tc-chat's own `REQUEST_DELAY_MS`) and retries
 //! on failure a few times with a short backoff -- the same idiom
 //! `crate::stream::relay`'s cascade republish uses.
-
-mod stable_json;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -334,7 +332,7 @@ fn verify_wire(obj: &Map<String, Value>) -> bool {
     let Some(signature) = obj.get("signature").and_then(Value::as_str) else {
         return false;
     };
-    let payload = stable_json::signing_payload(obj);
+    let payload = crate::wiresign::signing_payload(obj);
     let Ok(sig_bytes) = URL_SAFE_NO_PAD.decode(signature) else {
         return false;
     };
@@ -651,7 +649,7 @@ mod tests {
     /// `signWireFields` does, returning the exact wire bytes a peer would
     /// send.
     fn sign_wire(signing_key: &SigningKey, mut fields: Map<String, Value>) -> Vec<u8> {
-        let payload = super::stable_json::stable_stringify(&Value::Object(fields.clone()));
+        let payload = crate::wiresign::stable_stringify(&Value::Object(fields.clone()));
         let signature = signing_key.sign(payload.as_bytes());
         fields.insert(
             "signature".to_string(),
