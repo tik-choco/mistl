@@ -1,4 +1,5 @@
 pub mod ipc;
+mod services;
 
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,6 +15,7 @@ use crate::config::{self, Config};
 
 /// Shared state for all daemon services.
 pub struct AppState {
+    pub network: crate::network::NetworkControl,
     /// Live configuration. Behind a lock so `config.set` can hot-reload it:
     /// services read it when they (re)start, so most changes apply on the
     /// next `*.start` without a daemon restart.
@@ -102,6 +104,7 @@ impl AppState {
         // The receiver is dropped immediately: `watch::Sender::send` tolerates
         // having no receivers, so `request_shutdown` stays harmless in tests.
         Arc::new(Self {
+            network: crate::network::NetworkControl::for_test(),
             config: std::sync::RwLock::new(Config::default()),
             started_at: Instant::now(),
             shutdown,
@@ -129,14 +132,18 @@ impl AppState {
 /// `ui.listen` for this run (e.g. `--host 0.0.0.0` to reach the dashboard
 /// from another device on the LAN) without touching the persisted config.
 pub fn run_foreground(host_override: Option<String>) -> Result<()> {
+    crate::runtime::acquire_daemon_lock()?;
     let runtime = tokio::runtime::Runtime::new()?;
-    runtime.block_on(daemon_main(host_override))
+    let result = runtime.block_on(daemon_main(host_override));
+    runtime.shutdown_timeout(Duration::from_secs(2));
+    result
 }
 
 async fn daemon_main(host_override: Option<String>) -> Result<()> {
     let config = Config::load()?;
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     let state = Arc::new(AppState {
+        network: crate::network::NetworkControl::load(&config::data_dir()?),
         config: std::sync::RwLock::new(config),
         started_at: Instant::now(),
         shutdown: shutdown_tx,
@@ -152,6 +159,11 @@ async fn daemon_main(host_override: Option<String>) -> Result<()> {
     let listen = match &host_override {
         Some(host) => override_listen_host(&ui_config.listen, host),
         None => ui_config.listen.clone(),
+    };
+    let listen = if state.network.permitted() {
+        listen
+    } else {
+        crate::runtime::offline_listen(&listen)
     };
     let web = if ui_config.enabled {
         match crate::web::serve(state.clone(), &listen).await {
@@ -185,51 +197,9 @@ async fn daemon_main(host_override: Option<String>) -> Result<()> {
         None
     };
 
-    // Background self-update: periodically check GitHub Releases and, if
-    // enabled, stage a newer binary (applied on the next daemon start).
-    crate::update::spawn_auto_update(state.clone());
+    services::spawn(state.clone());
 
-    // tc-chat room relay/bot: starts only if `[chat_relay] enabled` and
-    // `rooms` are configured (a no-op otherwise). Spawned eagerly here --
-    // rather than lazily on first `chat.*` IPC call, like ai/stream's own
-    // services -- because the whole point is receiving tc-chat traffic
-    // while nobody is asking.
-    crate::chat_relay::spawn_background(state.clone());
-
-    // tc-storage folder-share sync (requester side) and owner
-    // responder/announcer: both no-ops unless syncs/shares are persisted.
-    crate::storage::folder_sync::spawn_background(state.clone());
-    crate::storage::folder_owner::spawn_background(state.clone());
-
-    // Cron-like job scheduler: fires due jobs on a 1-second tick. A no-op
-    // (logged) when `[scheduler] enabled = false`.
-    crate::scheduler::spawn_background(state.clone());
-
-    // Bot pipeline engine: source -> transform(s) -> sink(s) automation
-    // runs, fired on a 1-second tick. A no-op (logged) when
-    // `[bot] enabled = false`.
-    crate::bot::spawn_background(state.clone());
-
-    // AI network `provide`: if `ai provide start` (CLI or the dashboard
-    // toggle) was left enabled on a previous run, resume it automatically
-    // instead of coming back up silently not providing (see
-    // `crate::ai::spawn_provide_autoresume`'s doc comment -- this is the fix
-    // for a real "rebuild -> restart -> providing was off and nobody
-    // noticed" confusion). A no-op (quiet debug log) when it was never
-    // enabled, and never fails daemon startup on its own.
-    crate::ai::spawn_provide_autoresume(state.clone());
-
-    // Restore the local OpenAI-compatible API listener when it was left
-    // running. Its bind address still comes from the current config.
-    crate::ai::spawn_serve_autoresume(state.clone());
-
-    // WebRTC P2P tunnel (ported from the standalone `p2p` tool): joins
-    // `[tunnel] room_id` and restores persisted forwards only if `[tunnel]
-    // enabled = true`. A no-op (logged) otherwise -- `mistl tunnel start`
-    // (CLI, dashboard, or TUI) still starts it manually regardless, exactly
-    // like `crate::scheduler`/`crate::bot`'s own `enabled` flags gate only
-    // their background loops, not their manual commands.
-    crate::tunnel::spawn_background(state.clone());
+    let _tray = crate::tray::spawn(state.clone());
 
     tokio::select! {
         _ = tokio::signal::ctrl_c() => info!("interrupted, shutting down"),
@@ -267,8 +237,8 @@ async fn daemon_main(host_override: Option<String>) -> Result<()> {
     // bound to the configured (typically loopback-only) `ui.listen` host,
     // silently dropping external devices with connection-refused.
     if state.wants_restart() {
-        match spawn_detached_daemon(host_override.as_deref()) {
-            Ok(()) => info!("relaunched daemon on the updated binary"),
+        match spawn_daemon(host_override.as_deref(), true) {
+            Ok(_) => info!("relaunched daemon from the same instance"),
             Err(error) => tracing::warn!(%error, "failed to relaunch daemon after update"),
         }
     }
@@ -293,16 +263,19 @@ fn override_listen_host(listen: &str, host: &str) -> String {
 /// the IPC/web sockets have been released. `host`, if the daemon that's
 /// restarting was itself started with `--host`, is re-forwarded so the
 /// relaunched process keeps the same dashboard bind address.
-fn spawn_detached_daemon(host: Option<&str>) -> Result<()> {
+fn spawn_daemon(host: Option<&str>, append: bool) -> Result<std::process::Child> {
     let exe = std::env::current_exe().context("resolving current executable")?;
     let log_path = config::data_dir()?.join("daemon.log");
     let log = std::fs::OpenOptions::new()
         .create(true)
-        .append(true)
+        .append(append)
+        .write(true)
+        .truncate(!append)
         .open(&log_path)
         .with_context(|| format!("opening {}", log_path.display()))?;
 
     let mut command = std::process::Command::new(exe);
+    crate::runtime::child_args(&mut command);
     command.args(["daemon", "run"]);
     if let Some(host) = host {
         command.args(["--host", host]);
@@ -326,8 +299,7 @@ fn spawn_detached_daemon(host: Option<&str>) -> Result<()> {
         command.process_group(0);
     }
 
-    command.spawn().context("relaunching daemon process")?;
-    Ok(())
+    command.spawn().context("spawning daemon process")
 }
 
 /// Spawn `mistl daemon run` as a detached background process and wait for it
@@ -344,7 +316,13 @@ pub fn start_background_quiet() -> Result<()> {
 }
 
 fn start_background_impl(quiet: bool, host: Option<&str>) -> Result<()> {
-    if let Ok(status) = ipc::client_request("daemon.status", json!({})) {
+    let existing = ipc::client_request("daemon.status", json!({}));
+    if let Err(error) = &existing
+        && !error.to_string().contains("daemon is not running")
+    {
+        bail!("{error:#}");
+    }
+    if let Ok(status) = existing {
         if quiet {
             return Ok(());
         }
@@ -360,36 +338,8 @@ fn start_background_impl(quiet: bool, host: Option<&str>) -> Result<()> {
         .map(|config| config.ui.enabled)
         .unwrap_or(false);
 
-    let exe = std::env::current_exe().context("resolving current executable")?;
     let log_path = config::data_dir()?.join("daemon.log");
-    let log = std::fs::File::create(&log_path)
-        .with_context(|| format!("creating {}", log_path.display()))?;
-
-    let mut command = std::process::Command::new(exe);
-    command.args(["daemon", "run"]);
-    if let Some(host) = host {
-        command.args(["--host", host]);
-    }
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::from(log));
-
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        command.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
-
-    let child = command.spawn().context("spawning daemon process")?;
+    let child = spawn_daemon(host, false)?;
 
     // Poll until the daemon answers or we give up.
     for _ in 0..50 {
@@ -451,8 +401,43 @@ fn has_dashboard_url(status: &Value) -> bool {
 
 /// Route an IPC request to the owning module.
 pub async fn dispatch(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Value> {
+    if !state.network.permitted() && !crate::network::offline_command_allowed(cmd) {
+        state.network.require_online()?;
+    }
     match cmd {
+        "network.status" => Ok(state.network.status()),
+        "network.set" => {
+            let enabled = args
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .context("network.set requires enabled: boolean")?;
+            match state.network.set(enabled) {
+                Ok(true) => {
+                    let state = state.clone();
+                    // Let IPC/HTTP deliver the pending state before stopping this process.
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(300)).await;
+                        state.request_restart();
+                    });
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    if !enabled {
+                        let state = state.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(Duration::from_millis(300)).await;
+                            // Do not restart from a previous persisted ON value.
+                            state.request_shutdown();
+                        });
+                    }
+                    return Err(error);
+                }
+            }
+            Ok(state.network.status())
+        }
         "daemon.status" => Ok(json!({
+            "build": crate::runtime::build_info(),
+            "network": state.network.status(),
             "pid": std::process::id(),
             "uptime_secs": state.started_at.elapsed().as_secs(),
             "version": env!("CARGO_PKG_VERSION"),
@@ -511,15 +496,17 @@ pub async fn dispatch(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<V
             // -- so a preset/model edit is just... immediately true. Fired
             // fire-and-forget (it may hit the network re-fetching upstream
             // models) so this response isn't held up waiting on it.
-            if matches!(
-                path,
-                "ai.providers"
-                    | "ai.presets"
-                    | "ai.default_preset_id"
-                    | "ai.tts_preset_id"
-                    | "ai.stt_preset_id"
-                    | "ai.advertised_models"
-            ) {
+            if state.network.permitted()
+                && matches!(
+                    path,
+                    "ai.providers"
+                        | "ai.presets"
+                        | "ai.default_preset_id"
+                        | "ai.tts_preset_id"
+                        | "ai.stt_preset_id"
+                        | "ai.advertised_models"
+                )
+            {
                 let state = state.clone();
                 tokio::spawn(async move { crate::ai::reload_provider_if_running(&state).await });
             }

@@ -31,7 +31,7 @@ const SUMMARIZE_SYSTEM_PROMPT: &str = "あなたは記事やメッセージを�
 /// fed to any later `tts` step); `title`/`lang` are set once a `translate`
 /// step has run (sinks fall back to the article's own title/language when
 /// unset); `audio` is set once a `tts` step has run.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(super) struct TransformOutcome {
     pub script: Option<String>,
     pub title: Option<String>,
@@ -41,7 +41,7 @@ pub(super) struct TransformOutcome {
 
 /// Synthesized audio, already stored (see [`synthesize_audio`]) and ready
 /// for a sink to reference by CID.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(super) struct AudioOutcome {
     pub cid: String,
     pub mime: String,

@@ -1,0 +1,11 @@
+{
+  "name": "mistl-dashboard-tests",
+  "private": true,
+  "description": "Development-only DOM checks for the embedded dashboard; production builds need only Cargo.",
+  "scripts": {
+    "test": "node scripts/test-ui.mjs && node scripts/test-runtime-ui.mjs && node scripts/test-topology-ui.mjs && node scripts/test-storage-ui.mjs && node scripts/test-chat-ui.mjs && node scripts/test-tunnel-graph-ui.mjs && node scripts/test-dashboard.mjs"
+  },
+  "devDependencies": {
+    "happy-dom": "20.10.6"
+  }
+}

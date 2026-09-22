@@ -36,6 +36,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  MISTL_BUILD_CHANNEL: stable
   # Public mistlib. Switch to tik-choco-lab/mistlib-dev + develop (and set the
   # MISTLIB_DEV_TOKEN secret) to build against unreleased mistlib commits.
   MISTLIB_REPO: tik-choco-lab/mistlib
@@ -134,6 +135,11 @@ jobs:
       - name: Stamp release version into Cargo.toml
         # Only the [package] section has `version =` at column 0.
         run: sed -i.bak -E 's/^version = "[^"]*"/version = "${{ needs.plan.outputs.version }}"/' Cargo.toml && rm Cargo.toml.bak
+
+      # Test on the runner's native architecture (the macOS x86_64 build
+      # can be cross-compiled on an ARM runner). Publishing requires this.
+      - name: Test
+        run: cargo test -- --test-threads=1
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}

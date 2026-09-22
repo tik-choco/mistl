@@ -74,33 +74,15 @@ _ensure-mistlib-consensus:
 
 # --- release ---------------------------------------------------------------
 
-# Optimized release build (lto=thin, stripped — see Cargo.toml), then
-# (re)start the daemon from the freshly built exe.
-# Unlike the dev recipes below, release fetches/updates both mistlib clones
-# first (fetch-mistlib fetch-mistlib-consensus) rather than only cloning them
-# if missing, so a release build always picks up the latest pinned refs. The
-# fetch scripts are offline-tolerant — if the fetch fails they warn and keep
-# the existing checkout — and they auto-stash/re-apply any local changes in
-# the clone, rolling back with a warning on conflict, so this won't fail
-# outright when offline or clobber uncommitted work in the dependency clones.
-# On Windows, first free the exe if a running daemon is holding it (the
-# release link fails on a locked target). `Stop-Process -ErrorAction
-# SilentlyContinue` hides the "process not found" message but still leaves
-# $? = false, and `powershell -Command` returns that as exit code 1 — which
-# just treats as a failed recipe. `; exit 0` forces a clean exit whether or
-# not a mistl process was running. The final `daemon start` gets the same
-# treatment: a build that succeeded shouldn't fail the recipe just because
-# the daemon was, say, already started some other way in the meantime.
+# Optimized local build (channel remains dev unless explicitly stamped).
+# Does not start/stop any daemon. Use `just dev` or `just watch` to run.
 [windows]
 release: fetch-mistlib fetch-mistlib-consensus
-    Stop-Process -Name "{{bin}}" -Force -ErrorAction SilentlyContinue; exit 0
-    cargo build --release
-    .\target\release\{{bin}}.exe daemon start; exit 0
+    cargo build --release --locked
 
 [unix]
 release: fetch-mistlib fetch-mistlib-consensus
-    cargo build --release
-    ./target/release/{{bin}} daemon start || true
+    cargo build --release --locked
 
 # Validate the current dependency checkout without updating it.
 verify: _ensure-mistlib _ensure-mistlib-consensus fmt-check lint test test-fetch-safety
@@ -157,6 +139,10 @@ _copy-linux-exe:
 
 # --- dev -------------------------------------------------------------------
 
+# Start only this worktree's isolated development daemon.
+dev: _ensure-mistlib _ensure-mistlib-consensus
+    node scripts/dev.mjs
+
 # Debug build
 build: _ensure-mistlib _ensure-mistlib-consensus
     cargo build
@@ -180,11 +166,11 @@ test: _ensure-mistlib _ensure-mistlib-consensus
 # loop but leaves the last-built daemon running (same as `just release`).
 [windows]
 watch: _ensure-mistlib _ensure-mistlib-consensus
-    powershell -NoProfile -ExecutionPolicy Bypass -File scripts/watch.ps1
+    node scripts/dev.mjs --watch
 
 [unix]
 watch: _ensure-mistlib _ensure-mistlib-consensus
-    sh scripts/watch.sh
+    node scripts/dev.mjs --watch
 
 # --- quality ---------------------------------------------------------------
 

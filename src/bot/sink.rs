@@ -7,9 +7,9 @@
 //! translate-and-republish or chat-digest -> news). [`deliver`] runs every
 //! configured sink independently and never fails -- a sink error is
 //! recorded per-sink (`persist::SinkOutcome::{ok,error}`) rather than
-//! propagated, per the pipeline flow's "sink失敗は run 全体を FAIL にしない"
-//! rule (see `bot::run_pipeline`, which only fails a run on a
-//! source/transform error).
+//! propagated. The pipeline's durable outbox checkpoints successful sinks,
+//! retains failed deliveries for retry, and reports an unsuccessful run
+//! while delivery remains incomplete.
 
 use std::sync::Arc;
 

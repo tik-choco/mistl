@@ -752,25 +752,14 @@ impl Default for TunnelConfig {
     }
 }
 
-fn project_dirs() -> Result<directories::ProjectDirs> {
-    directories::ProjectDirs::from("com", "tik-choco", "mistl")
-        .context("could not determine home directory")
-}
-
 /// Per-user data directory (daemon state, keys, blocks, relay wirelogs).
 pub fn data_dir() -> Result<PathBuf> {
-    let dirs = project_dirs()?;
-    let dir = dirs.data_dir().to_path_buf();
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir)
+    crate::runtime::dirs(false)
 }
 
 /// Per-user config directory.
 pub fn config_dir() -> Result<PathBuf> {
-    let dirs = project_dirs()?;
-    let dir = dirs.config_dir().to_path_buf();
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir)
+    crate::runtime::dirs(true)
 }
 
 pub fn config_path() -> Result<PathBuf> {
@@ -929,7 +918,18 @@ impl Config {
     pub fn load() -> Result<Self> {
         let path = config_path()?;
         if !path.exists() {
-            let config = Self::default();
+            let mut config = Self::default();
+            config.ui.listen = format!("127.0.0.1:{}", crate::runtime::initial_ui_port()?);
+            if !crate::runtime::legacy_default() {
+                let api = std::net::TcpListener::bind("127.0.0.1:0")?;
+                let rtsp = std::net::TcpListener::bind("127.0.0.1:0")?;
+                config.ai.api_listen = api.local_addr()?.to_string();
+                config.stream.rtsp_url = format!("rtsp://{}/stream", rtsp.local_addr()?);
+                config.ai.room_id =
+                    Some(format!("mistl-dev-{}", crate::runtime::context().instance));
+                config.update.auto_check = false;
+                config.update.auto_apply = false;
+            }
             config.save()?;
             return Ok(config);
         }

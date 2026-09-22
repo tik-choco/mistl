@@ -89,6 +89,16 @@ build's `target/release/`.
 
 ## Quick start
 
+Local builds use an isolated **dev** instance, with a version/build banner at the
+top of the dashboard. External connections initially start **OFF**; enable them
+using the dashboard, Windows tray, or `mistl network on`. The choice is saved
+immediately and restored after PC restart. Switching briefly restarts that
+instance. Login startup is a separate, instance-specific setting.
+
+Use `just dev` / `just watch` for development. `just release` only builds and no
+longer stops running daemons. See [runtime and connection controls](docs/runtime.md)
+for instance paths, migration, tray controls, and verification commands.
+
 Double-click `mistl.exe` (or run `mistl` with no arguments): the daemon starts in
 the background and the dashboard opens in your browser — everything below can be
 done from there, including settings. The dashboard is bilingual (English/日本語,
@@ -438,6 +448,34 @@ mistl <subcommand>  --(JSON over loopback TCP)-->  mistl daemon run
   mistai consumers and providers in the same room interoperate; the `net` module
   multiplexes `ai`, `chat_relay`, and the other room protocols over mistlib's
   single raw-message handler by message shape
+
+## Bot delivery and scheduled jobs
+
+Bot pipelines save transformed content and per-sink delivery receipts before
+marking an article processed. Failed or timed-out sinks retry on later pipeline
+runs, including after a daemon restart; successful sinks are skipped and LLM/TTS
+transformations are reused. A sink has a 120-second deadline. An incomplete
+delivery makes the run unsuccessful; inspect `mistl bot items` for individual
+sink errors and `mistl bot logs` for run outcomes.
+
+Pending deliveries are retained in `bot-outbox-<pipeline hash>.json` under the
+data directory (up to 100 per pipeline). A full queue stops new imports rather
+than deleting undelivered content. Restore the failed destination and run the
+pipeline again, or let its schedule retry. Current sink settings are used for
+retries; changing a sink configuration treats it as a new destination. Disabling
+a pipeline pauses its retries. Existing processed-item files remain compatible;
+items marked processed by older versions are not automatically replayed.
+
+Delivery is at-least-once: if a remote destination accepts a send just before a
+crash, timeout, or local checkpoint failure, a retry may duplicate that send.
+Successful local checkpoints prevent ordinary retries from resending to healthy
+sinks. Unavailable source CIDs rotate through the polling budget so an old failed
+prefix does not indefinitely block newer items.
+
+Scheduled jobs retain only the last 64 KiB of combined stdout/stderr while they
+run. The one-hour deadline includes waiting for output pipes to close. Timeout
+ends the scheduler's wait and kills the shell if it is still running; detached
+descendant processes are not yet fully supervised.
 
 ## Known limitations (v0.1)
 

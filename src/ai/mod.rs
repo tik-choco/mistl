@@ -391,6 +391,11 @@ fn provider_upstream(ai: &crate::config::AiConfig, provider_id: &str) -> Result<
 
 /// IPC entry point for all `ai.*` commands.
 pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Value> {
+    if cmd == "ai.status" && SERVICE.get().is_none() {
+        return Ok(json!({"room":state.config().ai.room_id, "node_id":null,
+            "connected_peers":0, "providing":false, "models":[], "services":[],
+            "recent_requests":[], "serving":null, "remote_provider":null}));
+    }
     // Listing a provider's upstream models is a plain HTTP GET against its
     // configured `base_url` -- it doesn't touch the p2p AI network, so this
     // is handled before `ensure_started` (which joins the network room).

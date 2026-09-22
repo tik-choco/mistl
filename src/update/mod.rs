@@ -54,6 +54,12 @@ const DISABLED_RECHECK: Duration = Duration::from_secs(15 * 60);
 ///   latest}` when already up to date, else download + verify + stage and
 ///   `{updated: true, from, to, restart: "none"|"scheduled"}`.
 pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Value> {
+    if cmd != "update.status" {
+        state.network.require_online()?;
+        if crate::runtime::CHANNEL != "stable" {
+            bail!("self-update is disabled for development/preview builds");
+        }
+    }
     match cmd {
         "update.status" => cmd_status(state),
         "update.check" => cmd_check(state).await,
@@ -181,6 +187,9 @@ async fn cmd_apply(args: Value, state: &Arc<AppState>) -> Result<Value> {
 /// takes the daemon down, and it never restarts it either: staged updates
 /// apply on the next daemon start.
 pub fn spawn_auto_update(state: Arc<AppState>) {
+    if crate::runtime::CHANNEL != "stable" || !state.network.permitted() {
+        return;
+    }
     tokio::spawn(async move {
         tokio::time::sleep(FIRST_CHECK_DELAY).await;
         loop {

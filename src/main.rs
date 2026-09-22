@@ -1,6 +1,7 @@
 mod ai;
 mod bot;
 mod chat_relay;
+mod child_process;
 mod cli;
 mod config;
 mod consensus;
@@ -9,11 +10,14 @@ mod devlog;
 mod identity;
 mod install;
 mod net;
+mod network;
+mod runtime;
 mod scheduler;
 mod statefile;
 mod storage;
 mod stream;
 mod topology;
+mod tray;
 mod tunnel;
 mod update;
 mod web;
@@ -47,5 +51,6 @@ fn main() -> Result<()> {
     );
 
     let args = cli::Cli::parse();
+    runtime::initialize(args.instance.clone(), args.state_dir.clone(), args.no_tray)?;
     cli::dispatch(args)
 }

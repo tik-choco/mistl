@@ -1619,6 +1619,7 @@ dependencies = [
  "fdk-aac",
  "hex",
  "hmac",
+ "libc",
  "mistlib-consensus-core",
  "mistlib-consensus-native",
  "mistlib-core",
@@ -1647,6 +1648,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "windows-capture",
+ "windows-sys 0.61.2",
  "winreg",
 ]
 

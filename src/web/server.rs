@@ -97,7 +97,7 @@ pub async fn serve(state: Arc<AppState>, listen: &str) -> Result<WebServer> {
     let listener = TcpListener::bind(listen)
         .await
         .with_context(|| format!("binding web dashboard to {listen}"))?;
-    let listen = listen.to_string();
+    let listen = listener.local_addr()?.to_string();
 
     // Per-process nonce for the live-reload poll (see `/api/dev/instance`
     // above): a fresh value every time the daemon (re)starts, which is what
@@ -282,11 +282,12 @@ async fn read_body_to_file(
 /// [`super::INDEX_HTML`] with [`LIVE_RELOAD_SCRIPT`] spliced in before
 /// `</body>`; release builds get the embedded HTML unmodified.
 fn index_html_body() -> std::borrow::Cow<'static, str> {
-    if cfg!(debug_assertions) {
-        std::borrow::Cow::Owned(super::INDEX_HTML.replacen("</body>", LIVE_RELOAD_SCRIPT, 1))
-    } else {
-        std::borrow::Cow::Borrowed(super::INDEX_HTML)
-    }
+    let bootstrap = format!(
+        "<script>window.mistlRuntime={};</script>",
+        crate::runtime::build_info()
+    );
+    let html = super::INDEX_HTML.replacen("<head>", &format!("<head>{bootstrap}"), 1);
+    std::borrow::Cow::Owned(html.replacen("</body>", LIVE_RELOAD_SCRIPT, 1))
 }
 
 /// Debug-only live-reload poll: fetches the per-process `/api/dev/instance`
@@ -296,7 +297,7 @@ fn index_html_body() -> std::borrow::Cow<'static, str> {
 /// retried on the next tick.
 const LIVE_RELOAD_SCRIPT: &str = r#"<script>
 (function () {
-  var lastInstance = null;
+  var lastInstance = window.mistlRunId || null;
   function poll() {
     fetch("/api/dev/instance", { cache: "no-store" })
       .then(function (r) { return r.json(); })
@@ -534,6 +535,22 @@ async fn write_binary_response(
     stream.flush().await
 }
 
+/// Feature URLs are stable across builds; always revalidate alongside the
+/// dashboard so a refreshed shell cannot receive an older feature contract.
+async fn write_feature_response(
+    stream: &mut TcpStream,
+    content_type: &str,
+    body: &[u8],
+) -> io::Result<()> {
+    let head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).await?;
+    stream.write_all(body).await?;
+    stream.flush().await
+}
+
 /// JSON error body shape used by every non-2xx response from this server.
 async fn write_error(
     stream: &mut TcpStream,
@@ -591,16 +608,37 @@ async fn handle_connection_inner(
     let method = head.method.to_ascii_uppercase();
     let path = head.path.split('?').next().unwrap_or("").to_string();
 
+    if !state.network.permitted() && !stream.peer_addr()?.ip().is_loopback() {
+        return write_error(stream, 403, "Forbidden", "external connections are OFF").await;
+    }
+    // Bind every mutation to the page's actual build/instance. A stale tab cannot
+    // operate a different daemon which happens to reuse the same port.
+    if method == "POST" && head.header("x-mistl-instance") != Some(page_identity().as_str()) {
+        return write_error(stream, 409, "Conflict", "daemon changed; reload this page").await;
+    }
+
     match (method.as_str(), path.as_str()) {
         ("GET", "/") | ("GET", "/index.html") => {
             // Page load: a strong signal the dashboard tab is open, used by
             // `web::autoreopen` to avoid reopening a duplicate after a
             // restart (and to decide what to persist at shutdown).
             state.note_dashboard_activity();
-            write_html_response(stream, 200, "OK", index_html_body().as_ref()).await
+            let html = index_html_body().replacen(
+                "<head>",
+                &format!(
+                    "<head><script>window.mistlRunId={};</script>",
+                    json!(instance_id)
+                ),
+                1,
+            );
+            write_html_response(stream, 200, "OK", &html).await
         }
         ("GET", "/favicon.png") => {
             write_binary_response(stream, 200, "OK", "image/png", super::FAVICON_PNG).await
+        }
+        ("GET", path) if super::assets::feature_asset(path).is_some() => {
+            let (content_type, body) = super::assets::feature_asset(path).unwrap();
+            write_feature_response(stream, content_type, body).await
         }
         ("GET", "/api/dev/instance") => {
             write_json_response(
@@ -630,6 +668,14 @@ async fn handle_connection_inner(
         ("OPTIONS", _) => write_error(stream, 403, "Forbidden", "forbidden").await,
         _ => write_error(stream, 404, "Not Found", "not found").await,
     }
+}
+
+fn page_identity() -> String {
+    format!(
+        "{}/{}",
+        crate::runtime::registration_name(),
+        crate::runtime::BUILD_ID
+    )
 }
 
 async fn handle_api_call(
@@ -1327,6 +1373,27 @@ mod tests {
     }
 
     // -- socket-level parsing (no AppState needed) -----------------------------
+
+    #[tokio::test]
+    async fn feature_response_revalidates_scripts_with_exact_length() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            write_feature_response(&mut socket, "text/javascript; charset=utf-8", b"/* UI */")
+                .await
+                .unwrap();
+        });
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).await.unwrap();
+        server.await.unwrap();
+        assert!(response.contains("Content-Type: text/javascript; charset=utf-8\r\n"));
+        assert!(response.contains("Content-Length: 8\r\n"));
+        assert!(response.contains("Cache-Control: no-cache\r\n"));
+        assert!(response.contains("X-Content-Type-Options: nosniff\r\n"));
+        assert!(response.ends_with("\r\n\r\n/* UI */"));
+    }
 
     #[tokio::test]
     async fn read_request_head_splits_leftover_body_bytes() {

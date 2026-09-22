@@ -6,6 +6,7 @@
 //! rejected via a required custom header (browsers can't send it cross-site
 //! without a CORS preflight, which this server never grants).
 
+mod assets;
 pub mod autoreopen;
 pub mod browser;
 pub mod server;

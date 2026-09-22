@@ -129,6 +129,7 @@ pub fn set_media_consumer(
 /// additive, so ai, chat_relay, and the stream relay can each sit in their own
 /// room at the same time.
 pub async fn ensure_started(state: &Arc<AppState>, room: String) -> Result<Arc<Transport>> {
+    state.network.require_online()?;
     let engine = ENGINE
         .get_or_try_init(|| async { start_engine(state).await })
         .await?;

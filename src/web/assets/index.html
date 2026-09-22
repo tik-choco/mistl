@@ -1752,7 +1752,47 @@
       transition-duration: 0.001ms !important;
     }
   }
+
+  /* Persistent network workspace and task-focused forms. */
+  #topology-dock { min-width: 0; padding: 20px; }
+  #topology-dock .cascade-card { margin: 0; background: var(--panel); }
+  #topology-dock .topology-graph-wrap { overflow-x: auto; }
+  #topology-dock .topology-svg { min-width: 560px; }
+  #tunnel-room-connect-form { padding: 12px; background: var(--bg-alt); border-radius: var(--radius); margin-bottom: 12px; }
+  .tunnel-room-switch > summary { display: flex; gap: 6px; width: auto; }
+  #bot-editor { margin-top: 16px; }
+  #bot-editor > summary { color: var(--accent); font-weight: 600; }
+  #bot-editor .bot-recipe-grid { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
+  .chat-history { height: clamp(260px, 48vh, 640px); overflow-y: auto; padding: 20px; background: var(--bg-alt); border: 1px solid var(--panel-border); border-radius: var(--radius); overflow-anchor: none; }
+  #tunnel-chat-messages { display: flex; flex-direction: column; gap: 16px; }
+  .chat-message { max-width: 85%; align-self: flex-start; min-width: 0; }
+  .chat-message.mine { align-self: flex-end; }
+  .chat-message-meta { display: flex; flex-wrap: wrap; gap: 8px; color: var(--text-dim); font-size: 11px; margin-bottom: 5px; overflow-wrap: anywhere; }
+  .chat-message-body { margin: 0; padding: 10px 14px; background: var(--panel); border: 1px solid var(--panel-border); border-radius: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .chat-message.mine .chat-message-body { background: var(--accent-dim); }
+  #tunnel-chat-form { margin-top: 12px; align-items: flex-end; }
+  @media (min-width: 1280px) {
+    .shell { max-width: 1920px; display: grid; grid-template-columns: var(--sidenav-w) minmax(0, 1fr) minmax(340px, 30vw); }
+    #topology-dock { position: sticky; top: 76px; max-height: calc(100vh - 92px); overflow: auto; padding: 20px 20px 20px 0; }
+  }
+  @media (max-width: 1279px) {
+    .shell { flex-wrap: wrap; padding-bottom: 0; }
+    #topology-dock { position: static; width: 100%; padding: 16px 14px; background: var(--bg); border-top: 1px solid var(--panel-border); }
+  }
+
+  .ai-network-settings { margin-bottom: 24px; }
+  .ai-network-settings .settings-section { border: 0; padding: 0; }
+  .topology-node-glyph { fill: none; stroke: var(--text-dim); stroke-width: 1.7; stroke-linecap: round; }
+  .topology-node-box.kind-self + .topology-node-glyph { stroke: var(--accent); }
+  .topology-node-clickable:focus-visible { outline: none; }
+  .topology-node-clickable:focus-visible .topology-node-box,
+  .topology-node-clickable:hover .topology-node-box { stroke: var(--accent); stroke-width: 3; }
+  #topology-card .topology-dot { stroke: var(--panel); stroke-width: 2; }
 </style>
+<link rel="stylesheet" href="/assets/features/topology.css">
+<link rel="stylesheet" href="/assets/features/storage.css">
+<link rel="stylesheet" href="/assets/features/chat.css">
+<link rel="stylesheet" href="/assets/features/tunnel-graph.css">
 <script>
   /* Seed the theme before first paint (no flash). Light is the default; an
      explicit choice the user made with the toggle (stored in localStorage)
@@ -1770,8 +1810,10 @@
 <body>
 
 <div class="topbar" id="topbar">
+  <div id="build-banner" hidden style="padding:8px 16px;background:#513d05;color:#fff1b8;font:600 13px/1.5 system-ui;overflow-wrap:anywhere" role="status"></div>
   <header>
     <h1>MISTL</h1>
+    <button type="button" id="network-toggle" disabled aria-pressed="false">外部接続: …</button>
     <span id="daemon-pill" class="pill"><span class="dot"></span><span data-i18n="daemon.connecting">connecting&hellip;</span></span>
     <div class="identity" id="identity-summary"></div>
     <button type="button" class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">
@@ -1817,8 +1859,6 @@
       <button id="btn-restart-daemon" data-i18n="overview.restartDaemon">Restart daemon</button>
       <button id="btn-stop-daemon" class="danger" data-i18n="overview.stopDaemon">Stop daemon</button>
     </div>
-    <!-- The one topology card (#topology-card) is re-parented into whichever
-         of these slots belongs to the active panel; see placeTopologyCard(). -->
     <div class="topology-slot" id="topology-slot-overview"></div>
   </section>
 
@@ -1876,12 +1916,14 @@
             <span class="badge cascade-role-badge" id="cascade-role-badge" hidden></span>
             <span class="drawer-chevron" aria-hidden="true"></span>
           </summary>
-          <p class="muted" style="font-size: 12.5px; margin: 0;" data-i18n="topology.desc">Who this node is connected to and how, from what mistlib and the relay/cascade control plane can actually observe.</p>
+          <p class="muted" style="font-size: 12.5px; margin: 0;" data-i18n="topology.desc">Explore your connections. Hover for a preview or select a node to see details.</p>
           <div class="topology-context" id="topology-context" hidden></div>
+          <div class="topology-view-controls" id="topology-view-controls"></div>
           <div class="topology-graph-wrap">
-            <svg id="topology-svg" class="topology-svg" role="img" viewBox="0 0 640 200"></svg>
+            <svg id="topology-svg" class="topology-svg" role="group" tabindex="-1" viewBox="0 0 640 200"></svg>
           </div>
           <div class="cascade-source" id="cascade-source" hidden></div>
+          <p class="topology-empty-note" id="topology-empty-note" data-i18n="topology.emptyHint" hidden>No peers connected yet.</p>
           <div class="topology-legend" id="topology-legend"></div>
           <dl class="kv" id="topology-kv"></dl>
           <div class="topology-rooms" id="topology-rooms"></div>
@@ -1920,6 +1962,7 @@
       <div id="ai-connection-editor"></div>
     </div>
     <div class="subtab-page" data-subtab="network">
+      <div class="ai-network-settings" id="settings-drawer-body-ai"></div>
       <div id="ai-setup-state"></div>
       <div class="ai-role-cards">
         <div class="ai-role-card" id="ai-card-provide">
@@ -1956,14 +1999,7 @@
       </div>
     </div>
     <div class="topology-slot" id="topology-slot-ai"></div>
-    <details class="settings-drawer" id="settings-drawer-ai">
-      <summary>
-        <svg class="gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg>
-        <span data-i18n="settings.drawer.ai">AI settings</span>
-        <span class="drawer-chevron" aria-hidden="true"></span>
-      </summary>
-      <div class="settings-drawer-body" id="settings-drawer-body-ai"></div>
-    </details>
+
   </section>
 
   <section class="panel panel-span2" id="panel-chat-relay">
@@ -1977,24 +2013,7 @@
       <span class="topo-strip-peers" data-role="peers"></span>
       <a href="#topology-card" data-i18n="topoStrip.viewFull">View full topology</a>
     </div>
-    <div class="inline" style="align-items: flex-end;">
-      <div class="field" style="flex: 1; min-width: 160px;">
-        <label for="chat-relay-room" data-i18n="chatRelay.log.roomLabel">tc-chat room</label>
-        <select id="chat-relay-room"></select>
-      </div>
-    </div>
-    <div class="table-wrap">
-      <table id="chat-relay-log-table">
-        <thead><tr>
-          <th data-i18n="chatRelay.log.col.time">Time</th>
-          <th data-i18n="chatRelay.log.col.from">From</th>
-          <th data-i18n="chatRelay.log.col.kind">Kind</th>
-          <th data-i18n="chatRelay.log.col.content">Content</th>
-        </tr></thead>
-        <tbody></tbody>
-      </table>
-      <div class="empty-note" id="chat-relay-log-empty" data-i18n="chatRelay.log.empty">No relayed tc-chat messages yet for this room.</div>
-    </div>
+    <div id="chat-relay-app"></div>
     <div class="topology-slot" id="topology-slot-chat-relay"></div>
     <details class="settings-drawer" id="settings-drawer-chat-relay">
       <summary>
@@ -2017,16 +2036,35 @@
       <span class="topo-strip-peers" data-role="peers"></span>
       <a href="#topology-card" data-i18n="topoStrip.viewFull">View full topology</a>
     </div>
-    <div class="subtabs" role="tablist" data-i18n-aria-label="store.tabs.groupLabel" aria-label="Store sections">
-      <button type="button" data-subtab-target="files" data-i18n="store.tabs.files">Files</button>
-      <button type="button" data-subtab-target="sandbox" data-i18n="store.tabs.sandbox">Sandbox</button>
-      <button type="button" data-subtab-target="sync" data-i18n="store.tabs.sync">Folder sync</button>
-    </div>
+    <div class="store-workspace">
+    <aside class="store-sidebar">
+      <div class="store-sidebar-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/><path d="M9 21v-8h6v8"/></svg><span data-i18n="store.browser.drive">My Drive</span></div>
+      <div class="subtabs" role="tablist" aria-orientation="vertical" data-i18n-aria-label="store.tabs.groupLabel" aria-label="Store sections">
+        <button type="button" data-subtab-target="files"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span data-i18n="store.tabs.files">Files</span></button>
+        <button type="button" data-subtab-target="sandbox"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 4h16v16H4zM4 14h5l1 3h4l1-3h5M12 7v6m-3-3 3 3 3-3"/></svg><span data-i18n="store.tabs.sandbox">Sandbox</span></button>
+        <button type="button" data-subtab-target="sync"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M20 8a8 8 0 0 0-14-3L3 8m0-5v5h5M4 16a8 8 0 0 0 14 3l3-3m0 5v-5h-5"/></svg><span data-i18n="store.tabs.sync">Folder sync</span></button>
+      </div>
+      <div class="store-sidebar-summary" data-store-summary></div>
+    </aside>
+    <div class="store-main">
     <div class="subtab-page" data-subtab="files">
-      <div class="table-wrap">
+      <div class="store-browser-heading">
+        <nav class="store-breadcrumb" data-i18n-aria-label="store.browser.location" aria-label="Location"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="m3 10 9-7 9 7v11H3zM9 21v-8h6v8"/></svg><span data-i18n="store.browser.drive">My Drive</span><span aria-hidden="true">/</span><strong data-i18n="store.tabs.files">Files</strong></nav>
+        <span class="store-browser-count" data-store-count aria-live="polite"></span>
+      </div>
+      <div class="store-toolbar" data-store-toolbar>
+        <label class="store-search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg><input type="search" id="store-search" data-i18n-placeholder="store.browser.search" placeholder="Search files" data-i18n-aria-label="store.browser.search" aria-label="Search files" autocomplete="off"></label>
+        <select id="store-sort" data-i18n-aria-label="store.browser.sort" aria-label="Sort files"><option value="name" data-i18n="store.browser.sortName">Name</option><option value="recent" data-i18n="store.browser.sortRecent">Newest first</option><option value="size" data-i18n="store.browser.sortSize">Largest first</option></select>
+        <div class="store-view-toggle" role="group" data-i18n-aria-label="store.browser.view" aria-label="View mode">
+          <button type="button" data-store-view="list" aria-pressed="true" data-i18n-title="store.browser.list" data-i18n-aria-label="store.browser.list" title="List view" aria-label="List view"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M9 6h12M9 12h12M9 18h12M3 6h1M3 12h1M3 18h1"/></svg></button>
+          <button type="button" data-store-view="grid" aria-pressed="false" data-i18n-title="store.browser.grid" data-i18n-aria-label="store.browser.grid" title="Grid view" aria-label="Grid view"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z"/></svg></button>
+        </div>
+        <button type="button" class="store-upload-button" data-store-upload><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M12 16V3m-5 5 5-5 5 5M4 16v5h16v-5"/></svg><span data-i18n="store.browser.upload">Upload</span></button>
+      </div>
+      <div class="store-file-layout" data-store-layout>
+      <div class="store-file-list">
         <table id="store-table">
           <thead><tr>
-            <th data-i18n="store.col.cid">CID</th>
             <th data-i18n="store.col.name">Name</th>
             <th data-i18n="store.col.size">Size</th>
             <th data-i18n="store.col.storedAt">Stored at</th>
@@ -2034,9 +2072,12 @@
           </tr></thead>
           <tbody></tbody>
         </table>
-        <div class="empty-note" id="store-empty" data-i18n="store.empty">No stored items.</div>
+        <div class="store-file-grid" data-store-grid hidden></div>
+        <div class="empty-note" id="store-empty">No stored items.</div>
       </div>
-      <hr class="sep">
+      <aside class="store-file-detail" id="store-file-detail" data-store-detail aria-labelledby="store-detail-title" hidden></aside>
+      </div>
+      <div class="store-file-footer">
       <div class="store-dropzone" id="store-dropzone" tabindex="0" role="button">
         <span data-i18n="store.dropzoneText">Drag files here, or click to browse</span>
         <span class="muted" style="font-size: 11.5px;" data-i18n="store.dropzoneHint">Uploads directly to this node&#39;s store.</span>
@@ -2044,22 +2085,23 @@
       </div>
       <div id="store-upload-status"></div>
       <details id="store-path-details">
-        <summary data-i18n="store.addByPathSummary">Add by file path on this machine (for very large local files)</summary>
+        <summary data-i18n="store.addByPathSummary">Import a file from this node</summary>
         <form class="inline" id="store-put-form">
           <div class="field" style="flex: 1;">
-            <label for="store-path" data-i18n="store.pathLabel">Path on this machine (read server-side by the daemon)</label>
+            <label for="store-path" data-i18n="store.pathLabel">File path on this node</label>
             <input type="text" id="store-path" data-i18n-placeholder="store.pathPlaceholder" placeholder="C:\path\to\file or /path/to/file" autocomplete="off">
           </div>
           <button type="submit" class="primary" id="btn-store-put" data-i18n="store.addBtn">Add</button>
         </form>
       </details>
+      </div>
     </div>
     <div class="subtab-page" data-subtab="sandbox">
       <div class="row" style="justify-content: space-between;">
         <h3 style="margin: 0;"><span data-i18n="store.sandbox.title">Sandbox</span></h3>
         <button type="button" id="btn-store-sandbox-refresh" data-i18n="common.refresh">Refresh</button>
       </div>
-      <p class="muted" style="font-size: 12px;" data-i18n="store.sandbox.hint">A scratch folder on this node for one-shot imports, downloads and encryption &mdash; like the storage-cli sandbox.</p>
+      <p class="muted" style="font-size: 12px;" data-i18n="store.sandbox.hint">Import files here to download them or encrypt and store them.</p>
       <div class="table-wrap">
         <table id="store-sandbox-table">
           <thead><tr>
@@ -2095,10 +2137,10 @@
     </div>
     <div class="subtab-page" data-subtab="sync">
       <div class="row" style="justify-content: space-between;">
-        <h3 style="margin: 0;" data-i18n="store.sync.summary">Folder sync (tc-storage share links)</h3>
+        <h3 style="margin: 0;" data-i18n="store.sync.summary">Shared folders</h3>
         <button type="button" id="btn-store-sync-refresh" data-i18n="common.refresh">Refresh</button>
       </div>
-      <p class="muted" style="font-size: 12px;" data-i18n="store.sync.hint">Paste a folder share link below. The folder appears in the list right away with a &ldquo;connecting&rdquo; status while this node joins the room and fetches it into a managed sandbox in the background &mdash; the owner must be online for that to complete, and the daemon keeps retrying automatically every 30 seconds until it succeeds. Files stay in the sandbox until you press Extract on one to save a copy to your configured extract destination.</p>
+      <p class="muted" style="font-size: 12px;" data-i18n="store.sync.hint">Paste a tc-storage folder link to sync its files. The owner needs to be online. Choose Extract to save a file to the location below.</p>
       <div class="row store-export-dir-row">
         <label for="store-export-dir" data-i18n="store.sync.exportDirLabel">Extract to</label>
         <input type="text" id="store-export-dir" data-i18n-placeholder="store.sync.exportDirPlaceholder" placeholder="Defaults to your downloads folder" autocomplete="off">
@@ -2127,6 +2169,8 @@
         <div class="empty-note" id="store-sync-empty" data-i18n="store.sync.none">No active folder syncs.</div>
       </div>
     </div>
+    </div>
+    </div>
     <div class="topology-slot" id="topology-slot-store"></div>
     <details class="settings-drawer" id="settings-drawer-storage">
       <summary>
@@ -2147,7 +2191,7 @@
       <button type="button" data-subtab-target="runs" data-i18n="sched.tabs.runs">Recent runs</button>
     </div>
     <div class="subtab-page" data-subtab="jobs">
-    <p class="muted" style="font-size: 12px;" data-i18n="sched.hint">Runs shell commands on this node on a recurring schedule. The scheduler must be enabled below (applies on daemon restart).</p>
+    <p class="muted" style="font-size: 12px;" data-i18n="sched.hint">Run commands on a schedule. Enable the scheduler in the settings below.</p>
     <div class="table-wrap">
       <table id="scheduler-table">
         <thead><tr>
@@ -2219,7 +2263,7 @@
       <button type="button" data-subtab-target="items" data-i18n="bot.tabs.items">Delivered items</button>
     </div>
     <div class="subtab-page" data-subtab="pipelines">
-    <p class="muted" style="font-size: 12px;" data-i18n="bot.hint">Create, edit, and delete pipelines right here. Changes save immediately and are picked up within seconds &mdash; no daemon restart needed.</p>
+    <p class="muted" style="font-size: 12px;" data-i18n="bot.hint">Choose a recipe, fill in the details, and save. You can edit your automations here at any time.</p>
     <div class="table-wrap">
       <table id="bot-pipelines-table">
         <thead><tr>
@@ -2236,6 +2280,9 @@
       <div class="empty-note" id="bot-pipelines-empty" data-i18n="bot.empty">No bot pipelines configured.</div>
     </div>
     <hr class="sep">
+    <details id="bot-editor" class="settings-drawer">
+    <summary id="bot-editor-summary">Add a pipeline</summary>
+    <div class="settings-drawer-body">
     <h3 id="bot-form-title" style="margin: 0 0 8px;" data-i18n="bot.form.addTitle">Add a pipeline</h3>
 
     <div class="bot-recipe-grid" id="bot-recipe-grid" role="radiogroup" data-i18n-aria-label="bot.recipe.groupLabel" aria-label="Pipeline recipe">
@@ -2441,7 +2488,9 @@
         <button type="button" id="btn-bot-cancel-edit" hidden data-i18n="bot.form.cancelBtn">Cancel edit</button>
       </div>
     </form>
-    <p class="muted" style="font-size: 12px;" data-i18n="bot.form.hint">Pick “Custom…” on any dropdown to type a value directly. Source languages: leave all unchecked to allow every language. Transform order is fixed: Summarize → Translate → Text-to-speech. Changes save immediately and are picked up within seconds &mdash; no daemon restart needed.</p>
+    <p class="muted" style="font-size: 12px;" data-i18n="bot.form.hint">Choose “Custom…” to enter your own value. Leave source languages empty to include every language. Steps run in this order: Summarize → Translate → Text-to-speech.</p>
+    </div>
+    </details>
     </div>
     <div class="subtab-page" data-subtab="runs">
     <h3 style="margin: 0 0 8px;"><span data-i18n="bot.runs.title">Recent runs</span></h3>
@@ -2498,26 +2547,27 @@
       <span class="muted" id="tunnel-peer-count" style="font-size: 12px;">0 peers</span>
     </div>
 
-    <div class="tunnel-session-row tunnel-chip-row">
-      <button type="button" class="tunnel-id-chip" id="tunnel-room-chip" data-i18n-title="tunnel.room.copyTitle" title="Click to copy room id">
-        <span class="tunnel-id-label" data-i18n="tunnel.room.label">room</span><span class="mono" id="tunnel-room-value">-</span>
-      </button>
-      <details class="tunnel-room-switch" id="tunnel-room-switch">
-        <summary data-i18n-title="tunnel.room.switchTitle" data-i18n-aria-label="tunnel.room.switchTitle" title="Switch room" aria-label="Switch room">&#9662;</summary>
-        <div class="tunnel-room-switch-body">
-          <div class="tunnel-room-switch-section">
-            <div class="tunnel-room-switch-heading" data-i18n="tunnel.room.recent">Recent rooms</div>
-            <div class="tunnel-room-list" id="tunnel-room-list"></div>
-            <div class="empty-note" id="tunnel-room-list-empty" data-i18n="tunnel.room.noRecent">No recent rooms yet.</div>
-          </div>
-          <div class="tunnel-room-switch-section">
-            <form class="inline" id="tunnel-room-connect-form">
+<form class="inline" id="tunnel-room-connect-form">
               <div class="field" style="flex: 1; min-width: 140px;">
                 <label for="tunnel-room-input" data-i18n="tunnel.room.joinLabel">Join room id</label>
                 <input type="text" id="tunnel-room-input" data-i18n-placeholder="tunnel.room.joinPlaceholder" placeholder="room id" autocomplete="off">
               </div>
               <button type="submit" class="primary" id="btn-tunnel-room-connect" data-i18n="tunnel.room.connect">Connect</button>
             </form>
+
+    <div class="tunnel-graph" id="tunnel-graph"></div>
+
+    <div class="tunnel-session-row tunnel-chip-row">
+      <button type="button" class="tunnel-id-chip" id="tunnel-room-chip" data-i18n-title="tunnel.room.copyTitle" title="Click to copy room id">
+        <span class="tunnel-id-label" data-i18n="tunnel.room.label">room</span><span class="mono" id="tunnel-room-value">-</span>
+      </button>
+      <details class="tunnel-room-switch" id="tunnel-room-switch">
+        <summary data-i18n-title="tunnel.room.switchTitle" data-i18n-aria-label="tunnel.room.switchTitle" title="Switch room" aria-label="Switch room"><span data-i18n="tunnel.room.recent">Recent rooms</span> &#9662;</summary>
+        <div class="tunnel-room-switch-body">
+          <div class="tunnel-room-switch-section">
+            <div class="tunnel-room-switch-heading" data-i18n="tunnel.room.recent">Recent rooms</div>
+            <div class="tunnel-room-list" id="tunnel-room-list"></div>
+            <div class="empty-note" id="tunnel-room-list-empty" data-i18n="tunnel.room.noRecent">No recent rooms yet.</div>
           </div>
           <div class="tunnel-room-switch-section">
             <button type="button" id="btn-tunnel-room-new" data-i18n="tunnel.room.new">New room</button>
@@ -2586,11 +2636,11 @@
       </div>
     </div>
 
-    <div class="subtabs" role="tablist" aria-label="Tunnel sections">
+    <div class="subtabs" role="tablist" data-i18n-aria-label="tunnel.title" aria-label="Tunnel sections">
+      <button type="button" data-subtab-target="chat" data-i18n="tunnel.tabs.chat">Chat</button>
       <button type="button" data-subtab-target="peers" data-i18n="tunnel.tabs.peers">Peers &amp; forwards</button>
       <button type="button" data-subtab-target="trust" data-i18n="tunnel.tabs.trust">Trust</button>
       <button type="button" data-subtab-target="activity" data-i18n="tunnel.tabs.activity">Notices &amp; events</button>
-      <button type="button" data-subtab-target="chat" data-i18n="tunnel.tabs.chat">Chat</button>
     </div>
 
     <div class="subtab-page" data-subtab="peers">
@@ -2718,18 +2768,10 @@
     </div>
 
     <div class="subtab-page" data-subtab="chat">
-      <div class="table-wrap">
-        <table id="tunnel-chat-table">
-          <thead><tr>
-            <th data-i18n="tunnel.table.time">Time</th>
-            <th data-i18n="tunnel.table.peer">Peer</th>
-            <th data-i18n="tunnel.table.message">Message</th>
-          </tr></thead>
-          <tbody></tbody>
-        </table>
+      <div class="chat-history" id="tunnel-chat-history" tabindex="0" role="region" data-i18n-aria-label="tunnel.tabs.chat" aria-label="Chat">
+        <div id="tunnel-chat-messages" role="log" aria-live="polite" aria-relevant="additions" aria-atomic="false"></div>
         <div class="empty-note" id="tunnel-chat-empty" data-i18n="tunnel.chat.empty">No chat messages yet.</div>
       </div>
-      <hr class="sep">
       <form class="inline" id="tunnel-chat-form">
         <div class="field" style="flex: 1;">
           <label for="tunnel-chat-input" data-i18n="tunnel.chat.inputLabel">Message</label>
@@ -2824,6 +2866,7 @@
     <div id="settings-body"></div>
   </section>
 </main>
+<aside id="topology-dock" aria-label="Topology" data-i18n-aria-label="topology.title"></aside>
 </div>
 
 <div class="modal-overlay" id="store-picker-overlay" hidden>
@@ -2863,6 +2906,10 @@
 
 <div class="toast-stack" id="toast-stack" role="status" aria-live="polite"></div>
 
+<script src="/assets/features/topology.js"></script>
+<script src="/assets/features/storage.js"></script>
+<script src="/assets/features/chat.js"></script>
+<script src="/assets/features/tunnel-graph.js"></script>
 <script>
 (function () {
   "use strict";
@@ -2871,6 +2918,7 @@
 
   var T = {
     en: {
+      "daemon.connected": "Connected",
       "pageTitle": "MISTL dashboard",
       "lang.en": "EN",
       "lang.zh": "中文",
@@ -2883,8 +2931,8 @@
       "nav.overview": "Overview",
       "nav.stream": "Stream",
       "nav.ai": "AI",
-      "nav.chatRelay": "tc-chat Relay",
-      "nav.store": "Store",
+      "nav.chatRelay": "Chat",
+      "nav.store": "Storage",
       "nav.scheduler": "Scheduler",
       "nav.bot": "Bot",
       "nav.tunnel": "Tunnel",
@@ -2995,7 +3043,22 @@
       "stream.cascade.consensusPeers": "raft peers",
       "stream.cascade.offNote": "Cascade off ([stream] cascade = false)",
       "topology.title": "Topology",
-      "topology.desc": "Who this node is connected to and how, from what mistlib and the relay/cascade control plane can actually observe.",
+      "topology.desc": "Explore your connections. Hover for a preview or select a node to see details.",
+      "topology.details.open": "View node details",
+      "topology.details.title": "Connection details",
+      "topology.details.close": "Close",
+      "topology.details.copy": "Copy node ID",
+      "topology.details.id": "Node ID",
+      "topology.details.role": "Role",
+      "topology.details.state": "Status",
+      "topology.details.connection": "Connection",
+      "topology.details.media": "Media",
+      "topology.details.viewers": "Viewers",
+      "topology.details.noRooms": "No shared rooms reported.",
+      "topology.details.unavailable": "This connection is no longer available. Showing the last known details.",
+      "topology.view.label": "Graph scale",
+      "topology.view.fit": "Fit to view",
+      "topology.view.readable": "Actual size",
       "topology.node.self": "this node",
       "topology.node.viewers": "VRChat viewers",
       "topology.role.leader": "leader",
@@ -3095,7 +3158,7 @@
       "ai.editor.defaultBadge": "default",
       "ai.editor.kindLabel": "Provides",
       "ai.tabs.groupLabel": "AI sections",
-      "chatRelay.title": "tc-chat Relay",
+      "chatRelay.title": "Chat",
       "chatRelay.log.roomLabel": "tc-chat room",
       "chatRelay.log.refresh": "Refresh",
       "chatRelay.log.col.time": "Time",
@@ -3103,14 +3166,41 @@
       "chatRelay.log.col.kind": "Kind",
       "chatRelay.log.col.content": "Content",
       "chatRelay.log.empty": "No relayed tc-chat messages yet for this room.",
-      "chatRelay.log.disabled": "tc-chat relay is off. Set rooms and enable it below (requires a daemon restart).",
+      "chatRelay.log.disabled": "Set up a room and enable tc-chat in settings to see your conversations.",
       "chatRelay.log.noRooms": "No tc-chat rooms configured yet.",
       "chatRelay.log.notJoined": "not joined",
+      "store.browser.drive": "My Drive",
+      "store.browser.location": "Location",
+      "store.browser.search": "Search files or CID",
+      "store.browser.sort": "Sort files",
+      "store.browser.sortName": "Name",
+      "store.browser.sortRecent": "Newest first",
+      "store.browser.sortSize": "Largest first",
+      "store.browser.view": "View mode",
+      "store.browser.list": "List view",
+      "store.browser.grid": "Grid view",
+      "store.browser.upload": "Upload",
+      "store.browser.count": "{shown} / {total} files",
+      "store.browser.summary": "{count} files · {size}",
+      "store.browser.empty": "Your files will appear here.\nUpload a file to get started.",
+      "store.browser.noResults": "No matching files. Try a different name or CID.",
+      "store.browser.openFile": "File details: {name}",
+      "store.browser.downloadFile": "Download {name}",
+      "store.browser.details": "File details",
+      "store.browser.close": "Close details",
+      "store.browser.copyCid": "Copy CID",
+      "store.browser.outputPath": "Save location on this node",
+      "store.browser.kind": "Type",
+      "store.browser.type.file": "File",
+      "store.browser.type.image": "Image",
+      "store.browser.type.archive": "Archive",
+      "store.browser.type.audio": "Audio",
+      "store.browser.type.video": "Video",
       "store.tabs.groupLabel": "Store sections",
       "store.tabs.files": "Files",
       "store.tabs.sandbox": "Sandbox",
       "store.tabs.sync": "Folder sync",
-      "store.title": "Store",
+      "store.title": "Storage",
       "store.col.cid": "CID",
       "store.col.name": "Name",
       "store.col.size": "Size",
@@ -3118,7 +3208,7 @@
       "store.col.actions": "Actions",
       "store.empty": "No stored items.",
       "store.download": "Download",
-      "store.saveToPath": "Save to server path",
+      "store.saveToPath": "Save on this node",
       "store.savePathPlaceholder": "output path (optional)",
       "store.saved": "Saved to {output}",
       "store.dropzoneText": "Drag files here, or click to browse",
@@ -3126,13 +3216,13 @@
       "store.uploading": "Uploading {name}… {pct}%",
       "store.uploaded": "Uploaded {name} ({size}).",
       "store.uploadFailed": "Upload failed for {name}: {error}",
-      "store.addByPathSummary": "Add by file path on this machine (for very large local files)",
-      "store.pathLabel": "Path on this machine (read server-side by the daemon)",
+      "store.addByPathSummary": "Import a file from this node",
+      "store.pathLabel": "File path on this node",
       "store.pathPlaceholder": "C:\\path\\to\\file or /path/to/file",
       "store.addBtn": "Add",
       "store.stored": "Stored {name} ({size}).",
       "store.sandbox.title": "Sandbox",
-      "store.sandbox.hint": "A scratch folder on this node for one-shot imports, downloads and encryption — like the storage-cli sandbox.",
+      "store.sandbox.hint": "Import files here to download them or encrypt and store them.",
       "store.sandbox.col.path": "Path",
       "store.sandbox.col.actions": "Actions",
       "store.sandbox.empty": "Sandbox is empty.",
@@ -3155,8 +3245,8 @@
       "store.getfile.startBtn": "Decrypt to sandbox",
       "store.getfile.landedLabel": "Landed at",
       "store.getfile.done": "Decrypted into sandbox: {path}",
-      "store.sync.summary": "Folder sync (tc-storage share links)",
-      "store.sync.hint": "Paste a folder share link below. The folder appears in the list right away with a “connecting” status while this node joins the room and fetches it into a managed sandbox in the background — the owner must be online for that to complete, and the daemon keeps retrying automatically every 30 seconds until it succeeds. Files stay in the sandbox until you press Extract on one to save a copy to your configured extract destination.",
+      "store.sync.summary": "Shared folders",
+      "store.sync.hint": "Paste a tc-storage folder link to sync its files. The owner needs to be online. Choose Extract to save a file to the location below.",
       "store.sync.urlLabel": "Share link",
       "store.sync.urlPlaceholder": "#tc-share=… or full URL",
       "store.sync.startBtn": "Start sync",
@@ -3198,7 +3288,7 @@
       "sched.tabs.jobs": "Jobs",
       "sched.tabs.runs": "Recent runs",
       "sched.title": "Scheduler",
-      "sched.hint": "Runs shell commands on this node on a recurring schedule. The scheduler must be enabled below (applies on daemon restart).",
+      "sched.hint": "Run commands on a schedule. Enable the scheduler in the settings below.",
       "sched.col.name": "Name",
       "sched.col.schedule": "Schedule",
       "sched.col.nextRun": "Next run",
@@ -3242,7 +3332,7 @@
       "bot.tabs.runs": "Recent runs",
       "bot.tabs.items": "Delivered items",
       "bot.title": "Bot",
-      "bot.hint": "Pick a recipe, fill in a few fields, and save. Pipelines run on their schedule and can be edited or deleted here at any time. Changes save immediately and are picked up within seconds — no daemon restart needed.",
+      "bot.hint": "Choose a recipe, fill in the details, and save. You can edit your automations here at any time.",
       "bot.col.id": "ID",
       "bot.col.schedule": "Schedule",
       "bot.col.nextRun": "Next run",
@@ -3313,7 +3403,7 @@
       "bot.form.sinkWebhookBodyTemplateLabel": "Body template",
       "bot.form.sinkWebhookBodyTemplateHint": "Variables: {{id}} {{title}} {{excerpt}} {{body}} {{author}} {{lang}} {{pipeline}} {{from_id}} {{published_at}} {{link}} {{links}} {{item_json}}. String variables are JSON-escaped; {{item_json}} is raw JSON. Leave blank to send the default signed JSON payload.",
       "bot.form.sinkWebhookTemplateModeNote": "Template mode: the payload is sent as-is, unsigned.",
-      "bot.form.hint": "Pick “Custom…” on any dropdown to type a value directly. Source languages: leave all unchecked to allow every language. Transform order is fixed: Summarize → Translate → Text-to-speech. Changes save immediately and are picked up within seconds — no daemon restart needed.",
+      "bot.form.hint": "Choose “Custom…” to enter your own value. Leave source languages empty to include every language. Steps run in this order: Summarize → Translate → Text-to-speech.",
       "bot.form.enterSpeed": "Enter a valid speed number, or leave it blank.",
       "bot.form.enterMaxAudio": "Enter a valid size in MiB, or leave it blank.",
       "bot.form.notFound": "Pipeline {id} not found.",
@@ -3399,11 +3489,11 @@
       "devlog.collapse": "Collapse",
       "devlog.expand": "Expand",
       "devlog.empty": "No log entries yet.",
-      "settings.restartBadge": "restart the daemon to apply",
-      "settings.restartBadgeTitle": "Click to restart the daemon now",
-      "settings.savedRestart": "Saved. Restart the daemon to apply.",
-      "settings.savedNextStart": "Saved. Applies next time this service starts.",
-      "settings.savedLive": "Saved. Already applied.",
+      "settings.restartBadge": "Apply changes",
+      "settings.restartBadgeTitle": "Apply saved changes. Connections will briefly pause.",
+      "settings.savedRestart": "Saved",
+      "settings.savedNextStart": "Saved",
+      "settings.savedLive": "Saved",
       "settings.enterGib": "Enter a number of GiB for {label}.",
       "settings.enterNumber": "Enter a number for {label}.",
       "settings.gibUnit": "GiB",
@@ -3436,7 +3526,7 @@
       "settings.field.storage.capacity_bytes.label": "Storage capacity",
       "settings.field.storage.capacity_bytes.desc": "Maximum size of the local block store.",
       "settings.field.storage.room_ids.label": "Room ids",
-      "settings.field.storage.room_ids.desc": "tc-chat rooms the store joins for peer block exchange -- every room in the list is joined at once. Leave empty to stay local-only. Applies live, no restart needed.",
+      "settings.field.storage.room_ids.desc": "tc-chat rooms the store joins for peer block exchange -- every room in the list is joined at once. Leave empty to stay local-only.",
       "settings.field.stream.rtsp_url.label": "RTSP URL",
       "settings.field.stream.rtsp_url.desc": "RTSP endpoint used when streaming. Leave blank to use the default.",
       "settings.field.stream.frame_rate.label": "Frame rate",
@@ -3446,7 +3536,7 @@
       "settings.field.stream.max_width.label": "Max width",
       "settings.field.stream.max_width.desc": "Maximum capture width in pixels; wider input is scaled down.",
       "settings.field.stream.room.label": "Default room",
-      "settings.field.stream.room.desc": "tc-chat room id used by both “Relay a tc-chat share” and “Share screen to the room” when none is typed. Applies on daemon restart.",
+      "settings.field.stream.room.desc": "tc-chat room id used by both “Relay a tc-chat share” and “Share screen to the room” when none is typed.",
       "settings.field.stream.audio_codec.label": "Audio codec",
       "settings.field.stream.audio_codec.desc": "Audio codec used for the stream.",
       "settings.field.stream.audio_capture.label": "Capture audio",
@@ -3454,9 +3544,9 @@
       "settings.field.stream.cascade.label": "Cascade distribution",
       "settings.field.stream.cascade.desc": "Elect a leader among relay nodes so followers relay from it instead of the sharer directly. Turn off to fall back to locking onto the first video track.",
       "settings.field.chat_relay.rooms.label": "tc-chat rooms",
-      "settings.field.chat_relay.rooms.desc": "Comma-separated tc-chat room ids to relay. Persists and replays their signed chat traffic so messages keep arriving even without a tc-chat tab open. Requires a daemon restart.",
+      "settings.field.chat_relay.rooms.desc": "Comma-separated tc-chat room ids to relay. Persists and replays their signed chat traffic so messages keep arriving even without a tc-chat tab open.",
       "settings.field.chat_relay.enabled.label": "Enable tc-chat relay",
-      "settings.field.chat_relay.enabled.desc": "Join the rooms above and act as a standing relay/bot for tc-chat messages. Requires a daemon restart.",
+      "settings.field.chat_relay.enabled.desc": "Join the rooms above and act as a standing relay/bot for tc-chat messages.",
       "settings.field.ai.room_id.label": "Room id",
       "settings.field.ai.room_id.desc": "tc-chat room used to discover AI providers and consumers.",
       "settings.field.ai.request_timeout_secs.label": "Request timeout (seconds)",
@@ -3491,17 +3581,17 @@
       "settings.field.ui.enabled.label": "Enabled",
       "settings.field.ui.enabled.desc": "Whether the web dashboard starts with the daemon.",
       "settings.field.scheduler.enabled.label": "Enable the job scheduler",
-      "settings.field.scheduler.enabled.desc": "Runs scheduled jobs in the background. Applies on daemon restart.",
+      "settings.field.scheduler.enabled.desc": "Runs scheduled jobs in the background.",
       "settings.field.bot.enabled.label": "Enable the bot background loop",
-      "settings.field.bot.enabled.desc": "Runs bot pipelines (fetch, transform, deliver) in the background. Applies on daemon restart.",
+      "settings.field.bot.enabled.desc": "Runs bot pipelines (fetch, transform, deliver) in the background.",
       "settings.section.update": "Updates",
       "settings.drawer.update": "Update settings",
       "settings.field.update.auto_check.label": "Automatically check for updates",
-      "settings.field.update.auto_check.desc": "Periodically check GitHub Releases for a newer version in the background. Applies on daemon restart.",
+      "settings.field.update.auto_check.desc": "Periodically check GitHub Releases for a newer version in the background.",
       "settings.field.update.auto_apply.label": "Automatically apply updates",
       "settings.field.update.auto_apply.desc": "When a newer version is found, download it, verify it, and stage it to replace the on-disk binary. Never force-restarts a running daemon -- the new version takes effect the next time it starts.",
       "settings.field.update.check_interval_hours.label": "Check interval (hours)",
-      "settings.field.update.check_interval_hours.desc": "Hours between background update checks. Applies on daemon restart.",
+      "settings.field.update.check_interval_hours.desc": "Hours between background update checks.",
       "settings.field.update.prerelease.label": "Include pre-releases",
       "settings.field.update.prerelease.desc": "Consider GitHub pre-release builds when checking for updates.",
       "settings.field.update.repo.label": "GitHub repository",
@@ -3622,6 +3712,7 @@
       "tunnel.error.portInvalid": "Listen port must be a non-negative number.",
     },
     ja: {
+      "daemon.connected": "接続中",
       "pageTitle": "MISTL ダッシュボード",
       "lang.en": "EN",
       "lang.zh": "中文",
@@ -3634,8 +3725,8 @@
       "nav.overview": "概要",
       "nav.stream": "ストリーム",
       "nav.ai": "AI",
-      "nav.chatRelay": "tc-chatリレー",
-      "nav.store": "ストア",
+      "nav.chatRelay": "チャット",
+      "nav.store": "ストレージ",
       "nav.scheduler": "スケジューラ",
       "nav.bot": "Bot",
       "nav.tunnel": "トンネル",
@@ -3746,7 +3837,22 @@
       "stream.cascade.consensusPeers": "Raftピア数",
       "stream.cascade.offNote": "カスケードはオフです ([stream] cascade = false)",
       "topology.title": "トポロジー",
-      "topology.desc": "このノードが誰と、どのようにつながっているか — mistlibと中継/カスケード制御プレーンから実際に観測できる範囲で表示します。",
+      "topology.desc": "接続の様子を確認できます。ホバーで概要、ノードを選択すると詳細を表示します。",
+      "topology.details.open": "ノードの詳細を表示",
+      "topology.details.title": "接続の詳細",
+      "topology.details.close": "閉じる",
+      "topology.details.copy": "ノードIDをコピー",
+      "topology.details.id": "ノードID",
+      "topology.details.role": "役割",
+      "topology.details.state": "接続状態",
+      "topology.details.connection": "接続",
+      "topology.details.media": "メディア",
+      "topology.details.viewers": "視聴者数",
+      "topology.details.noRooms": "共有ルームの情報はありません。",
+      "topology.details.unavailable": "現在この接続は確認できません。最後に取得した情報を表示しています。",
+      "topology.view.label": "グラフの表示サイズ",
+      "topology.view.fit": "全体を表示",
+      "topology.view.readable": "標準サイズ",
       "topology.node.self": "このノード",
       "topology.node.viewers": "VRChat視聴者",
       "topology.role.leader": "リーダー",
@@ -3846,7 +3952,7 @@
       "ai.editor.defaultBadge": "デフォルト",
       "ai.editor.kindLabel": "提供内容",
       "ai.tabs.groupLabel": "AI セクション",
-      "chatRelay.title": "tc-chatリレー",
+      "chatRelay.title": "チャット",
       "chatRelay.log.roomLabel": "tc-chatルーム",
       "chatRelay.log.refresh": "更新",
       "chatRelay.log.col.time": "時刻",
@@ -3854,14 +3960,41 @@
       "chatRelay.log.col.kind": "種類",
       "chatRelay.log.col.content": "内容",
       "chatRelay.log.empty": "このルームで中継されたtc-chatメッセージはまだありません。",
-      "chatRelay.log.disabled": "tc-chatリレーはオフです。下でルームを設定して有効化してください(デーモンの再起動が必要です)。",
+      "chatRelay.log.disabled": "設定でルームを追加してtc-chatを有効にすると、会話を確認できます。",
       "chatRelay.log.noRooms": "tc-chatルームがまだ設定されていません。",
       "chatRelay.log.notJoined": "未参加",
-      "store.tabs.groupLabel": "ストアのセクション",
+      "store.browser.drive": "マイドライブ",
+      "store.browser.location": "現在の場所",
+      "store.browser.search": "ファイル名・CIDで検索",
+      "store.browser.sort": "ファイルの並び順",
+      "store.browser.sortName": "名前順",
+      "store.browser.sortRecent": "新しい順",
+      "store.browser.sortSize": "サイズの大きい順",
+      "store.browser.view": "表示形式",
+      "store.browser.list": "リスト表示",
+      "store.browser.grid": "グリッド表示",
+      "store.browser.upload": "アップロード",
+      "store.browser.count": "{total} 件中 {shown} 件",
+      "store.browser.summary": "{count} ファイル · {size}",
+      "store.browser.empty": "ここにファイルが表示されます。\nファイルをアップロードして始めましょう。",
+      "store.browser.noResults": "一致するファイルがありません。別の名前やCIDで検索してください。",
+      "store.browser.openFile": "ファイルの詳細: {name}",
+      "store.browser.downloadFile": "{name} をダウンロード",
+      "store.browser.details": "ファイルの詳細",
+      "store.browser.close": "詳細を閉じる",
+      "store.browser.copyCid": "CIDをコピー",
+      "store.browser.outputPath": "このノードでの保存先",
+      "store.browser.kind": "種類",
+      "store.browser.type.file": "ファイル",
+      "store.browser.type.image": "画像",
+      "store.browser.type.archive": "圧縮ファイル",
+      "store.browser.type.audio": "音声",
+      "store.browser.type.video": "動画",
+      "store.tabs.groupLabel": "ストレージの場所",
       "store.tabs.files": "ファイル",
       "store.tabs.sandbox": "サンドボックス",
       "store.tabs.sync": "フォルダ同期",
-      "store.title": "ストア",
+      "store.title": "ストレージ",
       "store.col.cid": "CID",
       "store.col.name": "名前",
       "store.col.size": "サイズ",
@@ -3869,7 +4002,7 @@
       "store.col.actions": "操作",
       "store.empty": "保存されたアイテムはありません。",
       "store.download": "ダウンロード",
-      "store.saveToPath": "サーバー側パスに保存",
+      "store.saveToPath": "このノードに保存",
       "store.savePathPlaceholder": "出力パス (任意)",
       "store.saved": "{output} に保存しました",
       "store.dropzoneText": "ここにファイルをドラッグ、またはクリックして選択",
@@ -3877,13 +4010,13 @@
       "store.uploading": "{name} をアップロード中… {pct}%",
       "store.uploaded": "{name} ({size}) をアップロードしました。",
       "store.uploadFailed": "{name} のアップロードに失敗しました: {error}",
-      "store.addByPathSummary": "このPC上のファイルパスで追加 (大きなローカルファイル向け)",
-      "store.pathLabel": "このPC上のパス (デーモンがサーバー側で読み込みます)",
+      "store.addByPathSummary": "このノードのファイルを取り込む",
+      "store.pathLabel": "このノードのファイルパス",
       "store.pathPlaceholder": "C:\\path\\to\\file or /path/to/file",
       "store.addBtn": "追加",
       "store.stored": "{name} ({size}) を保存しました。",
       "store.sandbox.title": "サンドボックス",
-      "store.sandbox.hint": "このノード上の使い捨て作業フォルダです。storage-cli のサンドボックスのように、インポート・ダウンロード・暗号化を一回限りの操作として行えます。",
+      "store.sandbox.hint": "ファイルを取り込んで、ダウンロードや暗号化して保存ができます。",
       "store.sandbox.col.path": "パス",
       "store.sandbox.col.actions": "操作",
       "store.sandbox.empty": "サンドボックスは空です。",
@@ -3906,8 +4039,8 @@
       "store.getfile.startBtn": "サンドボックスへ復号",
       "store.getfile.landedLabel": "格納先",
       "store.getfile.done": "サンドボックスへ復号しました: {path}",
-      "store.sync.summary": "フォルダ同期 (tc-storage 共有リンク)",
-      "store.sync.hint": "フォルダ共有リンクを貼り付けると、フォルダはすぐに「接続中」ステータスでリストに表示され、このノードがバックグラウンドでルームに参加し、管理されたサンドボックスへ取得します。完了には所有者がオンラインである必要があり、成功するまでデーモンが30秒ごとに自動で再試行します。ファイルはサンドボックスに留まり、個々のファイルで「取り出す」を押すと設定した取り出し先へコピーが保存されます。",
+      "store.sync.summary": "共有フォルダ",
+      "store.sync.hint": "tc-storageのフォルダ共有リンクを貼り付けると同期できます。共有元がオンラインになると取得が始まります。「取り出す」で指定した保存先にファイルを保存します。",
       "store.sync.status.connecting": "接続中…",
       "store.sync.status.synced": "同期済み",
       "store.sync.status.error": "エラー",
@@ -3949,7 +4082,7 @@
       "sched.tabs.jobs": "ジョブ",
       "sched.tabs.runs": "実行履歴",
       "sched.title": "スケジューラ",
-      "sched.hint": "このノード上でシェルコマンドを定期的に実行します。下記でスケジューラを有効にする必要があります (デーモンの再起動が必要です)。",
+      "sched.hint": "決めた日時にコマンドを実行します。下の設定でスケジューラを有効にできます。",
       "sched.col.name": "名前",
       "sched.col.schedule": "スケジュール",
       "sched.col.nextRun": "次回実行",
@@ -3993,7 +4126,7 @@
       "bot.tabs.runs": "実行履歴",
       "bot.tabs.items": "配信済みアイテム",
       "bot.title": "Bot",
-      "bot.hint": "レシピを選び、いくつかの項目を入力して保存するだけです。パイプラインはスケジュールどおりに実行され、このパネルからいつでも編集・削除できます。変更は即座に保存され、数秒以内に反映されます — デーモンの再起動は不要です。",
+      "bot.hint": "レシピを選び、必要な項目を入力して保存します。作成した自動処理はいつでも編集できます。",
       "bot.col.id": "ID",
       "bot.col.schedule": "スケジュール",
       "bot.col.nextRun": "次回実行",
@@ -4064,7 +4197,7 @@
       "bot.form.sinkWebhookBodyTemplateLabel": "本文テンプレート",
       "bot.form.sinkWebhookBodyTemplateHint": "利用できる変数: {{id}} {{title}} {{excerpt}} {{body}} {{author}} {{lang}} {{pipeline}} {{from_id}} {{published_at}} {{link}} {{links}} {{item_json}}。文字列の変数はJSONエスケープ済みです。{{item_json}} のみ生のJSONです。空欄の場合は既定の署名付きJSONペイロードを送信します。",
       "bot.form.sinkWebhookTemplateModeNote": "テンプレートモード: ペイロードはそのまま送信され、署名は付与されません。",
-      "bot.form.hint": "各プルダウンの「カスタム…」を選ぶと直接入力できます。取得元の言語はすべて未選択のままにするとすべての言語を許可します。変換の順序は固定で、要約 → 翻訳 → 音声合成の順に実行されます。変更は即座に保存され、数秒以内に反映されます — デーモンの再起動は不要です。",
+      "bot.form.hint": "「カスタム…」で任意の値を入力できます。取得元の言語を選ばない場合は全言語が対象です。要約 → 翻訳 → 音声合成の順に実行します。",
       "bot.form.enterSpeed": "有効な速度の数値を入力するか、空欄のままにしてください。",
       "bot.form.enterMaxAudio": "有効なサイズ (MiB) を入力するか、空欄のままにしてください。",
       "bot.form.notFound": "パイプライン {id} が見つかりません。",
@@ -4150,11 +4283,11 @@
       "devlog.collapse": "折りたたむ",
       "devlog.expand": "開く",
       "devlog.empty": "ログはまだありません。",
-      "settings.restartBadge": "適用にはデーモンの再起動が必要",
-      "settings.restartBadgeTitle": "クリックして今すぐデーモンを再起動",
-      "settings.savedRestart": "保存しました。適用にはデーモンの再起動が必要です。",
-      "settings.savedNextStart": "保存しました。次回起動時に適用されます。",
-      "settings.savedLive": "保存しました。すでに適用されています。",
+      "settings.restartBadge": "変更を適用",
+      "settings.restartBadgeTitle": "保存した変更を適用します。接続が一時的に中断します。",
+      "settings.savedRestart": "保存しました",
+      "settings.savedNextStart": "保存しました",
+      "settings.savedLive": "保存しました",
       "settings.enterGib": "{label} にはGiB単位の数値を入力してください。",
       "settings.enterNumber": "{label} には数値を入力してください。",
       "settings.gibUnit": "GiB",
@@ -4187,7 +4320,7 @@
       "settings.field.storage.capacity_bytes.label": "ストレージ容量",
       "settings.field.storage.capacity_bytes.desc": "ローカルブロックストアの最大サイズです。",
       "settings.field.storage.room_ids.label": "ルームID",
-      "settings.field.storage.room_ids.desc": "ピア間のブロック交換のためにストアが参加するtc-chatルームです。リスト内の全ルームに同時に参加します。空欄の場合はローカルのみで動作します。再起動不要で即時反映されます。",
+      "settings.field.storage.room_ids.desc": "ピア間のブロック交換のためにストアが参加するtc-chatルームです。リスト内の全ルームに同時に参加します。空欄の場合はローカルのみで動作します。",
       "settings.field.stream.rtsp_url.label": "RTSP URL",
       "settings.field.stream.rtsp_url.desc": "配信に使用するRTSPエンドポイントです。空欄の場合はデフォルトを使用します。",
       "settings.field.stream.frame_rate.label": "フレームレート",
@@ -4197,7 +4330,7 @@
       "settings.field.stream.max_width.label": "最大幅",
       "settings.field.stream.max_width.desc": "キャプチャの最大幅 (ピクセル) です。これより広い入力は縮小されます。",
       "settings.field.stream.room.label": "デフォルトのルーム",
-      "settings.field.stream.room.desc": "「tc-chatの画面共有を中継」と「画面をルームへ共有」の両方で、ルームIDが未入力のときに使われるtc-chatルームIDです。デーモンの再起動後に適用されます。",
+      "settings.field.stream.room.desc": "「tc-chatの画面共有を中継」と「画面をルームへ共有」の両方で、ルームIDが未入力のときに使われるtc-chatルームIDです。",
       "settings.field.stream.audio_codec.label": "音声コーデック",
       "settings.field.stream.audio_codec.desc": "配信に使用する音声コーデックです。",
       "settings.field.stream.audio_capture.label": "音声キャプチャ",
@@ -4205,9 +4338,9 @@
       "settings.field.stream.cascade.label": "カスケード配信",
       "settings.field.stream.cascade.desc": "中継ノード間でリーダーを選出し、フォロワーは共有元ではなくリーダーから中継します。オフにすると最初に見つかった映像トラックにロックする従来の動作に戻ります。",
       "settings.field.chat_relay.rooms.label": "tc-chatルーム",
-      "settings.field.chat_relay.rooms.desc": "中継するtc-chatルームIDをカンマ区切りで指定します。署名済みのチャットトラフィックを保存・再送信するため、tc-chatタブを開いていなくてもメッセージが届き続けます。デーモンの再起動が必要です。",
+      "settings.field.chat_relay.rooms.desc": "中継するtc-chatルームIDをカンマ区切りで指定します。署名済みのチャットトラフィックを保存・再送信するため、tc-chatタブを開いていなくてもメッセージが届き続けます。",
       "settings.field.chat_relay.enabled.label": "tc-chatリレーを有効化",
-      "settings.field.chat_relay.enabled.desc": "上記のルームに参加し、tc-chatメッセージの常駐リレー/ボットとして動作します。デーモンの再起動が必要です。",
+      "settings.field.chat_relay.enabled.desc": "上記のルームに参加し、tc-chatメッセージの常駐リレー/ボットとして動作します。",
       "settings.field.ai.room_id.label": "ルームID",
       "settings.field.ai.room_id.desc": "AIプロバイダーと利用者を発見するために使うtc-chatルームです。",
       "settings.field.ai.request_timeout_secs.label": "リクエストタイムアウト (秒)",
@@ -4242,17 +4375,17 @@
       "settings.field.ui.enabled.label": "有効化",
       "settings.field.ui.enabled.desc": "デーモン起動時にWebダッシュボードを開始するかどうかです。",
       "settings.field.scheduler.enabled.label": "ジョブスケジューラを有効化",
-      "settings.field.scheduler.enabled.desc": "バックグラウンドでスケジュールされたジョブを実行します。デーモンの再起動後に適用されます。",
+      "settings.field.scheduler.enabled.desc": "バックグラウンドでスケジュールされたジョブを実行します。",
       "settings.field.bot.enabled.label": "Botのバックグラウンドループを有効化",
-      "settings.field.bot.enabled.desc": "バックグラウンドで bot パイプライン（取得・変換・配信）を実行します。デーモンの再起動後に適用されます。",
+      "settings.field.bot.enabled.desc": "バックグラウンドで bot パイプライン（取得・変換・配信）を実行します。",
       "settings.section.update": "アップデート",
       "settings.drawer.update": "アップデート設定",
       "settings.field.update.auto_check.label": "自動的にアップデートを確認",
-      "settings.field.update.auto_check.desc": "GitHub Releasesで新しいバージョンがないか定期的にバックグラウンドで確認します。デーモンの再起動後に適用されます。",
+      "settings.field.update.auto_check.desc": "GitHub Releasesで新しいバージョンがないか定期的にバックグラウンドで確認します。",
       "settings.field.update.auto_apply.label": "アップデートを自動適用",
       "settings.field.update.auto_apply.desc": "新しいバージョンが見つかった場合、ダウンロード・検証したうえで、ディスク上のバイナリを置き換える準備をします。実行中のデーモンを強制的に再起動することはなく、新しいバージョンは次回起動時から有効になります。",
       "settings.field.update.check_interval_hours.label": "確認間隔 (時間)",
-      "settings.field.update.check_interval_hours.desc": "バックグラウンドでアップデートを確認する間隔 (時間) です。デーモンの再起動後に適用されます。",
+      "settings.field.update.check_interval_hours.desc": "バックグラウンドでアップデートを確認する間隔 (時間) です。",
       "settings.field.update.prerelease.label": "プレリリースを含める",
       "settings.field.update.prerelease.desc": "アップデート確認時にGitHubのプレリリースビルドも対象にします。",
       "settings.field.update.repo.label": "GitHubリポジトリ",
@@ -4373,6 +4506,7 @@
       "tunnel.error.portInvalid": "リッスンポートは 0 以上の数値で指定してください。",
     },
     zh: {
+      "daemon.connected": "已连接",
       "pageTitle": "MISTL 仪表盘",
       "lang.en": "EN",
       "lang.zh": "中文",
@@ -4385,7 +4519,7 @@
       "nav.overview": "概览",
       "nav.stream": "串流",
       "nav.ai": "AI",
-      "nav.chatRelay": "tc-chat 中继",
+      "nav.chatRelay": "聊天",
       "nav.store": "存储",
       "nav.scheduler": "调度器",
       "nav.bot": "Bot",
@@ -4497,7 +4631,22 @@
       "stream.cascade.consensusPeers": "Raft 节点数",
       "stream.cascade.offNote": "级联已关闭 ([stream] cascade = false)",
       "topology.title": "拓扑",
-      "topology.desc": "本节点当前与谁相连、如何相连 —— 仅展示 mistlib 与中继/级联控制平面实际能观测到的信息。",
+      "topology.desc": "查看当前连接。悬停显示概要，选择节点查看详情。",
+      "topology.details.open": "查看节点详情",
+      "topology.details.title": "连接详情",
+      "topology.details.close": "关闭",
+      "topology.details.copy": "复制节点 ID",
+      "topology.details.id": "节点 ID",
+      "topology.details.role": "角色",
+      "topology.details.state": "状态",
+      "topology.details.connection": "连接",
+      "topology.details.media": "媒体",
+      "topology.details.viewers": "观看人数",
+      "topology.details.noRooms": "暂无共享房间信息。",
+      "topology.details.unavailable": "此连接已不可用，正在显示最后获取的信息。",
+      "topology.view.label": "图形缩放",
+      "topology.view.fit": "显示全部",
+      "topology.view.readable": "实际大小",
       "topology.node.self": "本节点",
       "topology.node.viewers": "VRChat 观看者",
       "topology.role.leader": "主节点",
@@ -4597,7 +4746,7 @@
       "ai.editor.defaultBadge": "默认",
       "ai.editor.kindLabel": "提供内容",
       "ai.tabs.groupLabel": "AI 部分",
-      "chatRelay.title": "tc-chat 中继",
+      "chatRelay.title": "聊天",
       "chatRelay.log.roomLabel": "tc-chat 房间",
       "chatRelay.log.refresh": "刷新",
       "chatRelay.log.col.time": "时间",
@@ -4608,7 +4757,34 @@
       "chatRelay.log.disabled": "tc-chat 中继已关闭。请在下方设置房间并启用(需要重启守护进程)。",
       "chatRelay.log.noRooms": "尚未配置 tc-chat 房间。",
       "chatRelay.log.notJoined": "未加入",
-      "store.tabs.groupLabel": "存储部分",
+      "store.browser.drive": "我的网盘",
+      "store.browser.location": "当前位置",
+      "store.browser.search": "搜索文件名或CID",
+      "store.browser.sort": "文件排序",
+      "store.browser.sortName": "名称",
+      "store.browser.sortRecent": "最新优先",
+      "store.browser.sortSize": "最大优先",
+      "store.browser.view": "视图模式",
+      "store.browser.list": "列表视图",
+      "store.browser.grid": "网格视图",
+      "store.browser.upload": "上传",
+      "store.browser.count": "{shown} / {total} 个文件",
+      "store.browser.summary": "{count} 个文件 · {size}",
+      "store.browser.empty": "文件将显示在这里。\n上传文件即可开始。",
+      "store.browser.noResults": "没有匹配的文件。请尝试其他名称或CID。",
+      "store.browser.openFile": "文件详情：{name}",
+      "store.browser.downloadFile": "下载 {name}",
+      "store.browser.details": "文件详情",
+      "store.browser.close": "关闭详情",
+      "store.browser.copyCid": "复制CID",
+      "store.browser.outputPath": "此节点的保存位置",
+      "store.browser.kind": "类型",
+      "store.browser.type.file": "文件",
+      "store.browser.type.image": "图片",
+      "store.browser.type.archive": "压缩文件",
+      "store.browser.type.audio": "音频",
+      "store.browser.type.video": "视频",
+      "store.tabs.groupLabel": "存储位置",
       "store.tabs.files": "文件",
       "store.tabs.sandbox": "沙盒",
       "store.tabs.sync": "文件夹同步",
@@ -4620,7 +4796,7 @@
       "store.col.actions": "操作",
       "store.empty": "暂无存储项目。",
       "store.download": "下载",
-      "store.saveToPath": "保存到服务器路径",
+      "store.saveToPath": "保存到此节点",
       "store.savePathPlaceholder": "输出路径 (可选)",
       "store.saved": "已保存到 {output}",
       "store.dropzoneText": "将文件拖到此处，或点击浏览",
@@ -4628,13 +4804,13 @@
       "store.uploading": "正在上传 {name}… {pct}%",
       "store.uploaded": "已上传 {name} ({size})。",
       "store.uploadFailed": "{name} 上传失败：{error}",
-      "store.addByPathSummary": "按此电脑上的文件路径添加 (适用于非常大的本地文件)",
-      "store.pathLabel": "此电脑上的路径 (由守护进程在服务器端读取)",
+      "store.addByPathSummary": "从此节点导入文件",
+      "store.pathLabel": "此节点上的文件路径",
       "store.pathPlaceholder": "C:\\path\\to\\file or /path/to/file",
       "store.addBtn": "添加",
       "store.stored": "已存储 {name} ({size})。",
       "store.sandbox.title": "沙盒",
-      "store.sandbox.hint": "此节点上的临时工作目录，用于一次性导入、下载和加密 — 类似 storage-cli 的沙盒。",
+      "store.sandbox.hint": "导入文件后，可以下载或加密保存。",
       "store.sandbox.col.path": "路径",
       "store.sandbox.col.actions": "操作",
       "store.sandbox.empty": "沙盒为空。",
@@ -4657,8 +4833,8 @@
       "store.getfile.startBtn": "解密到沙盒",
       "store.getfile.landedLabel": "存放位置",
       "store.getfile.done": "已解密到沙盒: {path}",
-      "store.sync.summary": "文件夹同步 (tc-storage 分享链接)",
-      "store.sync.hint": "粘贴文件夹分享链接后，该文件夹会立即以“连接中”状态出现在列表里，本节点在后台加入房间并将内容获取到受管理的沙盒中。完成需要所有者在线，守护进程会每 30 秒自动重试直到成功。文件会保留在沙盒中，对某个文件点击“提取”即可将副本保存到你配置的提取目录。",
+      "store.sync.summary": "共享文件夹",
+      "store.sync.hint": "粘贴tc-storage文件夹链接即可同步文件。共享者需要在线。点击“提取”将文件保存到指定位置。",
       "store.sync.status.connecting": "连接中…",
       "store.sync.status.synced": "已同步",
       "store.sync.status.error": "错误",
@@ -4700,7 +4876,7 @@
       "sched.tabs.jobs": "任务",
       "sched.tabs.runs": "运行记录",
       "sched.title": "调度器",
-      "sched.hint": "按计划在本节点上运行 shell 命令。需要在下方启用调度器 (需要重启守护进程)。",
+      "sched.hint": "按计划执行命令。可在下方设置中启用调度器。",
       "sched.col.name": "名称",
       "sched.col.schedule": "计划",
       "sched.col.nextRun": "下次运行",
@@ -4744,7 +4920,7 @@
       "bot.tabs.runs": "运行记录",
       "bot.tabs.items": "已投递项目",
       "bot.title": "Bot",
-      "bot.hint": "选择一个方案，填写少量字段后保存即可 — 管道会按计划自动运行，随时可以在此编辑或删除。更改会立即保存，并在几秒内生效 —— 无需重启守护进程。",
+      "bot.hint": "选择配方，填写信息并保存。可随时在此编辑自动任务。",
       "bot.col.id": "ID",
       "bot.col.schedule": "计划",
       "bot.col.nextRun": "下次运行",
@@ -4815,7 +4991,7 @@
       "bot.form.sinkWebhookBodyTemplateLabel": "请求体模板",
       "bot.form.sinkWebhookBodyTemplateHint": "可用变量: {{id}} {{title}} {{excerpt}} {{body}} {{author}} {{lang}} {{pipeline}} {{from_id}} {{published_at}} {{link}} {{links}} {{item_json}}。字符串变量已进行 JSON 转义；{{item_json}} 为原始 JSON。留空则发送默认的已签名 JSON 负载。",
       "bot.form.sinkWebhookTemplateModeNote": "模板模式：负载将原样发送，不进行签名。",
-      "bot.form.hint": "在任意下拉菜单中选择“自定义…”即可直接输入。来源语言：全部不勾选表示允许所有语言。转换顺序固定：摘要 → 翻译 → 语音合成。更改会立即保存，并在几秒内生效 —— 无需重启守护进程。",
+      "bot.form.hint": "选择“自定义…”可输入自己的值。不选择来源语言时包含所有语言。执行顺序：摘要 → 翻译 → 语音合成。",
       "bot.form.enterSpeed": "请输入有效的语速数值，或留空。",
       "bot.form.enterMaxAudio": "请输入有效的大小 (MiB)，或留空。",
       "bot.form.notFound": "未找到管道 {id}。",
@@ -4901,11 +5077,11 @@
       "devlog.collapse": "折叠",
       "devlog.expand": "展开",
       "devlog.empty": "暂无日志。",
-      "settings.restartBadge": "需要重启守护进程才能生效",
-      "settings.restartBadgeTitle": "点击立即重启守护进程",
-      "settings.savedRestart": "已保存。需要重启守护进程才能生效。",
-      "settings.savedNextStart": "已保存。将在此服务下次启动时生效。",
-      "settings.savedLive": "已保存，已立即生效。",
+      "settings.restartBadge": "应用更改",
+      "settings.restartBadgeTitle": "应用已保存的更改。连接会短暂中断。",
+      "settings.savedRestart": "已保存",
+      "settings.savedNextStart": "已保存",
+      "settings.savedLive": "已保存",
       "settings.enterGib": "请为{label}输入以 GiB 为单位的数值。",
       "settings.enterNumber": "请为{label}输入一个数值。",
       "settings.gibUnit": "GiB",
@@ -4938,7 +5114,7 @@
       "settings.field.storage.capacity_bytes.label": "存储容量",
       "settings.field.storage.capacity_bytes.desc": "本地区块存储的最大容量。",
       "settings.field.storage.room_ids.label": "房间 ID",
-      "settings.field.storage.room_ids.desc": "用于对等区块交换的 tc-chat 房间列表 -- 会同时加入列表中的所有房间。留空则仅在本地运行。立即生效，无需重启。",
+      "settings.field.storage.room_ids.desc": "用于对等区块交换的 tc-chat 房间列表 -- 会同时加入列表中的所有房间。留空则仅在本地运行。",
       "settings.field.stream.rtsp_url.label": "RTSP URL",
       "settings.field.stream.rtsp_url.desc": "串流时使用的 RTSP 端点。留空则使用默认值。",
       "settings.field.stream.frame_rate.label": "帧率",
@@ -4948,7 +5124,7 @@
       "settings.field.stream.max_width.label": "最大宽度",
       "settings.field.stream.max_width.desc": "采集的最大宽度 (像素)；超过此宽度的输入将被缩小。",
       "settings.field.stream.room.label": "默认房间",
-      "settings.field.stream.room.desc": "未输入房间 ID 时，“中继 tc-chat 共享”和“将屏幕共享到房间”共同使用的 tc-chat 房间 ID。需要重启守护进程才能生效。",
+      "settings.field.stream.room.desc": "未输入房间 ID 时，“中继 tc-chat 共享”和“将屏幕共享到房间”共同使用的 tc-chat 房间 ID。",
       "settings.field.stream.audio_codec.label": "音频编码",
       "settings.field.stream.audio_codec.desc": "串流使用的音频编码格式。",
       "settings.field.stream.audio_capture.label": "采集音频",
@@ -4956,9 +5132,9 @@
       "settings.field.stream.cascade.label": "级联分发",
       "settings.field.stream.cascade.desc": "在中继节点之间选举一个 leader，使 follower 从其中继而非直接从分享者中继。关闭后将回退为锁定遇到的第一条视频轨道。",
       "settings.field.chat_relay.rooms.label": "tc-chat 房间",
-      "settings.field.chat_relay.rooms.desc": "要中继的 tc-chat 房间 ID，以逗号分隔。会保存并重放已签名的聊天流量，即使未打开 tc-chat 标签页，消息也会持续送达。需要重启守护进程。",
+      "settings.field.chat_relay.rooms.desc": "要中继的 tc-chat 房间 ID，以逗号分隔。会保存并重放已签名的聊天流量，即使未打开 tc-chat 标签页，消息也会持续送达。",
       "settings.field.chat_relay.enabled.label": "启用 tc-chat 中继",
-      "settings.field.chat_relay.enabled.desc": "加入上方房间，并作为 tc-chat 消息的常驻中继/机器人。需要重启守护进程。",
+      "settings.field.chat_relay.enabled.desc": "加入上方房间，并作为 tc-chat 消息的常驻中继/机器人。",
       "settings.field.ai.room_id.label": "房间 ID",
       "settings.field.ai.room_id.desc": "用于发现 AI 提供方与使用方的 tc-chat 房间。",
       "settings.field.ai.request_timeout_secs.label": "请求超时 (秒)",
@@ -4993,17 +5169,17 @@
       "settings.field.ui.enabled.label": "启用",
       "settings.field.ui.enabled.desc": "守护进程启动时是否同时启动 Web 仪表盘。",
       "settings.field.scheduler.enabled.label": "启用任务调度器",
-      "settings.field.scheduler.enabled.desc": "在后台运行已计划的任务。需要重启守护进程才能生效。",
+      "settings.field.scheduler.enabled.desc": "在后台运行已计划的任务。",
       "settings.field.bot.enabled.label": "启用 Bot 后台循环",
-      "settings.field.bot.enabled.desc": "在后台运行 bot 管道（抓取、转换、投递）。需要重启守护进程才能生效。",
+      "settings.field.bot.enabled.desc": "在后台运行 bot 管道（抓取、转换、投递）。",
       "settings.section.update": "更新",
       "settings.drawer.update": "更新设置",
       "settings.field.update.auto_check.label": "自动检查更新",
-      "settings.field.update.auto_check.desc": "在后台定期检查 GitHub Releases 是否有新版本。需要重启守护进程才能生效。",
+      "settings.field.update.auto_check.desc": "在后台定期检查 GitHub Releases 是否有新版本。",
       "settings.field.update.auto_apply.label": "自动应用更新",
       "settings.field.update.auto_apply.desc": "发现新版本时，下载并验证后暂存以替换磁盘上的二进制文件。不会强制重启正在运行的守护进程 -- 新版本会在下次启动时生效。",
       "settings.field.update.check_interval_hours.label": "检查间隔 (小时)",
-      "settings.field.update.check_interval_hours.desc": "后台检查更新的间隔小时数。需要重启守护进程才能生效。",
+      "settings.field.update.check_interval_hours.desc": "后台检查更新的间隔小时数。",
       "settings.field.update.prerelease.label": "包含预发布版本",
       "settings.field.update.prerelease.desc": "检查更新时也考虑 GitHub 的预发布构建。",
       "settings.field.update.repo.label": "GitHub 仓库",
@@ -5345,7 +5521,7 @@
   function api(cmd, args) {
     return fetch("/api/call", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-mistl-ui": "1" },
+      headers: { "Content-Type": "application/json", "x-mistl-ui": "1", "x-mistl-instance": pageIdentity() },
       body: JSON.stringify({ cmd: cmd, args: args || {} })
     }).then(function (resp) {
       return resp.json().catch(function () {
@@ -5361,6 +5537,49 @@
       return json.data;
     });
   }
+
+  function pageIdentity() {
+    var build = window.mistlRuntime || {};
+    return [build.instance_id, build.build_id].join("/");
+  }
+
+  function renderRuntime() {
+    var build = state && state.daemon && state.daemon.build || window.mistlRuntime;
+    var banner = document.getElementById("build-banner");
+    var button = document.getElementById("network-toggle");
+    var ja = currentLang === "ja";
+    if (build && build.channel !== "stable") {
+      banner.hidden = false;
+      banner.textContent = build.channel.toUpperCase() + " · mistl v" + build.version + " · " +
+        (build.build_id || "unknown").slice(0, 12) + " · " + build.instance + " · mistlib " + build.mistlib_version;
+      document.title = "MISTL " + build.channel.toUpperCase() + " · " + build.instance;
+    } else {
+      banner.hidden = true;
+    }
+    var network = state && state.daemon && state.daemon.network;
+    if (!network) { button.disabled = true; return; }
+    var mode = network.state === "restarting" ? (ja ? "切替中…" : "Switching…") : network.state.toUpperCase();
+    button.textContent = (ja ? "外部接続: " : "External connections: ") + mode +
+      (network.saved ? "" : (ja ? "（未保存）" : " (not saved)"));
+    button.disabled = network.state === "restarting";
+    button.setAttribute("aria-pressed", network.enabled ? "true" : "false");
+    button.title = network.error || (ja ? "外部の端末との接続を切り替えます。設定は自動保存されます。" :
+      "Control connections to other devices. Your choice is saved automatically.");
+  }
+
+  document.getElementById("network-toggle").addEventListener("click", function () {
+    var button = this;
+    var network = state.daemon && state.daemon.network;
+    if (!network) return;
+    button.disabled = true;
+    api("network.set", { enabled: !network.enabled }).then(function (result) {
+      state.daemon.network = result; renderRuntime();
+    }).catch(function (error) {
+      showToast(error.message, "error"); button.disabled = false;
+    });
+  });
+  // Render build metadata immediately, even while the daemon status is loading.
+  renderRuntime();
 
   function withBusy(button, promiseFn) {
     if (!button) return promiseFn();
@@ -5402,6 +5621,7 @@
   };
 
   function rerenderAllDynamic() {
+    renderRuntime();
     renderDaemonPill();
     renderOverview();
     renderIdentitySummary();
@@ -5418,6 +5638,7 @@
     renderBotItems(state.botItems);
     botRefreshOptionSelects();
     botApplyVisibility();
+    document.getElementById("bot-editor-summary").textContent = botEditingId ? t("bot.form.editTitle", { id: botEditingId }) : t("bot.form.addTitle");
     renderProfile(state.identity);
     renderSettings(state.config);
     renderUpdate();
@@ -5442,9 +5663,11 @@
       var uptime = state.daemonUptimeBase !== null
         ? state.daemonUptimeBase + Math.floor((Date.now() - state.daemonUptimeAt) / 1000)
         : state.daemon.uptime_secs;
-      label = el("span", { text: t("daemon.running", { pid: state.daemon.pid, version: state.daemon.version, uptime: fmtUptime(uptime) }) });
+      label = el("span", { text: t("daemon.connected") });
+      daemonPill.title = t("daemon.running", { pid: state.daemon.pid, version: state.daemon.version, uptime: fmtUptime(uptime) });
     } else {
       daemonPill.className = "pill err";
+      daemonPill.title = "";
       label = el("span", { text: t("daemon.unreachable") });
     }
     daemonPill.appendChild(dot);
@@ -5462,7 +5685,7 @@
       identitySummary.appendChild(av);
     }
     var name = state.identity.display_name || "(no name)";
-    identitySummary.appendChild(el("span", { class: "name", text: name }));
+    identitySummary.appendChild(el("span", { class: "name", text: name, title: name }));
     var did = state.identity.did || "";
     if (did) {
       identitySummary.appendChild(copyButton(did, truncateMiddle(did, 14, 6)));
@@ -5504,6 +5727,7 @@
   function pollDaemonStatus() {
     return api("daemon.status", {}).then(function (data) {
       state.daemon = data;
+      renderRuntime();
       state.daemonUptimeBase = data.uptime_secs;
       state.daemonUptimeAt = Date.now();
       renderDaemonPill();
@@ -5511,6 +5735,7 @@
       daemonWasReachable = true;
     }, function (err) {
       state.daemon = null;
+      renderRuntime();
       renderDaemonPill();
       renderOverview();
       if (daemonWasReachable !== false) {
@@ -5866,6 +6091,12 @@
   var topologyKv = document.getElementById("topology-kv");
   var topologyRooms = document.getElementById("topology-rooms");
   var topologyContextEl = document.getElementById("topology-context");
+  var topologyEmptyNote = document.getElementById("topology-empty-note");
+  var topologyPresentation = window.MistlTopology.create({
+    document: document, window: window, t: t, copy: copyToClipboard,
+    graph: topologySvg, controls: document.getElementById("topology-view-controls"),
+    focusFallback: function () { topologySvg.focus({ preventScroll: true }); }
+  });
 
   function svgEl(tag, attrs) {
     var node = document.createElementNS(SVG_NS, tag);
@@ -5881,7 +6112,7 @@
      narrow-content case. */
   var TOPO_NODE_W_MIN = 112;
   var TOPO_NODE_W_MAX = 220;
-  var TOPO_NODE_H = 40;
+  var TOPO_NODE_H = 144;
   var TOPO_ROW_H = 48;
   /* Auto-layout: once a side's node count exceeds this, it wraps into a new
      sub-column instead of growing one very tall column. */
@@ -6125,7 +6356,7 @@
       var pubSub = cascadeActive && role !== "leader" ? t("topology.role.leader") : t("topology.role.sharer");
       /* Everything this node forwards came in on this edge, so it flows
          exactly when the stream as a whole does. */
-      leftNodes.push({ id: publisherId, label: shortNodeId(publisherId), sub: pubSub, kind: "publisher", edge: "publishing", flowing: mediaFlowing });
+      leftNodes.push({ id: publisherId, label: shortNodeId(publisherId), sub: pubSub, kind: "publisher", edge: "publishing", flowing: mediaFlowing, state: peerStateById[publisherId] || null });
       shown[publisherId] = true;
     }
 
@@ -6204,7 +6435,7 @@
 
   function topologyTextUnits(str) {
     var units = 0;
-    for (var i = 0; i < str.length; i++) units += topologyCharUnits(str[i]);
+    Array.from(str).forEach(function (ch) { units += topologyCharUnits(ch); });
     return units;
   }
 
@@ -6236,12 +6467,14 @@
      width would exceed TOPO_LABEL_MAX_UNITS; short labels pass through
      unchanged. Pure function of the string, so render-signature gating
      (topologyRenderSnapshot) stays deterministic poll-to-poll. */
-  function topologyTruncateLabel(label) {
-    if (!label || topologyTextUnits(label) <= TOPO_LABEL_MAX_UNITS) return label;
-    var budget = Math.max(TOPO_LABEL_MAX_UNITS - 1, 2); // reserve 1 unit for the ellipsis glyph
+  function topologyTruncateLabel(label, maxUnits) {
+    maxUnits = maxUnits || TOPO_LABEL_MAX_UNITS;
+    if (!label || topologyTextUnits(label) <= maxUnits) return label;
+    var budget = Math.max(maxUnits - 1, 2); // reserve 1 unit for the ellipsis glyph
     var headUnits = Math.ceil(budget * 0.6);
     var tailUnits = budget - headUnits;
     function takeUnits(str, units, fromEnd) {
+      str = Array.from(str);
       var out = "";
       var used = 0;
       if (!fromEnd) {
@@ -6264,48 +6497,33 @@
     return takeUnits(label, headUnits, false) + "…" + takeUnits(label, tailUnits, true);
   }
 
-  /* `id` (when present) is both the click-to-copy payload and what the
-     tooltip shows in full; `stateLabel` is an already-localized connection
-     state (e.g. "connected") appended as a second tooltip line when known.
-     The viewers-count box has no id, so it gets neither the pointer cursor
-     nor the click handler -- there's nothing to copy. */
+  /* Keep graph geometry here; inspection and keyboard interactions belong
+     to the independent presentation feature. The full display model stays
+     available even when a compact graph label needs an ellipsis. */
   function topologyNodeBox(parent, x, y, w, label, sub, kindClass, id, stateLabel) {
     var g = svgEl("g", { transform: "translate(" + (x - w / 2) + "," + (y - TOPO_NODE_H / 2) + ")" });
-    if (id) {
-      g.classList.add("topology-node-clickable");
-      g.addEventListener("click", function () { copyToClipboard(id); });
-    }
-    var displayLabel = topologyTruncateLabel(label);
-    var labelTruncated = displayLabel !== label;
-    if (id || labelTruncated) {
-      /* Hover tooltip with the untruncated node id (SVG <title>) -- the
-         merged-away cascade peer-pill list used to be where full ids
-         lived -- plus, when the *label* itself (e.g. a free-text
-         display_name) had to be truncated to fit the box, the full label
-         text too, so nothing is ever only available in clipped form. */
-      var titleLines = [];
-      if (id) titleLines.push(id);
-      if (labelTruncated) titleLines.push(label);
-      if (stateLabel) titleLines.push(stateLabel);
-      if (id) titleLines.push(t("common.clickToCopy"));
-      var titleEl = svgEl("title");
-      titleEl.textContent = titleLines.join("\n");
-      g.appendChild(titleEl);
-    }
-    g.appendChild(svgEl("rect", {
-      class: "topology-node-box " + kindClass, x: 0, y: 0,
-      width: w, height: TOPO_NODE_H, rx: 8
+    topologyPresentation.bindNode(g, id || (kindClass === "kind-viewers" ? "viewers" : "self"));
+    var displayLabel = topologyTruncateLabel(label, Math.floor((w - 20) / 7.4));
+    g.appendChild(svgEl("rect", { class: "topology-node-hit", x: 0, y: 20, width: w, height: TOPO_NODE_H - 20, rx: 12 }));
+    var radius = kindClass === "kind-self" ? 30 : 25;
+    g.appendChild(svgEl("circle", {
+      class: "topology-node-box " + kindClass, cx: w / 2, cy: TOPO_NODE_H / 2, r: radius
     }));
-    var labelEl = svgEl("text", { class: "topology-node-label", x: w / 2, y: sub ? 17 : TOPO_NODE_H / 2 + 4, "text-anchor": "middle" });
+    // A simple device glyph keeps the circular marker separate from its label.
+    var glyph = svgEl("g", { class: "topology-node-glyph", transform: "translate(" + (w / 2 - 10) + "," + (TOPO_NODE_H / 2 - 10) + ")", "aria-hidden": "true" });
+    glyph.appendChild(svgEl("rect", { x: 0, y: 1, width: 20, height: 14, rx: 3 }));
+    glyph.appendChild(svgEl("path", { d: "M6 20h8M10 15v5" }));
+    g.appendChild(glyph);
+    var labelEl = svgEl("text", { class: "topology-node-label", x: w / 2, y: TOPO_NODE_H / 2 + 45, "text-anchor": "middle" });
     labelEl.textContent = displayLabel;
     g.appendChild(labelEl);
     if (sub) {
-      var subEl = svgEl("text", { class: "topology-node-sub", x: w / 2, y: 30, "text-anchor": "middle" });
-      subEl.textContent = sub;
+      var subEl = svgEl("text", { class: "topology-node-sub", x: w / 2, y: TOPO_NODE_H / 2 + 59, "text-anchor": "middle" });
+      subEl.textContent = topologyTruncateLabel(sub, Math.floor((w - 20) / 6.4));
       g.appendChild(subEl);
     }
     parent.appendChild(g);
-    return { x: x, y: y, w: w, h: TOPO_NODE_H, el: g };
+    return { x: x, y: y, w: w, h: TOPO_NODE_H, radius: radius, el: g };
   }
 
   /* ---- auto-layout helpers (column wrapping + label collision avoidance) ----
@@ -6479,8 +6697,8 @@
        so the arrowhead (always at the path's end, via marker-end) lands on
        the right node without this function needing a separate "reverse"
        flag. */
-    var x1 = from.x <= to.x ? from.x + from.w / 2 : from.x - from.w / 2;
-    var x2 = from.x <= to.x ? to.x - to.w / 2 : to.x + to.w / 2;
+    var x1 = from.x <= to.x ? from.x + (from.radius || from.w / 2) : from.x - (from.radius || from.w / 2);
+    var x2 = from.x <= to.x ? to.x - (to.radius || to.w / 2) : to.x + (to.radius || to.w / 2);
     var cx = x1 + (x2 - x1) / 2;
     var cy1 = from.y, cy2 = to.y;
 
@@ -6618,16 +6836,10 @@
 
     var viewBoxW = rightmost + TOPO_MARGIN;
     topologySvg.setAttribute("viewBox", "0 0 " + viewBoxW + " " + height);
-    /* Cap the on-screen scale: a tight viewBox with CSS width:100% blows a
-       2-node graph up to fill the card (giant boxes, detached-looking edge
-       labels). Render at ~1.25x natural size, shrink-to-fit when wider than
-       the card, and keep a scroll floor so big graphs stay legible on
-       phones (the wrap is overflow-x:auto). Deterministic per viewBox, so
-       the render-signature gate is unaffected. */
+    /* Keep readable type at every peer count. Large graphs scroll inside
+       the viewport rather than shrinking every label to fit the dock. */
     var naturalW = Math.round(viewBoxW * 1.25);
-    topologySvg.style.width = naturalW + "px";
-    topologySvg.style.maxWidth = "100%";
-    topologySvg.style.minWidth = Math.min(620, naturalW) + "px";
+    topologyPresentation.setGraphWidth(naturalW);
     topologySvg.style.margin = "0 auto";
 
     var selfBox = topologyNodeBox(topologySvg, xSelf, centerY, selfW, selfLabel, selfSub, "kind-self", graph.self.node_id || null);
@@ -6682,7 +6894,7 @@
          dot generic peers do -- cascade nodes (leader/follower/sibling) get
          one too whenever mistlib also reports them via `net`. */
       if (n.state) {
-        var dot = svgEl("circle", { class: "topology-dot " + topologyStateClass(n.state), cx: x - box.w / 2 + 8, cy: y - TOPO_NODE_H / 2 + 8, r: 4 });
+        var dot = svgEl("circle", { class: "topology-dot " + topologyStateClass(n.state), cx: x + 19, cy: y - 19, r: 5 });
         topologySvg.appendChild(dot);
       }
       placedRects.push({ x: x - box.w / 2, y: y - box.h / 2, w: box.w, h: box.h });
@@ -6742,25 +6954,21 @@
     }
 
     hoverNodes.forEach(function (node) {
-      node.el.addEventListener("mouseenter", function () {
+      function highlightEdges() {
         hoverEdges.forEach(function (edge) {
           if (edge.from !== node.key && edge.to !== node.key) edge.el.classList.add("dimmed");
         });
-      });
-      node.el.addEventListener("mouseleave", function () {
+      }
+      function resetEdges() {
         hoverEdges.forEach(function (edge) { edge.el.classList.remove("dimmed"); });
-      });
+      }
+      node.el.addEventListener("mouseenter", highlightEdges);
+      node.el.addEventListener("focus", highlightEdges);
+      node.el.addEventListener("mouseleave", resetEdges);
+      node.el.addEventListener("blur", resetEdges);
     });
 
-    /* Nothing but self on the graph: say so instead of leaving a lone box
-       floating in an otherwise-blank card. */
-    if (leftCount === 0 && rightCount === 0 && !graph.viewerNode) {
-      var emptyHint = svgEl("text", {
-        x: xSelf, y: selfBox.y + selfBox.h / 2 + 26, "text-anchor": "middle", class: "topology-node-sub"
-      });
-      emptyHint.textContent = t("topology.emptyHint");
-      topologySvg.appendChild(emptyHint);
-    }
+    topologyEmptyNote.hidden = !(leftCount === 0 && rightCount === 0 && !graph.viewerNode);
 
     topologySvg.setAttribute("aria-label", t("topology.aria", {
       peers: graph.rightNodes.length,
@@ -6978,7 +7186,7 @@
       hostPanel: topologyHostPanel,
       moduleInfo: module && data.modules ? data.modules[module] : null,
       self: { id: graph.self.node_id, name: graph.self.display_name, cascadeActive: graph.cascadeActive, role: graph.role },
-      left: graph.leftNodes.map(function (n) { return [n.id, n.label, n.sub, n.kind, !!n.flowing]; }),
+      left: graph.leftNodes.map(function (n) { return [n.id, n.label, n.sub, n.kind, n.state || null, !!n.flowing]; }),
       right: graph.rightNodes.map(function (n) { return [n.id, n.label, n.sub, n.kind, n.state || null, !!n.flowing]; }),
       viewer: graph.viewerNode ? [graph.viewerNode.label, graph.viewerNode.sub, !!graph.viewerNode.flowing] : null,
       peersCount: (data.peers || []).length,
@@ -7060,7 +7268,7 @@
       var broadcastSummary = topologyActivitySummary(activityMap[topologyActivityKey(room, null)]);
       var chipTitle = t("common.clickToCopy");
       if (broadcastSummary) chipTitle += "\n" + t("topology.activity.broadcast") + ": " + broadcastSummary;
-      var chip = el("span", { class: "badge mono topology-room-chip", text: room, title: chipTitle });
+      var chip = el("button", { type: "button", class: "badge mono topology-room-chip", text: room, title: chipTitle });
       chip.addEventListener("click", function () { copyToClipboard(room); });
       head.appendChild(chip);
       topologyRoomChipRegistry[room] = chip;
@@ -7081,7 +7289,8 @@
           var activitySummary = topologyActivitySummary(activityEntry);
           var title = p.node_id + " · " + stateLabel;
           if (activitySummary) title += "\n" + activitySummary;
-          var peerEl = el("span", { class: "topology-room-peer", title: title });
+          var peerEl = el("button", { type: "button", class: "topology-room-peer" });
+          topologyPresentation.bindNode(peerEl, p.node_id);
           peerEl.appendChild(el("span", { class: "topo-strip-dot " + topologyStateClass(p.state) }));
           peerEl.appendChild(el("span", { class: "mono", text: shortNodeId(p.node_id) }));
           /* TX/RX glyphs only appear once that direction has ever carried
@@ -7096,7 +7305,6 @@
             if (activityEntry.rx) { rxEl = el("span", { class: "topology-room-peer-dir rx", text: "▼" }); dirs.appendChild(rxEl); }
             peerEl.appendChild(dirs);
           }
-          peerEl.addEventListener("click", function () { copyToClipboard(p.node_id); });
           peersEl.appendChild(peerEl);
           topologyRoomPeerRegistry[topologyActivityKey(room, p.node_id)] = { tx: txEl, rx: rxEl };
         });
@@ -7107,6 +7315,43 @@
     topologyRooms.appendChild(list);
   }
 
+  /* Adapt daemon-derived graph data into presentation-only records. The
+     inspection feature does not import the graph renderer or app state. */
+  function topologyDetailModels(data, graph) {
+    if (!data || !graph) return [];
+    var roomPeers = Array.isArray(data.room_peers) ? data.room_peers : null;
+    function peerRooms(id) {
+      return roomPeers && roomPeers.filter(function (room) {
+        return (room.peers || []).some(function (peer) { return peer.node_id === id; });
+      }).map(function (room) { return room.room; });
+    }
+    function stateLabel(state) {
+      if (!state) return null;
+      var key = "topology.state." + state;
+      return t(key) === key ? state : t(key);
+    }
+    var records = [{
+      key: graph.self.node_id || "self", id: graph.self.node_id,
+      label: graph.self.display_name || shortNodeId(graph.self.node_id) || t("topology.node.self"),
+      role: graph.cascadeActive ? t("topology.role." + (graph.role === "leader" || graph.role === "follower" ? graph.role : "electing")) : t("topology.node.self"),
+      rooms: data.rooms || []
+    }];
+    graph.leftNodes.concat(graph.rightNodes).forEach(function (node) {
+      records.push({
+        key: node.id, id: node.id, label: node.label,
+        role: t("topology.legend." + node.kind), state: stateLabel(node.state),
+        connection: edgeLabelFor(node.edge), rooms: peerRooms(node.id),
+        media: node.flowing == null ? null : t(node.flowing ? "topology.flow.flowing" : "topology.flow.idle")
+      });
+    });
+    if (graph.viewerNode) records.push({
+      key: "viewers", label: graph.viewerNode.label, role: t("topology.legend.viewers"),
+      connection: "RTSP", viewers: graph.viewerNode.sub,
+      media: t(graph.viewerNode.flowing ? "topology.flow.flowing" : "topology.flow.idle")
+    });
+    return records;
+  }
+
   var topologyLastSig = null;
 
   function renderTopology() {
@@ -7114,9 +7359,11 @@
     renderTopoStrips();   /* cheap, own DOM -- always kept current */
 
     var graph = data ? buildTopologyGraph(data) : null;
+    topologyPresentation.setSnapshot(topologyDetailModels(data, graph));
     var sig = JSON.stringify(topologyRenderSnapshot(data, graph));
     if (sig === topologyLastSig) return;
     topologyLastSig = sig;
+    topologyPresentation.beginRender();
 
     topologyKv.innerHTML = "";
     topologyRooms.innerHTML = "";
@@ -7127,9 +7374,11 @@
     topologyRoomChipRegistry = {};
 
     if (!data) {
+      topologyEmptyNote.hidden = true;
       topologySvg.innerHTML = "";
       topologyEdgeRegistry = {};
       topologySvg.setAttribute("viewBox", "0 0 640 80");
+      topologyPresentation.setGraphWidth(400);
       var placeholder = svgEl("text", { x: "320", y: "44", "text-anchor": "middle", class: "topology-node-sub" });
       placeholder.textContent = t("topology.kv.unknown");
       topologySvg.appendChild(placeholder);
@@ -7137,6 +7386,7 @@
       renderTopologyLegend(null);
       renderCascadeChrome(null);
       renderTopologyContext();
+      topologyPresentation.endRender();
       return;
     }
 
@@ -7174,7 +7424,7 @@
       if (rooms.length) {
         topologyRooms.appendChild(el("span", { text: t("topology.rooms") + ": " }));
         rooms.forEach(function (room) {
-          var chip = el("span", { class: "badge mono topology-room-chip", text: room, title: t("common.clickToCopy") });
+          var chip = el("button", { type: "button", class: "badge mono topology-room-chip", text: room, title: t("common.clickToCopy") });
           chip.addEventListener("click", function () { copyToClipboard(room); });
           topologyRooms.appendChild(chip);
         });
@@ -7183,6 +7433,7 @@
       }
     }
     renderTopologyContext();
+    topologyPresentation.endRender();
   }
 
   function pollTopology() {
@@ -7203,12 +7454,7 @@
     });
   }
 
-  /* No dedicated refresh button for the topology card: the Overview and
-     Stream panels' own refresh buttons re-poll it alongside their status,
-     and it's covered by the regular pollAll() interval like every other
-     panel's data. There is exactly one card instance (re-parented between
-     the five panels by placeTopologyCard in the router), so the one poll
-     feeds the one render target wherever it currently lives. */
+  /* The shared poll updates the persistent topology dock on every page. */
 
   /* ---------- ai panel ---------- */
 
@@ -7401,167 +7647,66 @@
     }
   });
 
-  /* ---------- tc-chat relay log ---------- */
+  /* ---------- tc-chat: explicit transport and configuration ports ---------- */
 
-  var chatRelayRoomSelect = document.getElementById("chat-relay-room");
-  var chatRelayLogTbody = document.querySelector("#chat-relay-log-table tbody");
-  var chatRelayLogEmpty = document.getElementById("chat-relay-log-empty");
-  /* signature (lang + room list) of the options currently in the room
-     select, so a poll doesn't rebuild it (and lose the user's selection)
-     unless something actually changed */
-  var lastChatRelayRoomsKey = null;
-
-  function chatLogKindLabel(item) {
-    if (item.type === "tc-chat:post") return item.kind || "post";
-    if (item.type === "tc-chat:reaction") return "reaction";
-    if (item.type === "tc-chat:post-edit") return "edit";
-    if (item.type === "tc-chat:post-delete") return "delete";
-    return item.type || "-";
-  }
-
-  function chatLogContent(item) {
-    if (item.type === "tc-chat:post") {
-      if (item.text) return item.text;
-      if (item.kind === "media" || item.kind === "file") {
-        return (item.fileName || item.cid || "") + (item.fileSize ? " (" + fmtBytes(item.fileSize) + ")" : "");
+  var chatRelayView = window.MistlChat.create({
+    root: document.getElementById("chat-relay-app"),
+    ports: {
+      language: function () { return currentLang; },
+      readRooms: function () { return api("chat.rooms", {}); },
+      readLog: function (room, limit) { return api("chat.log", { room: room, limit: limit }); },
+      formatBytes: fmtBytes,
+      openSettings: function () {
+        var drawer = document.getElementById("settings-drawer-chat-relay");
+        drawer.open = true;
+        drawer.scrollIntoView({ behavior: "smooth", block: "start" });
+        var field = drawer.querySelector("input, select, button");
+        if (field) field.focus({ preventScroll: true });
+      },
+      changed: function (snapshot) {
+        state.chatRelayRooms = snapshot.status;
+        state.chatRelayLogRoom = snapshot.room;
+        state.chatRelayLogItems = snapshot.items;
       }
-      return item.cid ? "cid " + truncateMiddle(item.cid, 8, 4) : "-";
     }
-    if (item.type === "tc-chat:reaction") {
-      return (item.emoji || "") + " (" + (item.op || "") + ")";
-    }
-    if (item.type === "tc-chat:post-edit" || item.type === "tc-chat:post-delete") {
-      return "-> " + truncateMiddle(String(item.targetId || ""), 8, 4);
-    }
-    return "-";
-  }
-
-  function renderChatRelayLog(items) {
-    items = items || [];
-    state.chatRelayLogItems = items;
-    chatRelayLogTbody.innerHTML = "";
-    chatRelayLogEmpty.style.display = items.length ? "none" : "block";
-    if (items.length) chatRelayLogEmpty.textContent = t("chatRelay.log.empty");
-    items.forEach(function (item) {
-      var tr = el("tr", {});
-      var timeCell = el("td", {});
-      var ts = typeof item.timestamp === "number" ? new Date(item.timestamp) : null;
-      timeCell.textContent = ts ? ts.toLocaleString() : "-";
-      tr.appendChild(timeCell);
-      var fromCell = el("td", {});
-      var fromLabel = item.fromName || truncateMiddle(String(item.fromId || ""), 12, 6);
-      fromCell.appendChild(copyButton(String(item.fromId || ""), fromLabel, "mono"));
-      tr.appendChild(fromCell);
-      tr.appendChild(el("td", { text: chatLogKindLabel(item) }));
-      tr.appendChild(el("td", { text: chatLogContent(item) }));
-      chatRelayLogTbody.appendChild(tr);
-    });
-  }
-
-  function loadChatRelayLog(room) {
-    if (!room) { renderChatRelayLog([]); return Promise.resolve(); }
-    state.chatRelayLogRoom = room;
-    return api("chat.log", { room: room, limit: 100 }).then(renderChatRelayLog, function (err) {
-      showToast("chat.log: " + err.message, "error");
-    });
-  }
-
-  function renderChatRelayRooms(status) {
-    state.chatRelayRooms = status;
-    var rooms = (status && status.rooms) || [];
-    var roomsKey = currentLang + "|" + JSON.stringify(rooms) + "|" + (status && status.enabled);
-    if (roomsKey === lastChatRelayRoomsKey) return;
-    lastChatRelayRoomsKey = roomsKey;
-
-    var prevSelected = chatRelayRoomSelect.value;
-    chatRelayRoomSelect.innerHTML = "";
-    if (!status || !status.enabled || !rooms.length) {
-      chatRelayLogTbody.innerHTML = "";
-      chatRelayLogEmpty.style.display = "block";
-      chatRelayLogEmpty.textContent = rooms.length ? t("chatRelay.log.disabled") : t("chatRelay.log.noRooms");
-      return;
-    }
-    rooms.forEach(function (r) {
-      var label = r.room + (r.joined ? "" : " (" + t("chatRelay.log.notJoined") + ")");
-      chatRelayRoomSelect.appendChild(el("option", { value: r.room, text: label }));
-    });
-    var toSelect = rooms.some(function (r) { return r.room === prevSelected; }) ? prevSelected : rooms[0].room;
-    chatRelayRoomSelect.value = toSelect;
-    loadChatRelayLog(toSelect);
-  }
-
-  function pollChatRelayRooms() {
-    return api("chat.rooms", {}).then(renderChatRelayRooms, function () {
-      renderChatRelayRooms(null);
-    });
-  }
-
-  chatRelayRoomSelect.addEventListener("change", function () {
-    loadChatRelayLog(chatRelayRoomSelect.value);
   });
+
+  function renderChatRelayRooms(status) { return chatRelayView.setRooms(status); }
+  function pollChatRelayRooms() { return chatRelayView.refresh(); }
 
   document.getElementById("btn-chat-relay-refresh").addEventListener("click", function (e) {
-    withBusy(e.currentTarget, function () {
-      return pollChatRelayRooms().then(function () {
-        return loadChatRelayLog(chatRelayRoomSelect.value);
-      });
-    });
+    withBusy(e.currentTarget, function () { return pollChatRelayRooms(); });
   });
+
 
   /* ---------- store ---------- */
 
-  var storeTbody = document.querySelector("#store-table tbody");
-  var storeEmpty = document.getElementById("store-empty");
   var storeDropzone = document.getElementById("store-dropzone");
   var storeFileInput = document.getElementById("store-file-input");
   var storeUploadStatus = document.getElementById("store-upload-status");
   var uploadSeq = 0;
 
+  var storageBrowser = window.MistlStorage.create({
+    root: document.getElementById("panel-store"),
+    t: t,
+    formatBytes: fmtBytes,
+    getLocale: function () { return currentLang; },
+    copy: copyToClipboard,
+    downloadUrl: function (entry) { return "/api/store/download?cid=" + encodeURIComponent(entry.cid); },
+    pickFiles: function () { storeFileInput.click(); },
+    saveToPath: function (entry, outputPath, button) {
+      var args = { id: entry.cid };
+      if (outputPath) args.output = outputPath;
+      runAction(button, "store.get", args, function (data) {
+        showToast(t("store.saved", { output: data.output }), "success");
+      });
+    }
+  });
+
   function renderStore(items) {
     items = items || [];
     state.storeItems = items;
-    storeTbody.innerHTML = "";
-    storeEmpty.style.display = items.length ? "none" : "block";
-    items.forEach(function (entry) {
-      var tr = el("tr", {});
-      var cidCell = el("td", {});
-      cidCell.appendChild(copyButton(entry.cid, truncateMiddle(entry.cid, 10, 6), "mono"));
-      tr.appendChild(cidCell);
-      tr.appendChild(el("td", { text: entry.name }));
-      tr.appendChild(el("td", { text: fmtBytes(entry.size) }));
-      tr.appendChild(el("td", { text: entry.stored_at || "-" }));
-
-      var actionCell = el("td", {});
-      var dl = el("a", { href: "/api/store/download?cid=" + encodeURIComponent(entry.cid), download: entry.name || entry.cid, class: "download-link" });
-      dl.textContent = t("store.download");
-      actionCell.appendChild(dl);
-
-      /* the save-to-path form is rarely used, so keep it behind a per-row
-         disclosure instead of bloating the Actions column with a full form */
-      var saveDetails = el("details", { class: "store-save-details" });
-      saveDetails.appendChild(el("summary", { text: t("store.saveToPath") }));
-      var form = el("form", { class: "row store-save-form" });
-      var input = el("input", { type: "text" });
-      input.placeholder = t("store.savePathPlaceholder");
-      var btn = el("button", { type: "submit" });
-      btn.textContent = t("store.saveToPath");
-      form.appendChild(input);
-      form.appendChild(btn);
-      form.addEventListener("submit", function (ev) {
-        ev.preventDefault();
-        var args = { id: entry.cid };
-        var outputPath = input.value.trim();
-        if (outputPath) args.output = outputPath;
-        runAction(btn, "store.get", args, function (data) {
-          showToast(t("store.saved", { output: data.output }), "success");
-        });
-      });
-      saveDetails.appendChild(form);
-      actionCell.appendChild(saveDetails);
-      tr.appendChild(actionCell);
-
-      storeTbody.appendChild(tr);
-    });
+    storageBrowser.render(items);
   }
 
   function pollStoreLs() {
@@ -7598,7 +7743,8 @@
     return new Promise(function (resolve, reject) {
       var xhr = new XMLHttpRequest();
       xhr.open("POST", "/api/store/upload");
-      xhr.setRequestHeader("x-mistl-ui", "1");
+    xhr.setRequestHeader("x-mistl-ui", "1");
+    xhr.setRequestHeader("x-mistl-instance", pageIdentity());
       xhr.setRequestHeader("x-file-name", encodeURIComponent(file.name));
       xhr.upload.addEventListener("progress", function (e) {
         if (e.lengthComputable) {
@@ -7670,7 +7816,10 @@
     sandboxEmpty.style.display = entries.length ? "none" : "block";
     entries.forEach(function (rel) {
       var tr = el("tr", {});
-      tr.appendChild(el("td", { class: "mono", text: rel }));
+      var nameCell = el("td", { title: rel });
+      nameCell.appendChild(el("span", { class: "store-sandbox-name", text: sandboxBaseName(rel) }));
+      nameCell.appendChild(el("span", { class: "store-sandbox-path mono", text: rel }));
+      tr.appendChild(nameCell);
 
       var actionCell = el("td", {});
 
@@ -7748,7 +7897,8 @@
     return new Promise(function (resolve, reject) {
       var xhr = new XMLHttpRequest();
       xhr.open("POST", "/api/store/sandbox-upload");
-      xhr.setRequestHeader("x-mistl-ui", "1");
+    xhr.setRequestHeader("x-mistl-ui", "1");
+    xhr.setRequestHeader("x-mistl-instance", pageIdentity());
       xhr.setRequestHeader("x-file-name", encodeURIComponent(file.name));
       xhr.upload.addEventListener("progress", function (e) {
         if (e.lengthComputable) {
@@ -9014,8 +9164,10 @@
     var defaultRecipe = document.querySelector('input[name="bot-recipe"][value="news-audio"]');
     if (defaultRecipe) defaultRecipe.checked = true;
     botFormTitle.textContent = t("bot.form.addTitle");
+    document.getElementById("bot-editor").querySelector("summary").textContent = t("bot.form.addTitle");
     botSaveBtn.textContent = t("bot.form.addBtn");
-    botCancelEditBtn.hidden = true;
+    botCancelEditBtn.hidden = false;
+    document.getElementById("bot-editor").open = false;
     botSetSimplePickerValue(botScheduleSelect, botScheduleInput, "@hourly");
     botSetSimplePickerValue(botTranslateTargetLang, botTranslateTargetLangCustom, "ja");
     botSetLangsValue([]);
@@ -9146,6 +9298,8 @@
       botFormTitle.textContent = t("bot.form.editTitle", { id: pipeline.id || "" });
       botSaveBtn.textContent = t("bot.form.updateBtn");
       botCancelEditBtn.hidden = false;
+      document.getElementById("bot-editor").open = true;
+      document.getElementById("bot-editor").querySelector("summary").textContent = t("bot.form.editTitle", { id: pipeline.id || "" });
     });
   }
 
@@ -9385,7 +9539,9 @@
   var tunnelNoticesEmpty = document.getElementById("tunnel-notices-empty");
   var tunnelEventsTbody = document.querySelector("#tunnel-events-table tbody");
   var tunnelEventsEmpty = document.getElementById("tunnel-events-empty");
-  var tunnelChatTbody = document.querySelector("#tunnel-chat-table tbody");
+  var tunnelChatMessages = document.getElementById("tunnel-chat-messages");
+  var tunnelChatSnapshot = [];
+  var tunnelChatLanguage = null;
   var tunnelChatEmpty = document.getElementById("tunnel-chat-empty");
   var tunnelChatForm = document.getElementById("tunnel-chat-form");
   var tunnelChatInput = document.getElementById("tunnel-chat-input");
@@ -9581,18 +9737,30 @@
 
   function renderTunnelChat(items) {
     items = items || [];
-    tunnelChatTbody.innerHTML = "";
-    tunnelChatEmpty.style.display = items.length ? "none" : "block";
-    items.forEach(function (msg) {
+    var keys = items.map(function (msg) { return JSON.stringify(msg || {}); });
+    var sameLanguage = tunnelChatLanguage === currentLang;
+    if (sameLanguage && JSON.stringify(keys) === JSON.stringify(tunnelChatSnapshot)) return;
+    var wrap = document.getElementById("tunnel-chat-history");
+    var atBottom = wrap.scrollHeight - wrap.scrollTop - wrap.clientHeight < 48;
+    var oldScroll = wrap.scrollTop;
+    var appendOnly = sameLanguage && tunnelChatSnapshot.length <= keys.length && tunnelChatSnapshot.every(function (key, i) { return key === keys[i]; });
+    var offset = appendOnly ? tunnelChatSnapshot.length : 0;
+    if (!appendOnly) tunnelChatMessages.replaceChildren();
+    tunnelChatEmpty.hidden = items.length > 0;
+    items.slice(offset).forEach(function (msg) {
       msg = msg || {};
-      var tr = el("tr", { class: msg.mine ? "tunnel-chat-row mine" : "tunnel-chat-row" });
-      tr.appendChild(el("td", { text: fmtEpochMs(msg.timestamp_ms) }));
-      tr.appendChild(el("td", { class: "mono", text: msg.mine ? t("tunnel.chat.you") : (msg.peer_id || "-") }));
-      tr.appendChild(el("td", { text: msg.text || "" }));
-      tunnelChatTbody.appendChild(tr);
+      var row = el("article", { class: msg.mine ? "chat-message mine" : "chat-message" });
+      var meta = el("div", { class: "chat-message-meta" });
+      meta.appendChild(el("span", { text: msg.mine ? t("tunnel.chat.you") : (msg.peer_id || "-") }));
+      meta.appendChild(el("time", { text: fmtEpochMs(msg.timestamp_ms) }));
+      row.appendChild(meta);
+      row.appendChild(el("p", { class: "chat-message-body", text: msg.text || "" }));
+      tunnelChatMessages.appendChild(row);
     });
-    var wrap = tunnelChatTbody.closest(".table-wrap");
-    if (wrap) wrap.scrollTop = wrap.scrollHeight;
+    tunnelChatSnapshot = keys;
+    tunnelChatLanguage = currentLang;
+    // Preserve the reader's position when earlier messages are being read.
+    wrap.scrollTop = atBottom ? wrap.scrollHeight : oldScroll;
   }
 
   function renderTunnelRoomList(rooms) {
@@ -9646,8 +9814,16 @@
     }
   }
 
+  var tunnelGraph = window.MistlTunnelGraph.create({
+    document: document,
+    host: document.getElementById("tunnel-graph"),
+    api: api,
+    refresh: pollTunnelStatus
+  });
+
   function renderTunnel(data) {
     state.tunnel = data;
+    tunnelGraph.render(data);
     if (!data) return;
     var running = !!data.running;
     tunnelStatePill.className = "pill " + (running ? "ok" : "err");
@@ -9775,9 +9951,16 @@
       return;
     }
     if (!tunnelConfirmRoomChange()) return;
-    runAction(tunnelRoomConnectBtn, "tunnel.room.set", { room: room }, function (data) {
+    withBusy(tunnelRoomConnectBtn, function () {
+      return api("tunnel.room.set", { room: room }).then(function (data) {
+        return api("tunnel.start", {}).then(function () { return data; });
+      });
+    }).then(function (data) {
       tunnelRoomConnectInput.value = "";
       tunnelRoomSwitched((data && data.room) || room);
+    }, function (err) {
+      showToast(err.message || String(err), "error");
+      pollTunnelStatus();
     });
   });
 
@@ -9843,7 +10026,7 @@
     var text = tunnelChatInput.value.trim();
     if (!text) return;
     runAction(tunnelChatSendBtn, "tunnel.chat.send", { text: text }, function () {
-      tunnelChatInput.value = "";
+      if (tunnelChatInput.value.trim() === text) tunnelChatInput.value = "";
       pollTunnelStatus();
     });
   });
@@ -9948,7 +10131,8 @@
     return new Promise(function (resolve, reject) {
       var xhr = new XMLHttpRequest();
       xhr.open("POST", "/api/store/upload");
-      xhr.setRequestHeader("x-mistl-ui", "1");
+    xhr.setRequestHeader("x-mistl-ui", "1");
+    xhr.setRequestHeader("x-mistl-instance", pageIdentity());
       xhr.setRequestHeader("x-file-name", encodeURIComponent(name));
       xhr.onload = function () {
         var json = null;
@@ -10111,6 +10295,7 @@
     var drawer = document.getElementById("settings-drawer-" + section) ||
       document.getElementById("settings-drawer-" + section.replace(/_/g, "-"));
     if (drawer) drawer.open = true;
+    if (section === "ai" && subtabActivate["panel-ai"]) subtabActivate["panel-ai"]("network");
     if (input) {
       var details = input.closest ? input.closest("details") : null;
       while (details) {
@@ -10979,7 +11164,7 @@
       }
       var advancedFields = [];
       grp.fields.forEach(function (f) {
-        if (f.advanced) advancedFields.push(f);
+        if (f.advanced && grp.section !== "ai") advancedFields.push(f);
         else sec.appendChild(buildSettingsField(grp.section, f, sectionCfg));
       });
       if (advancedFields.length) {
@@ -11258,6 +11443,7 @@
     pollStreamStatus();
     pollTopology();
     pollAiStatus();
+    pollChatRelayRooms();
     /* folder sync entries change in the background (daemon-side
        connect/retry loop), so poll them on the same unconditional cycle as
        everything else above rather than gating on panel visibility --
@@ -11357,47 +11543,14 @@
     return PANEL_IDS.indexOf(id) >= 0 ? id : "panel-overview";
   }
 
-  /* The topology card exists exactly once and is shown on five panels --
-     Overview and Stream (primary network views, fold open by default) plus
-     AI, tc-chat Relay and Store (fold collapsed by default, expanded on
-     demand from their mini-strips). Rather than duplicating markup/renderers --
-     which would need duplicate element ids and double rendering -- the
-     single card is re-parented into the active panel's slot on navigation.
-     The SVG, including its marker defs, survives same-document moves
-     intact, and the shared 5s poll keeps rendering into it wherever it
-     sits. */
+  // One persistent host: navigation never hides or recreates the graph.
   var topologyCardEl = document.getElementById("topology-card");
-  var topologySlots = {
-    "panel-overview": document.getElementById("topology-slot-overview"),
-    "panel-stream": document.getElementById("topology-slot-stream"),
-    "panel-ai": document.getElementById("topology-slot-ai"),
-    "panel-chat-relay": document.getElementById("topology-slot-chat-relay"),
-    "panel-store": document.getElementById("topology-slot-store")
-  };
   var topologyFoldEl = document.getElementById("topology-fold");
-  var topologyDefaultOpen = { "panel-overview": true, "panel-stream": true, "panel-ai": false, "panel-chat-relay": false, "panel-store": false };
-  var topologyUserToggled = {};   /* panelId -> true once the user opens/closes the fold there */
   var topologyHostPanel = null;
-
+  document.getElementById("topology-dock").appendChild(topologyCardEl);
   function placeTopologyCard(activeId) {
-    var slot = topologySlots[activeId];
-    if (slot && topologyCardEl.parentNode !== slot) slot.appendChild(topologyCardEl);
-    if (slot) {
-      topologyHostPanel = activeId;
-      if (topologyFoldEl && !topologyUserToggled[activeId]) {
-        topologyFoldEl.open = topologyDefaultOpen[activeId] !== false;
-      }
-      renderTopologyContext();
-    }
-  }
-
-  if (topologyFoldEl) {
-    var topologyFoldSummary = topologyFoldEl.querySelector("summary");
-    if (topologyFoldSummary) {
-      topologyFoldSummary.addEventListener("click", function () {
-        topologyUserToggled[topologyHostPanel] = true;
-      });
-    }
+    topologyHostPanel = activeId;
+    renderTopologyContext();
   }
 
   function showPanel(id) {
@@ -11444,14 +11597,11 @@
     e.preventDefault();
     navigateTo(id);
   });
-  /* the strips' "view topology" link no longer navigates away -- it opens
-     (if collapsed) and scrolls to the in-panel card, which is always in the
-     active panel now that every strip-bearing panel has a slot */
+  /* Reveal the persistent graph from a module's topology shortcut. */
   document.addEventListener("click", function (e) {
     var a = e.target.closest ? e.target.closest('a[href="#topology-card"]') : null;
     if (!a) return;
     e.preventDefault();
-    topologyUserToggled[topologyHostPanel] = true;
     if (topologyFoldEl) topologyFoldEl.open = true;
     var card = document.getElementById("topology-card");
     if (card) card.scrollIntoView({ behavior: "smooth", block: "start" });

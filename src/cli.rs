@@ -9,11 +9,21 @@ use crate::tunnel::forward_args;
 #[command(
     name = "mistl",
     version,
+    long_version = concat!(env!("CARGO_PKG_VERSION"), " ", env!("MISTL_CHANNEL"), "\nbuild ", env!("MISTL_BUILD_ID")),
     about = "MISTL - unified P2P daemon: identity, storage, VRChat screen share, tc-chat relay, AI network",
     after_help = "Running `mistl` with no arguments opens the web dashboard \
                   (starts the daemon if needed) -- double-clicking mistl.exe does the same."
 )]
 pub struct Cli {
+    /// Isolated instance name (development builds default to this worktree).
+    #[arg(long, global = true)]
+    pub instance: Option<String>,
+    /// Alternate state root; channel and instance are always appended.
+    #[arg(long, global = true)]
+    pub state_dir: Option<std::path::PathBuf>,
+    /// Do not create a Windows notification-area icon.
+    #[arg(long, global = true)]
+    pub no_tray: bool,
     /// Omitted -> open the web dashboard.
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -21,6 +31,13 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Allow/block external connections, persistently across PC restarts.
+    Network {
+        #[command(subcommand)]
+        action: NetworkAction,
+    },
+    /// Show the identity of this binary without starting a daemon.
+    BuildInfo,
     /// Manage the background daemon
     Daemon {
         #[command(subcommand)]
@@ -719,6 +736,13 @@ pub enum TunnelAction {
 
 /// Dispatch a parsed CLI invocation: either run the daemon, or act as a
 /// client sending one request to the running daemon over local IPC.
+#[derive(Subcommand)]
+pub enum NetworkAction {
+    On,
+    Off,
+    Status,
+}
+
 pub fn dispatch(cli: Cli) -> Result<()> {
     let Some(command) = cli.command else {
         // Bare `mistl` (including an Explorer double-click on the exe):
@@ -726,6 +750,18 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         return open_dashboard();
     };
     match command {
+        Command::BuildInfo => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&crate::runtime::build_info())?
+            );
+            Ok(())
+        }
+        Command::Network { action } => match action {
+            NetworkAction::On => client_call("network.set", json!({"enabled":true})),
+            NetworkAction::Off => client_call("network.set", json!({"enabled":false})),
+            NetworkAction::Status => client_call("network.status", json!({})),
+        },
         Command::Daemon { action } => match action {
             DaemonAction::Run { host } => daemon::run_foreground(host),
             DaemonAction::Start { host } => daemon::start_background(host),

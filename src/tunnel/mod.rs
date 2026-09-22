@@ -83,6 +83,7 @@ pub mod controller;
 pub mod forward_args;
 pub mod forward_runtime;
 pub mod forward_store;
+pub mod graph;
 pub mod negotiation;
 pub mod proxy;
 pub mod room_store;
@@ -281,6 +282,7 @@ async fn start(state: &Arc<AppState>) -> Result<Value> {
     let drain_task = tokio::spawn(async move {
         loop {
             drain_ctx.drain_and_apply_outcomes().await;
+            drain_ctx.graph_tick().await;
             tokio::time::sleep(DRAIN_INTERVAL).await;
         }
     });
@@ -304,6 +306,14 @@ async fn stop() -> Result<Value> {
     match guard.take() {
         Some(session) => {
             session.drain_task.abort();
+            let graph = session.ctx.manager.graph();
+            let _graph_guard = graph.mutation.lock().await;
+            graph
+                .closed
+                .store(true, std::sync::atomic::Ordering::Release);
+            for forward in session.ctx.controller.list_forwards().await {
+                let _ = session.ctx.controller.remove_forward(&forward.key).await;
+            }
             // Before dropping the transport, so no peer's stdio session
             // outlives the tunnel that authorized it.
             if let Some(executor) = session.stdio_executor.as_ref() {
@@ -347,7 +357,18 @@ async fn status(state: &Arc<AppState>) -> Result<Value> {
     let cfg = state.config().tunnel;
     let guard = SESSION.lock().await;
     let mut value = match guard.as_ref() {
-        Some(session) => session.ctx.snapshot().await.to_json(),
+        Some(session) => {
+            let mut value = session.ctx.snapshot().await.to_json();
+            value["graph"] = session.ctx.graph_snapshot().await;
+            let targets = session.ctx.graph_managed_targets().await;
+            if let Some(forwards) = value["forwards"].as_array_mut() {
+                for forward in forwards {
+                    forward["graph_managed"] =
+                        json!(targets.iter().any(|key| forward["target"] == *key));
+                }
+            }
+            value
+        }
         None => empty_snapshot_json(&cfg.room_id),
     };
     value["enabled"] = json!(cfg.enabled);
@@ -754,6 +775,20 @@ async fn chat_send(args: Value) -> Result<Value> {
 pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Value> {
     match cmd {
         "tunnel.status" => status(state).await,
+        "tunnel.graph.command" => {
+            let ctx = running_ctx().await?;
+            let node_id = args
+                .get("node_id")
+                .and_then(Value::as_str)
+                .context("node_id is required")?;
+            let room = args
+                .get("room")
+                .and_then(Value::as_str)
+                .context("room is required")?;
+            let action =
+                serde_json::from_value(args.get("action").cloned().context("action is required")?)?;
+            ctx.graph_command(node_id, action, room).await
+        }
         "tunnel.start" => start(state).await,
         "tunnel.stop" => stop().await,
         "tunnel.room.set" => room_set(state, args).await,

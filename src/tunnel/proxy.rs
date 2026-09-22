@@ -212,12 +212,15 @@ impl Executor {
             return Ok(());
         }
 
-        let mut child = Command::new(&cmd[0])
+        let mut command = Command::new(&cmd[0]);
+        command
             .args(&cmd[1..])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()?;
+            .stderr(std::process::Stdio::piped());
+        crate::child_process::prepare(&mut command);
+        let mut child = command.spawn()?;
+        let process_tree = crate::child_process::ProcessTree::attach(&mut child)?;
 
         let stdin = child.stdin.take().unwrap();
         *stdin_holder.lock().await = Some(stdin);
@@ -240,6 +243,7 @@ impl Executor {
 
         let stdin_holder2 = stdin_holder.clone();
         tokio::spawn(async move {
+            let _process_tree = process_tree;
             let status = child.wait().await;
             *stdin_holder2.lock().await = None;
             match status {

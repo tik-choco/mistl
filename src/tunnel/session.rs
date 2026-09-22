@@ -316,6 +316,10 @@ impl SessionContext {
     /// `crate::tunnel::handle`/`spawn_background` (W5).
     pub async fn build(state: &Arc<AppState>, room: String, is_server: bool) -> Result<Self> {
         let manager = RTCManager::new(state, room.clone(), is_server).await?;
+        if let Err(error) = manager.graph().load_room(&room).await {
+            manager.close().await;
+            return Err(error);
+        }
         let trust_store = TrustStore::load(default_trust_store_path()).await?;
         let audit_log = AuthAuditLog::default();
         let pending_auth = PendingAuthorizations::new();
@@ -329,6 +333,7 @@ impl SessionContext {
             pending_auth.clone(),
             audit_log.clone(),
         );
+        let authorizer = super::graph::authorizer(manager.graph(), authorizer);
         let controller = ForwardController::with_authorizer(manager.clone(), authorizer);
 
         // Re-establish previously approved forwards.
@@ -394,7 +399,7 @@ impl SessionContext {
                 .await;
         }
 
-        Ok(Self {
+        let context = Self {
             room: Arc::new(Mutex::new(room)),
             manager,
             controller,
@@ -405,7 +410,9 @@ impl SessionContext {
             forward_store,
             notices: Arc::new(Mutex::new(Vec::new())),
             chat_log,
-        })
+        };
+        context.restore_graph_forwards().await;
+        Ok(context)
     }
 
     /// Appends a notice, trimming the oldest entries past [`MAX_NOTICES`].
@@ -661,6 +668,21 @@ impl SessionContext {
     /// Removes a forward by its key (the target string the controller uses
     /// as the forward's id) and drops it from the persisted forward store.
     pub async fn remove_forward(&self, key: &str) -> Result<(), SessionError> {
+        if self
+            .graph_managed_targets()
+            .await
+            .iter()
+            .any(|target| target == key)
+        {
+            self.graph_command(
+                self.manager.self_id(),
+                super::graph::Action::RemoveForward { target: key.into() },
+                &self.manager.current_room().await,
+            )
+            .await
+            .map_err(|e| SessionError::Invalid(e.to_string()))?;
+            return Ok(());
+        }
         self.controller
             .remove_forward(key)
             .await
@@ -739,8 +761,29 @@ impl SessionContext {
     /// it to re-join via `crate::net::ensure_started` -- see the
     /// integration contract's frozen `crate::tunnel::rtc` surface.
     pub async fn switch_room(&self, state: &Arc<AppState>, new_room: String) -> Result<()> {
+        let graph = self.manager.graph();
+        let _graph_guard = graph.mutation.lock().await;
+        if self.manager.current_room().await == new_room {
+            return Ok(());
+        }
+        let prepared = super::graph::GraphState::prepare_room(&new_room).await?;
         let old_peers = self.manager.connected_peers().await;
-        self.manager.switch_room(state, new_room.clone()).await?;
+        graph
+            .suspended
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.graph_remove_room_forwards().await;
+        if let Err(error) = self.manager.switch_room(state, new_room.clone()).await {
+            self.restore_graph_forwards().await;
+            graph
+                .suspended
+                .store(false, std::sync::atomic::Ordering::Release);
+            return Err(error);
+        }
+        graph.install_room(prepared).await;
+        self.restore_graph_forwards().await;
+        graph
+            .suspended
+            .store(false, std::sync::atomic::Ordering::Release);
         *self.room.lock().await = new_room.clone();
         for peer_id in old_peers {
             self.pending_auth.purge_peer(&peer_id).await;
@@ -787,7 +830,10 @@ impl SessionContext {
             target_addr: tunnel_config.stdio_command.join(" "),
             proto: "stdio".to_string(),
         };
-        authorizer.authorize(&req).await.is_allowed()
+        super::graph::authorizer(self.manager.graph(), authorizer)
+            .authorize(&req)
+            .await
+            .is_allowed()
     }
 }
 
