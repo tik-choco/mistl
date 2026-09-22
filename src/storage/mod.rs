@@ -252,9 +252,11 @@ pub async fn store(state: &Arc<AppState>) -> Result<Arc<Store>> {
     // (answering inbound QUERY/WANT) can actually find it -- see
     // `resolver::ensure_wire_handler_registered`'s doc comment.
     resolver::ensure_wire_handler_registered();
-    store
-        .sync_rooms(state, &state.config().storage.room_ids)
-        .await?;
+    if state.network.permitted() {
+        store
+            .sync_rooms(state, &state.config().storage.room_ids)
+            .await?;
+    }
     Ok(store.clone())
 }
 

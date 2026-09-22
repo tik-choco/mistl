@@ -132,6 +132,27 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 /// [`poll_chat_candidates`] for the same reason.
 const POLL_CANDIDATE_LIMIT: usize = 10;
 
+/// Prefer never-tried items, then the least recently attempted ones. Failed
+/// CIDs remain retryable without monopolizing every poll's bounded budget.
+#[derive(Default)]
+struct PollOrder {
+    generation: u64,
+    attempted: HashMap<String, u64>,
+}
+
+impl PollOrder {
+    fn select<T>(&mut self, items: &mut Vec<T>, id: impl Fn(&T) -> &str) {
+        let live: HashSet<String> = items.iter().map(|item| id(item).to_string()).collect();
+        self.attempted.retain(|key, _| live.contains(key));
+        items.sort_by_key(|item| self.attempted.get(id(item)).copied().unwrap_or(0));
+        items.truncate(POLL_CANDIDATE_LIMIT);
+        self.generation += 1;
+        for item in items {
+            self.attempted.insert(id(item).to_string(), self.generation);
+        }
+    }
+}
+
 /// `tc-chat:post` wire type (`usePostStream.ts:41`), for the chat-room
 /// source.
 const WIRE_CHAT_POST: &str = "tc-chat:post";
@@ -167,7 +188,7 @@ pub(super) struct SourceLink {
 
 /// A fetched, filtered `NewsArticle` (`tc-news/src/types.ts:28-44`), holding
 /// only the fields the bot pipeline's transforms/sinks need.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct Article {
     pub id: String,
     pub title: String,
@@ -223,6 +244,7 @@ struct GlobalArticlesHub {
     /// room).
     joined_rooms: Mutex<HashSet<String>>,
     buffers: Mutex<HashMap<String, VecDeque<BufferedWire>>>,
+    polls: Mutex<HashMap<String, PollOrder>>,
 }
 
 static HUB: OnceCell<Arc<GlobalArticlesHub>> = OnceCell::const_new();
@@ -232,6 +254,7 @@ async fn ensure_hub() -> Arc<GlobalArticlesHub> {
         let hub = Arc::new(GlobalArticlesHub {
             joined_rooms: Mutex::new(HashSet::new()),
             buffers: Mutex::new(HashMap::new()),
+            polls: Mutex::new(HashMap::new()),
         });
         register_handler(hub.clone());
         hub
@@ -389,7 +412,8 @@ fn parse_and_filter(bytes: &[u8], announced_from_id: &str, langs: &[String]) -> 
 }
 
 /// Ensures `rooms` are joined, then returns up to [`POLL_CANDIDATE_LIMIT`]
-/// not-yet-processed candidates (oldest first) for `pipeline_id`, fetching
+/// not-yet-processed candidates (oldest first among equally attempted items)
+/// for `pipeline_id`, fetching
 /// and filtering each one's body along the way. A wire whose body can't be
 /// resolved this round is simply omitted (left for a later run); a resolved
 /// body that fails validation/filtering is included with `article: None`
@@ -438,7 +462,12 @@ pub(super) async fn poll_candidates(
         }
     }
     unresolved.sort_by_key(|(_, wire)| wire.timestamp);
-    unresolved.truncate(POLL_CANDIDATE_LIMIT);
+    hub.polls
+        .lock()
+        .await
+        .entry(pipeline_id.to_string())
+        .or_default()
+        .select(&mut unresolved, |(_, wire)| &wire.id);
 
     let store = crate::storage::store(state).await?;
     let mut candidates = Vec::with_capacity(unresolved.len());
@@ -492,6 +521,7 @@ struct BufferedChatWire {
 struct ChatHub {
     joined_rooms: Mutex<HashSet<String>>,
     buffers: Mutex<HashMap<String, VecDeque<BufferedChatWire>>>,
+    polls: Mutex<HashMap<String, PollOrder>>,
 }
 
 static CHAT_HUB: OnceCell<Arc<ChatHub>> = OnceCell::const_new();
@@ -502,6 +532,7 @@ async fn ensure_chat_hub() -> Arc<ChatHub> {
             let hub = Arc::new(ChatHub {
                 joined_rooms: Mutex::new(HashSet::new()),
                 buffers: Mutex::new(HashMap::new()),
+                polls: Mutex::new(HashMap::new()),
             });
             register_chat_handler(hub.clone());
             hub
@@ -757,7 +788,12 @@ pub(super) async fn poll_chat_candidates(
         }
     }
     unresolved.sort_by_key(|wire| wire.timestamp);
-    unresolved.truncate(POLL_CANDIDATE_LIMIT);
+    hub.polls
+        .lock()
+        .await
+        .entry(pipeline_id.to_string())
+        .or_default()
+        .select(&mut unresolved, |wire| &wire.id);
 
     let store = crate::storage::store(state).await?;
     let mut candidates = Vec::with_capacity(unresolved.len());
@@ -789,6 +825,30 @@ pub(super) async fn poll_chat_candidates(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_prefix_does_not_starve_later_items_and_is_eventually_retried() {
+        let backlog: Vec<String> = (0..25).map(|i| format!("item-{i}")).collect();
+        let mut order = PollOrder::default();
+        let mut first = backlog.clone();
+        order.select(&mut first, String::as_str);
+        assert_eq!(first, backlog[..10]);
+        // All first ten CIDs remain unresolved: the next poll still advances.
+        let mut second = backlog.clone();
+        order.select(&mut second, String::as_str);
+        assert_eq!(second, backlog[10..20]);
+        let mut third = backlog.clone();
+        order.select(&mut third, String::as_str);
+        assert_eq!(&third[..5], &backlog[20..]);
+        assert_eq!(&third[5..], &backlog[..5]);
+        let mut remaining = vec!["item-24".to_string()];
+        order.select(&mut remaining, String::as_str);
+        assert_eq!(
+            order.attempted.len(),
+            1,
+            "removed items must not accumulate"
+        );
+    }
 
     fn sample_wire_bytes() -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!({

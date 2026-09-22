@@ -97,6 +97,42 @@ pub struct RTCManagerHandle {
 
 #[allow(dead_code)]
 impl RTCManagerHandle {
+    pub fn graph(&self) -> Arc<crate::tunnel::graph::GraphState> {
+        self.inner.graph.clone()
+    }
+
+    /// Reuse the data-plane lifecycle hooks without removing room membership.
+    /// This closes idle sockets after a link is revoked, and cancels pending
+    /// close timers when the owner reconnects the peer during the grace window.
+    pub async fn graph_connection_changed(&self, peer: &str, allowed: bool) {
+        let (tunnel, stdio) = if allowed {
+            (
+                &self.inner.tunnel_open_handlers,
+                &self.inner.stdio_open_handlers,
+            )
+        } else {
+            (
+                &self.inner.tunnel_close_handlers,
+                &self.inner.stdio_close_handlers,
+            )
+        };
+        for handler in tunnel.read().await.iter() {
+            handler(peer.to_string());
+        }
+        for handler in stdio.read().await.iter() {
+            handler(peer.to_string());
+        }
+    }
+
+    pub async fn send_graph(
+        &self,
+        peer: &str,
+        message: crate::tunnel::graph::Message,
+    ) -> Result<()> {
+        let room = self.current_room().await;
+        self.send_payload(peer, P2pPayload::Graph { room, message })
+            .await
+    }
     /// Builds a handle backed by fresh in-memory state, without touching
     /// `crate::net` or any real transport. Lets other modules' tests (e.g.
     /// `crate::tunnel::tcp`) register/fire handlers and drive join/leave
@@ -281,6 +317,13 @@ impl RTCManagerHandle {
     /// candidate.
     pub async fn select_server_peer_for(&self, target: &str) -> Option<String> {
         let mut peers = self.get_server_peers_for(target).await;
+        let mut allowed = Vec::new();
+        for peer in peers {
+            if self.inner.graph.allows_traffic(&peer).await {
+                allowed.push(peer);
+            }
+        }
+        peers = allowed;
         if peers.is_empty() {
             return None;
         }
@@ -429,6 +472,15 @@ impl RTCManagerHandle {
     /// `src/tunnel/`, so this goes through `crate::net` instead (see this
     /// module's doc comment, seam 3).
     async fn send_payload(&self, peer_id: &str, payload: P2pPayload) -> Result<()> {
+        if matches!(
+            &payload,
+            P2pPayload::Tunnel { .. } | P2pPayload::Stdio { .. }
+        ) {
+            anyhow::ensure!(
+                !peer_id.is_empty() && self.inner.graph.allows_traffic(peer_id).await,
+                "graph policy blocks this connection"
+            );
+        }
         let data = serde_json::to_vec(&payload)?;
         let room = self.current_room().await;
         if peer_id.is_empty() {
@@ -452,6 +504,10 @@ impl RTCManagerHandle {
     /// registered in `new` simply stops matching anything once nothing is
     /// joined here, which is sufficient.
     pub async fn close(&self) {
+        self.inner
+            .graph
+            .closed
+            .store(true, std::sync::atomic::Ordering::Release);
         let room = self.current_room().await;
         let _ = crate::net::leave_room(&room).await;
     }
@@ -486,7 +542,9 @@ impl RTCManagerHandle {
     /// `connected_peers()` before calling this.
     pub async fn switch_room(&self, state: &Arc<AppState>, room: String) -> Result<()> {
         let old_room = self.current_room().await;
-        crate::net::leave_room(&old_room).await?;
+        if old_room == room {
+            return Ok(());
+        }
         crate::net::ensure_started(state, room.clone()).await?;
         *self.inner.room.write().await = room;
 
@@ -494,6 +552,7 @@ impl RTCManagerHandle {
         self.inner.peer_roles.write().await.clear();
         self.inner.peer_forward_keys.write().await.clear();
         self.inner.peer_epochs.write().await.clear();
+        let _ = crate::net::leave_room(&old_room).await;
         self.send_role_to_all().await;
         Ok(())
     }

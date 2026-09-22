@@ -32,6 +32,7 @@
 //! only this read/write pair is shared. Each caller's own tests cover that
 //! it reads and writes *its* file; the contract above is tested once here.
 
+use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -68,6 +69,55 @@ pub fn write<T: Serialize>(data_dir: &Path, file_name: &str, state: &T) -> Resul
     std::fs::rename(&tmp, &path)
         .with_context(|| format!("renaming {} into {}", tmp.display(), path.display()))?;
     Ok(())
+}
+
+/// Durable atomic replacement used for connection intent and daemon ownership.
+pub fn write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path.parent().context("missing state parent")?;
+    std::fs::create_dir_all(parent)?;
+    let temp = path.with_extension(format!("{:016x}.tmp", rand::random::<u64>()));
+    let result = (|| -> Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        replace_file(&temp, path)?;
+        #[cfg(unix)]
+        std::fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
+}
+#[cfg(windows)]
+fn replace_file(from: &Path, to: &Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+    let from: Vec<u16> = from.as_os_str().encode_wide().chain(Some(0)).collect();
+    let to: Vec<u16> = to.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SAFETY: valid NUL-terminated strings, owned for the duration of the call.
+    if unsafe {
+        MoveFileExW(
+            from.as_ptr(),
+            to.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+#[cfg(not(windows))]
+fn replace_file(from: &Path, to: &Path) -> Result<()> {
+    Ok(std::fs::rename(from, to)?)
 }
 
 #[cfg(test)]

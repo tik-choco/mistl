@@ -22,6 +22,113 @@ mod membership;
 mod ordering;
 mod routing;
 
+#[tokio::test]
+async fn graph_blocks_data_and_routing_but_keeps_control_plane_available() {
+    use crate::tunnel::graph::{Action, Message, Permissions};
+    let (ctx, dir) = crate::tunnel::graph::tests::context().await;
+    let manager = ctx.manager.clone();
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let captured = received.clone();
+    manager
+        .on_tunnel_message(move |peer, _| captured.lock().unwrap().push(peer))
+        .await;
+    ctx.graph_command("self", Action::Broadcast { enabled: false }, "test-room")
+        .await
+        .unwrap();
+    handle_payload(
+        manager.inner.clone(),
+        "peer".into(),
+        encode(P2pPayload::Role {
+            role: "server".into(),
+        }),
+    )
+    .await;
+    handle_payload(
+        manager.inner.clone(),
+        "peer".into(),
+        encode(P2pPayload::Tunnel { data: vec![1] }),
+    )
+    .await;
+    assert!(received.lock().unwrap().is_empty());
+    assert!(manager.select_server_peer_for("service").await.is_none());
+    assert!(manager.send_tunnel_to("peer", vec![1]).await.is_err());
+
+    // Transport sender cannot unlock/change broadcast or grant itself rights.
+    handle_payload(
+        manager.inner.clone(),
+        "peer".into(),
+        encode(P2pPayload::Graph {
+            room: "test-room".into(),
+            message: Message::Command {
+                id: "denied".into(),
+                action: Action::Broadcast { enabled: true },
+            },
+        }),
+    )
+    .await;
+    ctx.graph_tick().await;
+    assert!(!manager.graph().allows_traffic("peer").await);
+    ctx.graph_command(
+        "self",
+        Action::Permission {
+            peer_id: "peer".into(),
+            permissions: Permissions {
+                edit_links: true,
+                ..Default::default()
+            },
+        },
+        "test-room",
+    )
+    .await
+    .unwrap();
+    // A message queued for another room must never become a command here.
+    handle_payload(
+        manager.inner.clone(),
+        "peer".into(),
+        encode(P2pPayload::Graph {
+            room: "old-room".into(),
+            message: Message::Command {
+                id: "old".into(),
+                action: Action::Link {
+                    peer_id: "peer".into(),
+                    connected: true,
+                },
+            },
+        }),
+    )
+    .await;
+    ctx.graph_tick().await;
+    assert!(!manager.graph().allows_traffic("peer").await);
+    handle_payload(
+        manager.inner.clone(),
+        "peer".into(),
+        encode(P2pPayload::Graph {
+            room: "test-room".into(),
+            message: Message::Command {
+                id: "allowed".into(),
+                action: Action::Link {
+                    peer_id: "peer".into(),
+                    connected: true,
+                },
+            },
+        }),
+    )
+    .await;
+    ctx.graph_tick().await;
+    assert_eq!(
+        manager.select_server_peer_for("service").await.as_deref(),
+        Some("peer")
+    );
+    handle_payload(
+        manager.inner.clone(),
+        "peer".into(),
+        encode(P2pPayload::Tunnel { data: vec![1] }),
+    )
+    .await;
+    assert_eq!(*received.lock().unwrap(), vec!["peer"]);
+    tokio::fs::remove_dir_all(dir).await.unwrap();
+}
+
 fn test_manager(self_id: &str, self_role: PeerRole) -> RTCManagerHandle {
     RTCManagerHandle {
         inner: Arc::new(RTCManagerInner::new(

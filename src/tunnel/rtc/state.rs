@@ -61,6 +61,7 @@ impl PeerRole {
 }
 
 pub(super) struct RTCManagerInner {
+    pub(super) graph: Arc<crate::tunnel::graph::GraphState>,
     pub(super) self_id: String,
     pub(super) self_role: PeerRole,
     /// The room this manager currently sends to and filters inbound events
@@ -104,6 +105,7 @@ pub(super) struct RTCManagerInner {
 impl RTCManagerInner {
     pub(super) fn new(self_id: String, self_role: PeerRole, room: String) -> Self {
         Self {
+            graph: Arc::new(crate::tunnel::graph::GraphState::default()),
             self_id,
             self_role,
             room: RwLock::new(room),

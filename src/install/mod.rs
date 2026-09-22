@@ -120,6 +120,7 @@ pub fn is_installed() -> bool {
 /// the self-copy (copying a file over itself would fail) and just
 /// refreshes shortcut/autostart.
 pub fn install(enable_autostart: bool) -> Result<PathBuf> {
+    crate::runtime::require_installable()?;
     let current = std::env::current_exe().context("install: resolving current executable")?;
     let dir = install_dir()?;
     let dest = installed_exe_path()?;
@@ -176,6 +177,7 @@ pub fn install(enable_autostart: bool) -> Result<PathBuf> {
 /// running from the install dir: the exe is deleted via the self-delete
 /// dance, but the dir may only clear once this process exits.
 pub fn uninstall() -> Result<()> {
+    crate::runtime::require_installable()?;
     // Pointers first: registry/shortcut entries reference the exe we're
     // about to delete, and their failure shouldn't strand the binary.
     if let Err(error) = set_autostart(false) {
@@ -234,11 +236,11 @@ pub fn set_autostart(enabled: bool) -> Result<()> {
         .context("install: opening the HKCU Run key")?;
     if enabled {
         let command = autostart_command(&autostart_exe()?);
-        run.set_value(RUN_VALUE_NAME, &command)
+        run.set_value(crate::runtime::registration_name(), &command)
             .context("install: writing the HKCU Run value")?;
         info!(%command, "install: autostart enabled");
     } else {
-        match run.delete_value(RUN_VALUE_NAME) {
+        match run.delete_value(crate::runtime::registration_name()) {
             Ok(()) => info!("install: autostart disabled"),
             // Already absent: disabling is idempotent.
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -270,7 +272,7 @@ pub fn autostart_enabled() -> bool {
 
     RegKey::predef(HKEY_CURRENT_USER)
         .open_subkey(RUN_KEY_PATH)
-        .and_then(|run| run.get_value::<String, _>(RUN_VALUE_NAME))
+        .and_then(|run| run.get_value::<String, _>(crate::runtime::registration_name()))
         .is_ok()
 }
 
@@ -284,8 +286,6 @@ pub fn autostart_enabled() -> bool {
 
 #[cfg(windows)]
 const RUN_KEY_PATH: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
-#[cfg(windows)]
-const RUN_VALUE_NAME: &str = "mistl";
 
 /// Shared Unix flow: write the autostart file rendered by `render`, or
 /// remove it (idempotently) when disabling.
@@ -318,7 +318,10 @@ fn write_or_remove_autostart_file(enabled: bool, render: fn(&Path) -> String) ->
 fn autostart_file_path() -> Result<PathBuf> {
     let base =
         directories::BaseDirs::new().context("install: could not determine the home directory")?;
-    Ok(base.config_dir().join("autostart").join("mistl.desktop"))
+    Ok(base
+        .config_dir()
+        .join("autostart")
+        .join(format!("{}.desktop", crate::runtime::registration_name())))
 }
 
 #[cfg(target_os = "macos")]
@@ -329,14 +332,17 @@ fn autostart_file_path() -> Result<PathBuf> {
         .home_dir()
         .join("Library")
         .join("LaunchAgents")
-        .join("com.tik-choco.mistl.plist"))
+        .join(format!(
+            "com.tik-choco.{}.plist",
+            crate::runtime::registration_name()
+        )))
 }
 
 /// Exe the autostart entry points at: the installed copy when present (a
 /// stable path across updates), else the currently running one.
 fn autostart_exe() -> Result<PathBuf> {
     let installed = installed_exe_path()?;
-    if installed.exists() {
+    if crate::runtime::legacy_default() && installed.exists() {
         return Ok(installed);
     }
     std::env::current_exe().context("install: resolving current executable")
@@ -346,7 +352,11 @@ fn autostart_exe() -> Result<PathBuf> {
 /// dashboard). Used verbatim as the HKCU Run value and the XDG `Exec=`.
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 fn autostart_command(exe: &Path) -> String {
-    format!("\"{}\" daemon run", exe.display())
+    let args = crate::runtime::launch_arguments()
+        .iter()
+        .map(|a| format!(" \"{}\"", a.replace('"', "\\\"")))
+        .collect::<String>();
+    format!("\"{}\"{args} daemon run", exe.display())
 }
 
 /// XDG autostart entry (Linux).
@@ -367,16 +377,22 @@ fn desktop_entry(exe: &Path) -> String {
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn launch_agent_plist(exe: &Path) -> String {
     let exe = xml_escape(&exe.display().to_string());
+    let label = format!("com.tik-choco.{}", crate::runtime::registration_name());
+    let args = crate::runtime::launch_arguments()
+        .iter()
+        .map(|arg| format!("<string>{}</string>", xml_escape(arg)))
+        .collect::<String>();
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.tik-choco.mistl</string>
+    <string>{label}</string>
     <key>ProgramArguments</key>
     <array>
         <string>{exe}</string>
+        {args}
         <string>daemon</string>
         <string>run</string>
     </array>
@@ -483,7 +499,10 @@ mod tests {
     #[test]
     fn autostart_command_quotes_the_exe_and_runs_the_daemon_headless() {
         let command = autostart_command(Path::new(r"C:\Users\Jo Do\mistl.exe"));
-        assert_eq!(command, r#""C:\Users\Jo Do\mistl.exe" daemon run"#);
+        assert!(command.starts_with(r#""C:\Users\Jo Do\mistl.exe" "#));
+        assert!(command.contains("--instance"));
+        assert!(command.contains(&crate::runtime::context().instance));
+        assert!(command.contains("--state-dir"));
         assert!(
             command.ends_with("daemon run"),
             "must not launch the dashboard"
@@ -494,7 +513,9 @@ mod tests {
     fn desktop_entry_is_a_valid_xdg_autostart_stanza() {
         let entry = desktop_entry(Path::new("/home/jo/.local/bin/mistl"));
         assert!(entry.starts_with("[Desktop Entry]\n"));
-        assert!(entry.contains("Exec=\"/home/jo/.local/bin/mistl\" daemon run\n"));
+        assert!(entry.contains("Exec=\"/home/jo/.local/bin/mistl\" "));
+        assert!(entry.contains("--instance"));
+        assert!(entry.contains("daemon run\n"));
         assert!(entry.contains("Type=Application\n"));
     }
 

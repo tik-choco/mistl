@@ -123,6 +123,7 @@ pub(super) async fn handle_join(inner: Arc<RTCManagerInner>, peer_id: String) {
     // once joined, which repopulates these via `handle_payload`.
     inner.peer_roles.write().await.remove(&peer_id);
     inner.peer_forward_keys.write().await.remove(&peer_id);
+    inner.graph.forget_peer(&peer_id).await;
 
     inner.peers.write().await.insert(peer_id.clone());
     notify(&inner.peer_conn_handlers, peer_id.clone()).await;
@@ -149,6 +150,7 @@ pub(super) async fn handle_leave(inner: Arc<RTCManagerInner>, peer_id: String) {
     // `peers` (current-presence) is cleared; routing filters on that, and a
     // fresh JOIN resets the retained state (see `handle_join`).
     inner.peers.write().await.remove(&peer_id);
+    inner.graph.forget_peer(&peer_id).await;
     let epoch = inner
         .peer_epochs
         .read()
@@ -185,6 +187,18 @@ pub(super) async fn handle_payload(inner: Arc<RTCManagerInner>, peer_id: String,
     };
 
     match payload {
+        P2pPayload::Graph { room, message } => {
+            let current_room = inner.room.read().await;
+            if *current_room != room
+                || inner
+                    .graph
+                    .suspended
+                    .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return;
+            }
+            inner.graph.receive(peer_id, message).await;
+        }
         P2pPayload::Role { role } => {
             inner
                 .peer_roles
@@ -206,6 +220,9 @@ pub(super) async fn handle_payload(inner: Arc<RTCManagerInner>, peer_id: String,
             }
         }
         P2pPayload::Tunnel { data } => {
+            if !inner.graph.allows_traffic(&peer_id).await {
+                return;
+            }
             let tunnel_msg = serde_json::from_slice::<TunnelMessage>(&data).ok();
             let default_target = if tunnel_msg.as_ref().is_some_and(|msg| msg.target.is_empty()) {
                 inner.default_tunnel_target.read().await.clone()
@@ -227,6 +244,9 @@ pub(super) async fn handle_payload(inner: Arc<RTCManagerInner>, peer_id: String,
             }
         }
         P2pPayload::Stdio { data } => {
+            if !inner.graph.allows_traffic(&peer_id).await {
+                return;
+            }
             let handlers = inner.stdio_msg_handlers.read().await;
             for h in handlers.iter() {
                 h(peer_id.clone(), data.clone());

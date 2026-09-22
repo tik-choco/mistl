@@ -200,7 +200,9 @@ pub async fn mark_processed(data_dir: &Path, pipeline_id: &str, new_ids: &[Strin
         Ok(text) if !text.trim().is_empty() => {
             serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?
         }
-        _ => Vec::new(),
+        Ok(_) => Vec::new(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
     };
     let mut seen: HashSet<String> = ids.iter().cloned().collect();
     for id in new_ids {

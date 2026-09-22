@@ -29,11 +29,12 @@
 //! *resolve* over p2p (a transient timeout, not a config problem) is
 //! treated as "not yet available" rather than fatal: it's simply left
 //! unprocessed and retried on a later run (see `source::poll_candidates`).
-//! A sink failure never fails the run either -- it's recorded per-sink on
-//! the delivered item (`persist::SinkOutcome`) so a chat-post success next
-//! to a webhook failure (or vice versa) is visible without hiding the part
-//! that worked.
+//! Sink failures are recorded per-sink and make the run unsuccessful, but
+//! do not prevent delivery to other sinks. Transformed content and successful
+//! sink receipts are checkpointed in a durable outbox; later runs retry only
+//! unacknowledged sinks. No source is marked processed until delivery completes.
 
+mod outbox;
 mod persist;
 mod sink;
 mod source;
@@ -312,26 +313,97 @@ async fn run_pipeline(
     let started_at = Utc::now();
     let config = state.config();
 
-    // Fail fast on a config-level precondition before touching the network:
-    // every transform's preset must resolve. Mirrors `validate_pipeline`'s
-    // check, but here it aborts the run with a clear, actionable error
-    // (config path + fix command) instead of just warning.
-    if let Err(error) = check_transforms_resolve(&config, &pipeline.transforms) {
-        return persist::RunRecord {
-            pipeline_id: pipeline.id.clone(),
-            started_at: started_at.to_rfc3339(),
-            ended_at: Utc::now().to_rfc3339(),
-            ok: false,
-            error: Some(error.to_string()),
-            fetched_count: 0,
-            delivered_count: 0,
-        };
+    let mut fetched_count = 0;
+    let mut delivered_count = 0;
+    let result = run_pipeline_work(
+        state,
+        data_dir,
+        pipeline,
+        &config,
+        &mut fetched_count,
+        &mut delivered_count,
+    )
+    .await;
+    persist::RunRecord {
+        pipeline_id: pipeline.id.clone(),
+        started_at: started_at.to_rfc3339(),
+        ended_at: Utc::now().to_rfc3339(),
+        ok: result.is_ok(),
+        error: result.err().map(|error| format!("{error:#}")),
+        fetched_count,
+        delivered_count,
     }
+}
 
-    let mut fetched_count = 0u64;
-    let mut delivered_count = 0u64;
-    let mut run_error: Option<String> = None;
+async fn deliver_queued(
+    state: &Arc<AppState>,
+    data_dir: &std::path::Path,
+    pipeline: &PipelineConfig,
+    queue: &mut Vec<outbox::PendingDelivery>,
+    index: usize,
+) -> Result<bool> {
+    let item = outbox::attempt(
+        data_dir,
+        &pipeline.id,
+        queue,
+        index,
+        &pipeline.sinks,
+        |target, article, outcome| async move {
+            sink::deliver(state, &pipeline.id, &[target], &article, &outcome)
+                .await
+                .sinks
+                .remove(0)
+        },
+    )
+    .await?;
+    let complete = item.sinks.iter().all(|sink| sink.ok);
+    persist::append_item(data_dir, &item).await?;
+    Ok(complete)
+}
 
+async fn run_pipeline_work(
+    state: &Arc<AppState>,
+    data_dir: &std::path::Path,
+    pipeline: &PipelineConfig,
+    config: &Config,
+    fetched_count: &mut u64,
+    delivered_count: &mut u64,
+) -> Result<()> {
+    if pipeline.sinks.is_empty() {
+        bail!("bot pipeline has no delivery sinks; configure a sink before running");
+    }
+    let mut queue = outbox::load(data_dir, &pipeline.id)?;
+    let processed = persist::load_processed(data_dir, &pipeline.id).await?;
+    queue.retain(|entry| !processed.contains(&entry.source_id));
+    queue.sort_by_key(|entry| entry.last_attempt);
+    outbox::save(data_dir, &pipeline.id, &queue)?;
+    // Reserve two slots for fresh items so a broken sink cannot prevent
+    // new work forever. Rotate retries to avoid an old failed prefix.
+    let retry_ids: Vec<String> = queue
+        .iter()
+        .take(MAX_ITEMS_PER_RUN - 2)
+        .map(|entry| entry.source_id.clone())
+        .collect();
+    let mut attempted = 0;
+    let mut failed = false;
+    for id in retry_ids {
+        let index = queue
+            .iter()
+            .position(|entry| entry.source_id == id)
+            .expect("queued retry");
+        if deliver_queued(state, data_dir, pipeline, &mut queue, index).await? {
+            *delivered_count += 1;
+        } else {
+            failed = true;
+        }
+        attempted += 1;
+    }
+    if queue.len() >= outbox::CAPACITY {
+        bail!("bot delivery queue is full; failed items retained for retry");
+    }
+    // Saved transformations can be delivered even if their old AI preset
+    // has since been removed. Validate only before importing fresh content.
+    check_transforms_resolve(config, &pipeline.transforms)?;
     let candidates = match &pipeline.source {
         SourceConfig::GlobalArticles { rooms, langs } => {
             source::poll_candidates(state, data_dir, &pipeline.id, rooms, langs).await
@@ -339,99 +411,53 @@ async fn run_pipeline(
         SourceConfig::ChatRoom { room } => {
             source::poll_chat_candidates(state, data_dir, &pipeline.id, room).await
         }
-    };
-    match candidates {
-        Ok(candidates) => {
-            for candidate in candidates.into_iter().take(MAX_ITEMS_PER_RUN) {
-                match candidate.article {
-                    Some(article) => {
-                        fetched_count += 1;
-                        match transform::run_chain(
-                            state,
-                            &config,
-                            &pipeline.id,
-                            &pipeline.transforms,
-                            &article,
-                        )
-                        .await
-                        {
-                            Ok(outcome) => {
-                                let item = sink::deliver(
-                                    state,
-                                    &pipeline.id,
-                                    &pipeline.sinks,
-                                    &article,
-                                    &outcome,
-                                )
-                                .await;
-                                if let Err(error) = persist::append_item(data_dir, &item).await {
-                                    warn!(%error, pipeline_id = %pipeline.id, "bot: failed to append delivered item");
-                                }
-                                delivered_count += 1;
-                                // Persisted immediately (one id at a time),
-                                // not batched to the end of the run: if the
-                                // daemon crashes right after this point, the
-                                // article is already durably marked
-                                // delivered and won't be redelivered on the
-                                // next run. The per-run cap
-                                // (`MAX_ITEMS_PER_RUN`) keeps this to at most
-                                // a handful of extra small disk writes.
-                                if let Err(error) = persist::mark_processed(
-                                    data_dir,
-                                    &pipeline.id,
-                                    std::slice::from_ref(&candidate.id),
-                                )
-                                .await
-                                {
-                                    warn!(%error, pipeline_id = %pipeline.id, article_id = %candidate.id, "bot: failed to persist a processed article id");
-                                }
-                            }
-                            Err(error) => {
-                                // Fatal per the module doc: stop processing
-                                // further articles this run. The article
-                                // that failed is *not* marked processed, so
-                                // it's retried on the next run.
-                                run_error = Some(format!(
-                                    "transform failed for article {:?}: {error:#}",
-                                    candidate.id
-                                ));
-                                break;
-                            }
-                        }
-                    }
-                    None => {
-                        // Resolved and understood, but excluded forever
-                        // (language filter, authorDid mismatch, ...) --
-                        // never worth retrying. Persisted immediately for
-                        // the same crash-safety reason as the delivered
-                        // branch above.
-                        if let Err(error) = persist::mark_processed(
-                            data_dir,
-                            &pipeline.id,
-                            std::slice::from_ref(&candidate.id),
-                        )
-                        .await
-                        {
-                            warn!(%error, pipeline_id = %pipeline.id, article_id = %candidate.id, "bot: failed to persist a processed article id");
-                        }
-                    }
+    }
+    .context("source failed")?;
+    for candidate in candidates {
+        if attempted >= MAX_ITEMS_PER_RUN || queue.len() >= outbox::CAPACITY {
+            break;
+        }
+        if queue.iter().any(|entry| entry.source_id == candidate.id) {
+            continue;
+        }
+        attempted += 1;
+        match candidate.article {
+            Some(article) => {
+                *fetched_count += 1;
+                let outcome = transform::run_chain(
+                    state,
+                    config,
+                    &pipeline.id,
+                    &pipeline.transforms,
+                    &article,
+                )
+                .await
+                .with_context(|| format!("transform failed for article {:?}", candidate.id))?;
+                outbox::enqueue(
+                    data_dir,
+                    &pipeline.id,
+                    &mut queue,
+                    candidate.id,
+                    article,
+                    outcome,
+                )?;
+                let index = queue.len() - 1;
+                if deliver_queued(state, data_dir, pipeline, &mut queue, index).await? {
+                    *delivered_count += 1;
+                } else {
+                    failed = true;
                 }
             }
-        }
-        Err(error) => {
-            run_error = Some(format!("source failed: {error:#}"));
+            None => persist::mark_processed(data_dir, &pipeline.id, &[candidate.id]).await?,
         }
     }
-
-    persist::RunRecord {
-        pipeline_id: pipeline.id.clone(),
-        started_at: started_at.to_rfc3339(),
-        ended_at: Utc::now().to_rfc3339(),
-        ok: run_error.is_none(),
-        error: run_error,
-        fetched_count,
-        delivered_count,
+    if failed || !queue.is_empty() {
+        bail!(
+            "{} item(s) pending delivery; failed sinks will retry on the next run (see bot.items)",
+            queue.len()
+        );
     }
+    Ok(())
 }
 
 /// Checks every `summarize`/`tts` transform's `preset_id` resolves against

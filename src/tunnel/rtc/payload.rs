@@ -14,6 +14,11 @@
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum P2pPayload {
+    /// Additive extension; older p2p peers ignore this unknown envelope kind.
+    Graph {
+        room: String,
+        message: crate::tunnel::graph::Message,
+    },
     Role {
         role: String,
     },

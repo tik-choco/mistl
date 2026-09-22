@@ -2,6 +2,7 @@
 name = "mistl"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.93"
 description = "Unified P2P daemon CLI: identity (DID), storage, RTSP screen share for VRChat, and a standing tc-chat relay"
 license = "MPL-2.0"
 
@@ -128,6 +129,13 @@ debug = "line-tables-only"
 windows-capture = "2.0.0"
 # Per-user login autostart (HKCU\...\Run) for `mistl autostart`.
 winreg = "0.52"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security"] }
+
+[target."cfg(unix)".dependencies]
+libc = "0.2"
+
+[build-dependencies]
+sha2 = "0.10"
 
 # mistlib-consensus's crates depend on mistlib-core as a git dependency
 # (tik-choco-lab/mistlib, the public mirror of the mistlib-dev repo mistl

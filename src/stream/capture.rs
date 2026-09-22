@@ -10,6 +10,7 @@ use tokio::process::{Child, Command};
 /// A running `ffmpeg` screen-capture process.
 pub struct Capture {
     child: Child,
+    _process_tree: crate::child_process::ProcessTree,
 }
 
 impl Capture {
@@ -68,7 +69,9 @@ impl Capture {
             command.creation_flags(CREATE_NO_WINDOW);
         }
 
+        crate::child_process::prepare(&mut command);
         let mut child = command.spawn().context("spawning ffmpeg")?;
+        let process_tree = crate::child_process::ProcessTree::attach(&mut child)?;
 
         // Drain stderr in the background (ffmpeg logs everything there) so
         // the pipe never fills up and blocks the encoder; surface lines at
@@ -88,7 +91,10 @@ impl Capture {
             });
         }
 
-        Ok(Self { child })
+        Ok(Self {
+            child,
+            _process_tree: process_tree,
+        })
     }
 
     /// Kill the `ffmpeg` child and wait for it to exit.

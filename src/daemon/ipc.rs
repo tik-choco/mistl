@@ -24,6 +24,16 @@ struct DaemonInfo {
     pid: u32,
     port: u16,
     token: String,
+    #[serde(default)]
+    channel: String,
+    #[serde(default)]
+    instance: String,
+    #[serde(default)]
+    build_id: String,
+    #[serde(default)]
+    ipc_version: u32,
+    #[serde(default)]
+    run_id: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -32,6 +42,9 @@ struct Request {
     cmd: String,
     #[serde(default)]
     args: Value,
+    channel: String,
+    instance: String,
+    ipc_version: u32,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -48,6 +61,7 @@ fn info_path() -> Result<PathBuf> {
 }
 
 pub struct IpcServer {
+    run_id: String,
     port: u16,
     handle: JoinHandle<()>,
 }
@@ -60,7 +74,9 @@ impl IpcServer {
     /// Stop accepting connections and remove the discovery file.
     pub async fn close(self) {
         self.handle.abort();
-        if let Ok(path) = info_path() {
+        if let Ok(path) = info_path()
+            && crate::runtime::same_file_owner(&path, &self.run_id)
+        {
             let _ = std::fs::remove_file(path);
         }
     }
@@ -77,11 +93,16 @@ pub async fn serve(state: Arc<AppState>) -> Result<IpcServer> {
     let token: String = token_bytes.iter().map(|b| format!("{b:02x}")).collect();
 
     let info = DaemonInfo {
+        channel: crate::runtime::CHANNEL.into(),
+        instance: crate::runtime::context().instance.clone(),
+        build_id: crate::runtime::BUILD_ID.into(),
+        ipc_version: crate::runtime::IPC_VERSION,
+        run_id: format!("{:016x}", rand::random::<u64>()),
         pid: std::process::id(),
         port,
         token: token.clone(),
     };
-    std::fs::write(info_path()?, serde_json::to_vec(&info)?)?;
+    crate::statefile::write_bytes(&info_path()?, &serde_json::to_vec(&info)?)?;
 
     let handle = tokio::spawn(async move {
         loop {
@@ -103,7 +124,11 @@ pub async fn serve(state: Arc<AppState>) -> Result<IpcServer> {
         }
     });
 
-    Ok(IpcServer { port, handle })
+    Ok(IpcServer {
+        port,
+        handle,
+        run_id: info.run_id,
+    })
 }
 
 async fn handle_connection(
@@ -116,7 +141,12 @@ async fn handle_connection(
 
     while let Some(line) = lines.next_line().await? {
         let response = match serde_json::from_str::<Request>(&line) {
-            Ok(request) if request.token == token => {
+            Ok(request)
+                if request.token == token
+                    && request.channel == crate::runtime::CHANNEL
+                    && request.instance == crate::runtime::context().instance
+                    && request.ipc_version == crate::runtime::IPC_VERSION =>
+            {
                 match crate::daemon::dispatch(&request.cmd, request.args, &state).await {
                     Ok(data) => Response {
                         ok: true,
@@ -157,16 +187,41 @@ pub fn client_request(cmd: &str, args: Value) -> Result<Value> {
         Err(_) => bail!("daemon is not running (start it with `mistl daemon start`)"),
     };
 
+    if info.channel != crate::runtime::CHANNEL
+        || info.instance != crate::runtime::context().instance
+        || info.ipc_version != crate::runtime::IPC_VERSION
+    {
+        bail!("daemon identity/protocol mismatch (legacy daemon must be stopped before migration)");
+    }
+    if crate::runtime::CHANNEL == "dev"
+        && info.build_id != crate::runtime::BUILD_ID
+        && !matches!(
+            cmd,
+            "daemon.status" | "daemon.stop" | "daemon.restart" | "network.status"
+        )
+    {
+        bail!(
+            "development daemon build differs from this CLI; stop that instance and start the rebuilt binary"
+        );
+    }
+
     let stream = match TcpStream::connect(("127.0.0.1", info.port)) {
         Ok(stream) => stream,
         Err(_) => {
             // Stale discovery file from a crashed daemon.
-            let _ = std::fs::remove_file(&path);
+            if crate::runtime::same_file_owner(&path, &info.run_id) {
+                let _ = std::fs::remove_file(&path);
+            }
             bail!("daemon is not running (start it with `mistl daemon start`)");
         }
     };
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
+    stream.set_write_timeout(Some(std::time::Duration::from_secs(30)))?;
 
     let request = Request {
+        channel: crate::runtime::CHANNEL.into(),
+        instance: crate::runtime::context().instance.clone(),
+        ipc_version: crate::runtime::IPC_VERSION,
         token: info.token,
         cmd: cmd.to_string(),
         args,
