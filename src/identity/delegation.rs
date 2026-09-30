@@ -262,12 +262,11 @@ pub fn record_delegation(delegation: DelegationV1) -> Result<()> {
     }
 
     let path = delegations_path()?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
-    }
-    std::fs::write(&path, serde_json::to_string_pretty(&delegations)?)
-        .with_context(|| format!("writing {}", path.display()))?;
+    crate::statefile::write_private(
+        &path,
+        serde_json::to_string_pretty(&delegations)?.as_bytes(),
+    )
+    .with_context(|| format!("writing {}", path.display()))?;
     Ok(())
 }
 

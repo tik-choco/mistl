@@ -71,16 +71,67 @@ pub fn write<T: Serialize>(data_dir: &Path, file_name: &str, state: &T) -> Resul
     Ok(())
 }
 
+/// Creates `dir` (and parents). On Unix the directories are created with
+/// mode 0700 so secrets stored beneath are not listable by other users;
+/// Windows relies on the profile ACL. An already-existing directory is left
+/// as it is.
+pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir)
+    }
+}
+
+/// Best-effort tightening of an existing secret file to 0600 on Unix (files
+/// written by older versions used the umask default). No-op elsewhere.
+pub fn restrict_existing(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
 /// Durable atomic replacement used for connection intent and daemon ownership.
+/// Unix permissions are the umask defaults; use [`write_private`] for secrets.
 pub fn write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
+    write_atomic(path, bytes, false)
+}
+
+/// Like [`write_bytes`], but for secrets (signing keys, API keys, IPC
+/// tokens): on Unix the parent directory is created 0700 and the file is
+/// created 0600 (never briefly world-readable). Windows is unchanged.
+pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+    write_atomic(path, bytes, true)
+}
+
+fn write_atomic(path: &Path, bytes: &[u8], private: bool) -> Result<()> {
     let parent = path.parent().context("missing state parent")?;
-    std::fs::create_dir_all(parent)?;
+    if private {
+        create_private_dir(parent)?;
+    } else {
+        std::fs::create_dir_all(parent)?;
+    }
     let temp = path.with_extension(format!("{:016x}.tmp", rand::random::<u64>()));
     let result = (|| -> Result<()> {
-        let mut file = std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temp)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        if private {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temp)?;
         file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);
@@ -175,5 +226,27 @@ mod tests {
         assert!(!dir.exists());
         write(&dir, FILE, &Flag { enabled: true }).unwrap();
         assert!(read::<Flag>(&dir, FILE).unwrap().enabled);
+    }
+
+    #[test]
+    fn write_private_replaces_atomically_and_leaves_no_temp_files() {
+        let dir = scratch_dir("private");
+        let path = dir.join("secret.bin");
+        write_private(&path, b"one").unwrap();
+        write_private(&path, b"two").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"two");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_private_uses_owner_only_modes() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch_dir("private-mode").join("sub");
+        let path = dir.join("secret.bin");
+        write_private(&path, b"x").unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(mode(&dir), 0o700);
     }
 }

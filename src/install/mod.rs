@@ -359,6 +359,43 @@ fn autostart_command(exe: &Path) -> String {
     format!("\"{}\"{args} daemon run", exe.display())
 }
 
+/// Quotes one argument for a Desktop Entry `Exec=` key: wrapped in double
+/// quotes, with `"`, `` ` ``, `$` and `\` backslash-escaped (the backslash
+/// itself twice over, because the string-value escape layer is applied first
+/// -- four backslashes in the file mean one literal), and `%` doubled so it
+/// is not read as a field code.
+#[cfg_attr(not(all(unix, not(target_os = "macos"))), allow(dead_code))]
+fn desktop_exec_arg(arg: &str) -> String {
+    let mut out = String::from("\"");
+    for c in arg.chars() {
+        match c {
+            '\\' => out.push_str(r"\\\\"),
+            '"' | '`' | '$' => {
+                out.push('\\');
+                out.push(c);
+            }
+            '%' => out.push_str("%%"),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// `Exec=` value for the XDG autostart entry (see [`desktop_exec_arg`]).
+#[cfg_attr(not(all(unix, not(target_os = "macos"))), allow(dead_code))]
+fn desktop_exec(exe: &Path) -> String {
+    let mut parts = vec![desktop_exec_arg(&exe.display().to_string())];
+    parts.extend(
+        crate::runtime::launch_arguments()
+            .iter()
+            .map(|a| desktop_exec_arg(a)),
+    );
+    parts.push("daemon".into());
+    parts.push("run".into());
+    parts.join(" ")
+}
+
 /// XDG autostart entry (Linux).
 #[cfg_attr(not(all(unix, not(target_os = "macos"))), allow(dead_code))]
 fn desktop_entry(exe: &Path) -> String {
@@ -369,7 +406,7 @@ fn desktop_entry(exe: &Path) -> String {
          Comment=mistl P2P daemon\n\
          Exec={}\n\
          X-GNOME-Autostart-enabled=true\n",
-        autostart_command(exe)
+        desktop_exec(exe)
     )
 }
 
@@ -517,6 +554,20 @@ mod tests {
         assert!(entry.contains("--instance"));
         assert!(entry.contains("daemon run\n"));
         assert!(entry.contains("Type=Application\n"));
+    }
+
+    #[test]
+    fn desktop_exec_escapes_per_the_desktop_entry_spec() {
+        assert_eq!(desktop_exec_arg("/a b/c"), r#""/a b/c""#);
+        assert_eq!(desktop_exec_arg(r#"a"b`c$d"#), r#""a\"b\`c\$d""#);
+        assert_eq!(desktop_exec_arg("100%"), r#""100%%""#);
+        assert_eq!(desktop_exec_arg(r"a\b"), r#""a\\\\b""#);
+        let exec = desktop_exec(Path::new("/home/$USER/my app/mistl"));
+        assert!(
+            exec.starts_with(r#""/home/\$USER/my app/mistl" "#),
+            "{exec}"
+        );
+        assert!(exec.ends_with(" daemon run"));
     }
 
     #[test]

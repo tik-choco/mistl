@@ -102,5 +102,50 @@ pub fn forward_key(proto: &str, addr: &str) -> String {
     format!("{}:{}", proto, port)
 }
 
+/// Host a connect-side listener should bind, taken from the forward spec's
+/// local address (`host:port`, `[v6]:port` or `:port`). Defaults to loopback
+/// when the host is missing or empty, so a listener is only ever exposed on
+/// another interface (e.g. `0.0.0.0`) when the spec says so explicitly.
+pub fn listen_host(addr: &str) -> String {
+    let host = addr.rsplit_once(':').map_or("", |(host, _)| host);
+    let host = host.trim().trim_start_matches('[').trim_end_matches(']');
+    if host.is_empty() {
+        "127.0.0.1".to_string()
+    } else {
+        host.to_string()
+    }
+}
+
+/// `host:port` bind string for [`listen_host`]'s output, bracketing IPv6.
+pub fn listen_bind_addr(host: &str, port: i32) -> String {
+    if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
+/// Whether the host of `addr` (`host:port` / `[v6]:port` / bare host) is a
+/// link-local IP literal (`169.254.0.0/16`, `fe80::/10`, or an IPv4-mapped
+/// form of the former). Used to refuse remote-proposed forwards aimed at
+/// cloud metadata endpoints and the like. Hostnames are not resolved here.
+pub fn is_link_local_host(addr: &str) -> bool {
+    let host = addr.rsplit_once(':').map_or(addr, |(host, _)| host);
+    let host = host.trim().trim_start_matches('[').trim_end_matches(']');
+    // A bare IPv6 literal without brackets or port (`fe80::1`) splits oddly
+    // above; retry on the whole string.
+    let parsed = host
+        .parse::<std::net::IpAddr>()
+        .or_else(|_| addr.trim().parse::<std::net::IpAddr>());
+    match parsed {
+        Ok(std::net::IpAddr::V4(ip)) => ip.is_link_local(),
+        Ok(std::net::IpAddr::V6(ip)) => {
+            ip.to_ipv4_mapped().is_some_and(|v4| v4.is_link_local())
+                || (ip.segments()[0] & 0xffc0) == 0xfe80
+        }
+        Err(_) => false,
+    }
+}
+
 #[cfg(test)]
 mod tests;

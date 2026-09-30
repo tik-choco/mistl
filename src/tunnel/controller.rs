@@ -283,6 +283,7 @@ impl ForwardController {
                 Direction::Serve => spec.addr.clone(),
                 Direction::Connect => String::new(),
             };
+            let listen_host = crate::tunnel::forward_args::listen_host(&spec.addr);
             let result = match spec.proto {
                 Proto::Tcp => {
                     tcp::TcpManager::listen_and_serve_with_target_and_auth(
@@ -292,6 +293,7 @@ impl ForwardController {
                         spec.target.clone(),
                         runtime,
                         authorizer,
+                        listen_host,
                     )
                     .await
                 }
@@ -303,6 +305,7 @@ impl ForwardController {
                         spec.target.clone(),
                         runtime,
                         authorizer,
+                        listen_host,
                     )
                     .await
                 }

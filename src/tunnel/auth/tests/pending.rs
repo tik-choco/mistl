@@ -202,3 +202,59 @@ async fn wait_for_pending(pending: &PendingAuthorizations) -> Vec<PendingAuthori
     .await
     .expect("pending auth request should be queued")
 }
+
+#[tokio::test]
+async fn pending_rows_are_capped_per_peer_and_extras_are_denied() {
+    use crate::tunnel::auth::pending::MAX_PENDING_PER_PEER;
+
+    let store = TrustStore::load(temp_store_path("pending-cap"))
+        .await
+        .unwrap();
+    let pending = PendingAuthorizations::new();
+    let authorizer = PendingAuthorizer::new(store, pending.clone());
+
+    let mut tasks = Vec::new();
+    for i in 0..MAX_PENDING_PER_PEER {
+        let authorizer = authorizer.clone();
+        tasks.push(tokio::spawn(async move {
+            authorizer
+                .authorize(&request("peer-a", &format!("tcp:{}", 1000 + i)))
+                .await
+        }));
+    }
+    timeout(Duration::from_secs(1), async {
+        while pending.list().await.len() < MAX_PENDING_PER_PEER {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("rows should be queued");
+
+    // One over the cap is denied immediately, without parking a new row...
+    assert_eq!(
+        authorizer.authorize(&request("peer-a", "tcp:9999")).await,
+        AuthDecision::Deny
+    );
+    assert_eq!(pending.list().await.len(), MAX_PENDING_PER_PEER);
+
+    // ...while another peer is unaffected.
+    let other = {
+        let authorizer = authorizer.clone();
+        tokio::spawn(async move { authorizer.authorize(&request("peer-b", "tcp:80")).await })
+    };
+    timeout(Duration::from_secs(1), async {
+        while pending.list().await.len() <= MAX_PENDING_PER_PEER {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("peer-b row should be queued");
+
+    for item in pending.list().await {
+        pending.resolve(item.id, AuthDecision::Deny).await;
+    }
+    for task in tasks {
+        assert_eq!(task.await.unwrap(), AuthDecision::Deny);
+    }
+    let _ = other.await;
+}

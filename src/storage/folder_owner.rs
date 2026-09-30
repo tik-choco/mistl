@@ -192,20 +192,11 @@ async fn read_table_file(store: &Store) -> Result<Vec<SharedFolder>> {
 
 async fn write_table_file(store: &Store, table: &[SharedFolder]) -> Result<()> {
     let path = table_path(store);
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .with_context(|| format!("creating {}", parent.display()))?;
-    }
     let bytes = serde_json::to_vec_pretty(table).context("serializing shared-folders table")?;
-    let tmp = path.with_extension("json.tmp");
-    tokio::fs::write(&tmp, &bytes)
+    // Holds each share's passphrase, so it gets the owner-only treatment.
+    tokio::task::spawn_blocking(move || crate::statefile::write_private(&path, &bytes))
         .await
-        .with_context(|| format!("writing {}", tmp.display()))?;
-    tokio::fs::rename(&tmp, &path)
-        .await
-        .with_context(|| format!("renaming {} into {}", tmp.display(), path.display()))?;
-    Ok(())
+        .context("writing shared-folders table")?
 }
 
 /// Publish `local_dir` as a shared folder in `room` (falling back to the
@@ -445,6 +436,56 @@ async fn run_background(state: Arc<AppState>) -> Result<()> {
     Ok(())
 }
 
+/// Minimum gap between `hello`-triggered forced re-broadcasts for one peer.
+const HELLO_PEER_INTERVAL: Duration = Duration::from_secs(10);
+/// Minimum gap between `hello`-triggered forced re-broadcasts overall.
+const HELLO_GLOBAL_INTERVAL: Duration = Duration::from_secs(2);
+/// Upper bound on tracked peers before stale entries are pruned.
+const HELLO_MAX_TRACKED: usize = 1024;
+
+/// Rate limiter for `hello`-triggered forced announcements: any room member
+/// can spam `hello` to make the owner re-encrypt/re-broadcast every share.
+#[derive(Default)]
+struct HelloThrottle {
+    last_global: Option<std::time::Instant>,
+    last_by_peer: HashMap<String, std::time::Instant>,
+}
+
+impl HelloThrottle {
+    fn allow(&mut self, peer: &str, now: std::time::Instant) -> bool {
+        if self
+            .last_global
+            .is_some_and(|t| now.saturating_duration_since(t) < HELLO_GLOBAL_INTERVAL)
+        {
+            return false;
+        }
+        if self
+            .last_by_peer
+            .get(peer)
+            .is_some_and(|t| now.saturating_duration_since(*t) < HELLO_PEER_INTERVAL)
+        {
+            return false;
+        }
+        if self.last_by_peer.len() >= HELLO_MAX_TRACKED {
+            self.last_by_peer
+                .retain(|_, t| now.saturating_duration_since(*t) < HELLO_PEER_INTERVAL);
+        }
+        self.last_global = Some(now);
+        self.last_by_peer.insert(peer.to_string(), now);
+        true
+    }
+}
+
+static HELLO_THROTTLE: std::sync::LazyLock<std::sync::Mutex<HelloThrottle>> =
+    std::sync::LazyLock::new(Default::default);
+
+fn hello_throttle_allows(peer: &str) -> bool {
+    HELLO_THROTTLE
+        .lock()
+        .map(|mut throttle| throttle.allow(peer, std::time::Instant::now()))
+        .unwrap_or(true)
+}
+
 /// Handles one envelope relevant to the owner role: `folder-access-request`
 /// (serve a grant) and `hello` (announce every share in that peer's room
 /// immediately, matching a fresh peer's expectation of prompt state without
@@ -468,6 +509,9 @@ async fn dispatch_envelope(
             handle_access_request(identity, &entries, &envelope).await
         }
         "hello" => {
+            if !hello_throttle_allows(&envelope.from) {
+                return Ok(());
+            }
             let entries = {
                 let _guard = TABLE_LOCK.lock().await;
                 read_table_file(store).await?
@@ -1307,6 +1351,19 @@ mod tests {
     }
 
     // -- uuid format --------------------------------------------------
+
+    #[test]
+    fn hello_throttle_limits_per_peer_and_globally() {
+        let mut throttle = HelloThrottle::default();
+        let t0 = std::time::Instant::now();
+        assert!(throttle.allow("a", t0));
+        // Global gap not elapsed.
+        assert!(!throttle.allow("b", t0 + Duration::from_secs(1)));
+        // Other peer OK after the global gap, same peer still throttled.
+        assert!(throttle.allow("b", t0 + Duration::from_secs(3)));
+        assert!(!throttle.allow("a", t0 + Duration::from_secs(6)));
+        assert!(throttle.allow("a", t0 + Duration::from_secs(11)));
+    }
 
     #[test]
     fn uuid_v4_has_expected_format() {

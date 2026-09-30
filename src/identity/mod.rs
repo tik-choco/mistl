@@ -134,7 +134,8 @@ struct IdentityMeta {
 
 fn identity_dir() -> Result<PathBuf> {
     let dir = config::data_dir()?.join("identity");
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    crate::statefile::create_private_dir(&dir)
+        .with_context(|| format!("creating {}", dir.display()))?;
     Ok(dir)
 }
 
@@ -158,6 +159,7 @@ fn load_identity() -> Result<Option<Identity>> {
         return Ok(None);
     }
 
+    crate::statefile::restrict_existing(&key_path);
     let key_b64 = std::fs::read_to_string(&key_path)
         .with_context(|| format!("reading {}", key_path.display()))?;
     let pkcs8_bytes = BASE64
@@ -194,13 +196,14 @@ fn save_key(signing_key: &SigningKey) -> Result<()> {
         .map_err(|e| anyhow!("encoding PKCS8 key: {e}"))?;
     let encoded = BASE64.encode(der.as_bytes());
     let path = key_path()?;
-    std::fs::write(&path, encoded).with_context(|| format!("writing {}", path.display()))?;
+    crate::statefile::write_private(&path, encoded.as_bytes())
+        .with_context(|| format!("writing {}", path.display()))?;
     Ok(())
 }
 
 fn save_meta(meta: &IdentityMeta) -> Result<()> {
     let path = meta_path()?;
-    std::fs::write(&path, serde_json::to_string_pretty(meta)?)
+    crate::statefile::write_private(&path, serde_json::to_string_pretty(meta)?.as_bytes())
         .with_context(|| format!("writing {}", path.display()))?;
     Ok(())
 }
@@ -310,7 +313,7 @@ fn load_profile() -> Result<Profile> {
 
 fn save_profile(profile: &Profile) -> Result<()> {
     let path = profile_path()?;
-    std::fs::write(&path, serde_json::to_string_pretty(profile)?)
+    crate::statefile::write_private(&path, serde_json::to_string_pretty(profile)?.as_bytes())
         .with_context(|| format!("writing {}", path.display()))?;
     Ok(())
 }

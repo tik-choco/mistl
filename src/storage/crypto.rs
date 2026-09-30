@@ -172,6 +172,18 @@ pub fn decrypt_json<T: serde::de::DeserializeOwned>(
     serde_json::from_slice(&plaintext).context("deserializing decrypted JSON")
 }
 
+/// [`decrypt_json`] on the blocking pool: a PBKDF2 derivation at up to
+/// [`MAX_ITERATIONS`] would otherwise stall a tokio worker thread. Use this
+/// from async code, especially for payloads that arrived from a peer.
+pub async fn decrypt_json_async<T>(payload: EncryptedPayload, passphrase: String) -> Result<T>
+where
+    T: serde::de::DeserializeOwned + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || decrypt_json(&payload, &passphrase))
+        .await
+        .context("decrypt task")?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

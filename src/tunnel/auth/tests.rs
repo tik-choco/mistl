@@ -234,3 +234,39 @@ async fn audit_log_retains_only_capacity() {
     assert_eq!(events[0].peer_id, "peer-b");
     assert_eq!(events[0].sequence, 2);
 }
+
+#[tokio::test]
+async fn corrupt_trust_file_is_quarantined_and_store_starts_empty() {
+    let path = temp_store_path("corrupt");
+    tokio::fs::write(&path, "{not json").await.unwrap();
+
+    let store = TrustStore::load(&path).await.unwrap();
+    assert!(store.list().await.is_empty());
+    assert!(!path.exists(), "corrupt file must be moved aside");
+
+    let name = path.file_name().unwrap().to_string_lossy().into_owned();
+    let mut found = false;
+    let mut dir = tokio::fs::read_dir(path.parent().unwrap()).await.unwrap();
+    while let Some(entry) = dir.next_entry().await.unwrap() {
+        let candidate = entry.file_name().to_string_lossy().into_owned();
+        if candidate.starts_with(&format!("{name}.corrupt-")) {
+            found = true;
+            let _ = tokio::fs::remove_file(entry.path()).await;
+        }
+    }
+    assert!(found, "expected a .corrupt-<ts> backup next to the store");
+
+    // The store is usable afterwards and persists cleanly (no stray tmp file).
+    store
+        .remember(
+            TrustKey {
+                peer_id: "peer-a".into(),
+                forward_key: "tcp:80".into(),
+            },
+            TrustDecision::Allow,
+        )
+        .await
+        .unwrap();
+    assert_eq!(TrustStore::load(&path).await.unwrap().list().await.len(), 1);
+    let _ = tokio::fs::remove_file(&path).await;
+}

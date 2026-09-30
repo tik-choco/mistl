@@ -93,6 +93,9 @@ pub type SttCallFuture =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send>>;
 pub type SttFn = Arc<dyn Fn(stt::SttParams) -> SttCallFuture + Send + Sync>;
 
+/// Capacity of the outbound reply queue (see `init_service`).
+const SEND_QUEUE_CAPACITY: usize = 4096;
+
 /// How long discovery waits for a `provider_hello` (mistai default).
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -135,8 +138,10 @@ async fn init_service(state: &Arc<AppState>) -> Result<Arc<AiService>> {
         .context("ai: starting p2p transport")?;
 
     // Single-writer send queue: preserves cross-request send order.
+    // Bounded: a slow/stalled transport must not let remote-driven replies
+    // pile up without limit; on overflow new replies are dropped.
     let (send_tx, mut send_rx) =
-        tokio::sync::mpsc::unbounded_channel::<(String, ProtocolMessage)>();
+        tokio::sync::mpsc::channel::<(String, ProtocolMessage)>(SEND_QUEUE_CAPACITY);
     let ai_room = transport.room.clone();
     tokio::spawn(async move {
         while let Some((to, msg)) = send_rx.recv().await {
@@ -146,7 +151,9 @@ async fn init_service(state: &Arc<AppState>) -> Result<Arc<AiService>> {
         }
     });
     let send: SendFn = Arc::new(move |to: &str, msg: ProtocolMessage| {
-        let _ = send_tx.send((to.to_string(), msg));
+        if send_tx.try_send((to.to_string(), msg)).is_err() {
+            debug!(to = %to, "ai: send queue full or closed; dropping message");
+        }
     });
 
     let service = Arc::new(AiService {
@@ -190,7 +197,12 @@ async fn init_service(state: &Arc<AppState>) -> Result<Arc<AiService>> {
                     }
                 });
             }
-            crate::net::EVENT_LEAVE => service.consumer.on_peer_disconnected(from),
+            crate::net::EVENT_LEAVE => {
+                service.consumer.on_peer_disconnected(from);
+                if let Some(provider) = service.local_provider() {
+                    provider.on_peer_left(from);
+                }
+            }
             _ => {}
         });
     }

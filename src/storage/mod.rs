@@ -582,7 +582,8 @@ pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Val
             let raw = store.get(cid).await?;
             let payload: crypto::EncryptedPayload = serde_json::from_slice(&raw)
                 .context("stored object is not an encrypted file bundle")?;
-            let bundle: domain::FileBundle = crypto::decrypt_json(&payload, passphrase)?;
+            let bundle: domain::FileBundle =
+                crypto::decrypt_json_async(payload, passphrase.to_string()).await?;
 
             if to_sandbox {
                 let sandbox = sandbox::Sandbox::new(store.data_dir().join("sandbox"))?;
@@ -649,7 +650,8 @@ pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Val
                     let raw = store.get(cid).await?;
                     let payload: crypto::EncryptedPayload = serde_json::from_slice(&raw)
                         .context("shared object is not an encrypted file bundle")?;
-                    let bundle: domain::FileBundle = crypto::decrypt_json(&payload, key)?;
+                    let bundle: domain::FileBundle =
+                        crypto::decrypt_json_async(payload, key.to_string()).await?;
                     write_file_record(store.as_ref(), &bundle.file, output).await
                 }
                 _ => bail!(
@@ -1094,9 +1096,16 @@ fn build_encrypted_file_bundle(
     Ok((bytes, format!("{file_id}.tc-file.enc.json")))
 }
 
+/// Largest accepted `FileRecord.dataUrl` (base64 of a 512 MiB file plus the
+/// `data:<mime>;base64,` prefix slack).
+const MAX_DATA_URL_LEN: usize = folder_share::MAX_FILE_BLOB_BYTES / 3 * 4 + 1024;
+
 /// Decode a `FileRecord.dataUrl` (`data:<mime>;base64,<b64>`) back into the
 /// original file bytes.
 fn decode_data_url(data_url: &str) -> Result<Vec<u8>> {
+    if data_url.len() > MAX_DATA_URL_LEN {
+        bail!("dataUrl is too large ({} bytes)", data_url.len());
+    }
     let comma = data_url
         .find(',')
         .context("dataUrl is missing its payload")?;
@@ -1107,6 +1116,15 @@ fn decode_data_url(data_url: &str) -> Result<Vec<u8>> {
     BASE64_STANDARD
         .decode(&data_url.as_bytes()[comma + 1..])
         .context("decoding dataUrl base64")
+}
+
+/// Reduce a remote-supplied file name to a single safe path component.
+fn safe_download_name(name: &str) -> String {
+    let sanitized = folder_share::sanitize_name(name);
+    match Path::new(&sanitized).file_name().and_then(|n| n.to_str()) {
+        Some(component) if !component.is_empty() && component != "_" => component.to_string(),
+        _ => "download".to_string(),
+    }
 }
 
 /// Materialize a decrypted `FileRecord` to disk (or, if it carries no inline
@@ -1127,15 +1145,21 @@ async fn write_file_record(
     };
     let data = decode_data_url(data_url)?;
     let checksum_ok = sha256_hex(&data) == file.checksum;
+    if !file.checksum.is_empty() && !checksum_ok {
+        bail!(
+            "checksum mismatch for {}; refusing to write the file",
+            file.name
+        );
+    }
 
     let output_path = match output {
         Some(path) => path,
         None => {
+            // `file.name` is remote-supplied: reduce it to one safe path
+            // component and resolve it inside the downloads directory.
             let downloads = store.data_dir().join("downloads");
-            tokio::fs::create_dir_all(&downloads)
-                .await
-                .with_context(|| format!("creating {}", downloads.display()))?;
-            downloads.join(&file.name)
+            let jail = sandbox::Sandbox::new(&downloads)?;
+            jail.resolve(&safe_download_name(&file.name))?
         }
     };
     if let Some(parent) = output_path.parent()
@@ -1485,6 +1509,37 @@ mod tests {
         assert_eq!(listed, vec![safe_name.clone()]);
         let (data, _size) = sandbox.read_file(&safe_name).unwrap();
         assert_eq!(data, b"sandbox bound content");
+    }
+
+    #[tokio::test]
+    async fn write_file_record_confines_hostile_names_to_downloads() {
+        let (store, _dir) = temp_store("write-file-record-jail").await;
+        let (bytes, name) =
+            build_encrypted_file_bundle("../../evil.txt", b"payload", "pw").unwrap();
+        let cid = store.put(&name, bytes).await.unwrap();
+        let raw = store.get(&cid).await.unwrap();
+        let payload: crypto::EncryptedPayload = serde_json::from_slice(&raw).unwrap();
+        let bundle: domain::FileBundle = crypto::decrypt_json(&payload, "pw").unwrap();
+
+        let result = write_file_record(&store, &bundle.file, None).await.unwrap();
+        let written = PathBuf::from(result["output"].as_str().unwrap());
+        let downloads = std::path::absolute(store.data_dir().join("downloads")).unwrap();
+        assert_eq!(written.parent().unwrap(), downloads);
+        assert_eq!(std::fs::read(&written).unwrap(), b"payload");
+
+        // Checksum mismatch: nothing is written.
+        let mut tampered = bundle.file.clone();
+        tampered.name = "tampered.txt".to_string();
+        tampered.checksum = "0".repeat(64);
+        assert!(write_file_record(&store, &tampered, None).await.is_err());
+        assert!(!downloads.join("tampered.txt").exists());
+    }
+
+    #[test]
+    fn safe_download_name_reduces_to_one_component() {
+        assert_eq!(safe_download_name("a/b\\c.txt"), "a_b_c.txt");
+        assert_eq!(safe_download_name(".."), "download");
+        assert_eq!(safe_download_name(""), "download");
     }
 
     // -- `store.browse-dirs` -------------------------------------------

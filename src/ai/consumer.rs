@@ -107,10 +107,22 @@ enum Event {
     },
 }
 
+/// Cap on accumulated response content per request.
+const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+/// Cap on out-of-order chunks held back waiting for a missing `seq`.
+const MAX_BUFFERED_CHUNKS: usize = 1024;
+/// Largest accepted distance between a chunk's `seq` and the next expected.
+const MAX_SEQ_GAP: u64 = 1024;
+/// Total wall-clock deadline per request, on top of the inactivity timeout.
+const MAX_REQUEST_DURATION: Duration = Duration::from_secs(600);
+
 /// Consumer state: provider lock + in-flight requests.
 pub struct Consumer {
     send: SendFn,
-    pending: Mutex<HashMap<String, mpsc::UnboundedSender<Event>>>,
+    /// Request id -> (provider node id the request was sent to, event
+    /// sink). Events whose sender differs from the recorded provider are
+    /// dropped so another peer cannot inject into someone else's request.
+    pending: Mutex<HashMap<String, (String, mpsc::UnboundedSender<Event>)>>,
     /// Locked-in provider, `None` until the first `provider_hello`.
     /// A `watch` channel lets `wait_for_provider` await lock-in without
     /// polling.
@@ -176,6 +188,7 @@ impl Consumer {
             }
             ProtocolMessage::LlmResponseChunk { id, delta, seq } => {
                 self.send_event(
+                    from,
                     id,
                     Event::Chunk {
                         delta: delta.clone(),
@@ -185,6 +198,7 @@ impl Consumer {
             }
             ProtocolMessage::LlmResponseDone { id, content } => {
                 self.send_event(
+                    from,
                     id,
                     Event::Done {
                         content: content.clone(),
@@ -193,6 +207,7 @@ impl Consumer {
             }
             ProtocolMessage::LlmError { id, message, code } => {
                 self.send_event(
+                    from,
                     id,
                     Event::Error {
                         message: message.clone(),
@@ -204,10 +219,14 @@ impl Consumer {
         }
     }
 
-    fn send_event(&self, id: &str, event: Event) {
+    fn send_event(&self, from: &str, id: &str, event: Event) {
         let pending = self.pending.lock().expect("consumer pending lock");
-        if let Some(tx) = pending.get(id) {
-            let _ = tx.send(event);
+        if let Some((provider, tx)) = pending.get(id) {
+            if provider == from {
+                let _ = tx.send(event);
+            } else {
+                debug!(%from, %id, "ai: dropping response event from a peer that is not the request's provider");
+            }
         }
     }
 
@@ -270,7 +289,7 @@ impl Consumer {
         self.pending
             .lock()
             .expect("consumer pending lock")
-            .insert(id.clone(), tx);
+            .insert(id.clone(), (provider_id.to_string(), tx));
 
         // Always remove the pending entry on every exit path.
         struct RemoveOnDrop<'a> {
@@ -303,9 +322,15 @@ impl Consumer {
         let mut content = String::new();
         let mut next_seq: u64 = 0;
         let mut buffered: BTreeMap<u64, String> = BTreeMap::new();
+        let deadline = tokio::time::Instant::now() + MAX_REQUEST_DURATION;
 
         loop {
-            let event = match tokio::time::timeout(inactivity_timeout, rx.recv()).await {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                bail!("request timed out");
+            }
+            let wait = inactivity_timeout.min(remaining);
+            let event = match tokio::time::timeout(wait, rx.recv()).await {
                 Ok(Some(event)) => event,
                 Ok(None) => bail!("request channel closed unexpectedly"),
                 Err(_) => bail!("request timed out"),
@@ -314,6 +339,9 @@ impl Consumer {
             match event {
                 Event::Chunk { delta, seq } => match seq {
                     None => {
+                        if content.len() + delta.len() > MAX_RESPONSE_BYTES {
+                            bail!("provider response exceeded the maximum size");
+                        }
                         content.push_str(&delta);
                         if let Some(tx) = &delta_tx {
                             let _ = tx.send(delta);
@@ -323,15 +351,31 @@ impl Consumer {
                         // Stale duplicate; drop.
                     }
                     Some(seq) if seq > next_seq => {
+                        if seq - next_seq > MAX_SEQ_GAP
+                            || (buffered.len() >= MAX_BUFFERED_CHUNKS
+                                && !buffered.contains_key(&seq))
+                        {
+                            bail!("provider sent too many out-of-order chunks");
+                        }
                         buffered.insert(seq, delta);
+                        let buffered_bytes: usize = buffered.values().map(String::len).sum();
+                        if content.len() + buffered_bytes > MAX_RESPONSE_BYTES {
+                            bail!("provider response exceeded the maximum size");
+                        }
                     }
                     Some(_) => {
+                        if content.len() + delta.len() > MAX_RESPONSE_BYTES {
+                            bail!("provider response exceeded the maximum size");
+                        }
                         content.push_str(&delta);
                         if let Some(tx) = &delta_tx {
                             let _ = tx.send(delta);
                         }
                         next_seq += 1;
                         while let Some(next) = buffered.remove(&next_seq) {
+                            if content.len() + next.len() > MAX_RESPONSE_BYTES {
+                                bail!("provider response exceeded the maximum size");
+                            }
                             content.push_str(&next);
                             if let Some(tx) = &delta_tx {
                                 let _ = tx.send(next);
@@ -366,7 +410,7 @@ impl Consumer {
     pub fn reject_all(&self, reason: &str) {
         let senders: Vec<_> = {
             let pending = self.pending.lock().expect("consumer pending lock");
-            pending.values().cloned().collect()
+            pending.values().map(|(_, tx)| tx.clone()).collect()
         };
         for tx in senders {
             let _ = tx.send(Event::Rejected {
@@ -1142,5 +1186,39 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("no provider found"));
+    }
+
+    #[tokio::test]
+    async fn events_from_a_non_provider_peer_are_dropped() {
+        let (send, sent) = fake_send();
+        let consumer = Consumer::new(send);
+        let c2 = consumer.clone();
+        let handle = tokio::spawn(async move {
+            c2.request(
+                "provider1",
+                vec![chat("hi")],
+                None,
+                Duration::from_millis(300),
+                None,
+            )
+            .await
+        });
+        sleep(Duration::from_millis(20)).await;
+        let id = last_request_id(&sent);
+        consumer.handle_message(
+            "attacker",
+            &ProtocolMessage::LlmResponseDone {
+                id: id.clone(),
+                content: Some("forged".into()),
+            },
+        );
+        consumer.handle_message(
+            "provider1",
+            &ProtocolMessage::LlmResponseDone {
+                id,
+                content: Some("real".into()),
+            },
+        );
+        assert_eq!(handle.await.unwrap().unwrap(), "real");
     }
 }

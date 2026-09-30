@@ -572,6 +572,9 @@ async fn webhook(
     let http_method = parse_webhook_method(method);
     let client = reqwest::Client::builder()
         .no_proxy()
+        // Never follow redirects: custom headers (which may carry secrets)
+        // would be forwarded to whatever host the target redirects to.
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .context("bot: building webhook HTTP client")?;
     let mut request = client
@@ -595,6 +598,12 @@ async fn webhook(
         .await
         .with_context(|| format!("bot: webhook {http_method} failed: {url}"))?;
 
+    if response.status().is_redirection() {
+        bail!(
+            "bot: webhook {http_method} to {url} returned a redirect ({}); redirects are not followed",
+            response.status()
+        );
+    }
     if !response.status().is_success() {
         let status = response.status();
         let text = response.text().await.unwrap_or_default();

@@ -70,12 +70,17 @@ fn truncate_500(body: &str) -> String {
     body.chars().take(500).collect()
 }
 
+/// Upper bound on the audio body accepted from a TTS upstream.
+const MAX_TTS_AUDIO_BYTES: usize = 32 * 1024 * 1024;
+
 /// Builds a fresh client for one call. `no_proxy()` matters here for the
 /// same reason as `openai::build_client`: upstreams may be local and proxy
 /// env vars would otherwise break loopback requests.
 fn build_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .no_proxy()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(120))
         .build()
         .context("ai: building TTS upstream HTTP client")
 }
@@ -156,17 +161,31 @@ pub async fn synthesize(provider: &AiProviderConfig, req: TtsParams) -> Result<T
     if !response.status().is_success() {
         let status = response.status();
         let body_text = response.text().await.unwrap_or_default();
-        bail!(
-            "TTS API returned an error ({status}): {}",
-            truncate_500(&body_text)
-        );
+        return Err(anyhow::Error::new(super::openai::UpstreamHttpError {
+            label: "TTS API",
+            status: status.as_u16(),
+            detail: truncate_500(&body_text),
+        }));
     }
 
-    let bytes = response
-        .bytes()
+    if response
+        .content_length()
+        .is_some_and(|len| len > MAX_TTS_AUDIO_BYTES as u64)
+    {
+        bail!("ai: TTS API response exceeds the maximum audio size");
+    }
+    let mut response = response;
+    let mut bytes: Vec<u8> = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
         .await
         .context("ai: reading TTS API response body")?
-        .to_vec();
+    {
+        if bytes.len() + chunk.len() > MAX_TTS_AUDIO_BYTES {
+            bail!("ai: TTS API response exceeds the maximum audio size");
+        }
+        bytes.extend_from_slice(&chunk);
+    }
     if bytes.is_empty() {
         bail!("ai: TTS API returned an empty audio body");
     }

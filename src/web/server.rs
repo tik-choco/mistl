@@ -32,7 +32,12 @@
 //!   way (a per-process random number, nothing sensitive).
 //! - anything else -> 404 JSON error
 //!
-//! Security (no auth token; loopback bind):
+//! Security:
+//! - Every route except `GET /favicon.png` needs the `mistl_session_<port>` cookie
+//!   holding the persistent dashboard token ([`super::auth`]). `GET /?token=<t>`
+//!   with the right token answers 303 to `/` and sets the cookie; `GET /`
+//!   without a session serves a small 401 "locked" page. This holds on
+//!   loopback too: any local process could otherwise drive the daemon.
 //! - `POST /api/call`, `POST /api/store/upload`, and
 //!   `POST /api/store/sandbox-upload` require the request header
 //!   `x-mistl-ui: 1`. Browsers cannot attach custom headers cross-origin
@@ -55,12 +60,14 @@
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Semaphore;
 use tracing::{debug, warn};
 
 use crate::daemon::AppState;
@@ -73,6 +80,19 @@ const MAX_BODY_BYTES: usize = 1024 * 1024;
 const MAX_UPLOAD_BYTES: u64 = 1024 * 1024 * 1024;
 /// Chunk size used when streaming an upload/download body to/from disk.
 const STREAM_CHUNK_BYTES: usize = 64 * 1024;
+/// Time allowed for the request line + headers to arrive (Slowloris guard).
+const HEAD_READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// Idle time allowed between body reads.
+const BODY_READ_TIMEOUT: Duration = Duration::from_secs(30);
+/// Connections served concurrently; excess ones are dropped on accept.
+const MAX_CONNECTIONS: usize = 64;
+/// Uploads (content store + sandbox) streamed concurrently.
+const MAX_CONCURRENT_UPLOADS: usize = 2;
+static UPLOAD_SLOTS: Semaphore = Semaphore::const_new(MAX_CONCURRENT_UPLOADS);
+
+/// Content-Security-Policy for HTML responses. The dashboard is one page with
+/// inline script/style plus same-origin feature assets; nothing external.
+const CSP: &str = "default-src 'self'; img-src 'self' blob: data:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
 
 /// Running dashboard server; aborts its accept loop on [`WebServer::close`].
 pub struct WebServer {
@@ -97,7 +117,16 @@ pub async fn serve(state: Arc<AppState>, listen: &str) -> Result<WebServer> {
     let listener = TcpListener::bind(listen)
         .await
         .with_context(|| format!("binding web dashboard to {listen}"))?;
-    let listen = listener.local_addr()?.to_string();
+    let local = listener.local_addr()?;
+    let listen = local.to_string();
+    if !local.ip().is_loopback() {
+        warn!(
+            %listen,
+            "web dashboard is bound to a non-loopback address; it is reachable from the network and protected only by the dashboard token"
+        );
+    }
+    let token: Arc<str> = Arc::from(super::auth::token()?);
+    let permits = Arc::new(Semaphore::new(MAX_CONNECTIONS));
 
     // Per-process nonce for the live-reload poll (see `/api/dev/instance`
     // above): a fresh value every time the daemon (re)starts, which is what
@@ -113,10 +142,16 @@ pub async fn serve(state: Arc<AppState>, listen: &str) -> Result<WebServer> {
                     continue;
                 }
             };
+            let Ok(permit) = permits.clone().try_acquire_owned() else {
+                debug!("web dashboard at connection cap; dropping a connection");
+                continue;
+            };
             let state = state.clone();
             let instance_id = instance_id.clone();
+            let token = token.clone();
             tokio::spawn(async move {
-                handle_connection(socket, state, instance_id).await;
+                handle_connection(socket, state, instance_id, token).await;
+                drop(permit);
             });
         }
     });
@@ -220,6 +255,18 @@ async fn read_request_head(stream: &mut TcpStream) -> io::Result<Option<(Request
     }
 }
 
+/// One body read that fails with `TimedOut` if the peer stays silent for
+/// [`BODY_READ_TIMEOUT`].
+async fn read_idle(stream: &mut TcpStream, buf: &mut [u8]) -> io::Result<usize> {
+    match tokio::time::timeout(BODY_READ_TIMEOUT, stream.read(buf)).await {
+        Ok(result) => result,
+        Err(_) => Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "timed out waiting for request body",
+        )),
+    }
+}
+
 /// Read the remaining body bytes (on top of any `leftover` already read
 /// during header parsing) until exactly `content_length` bytes are
 /// available.
@@ -234,7 +281,7 @@ async fn read_body(
     }
     let mut chunk = [0u8; 8192];
     while leftover.len() < content_length {
-        let n = stream.read(&mut chunk).await?;
+        let n = read_idle(stream, &mut chunk).await?;
         if n == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
@@ -264,7 +311,7 @@ async fn read_body_to_file(
     }
     let mut chunk = [0u8; STREAM_CHUNK_BYTES];
     while written < content_length {
-        let n = stream.read(&mut chunk).await?;
+        let n = read_idle(stream, &mut chunk).await?;
         if n == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
@@ -462,12 +509,30 @@ fn validate_upload_filename(name: &str) -> Result<(), &'static str> {
     if name.contains('/') || name.contains('\\') || name.contains("..") {
         return Err("file name must not contain path separators or `..`");
     }
+    if name.len() > 255 {
+        return Err("file name is too long");
+    }
     const FORBIDDEN: [char; 7] = ['<', '>', ':', '"', '|', '?', '*'];
     if name
         .chars()
         .any(|c| FORBIDDEN.contains(&c) || c.is_control())
     {
         return Err("file name contains forbidden characters");
+    }
+    if name.ends_with('.') || name.ends_with(' ') {
+        return Err("file name must not end with a dot or space");
+    }
+    // Windows device names are reserved with or without an extension.
+    let stem = name.split('.').next().unwrap_or("").trim_end();
+    let upper = stem.to_ascii_uppercase();
+    let reserved = matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ["COM", "LPT"].iter().any(|p| {
+            upper
+                .strip_prefix(p)
+                .is_some_and(|n| matches!(n.as_bytes(), [b'1'..=b'9']))
+        });
+    if reserved {
+        return Err("file name is a reserved device name");
     }
     Ok(())
 }
@@ -514,11 +579,21 @@ async fn write_html_response(
     // showing a stale UI after the daemon is rebuilt. `no-cache` forces a
     // fresh copy on every load.
     let head = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nContent-Security-Policy: {CSP}\r\nX-Frame-Options: DENY\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
         body.len()
     );
     stream.write_all(head.as_bytes()).await?;
     stream.write_all(body.as_bytes()).await?;
+    stream.flush().await
+}
+
+/// `303 See Other` to `/` that also establishes the session cookie.
+async fn write_login_redirect(stream: &mut TcpStream, token: &str, port: u16) -> io::Result<()> {
+    let head = format!(
+        "HTTP/1.1 303 See Other\r\nLocation: /\r\nSet-Cookie: {}\r\nReferrer-Policy: no-referrer\r\nCache-Control: no-store\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        super::auth::session_cookie(token, port)
+    );
+    stream.write_all(head.as_bytes()).await?;
     stream.flush().await
 }
 
@@ -588,8 +663,13 @@ struct CallRequestBody {
     args: Option<Value>,
 }
 
-async fn handle_connection(mut stream: TcpStream, state: Arc<AppState>, instance_id: String) {
-    if let Err(error) = handle_connection_inner(&mut stream, state, &instance_id).await {
+async fn handle_connection(
+    mut stream: TcpStream,
+    state: Arc<AppState>,
+    instance_id: String,
+    token: Arc<str>,
+) {
+    if let Err(error) = handle_connection_inner(&mut stream, state, &instance_id, &token).await {
         debug!(%error, "web dashboard connection ended with error");
     }
 }
@@ -598,18 +678,52 @@ async fn handle_connection_inner(
     stream: &mut TcpStream,
     state: Arc<AppState>,
     instance_id: &str,
+    token: &str,
 ) -> io::Result<()> {
-    let (head, leftover) = match read_request_head(stream).await {
-        Ok(Some(pair)) => pair,
-        Ok(None) => return Ok(()),
-        Err(_) => return write_error(stream, 400, "Bad Request", "malformed request").await,
-    };
+    let (head, leftover) =
+        match tokio::time::timeout(HEAD_READ_TIMEOUT, read_request_head(stream)).await {
+            Ok(Ok(Some(pair))) => pair,
+            Ok(Ok(None)) => return Ok(()),
+            // Too slow: just drop the connection.
+            Err(_) => return Ok(()),
+            Ok(Err(_)) => {
+                return write_error(stream, 400, "Bad Request", "malformed request").await;
+            }
+        };
 
     let method = head.method.to_ascii_uppercase();
     let path = head.path.split('?').next().unwrap_or("").to_string();
 
     if !state.network.permitted() && !stream.peer_addr()?.ip().is_loopback() {
         return write_error(stream, 403, "Forbidden", "external connections are OFF").await;
+    }
+    let local_addr = stream.local_addr()?;
+    if !host_is_allowed(head.header("host").unwrap_or(""), &local_addr) {
+        warn!(
+            path = %head.path,
+            host = head.header("host").unwrap_or(""),
+            bound = %local_addr,
+            "refused a dashboard request whose Host is not loopback or the bound address (DNS-rebinding guard)"
+        );
+        return write_error(stream, 403, "Forbidden", "forbidden").await;
+    }
+    // Session gate: only the favicon and the token exchange are public.
+    let is_root = method == "GET" && (path == "/" || path == "/index.html");
+    if is_root {
+        let query = head.path.split_once('?').map(|(_, q)| q).unwrap_or("");
+        if let Some(candidate) = super::auth::query_token(query)
+            && super::auth::ct_eq(candidate.as_bytes(), token.as_bytes())
+        {
+            return write_login_redirect(stream, token, local_addr.port()).await;
+        }
+    }
+    let is_public = method == "GET" && path == "/favicon.png";
+    if !is_public && !is_authorized(&head, token, local_addr.port()) {
+        if is_root {
+            return write_html_response(stream, 401, "Unauthorized", super::auth::LOCKED_HTML)
+                .await;
+        }
+        return write_error(stream, 401, "Unauthorized", "dashboard session required").await;
     }
     // Bind every mutation to the page's actual build/instance. A stale tab cannot
     // operate a different daemon which happens to reuse the same port.
@@ -668,6 +782,11 @@ async fn handle_connection_inner(
         ("OPTIONS", _) => write_error(stream, 403, "Forbidden", "forbidden").await,
         _ => write_error(stream, 404, "Not Found", "not found").await,
     }
+}
+
+/// Whether the request carries the valid session cookie for this port.
+fn is_authorized(head: &RequestHead, token: &str, port: u16) -> bool {
+    super::auth::cookie_authorized(head.header("cookie"), token, port)
 }
 
 fn page_identity() -> String {
@@ -760,6 +879,16 @@ async fn handle_store_upload(
     if is_guard_denied(head, &local_addr, true) {
         return write_error(stream, 403, "Forbidden", "forbidden").await;
     }
+
+    let Ok(_slot) = UPLOAD_SLOTS.try_acquire() else {
+        return write_error(
+            stream,
+            503,
+            "Service Unavailable",
+            "too many uploads in progress",
+        )
+        .await;
+    };
 
     let Some(raw_name) = head.header("x-file-name") else {
         return write_error(stream, 400, "Bad Request", "x-file-name header required").await;
@@ -989,6 +1118,16 @@ async fn handle_store_sandbox_upload(
     if is_guard_denied(head, &local_addr, true) {
         return write_error(stream, 403, "Forbidden", "forbidden").await;
     }
+
+    let Ok(_slot) = UPLOAD_SLOTS.try_acquire() else {
+        return write_error(
+            stream,
+            503,
+            "Service Unavailable",
+            "too many uploads in progress",
+        )
+        .await;
+    };
 
     let Some(raw_name) = head.header("x-file-name") else {
         return write_error(stream, 400, "Bad Request", "x-file-name header required").await;
@@ -1478,6 +1617,10 @@ mod tests {
             "photo (1).jpg",
             "\u{e9}t\u{e9}.txt",
             "no-extension",
+            "COM0.txt",
+            "COM10",
+            "console.txt",
+            "aux2",
         ];
         for name in accept {
             assert!(
@@ -1502,6 +1645,14 @@ mod tests {
             "weird*name.txt",
             "with\ncontrol.txt",
             "with\0nul.txt",
+            "CON",
+            "con.txt",
+            "Nul.tar.gz",
+            "COM1",
+            "lpt9.log",
+            "aux .txt",
+            "trailing.",
+            "trailing ",
         ];
         for name in reject {
             assert!(
@@ -1509,6 +1660,40 @@ mod tests {
                 "expected {name:?} to be rejected"
             );
         }
+    }
+
+    #[test]
+    fn validate_upload_filename_rejects_overlong_names() {
+        assert!(validate_upload_filename(&"a".repeat(255)).is_ok());
+        assert!(validate_upload_filename(&"a".repeat(256)).is_err());
+    }
+
+    // -- is_authorized ---------------------------------------------------------
+
+    #[test]
+    fn is_authorized_needs_the_session_cookie() {
+        let ok = head_with(&[("cookie", "x=1; mistl_session_6480=tok")]);
+        assert!(is_authorized(&ok, "tok", 6480));
+        assert!(!is_authorized(&ok, "other", 6480));
+        assert!(!is_authorized(&ok, "tok", 6481));
+        assert!(!is_authorized(&head_with(&[]), "tok", 6480));
+        // The token must not be accepted from a header or the wrong cookie.
+        assert!(!is_authorized(
+            &head_with(&[("cookie", "session=tok")]),
+            "tok",
+            6480
+        ));
+        assert!(!is_authorized(
+            &head_with(&[("x-mistl-session", "tok")]),
+            "tok",
+            6480
+        ));
+    }
+
+    #[test]
+    fn html_response_carries_security_headers() {
+        assert!(CSP.contains("frame-ancestors 'none'"));
+        assert!(CSP.contains("connect-src 'self'"));
     }
 
     // -- parse_query_param -----------------------------------------------------

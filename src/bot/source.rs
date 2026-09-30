@@ -114,6 +114,38 @@ const WIRE_HISTORY_REQUEST: &str = "tc-news:history-request";
 /// (`newsWire.ts::MAX_WIRE_LOG`) is 300; this is a live receive buffer, not
 /// a replay log, so a little more headroom is fine.
 const BUFFER_CAP_PER_ROOM: usize = 500;
+/// Most buffered wires any single `fromId` may hold per room, so one sender
+/// can't evict every other sender's wires from the shared buffer.
+const MAX_BUFFERED_PER_SENDER: usize = 50;
+/// Wires stamped further ahead than this are rejected. Only a future bound
+/// is enforced: the same handler also receives legitimate history replays
+/// with arbitrarily old timestamps.
+const MAX_FUTURE_SKEW_MS: i64 = 10 * 60 * 1000;
+
+/// True when `timestamp_ms` lies more than [`MAX_FUTURE_SKEW_MS`] after `now_ms`.
+fn timestamp_too_far_ahead(timestamp_ms: i64, now_ms: i64) -> bool {
+    timestamp_ms > now_ms.saturating_add(MAX_FUTURE_SKEW_MS)
+}
+
+/// Appends `wire`, first evicting the sender's own oldest entry when it is
+/// at [`MAX_BUFFERED_PER_SENDER`], then trimming the whole buffer to `cap`.
+fn push_capped<T>(buf: &mut VecDeque<T>, wire: T, cap: usize, from_id: impl Fn(&T) -> &str) {
+    let sender = from_id(&wire).to_string();
+    let mut count = buf.iter().filter(|w| from_id(w) == sender).count();
+    while count >= MAX_BUFFERED_PER_SENDER {
+        match buf.iter().position(|w| from_id(w) == sender) {
+            Some(pos) => {
+                buf.remove(pos);
+                count -= 1;
+            }
+            None => break,
+        }
+    }
+    buf.push_back(wire);
+    while buf.len() > cap {
+        buf.pop_front();
+    }
+}
 /// Delay before this bot's own catch-up history request, giving the room's
 /// session (and other subscribers) time to settle after join -- matches
 /// `useNewsRoom.ts`/`globalArticlesReader.ts`'s own `HISTORY_REQUEST_DELAY_MS`,
@@ -295,6 +327,9 @@ fn register_handler(hub: Arc<GlobalArticlesHub>) {
             cid: cid.to_string(),
             timestamp: value.get("timestamp").and_then(Value::as_i64).unwrap_or(0),
         };
+        if timestamp_too_far_ahead(wire.timestamp, chrono::Utc::now().timestamp_millis()) {
+            return; // implausibly far in the future
+        }
         let room = room_id.to_string();
         let hub = hub.clone();
         runtime.spawn(async move {
@@ -303,10 +338,7 @@ fn register_handler(hub: Arc<GlobalArticlesHub>) {
             if buf.iter().any(|w| w.id == wire.id) {
                 return; // duplicate delivery (live + replay, or two replayers)
             }
-            buf.push_back(wire);
-            if buf.len() > BUFFER_CAP_PER_ROOM {
-                buf.pop_front();
-            }
+            push_capped(buf, wire, BUFFER_CAP_PER_ROOM, |w| w.from_id.as_str());
         });
     });
 }
@@ -588,6 +620,9 @@ fn register_chat_handler(hub: Arc<ChatHub>) {
             cid: cid.to_string(),
             timestamp: value.get("timestamp").and_then(Value::as_i64).unwrap_or(0),
         };
+        if timestamp_too_far_ahead(wire.timestamp, chrono::Utc::now().timestamp_millis()) {
+            return; // implausibly far in the future
+        }
         let room = room_id.to_string();
         let hub = hub.clone();
         runtime.spawn(async move {
@@ -596,10 +631,7 @@ fn register_chat_handler(hub: Arc<ChatHub>) {
             if buf.iter().any(|w| w.id == wire.id) {
                 return; // duplicate delivery (live + replay, or two replayers)
             }
-            buf.push_back(wire);
-            if buf.len() > CHAT_BUFFER_CAP_PER_ROOM {
-                buf.pop_front();
-            }
+            push_capped(buf, wire, CHAT_BUFFER_CAP_PER_ROOM, |w| w.from_id.as_str());
         });
     });
 }
@@ -904,6 +936,34 @@ mod tests {
     fn parse_and_filter_rejects_missing_required_fields() {
         let bytes = serde_json::to_vec(&serde_json::json!({ "id": "a", "title": "t" })).unwrap();
         assert!(parse_and_filter(&bytes, "did:key:zAuthor", &[]).is_none());
+    }
+
+    #[test]
+    fn timestamp_too_far_ahead_only_rejects_the_future() {
+        let now = 1_000_000_000_000;
+        assert!(!timestamp_too_far_ahead(0, now));
+        assert!(!timestamp_too_far_ahead(now - 30 * 24 * 3600 * 1000, now));
+        assert!(!timestamp_too_far_ahead(now + MAX_FUTURE_SKEW_MS, now));
+        assert!(timestamp_too_far_ahead(now + MAX_FUTURE_SKEW_MS + 1, now));
+    }
+
+    #[test]
+    fn push_capped_limits_one_senders_share_and_keeps_others() {
+        let mut buf: VecDeque<(String, u32)> = VecDeque::new();
+        for i in 0..5u32 {
+            push_capped(&mut buf, ("honest".to_string(), i), 500, |w| w.0.as_str());
+        }
+        for i in 0..200u32 {
+            push_capped(&mut buf, ("spammer".to_string(), i), 500, |w| w.0.as_str());
+        }
+        assert_eq!(buf.iter().filter(|w| w.0 == "honest").count(), 5);
+        assert_eq!(
+            buf.iter().filter(|w| w.0 == "spammer").count(),
+            MAX_BUFFERED_PER_SENDER
+        );
+        // The spammer's oldest entries were the ones evicted.
+        assert!(buf.iter().any(|w| w.0 == "spammer" && w.1 == 199));
+        assert!(!buf.iter().any(|w| w.0 == "spammer" && w.1 == 0));
     }
 
     #[test]

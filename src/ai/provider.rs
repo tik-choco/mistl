@@ -51,8 +51,10 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
+use tracing::warn;
 
 use crate::config::ResolvedAiPreset;
 
@@ -102,14 +104,240 @@ pub type SttCallFn = Arc<
     dyn Fn(Vec<u8>, String, Option<String>, Option<String>) -> VoiceFuture<String> + Send + Sync,
 >;
 
-/// In-progress reassembly of one chunked `stt_request` stream, keyed by its
-/// `id`. `mime`/`model`/`file_name` are captured from the first chunk only
-/// (peers are not required to repeat them on every chunk).
+/// Total bytes buffered across *all* in-flight `stt_request` streams.
+const STT_MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
+/// Maximum concurrently buffered `stt_request` streams per sending peer.
+const STT_MAX_BUFFERS_PER_PEER: usize = 4;
+/// Maximum concurrently buffered `stt_request` streams overall.
+const STT_MAX_BUFFERS_TOTAL: usize = 32;
+/// A buffer with no new chunk for this long is dropped (swept lazily on
+/// every insert).
+const STT_BUFFER_TTL: Duration = Duration::from_secs(60);
+
+/// Maximum concurrent remote-driven upstream jobs (llm/tts/stt) overall.
+const MAX_CONCURRENT_REMOTE_JOBS: usize = 8;
+/// Maximum concurrent remote-driven upstream jobs per peer.
+const MAX_JOBS_PER_PEER: usize = 2;
+/// Maximum `messages` in one remote `llm_request`.
+const MAX_LLM_MESSAGES: usize = 256;
+/// Maximum total `content` bytes across one remote `llm_request`.
+const MAX_LLM_CONTENT_BYTES: usize = 1024 * 1024;
+
+const BUSY_MESSAGE: &str = "The provider is busy; try again later.";
+const REQUEST_TOO_LARGE_MESSAGE: &str = "The request is too large for this provider.";
+
+/// Checks the size limits of a remote `llm_request` before any upstream call.
+fn validate_llm_messages(messages: &[super::protocol::ChatMessage]) -> Result<(), &'static str> {
+    if messages.len() > MAX_LLM_MESSAGES {
+        return Err(REQUEST_TOO_LARGE_MESSAGE);
+    }
+    let total: usize = messages.iter().map(|m| m.content.len()).sum();
+    if total > MAX_LLM_CONTENT_BYTES {
+        return Err(REQUEST_TOO_LARGE_MESSAGE);
+    }
+    Ok(())
+}
+
+/// Turns an upstream failure into text that is safe to send to a remote
+/// peer: the raw error can carry the upstream `base_url` and response body.
+/// The detail is logged locally; errors that are not upstream transport or
+/// HTTP failures (validation messages etc.) pass through unchanged.
+fn peer_safe_error(err: &anyhow::Error) -> String {
+    if let Some(http) = err
+        .chain()
+        .find_map(|e| e.downcast_ref::<openai::UpstreamHttpError>())
+    {
+        warn!(error = %err, "ai: upstream returned an error");
+        return format!("upstream error (status {})", http.status);
+    }
+    if err
+        .chain()
+        .any(|e| e.downcast_ref::<reqwest::Error>().is_some())
+    {
+        warn!(error = %err, "ai: upstream unavailable");
+        return "upstream unavailable".to_string();
+    }
+    err.to_string()
+}
+
+/// Limits remote-driven work: a global semaphore plus a per-peer in-flight
+/// count. Permits are released when the returned [`JobGuard`] drops.
+struct JobLimiter {
+    global: Arc<tokio::sync::Semaphore>,
+    per_peer: Arc<Mutex<HashMap<String, usize>>>,
+}
+
+struct JobGuard {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+    per_peer: Arc<Mutex<HashMap<String, usize>>>,
+    peer: String,
+}
+
+impl Drop for JobGuard {
+    fn drop(&mut self) {
+        let mut map = self.per_peer.lock().expect("ai job limiter lock");
+        if let Some(n) = map.get_mut(&self.peer) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                map.remove(&self.peer);
+            }
+        }
+    }
+}
+
+impl JobLimiter {
+    fn new(global: usize) -> Self {
+        Self {
+            global: Arc::new(tokio::sync::Semaphore::new(global)),
+            per_peer: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn try_acquire(&self, peer: &str, per_peer_max: usize) -> Option<JobGuard> {
+        let mut map = self.per_peer.lock().expect("ai job limiter lock");
+        if map.get(peer).copied().unwrap_or(0) >= per_peer_max {
+            return None;
+        }
+        let permit = self.global.clone().try_acquire_owned().ok()?;
+        *map.entry(peer.to_string()).or_insert(0) += 1;
+        Some(JobGuard {
+            _permit: permit,
+            per_peer: self.per_peer.clone(),
+            peer: peer.to_string(),
+        })
+    }
+}
+
+/// In-progress reassembly of one chunked `stt_request` stream, keyed by
+/// `(from, id)`. `mime`/`model`/`file_name` are captured from the first
+/// chunk only (peers are not required to repeat them on every chunk).
 struct SttBuffer {
     mime: String,
     model: Option<String>,
     file_name: Option<String>,
     bytes: Vec<u8>,
+    next_seq: u64,
+    last_update: Instant,
+}
+
+/// Why a chunk was refused by [`SttBuffers::push`].
+#[derive(Debug, PartialEq, Eq)]
+enum SttReject {
+    /// Per-stream size cap exceeded.
+    StreamTooLarge,
+    /// Global byte / buffer-count / per-peer caps exceeded.
+    Busy,
+    /// `seq` was not the next expected chunk index.
+    OutOfOrder,
+}
+
+enum SttPush {
+    Waiting,
+    Ready(SttBuffer),
+    Rejected(SttReject),
+}
+
+/// All in-flight `stt_request` reassembly buffers with their global caps.
+#[derive(Default)]
+struct SttBuffers {
+    map: HashMap<(String, String), SttBuffer>,
+    total_bytes: usize,
+}
+
+impl SttBuffers {
+    fn remove(&mut self, from: &str, id: &str) -> Option<SttBuffer> {
+        let buf = self.map.remove(&(from.to_string(), id.to_string()))?;
+        self.total_bytes = self.total_bytes.saturating_sub(buf.bytes.len());
+        Some(buf)
+    }
+
+    /// Drops buffers idle for longer than [`STT_BUFFER_TTL`].
+    fn sweep(&mut self, now: Instant) {
+        let expired: Vec<(String, String)> = self
+            .map
+            .iter()
+            .filter(|(_, b)| now.saturating_duration_since(b.last_update) > STT_BUFFER_TTL)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for (from, id) in expired {
+            self.remove(&from, &id);
+        }
+    }
+
+    /// Drops every buffer belonging to `from` (peer left).
+    fn drop_peer(&mut self, from: &str) {
+        let ids: Vec<String> = self
+            .map
+            .keys()
+            .filter(|(f, _)| f == from)
+            .map(|(_, id)| id.clone())
+            .collect();
+        for id in ids {
+            self.remove(from, &id);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn push(
+        &mut self,
+        now: Instant,
+        from: &str,
+        id: &str,
+        seq: u64,
+        chunk: &[u8],
+        last: bool,
+        mime: String,
+        model: Option<String>,
+        file_name: Option<String>,
+    ) -> SttPush {
+        self.sweep(now);
+        let key = (from.to_string(), id.to_string());
+        let existing_len = match self.map.get(&key) {
+            Some(buf) => {
+                if buf.next_seq != seq {
+                    self.remove(from, id);
+                    return SttPush::Rejected(SttReject::OutOfOrder);
+                }
+                buf.bytes.len()
+            }
+            None => {
+                if seq != 0 {
+                    return SttPush::Rejected(SttReject::OutOfOrder);
+                }
+                let peer_count = self.map.keys().filter(|(f, _)| f == from).count();
+                if self.map.len() >= STT_MAX_BUFFERS_TOTAL || peer_count >= STT_MAX_BUFFERS_PER_PEER
+                {
+                    return SttPush::Rejected(SttReject::Busy);
+                }
+                0
+            }
+        };
+        if existing_len + chunk.len() > STT_MAX_BUFFERED_BYTES {
+            self.remove(from, id);
+            return SttPush::Rejected(SttReject::StreamTooLarge);
+        }
+        if self.total_bytes + chunk.len() > STT_MAX_TOTAL_BYTES {
+            self.remove(from, id);
+            return SttPush::Rejected(SttReject::Busy);
+        }
+        let buf = self.map.entry(key).or_insert_with(|| SttBuffer {
+            mime,
+            model,
+            file_name,
+            bytes: Vec::new(),
+            next_seq: 0,
+            last_update: now,
+        });
+        buf.bytes.extend_from_slice(chunk);
+        buf.next_seq = seq.saturating_add(1);
+        buf.last_update = now;
+        self.total_bytes += chunk.len();
+        if last {
+            SttPush::Ready(self.remove(from, id).expect("just inserted above"))
+        } else {
+            SttPush::Waiting
+        }
+    }
 }
 
 /// Outcome of [`Provider::resolve_llm_call`]: which upstream (if any)
@@ -179,7 +407,8 @@ pub struct Provider {
     /// [`Provider::hello`] when `tts` is also configured, regardless of
     /// whether this list is non-empty (see [`Provider::hello`]).
     voices: Vec<String>,
-    stt_buffers: Mutex<HashMap<String, SttBuffer>>,
+    stt_buffers: Mutex<SttBuffers>,
+    limiter: JobLimiter,
     logs: Mutex<Vec<RequestLog>>,
 }
 
@@ -224,7 +453,8 @@ impl Provider {
             tts,
             stt,
             voices,
-            stt_buffers: Mutex::new(HashMap::new()),
+            stt_buffers: Mutex::new(SttBuffers::default()),
+            limiter: JobLimiter::new(MAX_CONCURRENT_REMOTE_JOBS),
             logs: Mutex::new(Vec::new()),
         })
     }
@@ -361,6 +591,17 @@ impl Provider {
             self.reject_voice_request(&from, id);
             return;
         };
+        let Some(_job) = self.limiter.try_acquire(&from, MAX_JOBS_PER_PEER) else {
+            (self.send)(
+                &from,
+                ProtocolMessage::VoiceError {
+                    id,
+                    message: BUSY_MESSAGE.to_string(),
+                    code: None,
+                },
+            );
+            return;
+        };
         match tts(text, model, voice, lang).await {
             Ok(audio) => self.send_tts_response(&from, id, audio),
             Err(err) => {
@@ -368,7 +609,7 @@ impl Provider {
                     &from,
                     ProtocolMessage::VoiceError {
                         id,
-                        message: err.to_string(),
+                        message: peer_safe_error(&err),
                         code: None,
                     },
                 );
@@ -431,7 +672,6 @@ impl Provider {
         model: Option<String>,
         file_name: Option<String>,
     ) {
-        let _ = seq;
         let Some(stt) = self.stt.clone() else {
             self.reject_voice_request(&from, id);
             return;
@@ -444,7 +684,7 @@ impl Provider {
                 self.stt_buffers
                     .lock()
                     .expect("ai stt buffer lock")
-                    .remove(&id);
+                    .remove(&from, &id);
                 (self.send)(
                     &from,
                     ProtocolMessage::VoiceError {
@@ -457,46 +697,50 @@ impl Provider {
             }
         };
 
-        enum ChunkOutcome {
-            Waiting,
-            Overflowed,
-            Ready(SttBuffer),
-        }
-        let outcome = {
-            let mut buffers = self.stt_buffers.lock().expect("ai stt buffer lock");
-            let buffer = buffers.entry(id.clone()).or_insert_with(|| SttBuffer {
-                mime,
-                model,
-                file_name,
-                bytes: Vec::new(),
-            });
-            buffer.bytes.extend_from_slice(&decoded);
-            if buffer.bytes.len() > STT_MAX_BUFFERED_BYTES {
-                buffers.remove(&id);
-                ChunkOutcome::Overflowed
-            } else if last {
-                ChunkOutcome::Ready(buffers.remove(&id).expect("just inserted above"))
-            } else {
-                ChunkOutcome::Waiting
-            }
-        };
+        let outcome = self.stt_buffers.lock().expect("ai stt buffer lock").push(
+            Instant::now(),
+            &from,
+            &id,
+            seq,
+            &decoded,
+            last,
+            mime,
+            model,
+            file_name,
+        );
 
         let buffer = match outcome {
-            ChunkOutcome::Waiting => return,
-            ChunkOutcome::Overflowed => {
+            SttPush::Waiting => return,
+            SttPush::Rejected(reason) => {
+                let message = match reason {
+                    SttReject::StreamTooLarge => "ai: stt audio exceeded the maximum buffered size",
+                    SttReject::Busy => BUSY_MESSAGE,
+                    SttReject::OutOfOrder => "ai: stt_request chunk out of order",
+                };
                 (self.send)(
                     &from,
                     ProtocolMessage::VoiceError {
                         id,
-                        message: "ai: stt audio exceeded the maximum buffered size".to_string(),
+                        message: message.to_string(),
                         code: None,
                     },
                 );
                 return;
             }
-            ChunkOutcome::Ready(buffer) => buffer,
+            SttPush::Ready(buffer) => buffer,
         };
 
+        let Some(_job) = self.limiter.try_acquire(&from, MAX_JOBS_PER_PEER) else {
+            (self.send)(
+                &from,
+                ProtocolMessage::VoiceError {
+                    id,
+                    message: BUSY_MESSAGE.to_string(),
+                    code: None,
+                },
+            );
+            return;
+        };
         match stt(buffer.bytes, buffer.mime, buffer.model, buffer.file_name).await {
             Ok(text) => (self.send)(&from, ProtocolMessage::SttResponse { id, text }),
             Err(err) => {
@@ -504,12 +748,21 @@ impl Provider {
                     &from,
                     ProtocolMessage::VoiceError {
                         id,
-                        message: err.to_string(),
+                        message: peer_safe_error(&err),
                         code: None,
                     },
                 );
             }
         }
+    }
+
+    /// Drops any partially buffered `stt_request` streams of a peer that
+    /// left the room.
+    pub fn on_peer_left(&self, from: &str) {
+        self.stt_buffers
+            .lock()
+            .expect("ai stt buffer lock")
+            .drop_peer(from);
     }
 
     /// Which upstream (if any) should serve one `llm_request.model`, per
@@ -518,18 +771,21 @@ impl Provider {
     /// rejected outright, so a peer can't accidentally get an unrelated
     /// preset's answer under a name it didn't ask for.
     fn resolve_llm_call(&self, model: &Option<String>) -> LlmCallResolution {
-        let Some(name) = model else {
-            // No model requested: always the default preset's upstream,
-            // whether or not an advertised list is configured.
-            return LlmCallResolution::Default;
-        };
         if self.advertised.is_empty() {
-            // Legacy pass-through mode: no advertised list configured at
-            // all, so there is nothing to check the name against -- forward
-            // it to the default upstream verbatim, unchanged from before
-            // this routing table existed.
+            // Legacy pass-through mode: no advertised list is configured,
+            // so a peer-supplied `model` is IGNORED (callers pass `None`
+            // to the default `call`), pinning every request to the default
+            // preset's own model. A peer must not pick arbitrary models on
+            // the operator's upstream.
             return LlmCallResolution::Default;
         }
+        let Some(name) = model else {
+            // No model requested: the first advertised preset.
+            return match self.models.first().and_then(|n| self.advertised.get(n)) {
+                Some(resolved) => LlmCallResolution::Resolved(resolved.clone()),
+                None => LlmCallResolution::Default,
+            };
+        };
         match self.advertised.get(name) {
             Some(resolved) => LlmCallResolution::Resolved(resolved.clone()),
             None => LlmCallResolution::Reject,
@@ -553,6 +809,40 @@ impl Provider {
             char_count: 0,
             detail: None,
         });
+
+        let refusal = validate_llm_messages(&messages).err();
+        let job = if refusal.is_none() {
+            self.limiter.try_acquire(&from, MAX_JOBS_PER_PEER)
+        } else {
+            None
+        };
+        let refusal = refusal.or(if job.is_none() {
+            Some(BUSY_MESSAGE)
+        } else {
+            None
+        });
+        if let Some(message) = refusal {
+            let message = message.to_string();
+            (self.send)(
+                &from,
+                ProtocolMessage::LlmError {
+                    id: id.clone(),
+                    message: message.clone(),
+                    code: None,
+                },
+            );
+            self.push_log(RequestLog {
+                id,
+                from,
+                model,
+                status: "error".into(),
+                started_at,
+                char_count: 0,
+                detail: Some(message),
+            });
+            return;
+        }
+        let _job = job;
 
         let resolution = self.resolve_llm_call(&model);
         if matches!(resolution, LlmCallResolution::Reject) {
@@ -602,7 +892,7 @@ impl Provider {
                     .await
                 })
             }
-            LlmCallResolution::Default => (self.call)(messages, model.clone(), Some(delta_tx)),
+            LlmCallResolution::Default => (self.call)(messages, None, Some(delta_tx)),
             LlmCallResolution::Reject => unreachable!("handled and returned above"),
         };
         tokio::pin!(call_fut);
@@ -674,7 +964,7 @@ impl Provider {
                 });
             }
             Err(err) => {
-                let message = err.to_string();
+                let message = peer_safe_error(&err);
                 (self.send)(
                     &from,
                     ProtocolMessage::LlmError {
@@ -768,7 +1058,7 @@ impl Provider {
                 openai::stream_chat_completion(&upstream, &messages, Some(&call_model), delta_tx)
                     .await
             }
-            LlmCallResolution::Default => (self.call)(messages, model, delta_tx).await,
+            LlmCallResolution::Default => (self.call)(messages, None, delta_tx).await,
             // Named a model that is not in the advertised list. The p2p
             // path answers `model_not_shared`; the local caller gets the
             // same refusal as an error rather than an unrelated preset's
@@ -1299,7 +1589,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_llm_call_is_default_when_no_model_requested() {
+    fn resolve_llm_call_routes_no_model_to_the_first_advertised_preset() {
         let (send, _sent) = fake_send();
         let call = fake_call_success(vec![], "");
         let mut advertised = HashMap::new();
@@ -1313,17 +1603,17 @@ mod tests {
             None,
             vec![],
         );
-        assert!(matches!(
-            provider.resolve_llm_call(&None),
-            LlmCallResolution::Default
-        ));
+        match provider.resolve_llm_call(&None) {
+            LlmCallResolution::Resolved(resolved) => assert_eq!(resolved.model, "gpt-4o"),
+            _ => panic!("expected Resolved(first advertised)"),
+        }
     }
 
     #[test]
     fn resolve_llm_call_is_default_in_legacy_mode_with_no_advertised_table() {
-        // No advertised list configured at all: any model (even one that
-        // matches nothing) is passed straight through, unchecked -- the
-        // pre-existing legacy pass-through behavior.
+        // No advertised list configured at all: the peer-supplied model is
+        // ignored and the default preset serves the request (see
+        // `legacy_mode_ignores_the_peer_supplied_model`).
         let (send, _sent) = fake_send();
         let call = fake_call_success(vec![], "");
         let provider = Provider::new_with_voice(send, call, vec![], None, None, vec![]);
@@ -2021,5 +2311,196 @@ mod tests {
             }
             other => panic!("expected a voice_error reply, got: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn legacy_mode_ignores_the_peer_supplied_model() {
+        let seen: Arc<Mutex<Option<Option<String>>>> = Arc::new(Mutex::new(None));
+        let seen2 = seen.clone();
+        let call: LlmCallFn = Arc::new(move |_m, model, _tx| {
+            *seen2.lock().unwrap() = Some(model);
+            Box::pin(async { Ok("ok".to_string()) })
+        });
+        let (send, _sent) = fake_send();
+        let provider = Provider::new_with_voice(send, call, vec![], None, None, vec![]);
+        provider
+            .call_upstream(messages(), Some("gpt-expensive".into()), None)
+            .await
+            .unwrap();
+        assert_eq!(seen.lock().unwrap().clone(), Some(None));
+    }
+
+    #[test]
+    fn validate_llm_messages_caps_count_and_bytes() {
+        let m = |n: usize| ChatMessage {
+            role: "user".into(),
+            content: "x".repeat(n),
+        };
+        assert!(validate_llm_messages(&[m(10)]).is_ok());
+        let many: Vec<_> = (0..=MAX_LLM_MESSAGES).map(|_| m(1)).collect();
+        assert!(validate_llm_messages(&many).is_err());
+        assert!(validate_llm_messages(&[m(MAX_LLM_CONTENT_BYTES + 1)]).is_err());
+    }
+
+    #[test]
+    fn peer_safe_error_hides_upstream_http_detail() {
+        let err = anyhow::Error::new(openai::UpstreamHttpError {
+            label: "LLM API",
+            status: 502,
+            detail: "http://10.0.0.5/secret body".into(),
+        });
+        let msg = peer_safe_error(&err);
+        assert_eq!(msg, "upstream error (status 502)");
+        assert_eq!(peer_safe_error(&anyhow::anyhow!("plain")), "plain");
+    }
+
+    #[test]
+    fn job_limiter_enforces_per_peer_and_global_limits() {
+        let lim = JobLimiter::new(3);
+        let a1 = lim.try_acquire("a", 2).expect("a1");
+        let _a2 = lim.try_acquire("a", 2).expect("a2");
+        assert!(lim.try_acquire("a", 2).is_none(), "per-peer cap");
+        let _b1 = lim.try_acquire("b", 2).expect("b1");
+        assert!(lim.try_acquire("c", 2).is_none(), "global cap");
+        drop(a1);
+        assert!(
+            lim.try_acquire("c", 2).is_some(),
+            "released permit reusable"
+        );
+    }
+
+    fn push(
+        b: &mut SttBuffers,
+        now: Instant,
+        from: &str,
+        id: &str,
+        seq: u64,
+        n: usize,
+        last: bool,
+    ) -> SttPush {
+        b.push(
+            now,
+            from,
+            id,
+            seq,
+            &vec![0u8; n],
+            last,
+            "audio/wav".into(),
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn stt_buffers_are_keyed_by_peer_and_id() {
+        let mut b = SttBuffers::default();
+        let now = Instant::now();
+        assert!(matches!(
+            push(&mut b, now, "a", "x", 0, 3, false),
+            SttPush::Waiting
+        ));
+        // Same id from another peer is an independent stream.
+        assert!(matches!(
+            push(&mut b, now, "b", "x", 0, 5, false),
+            SttPush::Waiting
+        ));
+        match push(&mut b, now, "a", "x", 1, 2, true) {
+            SttPush::Ready(buf) => assert_eq!(buf.bytes.len(), 5),
+            _ => panic!("expected Ready"),
+        }
+        assert_eq!(b.total_bytes, 5);
+    }
+
+    #[test]
+    fn stt_buffers_reject_out_of_order_seq() {
+        let mut b = SttBuffers::default();
+        let now = Instant::now();
+        assert!(matches!(
+            push(&mut b, now, "a", "x", 1, 1, false),
+            SttPush::Rejected(SttReject::OutOfOrder)
+        ));
+        assert!(matches!(
+            push(&mut b, now, "a", "x", 0, 1, false),
+            SttPush::Waiting
+        ));
+        assert!(matches!(
+            push(&mut b, now, "a", "x", 2, 1, false),
+            SttPush::Rejected(SttReject::OutOfOrder)
+        ));
+        assert_eq!(b.total_bytes, 0, "bad stream is dropped");
+    }
+
+    #[test]
+    fn stt_buffers_cap_per_peer_and_total_counts() {
+        let mut b = SttBuffers::default();
+        let now = Instant::now();
+        for i in 0..STT_MAX_BUFFERS_PER_PEER {
+            assert!(matches!(
+                push(&mut b, now, "a", &format!("i{i}"), 0, 1, false),
+                SttPush::Waiting
+            ));
+        }
+        assert!(matches!(
+            push(&mut b, now, "a", "extra", 0, 1, false),
+            SttPush::Rejected(SttReject::Busy)
+        ));
+        for i in 0..(STT_MAX_BUFFERS_TOTAL - STT_MAX_BUFFERS_PER_PEER) {
+            assert!(matches!(
+                push(&mut b, now, &format!("p{i}"), "x", 0, 1, false),
+                SttPush::Waiting
+            ));
+        }
+        assert!(matches!(
+            push(&mut b, now, "late", "x", 0, 1, false),
+            SttPush::Rejected(SttReject::Busy)
+        ));
+    }
+
+    #[test]
+    fn stt_buffers_cap_total_bytes() {
+        let mut b = SttBuffers::default();
+        let now = Instant::now();
+        let per = STT_MAX_BUFFERED_BYTES;
+        assert!(matches!(
+            push(&mut b, now, "a", "x", 0, per, false),
+            SttPush::Waiting
+        ));
+        assert!(matches!(
+            push(&mut b, now, "b", "x", 0, per, false),
+            SttPush::Waiting
+        ));
+        assert!(matches!(
+            push(&mut b, now, "c", "x", 0, per, false),
+            SttPush::Rejected(SttReject::Busy)
+        ));
+        assert!(matches!(
+            push(&mut b, now, "a", "x", 1, 1, false),
+            SttPush::Rejected(SttReject::StreamTooLarge)
+        ));
+    }
+
+    #[test]
+    fn stt_buffers_expire_and_drop_on_peer_leave() {
+        let mut b = SttBuffers::default();
+        let t0 = Instant::now();
+        assert!(matches!(
+            push(&mut b, t0, "a", "x", 0, 4, false),
+            SttPush::Waiting
+        ));
+        assert!(matches!(
+            push(&mut b, t0, "b", "y", 0, 4, false),
+            SttPush::Waiting
+        ));
+        b.drop_peer("b");
+        assert_eq!(b.map.len(), 1);
+        assert_eq!(b.total_bytes, 4);
+        // A later insert sweeps the stale buffer of "a".
+        let later = t0 + STT_BUFFER_TTL + Duration::from_secs(1);
+        assert!(matches!(
+            push(&mut b, later, "c", "z", 0, 1, false),
+            SttPush::Waiting
+        ));
+        assert_eq!(b.map.len(), 1);
+        assert_eq!(b.total_bytes, 1);
     }
 }
