@@ -16,6 +16,10 @@ pub const HELLO_INTERVAL: Duration = Duration::from_secs(5);
 /// A peer that hasn't sent a hello within this long is considered gone.
 pub const PEER_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Maximum number of tracked relay peers (excluding self); new peers beyond
+/// this are ignored.
+pub const MAX_PEERS: usize = 64;
+
 /// Tracks last-seen times for known relay peers (never includes `self_id`).
 #[derive(Debug)]
 pub struct Membership {
@@ -37,6 +41,11 @@ impl Membership {
     /// a hello that loops back to ourselves is ignored entirely.
     pub fn record_hello(&mut self, node: &str, now: Instant) -> bool {
         if node == self.self_id {
+            return false;
+        }
+        // Bound the peer set so a flood of distinct ids can't inflate the
+        // Raft quorum or grow memory without limit; known peers still refresh.
+        if self.peers.len() >= MAX_PEERS && !self.peers.contains_key(node) {
             return false;
         }
         self.peers.insert(node.to_string(), now).is_none()
@@ -89,6 +98,19 @@ mod tests {
             !m.record_hello("peer-a", t0 + Duration::from_secs(1)),
             "second hello from the same peer is a refresh, not new membership"
         );
+    }
+
+    #[test]
+    fn record_hello_caps_peer_count() {
+        let mut m = Membership::new("self".into());
+        let t0 = Instant::now();
+        for i in 0..MAX_PEERS {
+            assert!(m.record_hello(&format!("p{i}"), t0));
+        }
+        assert!(!m.record_hello("overflow", t0), "beyond the cap is ignored");
+        assert_eq!(m.peers_with_self().len(), MAX_PEERS + 1);
+        // Known peers still refresh without counting as new.
+        assert!(!m.record_hello("p0", t0));
     }
 
     #[test]

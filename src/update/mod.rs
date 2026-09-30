@@ -238,6 +238,19 @@ async fn auto_check_once(update: &UpdateConfig) -> Result<()> {
         return Ok(());
     };
 
+    if update.auto_apply && !is_default_repo(&repo) {
+        record_check(format!(
+            "v{} available (auto_apply skipped: custom repo {repo})",
+            release.version
+        ));
+        warn!(
+            %repo,
+            latest = %release.version,
+            "update: refusing to auto-apply from a non-default [update] repo; run `mistl update apply` to install manually"
+        );
+        return Ok(());
+    }
+
     if !update.auto_apply {
         record_check(format!("v{} available", release.version));
         info!(
@@ -277,13 +290,53 @@ impl ReleaseInfo {
     }
 }
 
-/// GitHub requires a `User-Agent` (403s without one); `.no_proxy()`
+/// Hosts a release download (including every redirect hop) may touch.
+fn is_allowed_download_host(host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    host == "github.com"
+        || host == "api.github.com"
+        || host == "githubusercontent.com"
+        || host.ends_with(".githubusercontent.com")
+}
+
+/// Only `https://` URLs on GitHub-owned hosts are ever fetched by the
+/// updater, so a tampered release API response cannot point it elsewhere.
+fn is_allowed_download_url(url: &str) -> bool {
+    match reqwest::Url::parse(url) {
+        Ok(url) => {
+            url.scheme() == "https"
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.host_str().is_some_and(is_allowed_download_host)
+        }
+        Err(_) => false,
+    }
+}
+
+/// Whether `repo` is the built-in default (only that repo may auto-apply).
+fn is_default_repo(repo: &str) -> bool {
+    repo.trim().eq_ignore_ascii_case(REPO_DEFAULT)
+}
+
+/// Upper bound on any single downloaded release asset.
+const MAX_DOWNLOAD_BYTES: u64 = 256 * 1024 * 1024;
+
+/// GitHub requires a `User-Agent' (403s without one); `.no_proxy()`
 /// matches the rest of this repo (local proxy env vars must not intercept
 /// daemon traffic).
 fn build_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .user_agent(format!("mistl/{CURRENT_VERSION}"))
         .no_proxy()
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 5 {
+                attempt.error("too many redirects")
+            } else if is_allowed_download_url(attempt.url().as_str()) {
+                attempt.follow()
+            } else {
+                attempt.error("redirect to a non-GitHub or non-https URL is not allowed")
+            }
+        }))
         .build()
         .context("update: building HTTP client")
 }
@@ -382,8 +435,11 @@ async fn fetch_latest_release_recorded(
 
 /// Download a release asset. GitHub redirects `browser_download_url` to a
 /// signed URL; reqwest follows redirects by default.
-async fn download(client: &reqwest::Client, url: &str) -> Result<bytes::Bytes> {
-    let response = client
+async fn download(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
+    if !is_allowed_download_url(url) {
+        bail!("update: refusing to download from {url} (only https on GitHub hosts is allowed)");
+    }
+    let mut response = client
         .get(url)
         .send()
         .await
@@ -391,10 +447,24 @@ async fn download(client: &reqwest::Client, url: &str) -> Result<bytes::Bytes> {
     if !response.status().is_success() {
         bail!("update: download returned {} for {url}", response.status());
     }
-    response
-        .bytes()
+    if response
+        .content_length()
+        .is_some_and(|len| len > MAX_DOWNLOAD_BYTES)
+    {
+        bail!("update: {url} is larger than {MAX_DOWNLOAD_BYTES} bytes; refusing");
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .with_context(|| format!("update: reading {url}"))
+        .with_context(|| format!("update: reading {url}"))?
+    {
+        if body.len() as u64 + chunk.len() as u64 > MAX_DOWNLOAD_BYTES {
+            bail!("update: {url} exceeded {MAX_DOWNLOAD_BYTES} bytes; refusing");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 /// Download + verify + self-replace. The SHA-256 is checked against the
@@ -450,8 +520,26 @@ fn replace_current_exe(bytes: &[u8]) -> Result<()> {
     let dir = exe
         .parent()
         .context("update: current executable has no parent directory")?;
-    let temp = dir.join(format!(".mistl-update-{}.tmp", std::process::id()));
-    std::fs::write(&temp, bytes).with_context(|| format!("update: writing {}", temp.display()))?;
+    // `create_new` (O_EXCL) with an unpredictable name: never follows or
+    // clobbers a pre-planted file/symlink in the exe directory.
+    let temp = dir.join(format!(
+        ".mistl-update-{}-{:016x}.tmp",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
+    {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .with_context(|| format!("update: creating {}", temp.display()))?;
+        if let Err(error) = file.write_all(bytes) {
+            drop(file);
+            let _ = std::fs::remove_file(&temp);
+            return Err(error).with_context(|| format!("update: writing {}", temp.display()));
+        }
+    }
 
     #[cfg(unix)]
     {
@@ -658,6 +746,35 @@ mod tests {
         assert_eq!(release.version, "0.3.0");
         assert!(release.assets.is_empty());
         assert_eq!(release.notes_url, "");
+    }
+
+    #[test]
+    fn download_urls_are_limited_to_https_github_hosts() {
+        for ok in [
+            "https://github.com/tik-choco/mistl/releases/download/v1/x.exe",
+            "https://objects.githubusercontent.com/a/b?sig=1",
+            "https://release-assets.githubusercontent.com/x",
+            "https://api.github.com/repos/a/b",
+        ] {
+            assert!(is_allowed_download_url(ok), "{ok}");
+        }
+        for bad in [
+            "http://github.com/x",
+            "https://evil.example/x",
+            "https://github.com.evil.example/x",
+            "https://evilgithubusercontent.com/x",
+            "https://user@github.com/x",
+            "file:///etc/passwd",
+            "not a url",
+        ] {
+            assert!(!is_allowed_download_url(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn only_the_default_repo_counts_as_default() {
+        assert!(is_default_repo(REPO_DEFAULT));
+        assert!(!is_default_repo("me/fork"));
     }
 
     #[test]

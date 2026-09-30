@@ -510,11 +510,9 @@ fn load_entries_unlocked(data_dir: &Path) -> Result<Vec<SyncEntry>> {
 
 fn save_entries_unlocked(data_dir: &Path, entries: &[SyncEntry]) -> Result<()> {
     let path = table_path(data_dir);
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    }
     let text = serde_json::to_string_pretty(entries)?;
-    std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))
+    // Holds each sync's folder key, so it gets the owner-only treatment.
+    crate::statefile::write_private(&path, text.as_bytes())
 }
 
 async fn read_entries_at(data_dir: &Path) -> Result<Vec<SyncEntry>> {
@@ -780,14 +778,20 @@ async fn sync_bundle(
                 continue;
             }
         };
-        if let Some(parent) = target.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .with_context(|| format!("creating {}", parent.display()))?;
+        // A per-file IO failure (e.g. an OS-invalid name from a peer) must
+        // not abort the whole sync.
+        if let Some(parent) = target.parent()
+            && let Err(error) = tokio::fs::create_dir_all(parent).await
+        {
+            warn!("sync: creating {} failed: {error}", parent.display());
+            progress(&format!("skip {} (creating directory: {error})", item.rel));
+            continue;
         }
-        tokio::fs::write(&target, &data)
-            .await
-            .with_context(|| format!("writing {}", target.display()))?;
+        if let Err(error) = tokio::fs::write(&target, &data).await {
+            warn!("sync: writing {} failed: {error}", target.display());
+            progress(&format!("skip {} (writing: {error})", item.rel));
+            continue;
+        }
         progress(&format!("saved {} ({} bytes)", item.rel, data.len()));
         new_files.push(SyncedFile {
             file_id: item.file.id.clone(),
@@ -1437,6 +1441,13 @@ async fn full_resync(
     .await
 }
 
+/// Whether `envelope` comes from the folder's owner in the folder's room.
+/// Any room member can send a well-formed envelope, so folder-state /
+/// folder-share / folder-change from anyone else must be ignored.
+fn envelope_from_owner(entry: &SyncEntry, envelope: &ShareEnvelope) -> bool {
+    envelope.from == entry.owner_node_id && envelope.room_id == entry.room_id
+}
+
 async fn handle_envelope(store: &Store, envelope: &ShareEnvelope) -> Result<()> {
     let Some(folder_id) = envelope.folder_id.clone() else {
         return Ok(());
@@ -1444,6 +1455,14 @@ async fn handle_envelope(store: &Store, envelope: &ShareEnvelope) -> Result<()> 
     let Some(entry) = find_entry(store, &folder_id).await? else {
         return Ok(()); // not one of our syncs
     };
+    if !envelope_from_owner(&entry, envelope) {
+        debug!(
+            folder_id = %folder_id,
+            from = %envelope.from,
+            "folder-sync: ignoring envelope not from the folder owner/room"
+        );
+        return Ok(());
+    }
 
     let result = match envelope.type_.as_str() {
         "folder-change" => handle_folder_change(store, &entry, envelope).await,
@@ -1617,6 +1636,23 @@ mod sync_tests {
             folders: Vec::new(),
             files: Vec::new(),
         }
+    }
+
+    #[test]
+    fn envelope_from_owner_requires_owner_and_room() {
+        let entry = sample_entry("f1", Path::new("/tmp/x"));
+        let mut envelope = ShareEnvelope {
+            type_: "folder-state".to_string(),
+            from: "did:key:zOwner".to_string(),
+            room_id: "room-1".to_string(),
+            ..ShareEnvelope::default()
+        };
+        assert!(envelope_from_owner(&entry, &envelope));
+        envelope.from = "did:key:zMallory".to_string();
+        assert!(!envelope_from_owner(&entry, &envelope));
+        envelope.from = "did:key:zOwner".to_string();
+        envelope.room_id = "other-room".to_string();
+        assert!(!envelope_from_owner(&entry, &envelope));
     }
 
     fn folder_rec(id: &str, parent: Option<&str>, name: &str) -> FolderRecord {

@@ -59,6 +59,8 @@ fn truncate_500(body: &str) -> String {
 fn build_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .no_proxy()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(300))
         .build()
         .context("ai: building STT upstream HTTP client")
 }
@@ -125,10 +127,11 @@ pub async fn transcribe(provider: &AiProviderConfig, req: SttParams) -> Result<S
     if !response.status().is_success() {
         let status = response.status();
         let body_text = response.text().await.unwrap_or_default();
-        bail!(
-            "STT API returned an error ({status}): {}",
-            truncate_500(&body_text)
-        );
+        return Err(anyhow::Error::new(super::openai::UpstreamHttpError {
+            label: "STT API",
+            status: status.as_u16(),
+            detail: truncate_500(&body_text),
+        }));
     }
 
     let body: serde_json::Value = response

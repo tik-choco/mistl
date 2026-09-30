@@ -61,7 +61,7 @@
 use std::io;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
@@ -77,8 +77,16 @@ use super::{LlmCallFn, ModelsFn, SttFn, TtsFn, stt, tts};
 
 /// Header section size cap (request-line + headers), matches doc.
 const MAX_HEADER_BYTES: usize = 16 * 1024;
-/// Body size cap.
+/// Body size cap for `/v1/audio/transcriptions` (multipart audio upload).
 const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
+/// Body size cap for the JSON endpoints (chat / speech).
+const MAX_JSON_BODY_BYTES: usize = 2 * 1024 * 1024;
+/// Deadline for receiving the complete request head (slowloris guard).
+const HEAD_READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// Max idle gap between body reads.
+const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Concurrent connections served; extra ones are dropped at accept.
+const MAX_CONNECTIONS: usize = 32;
 const SSE_RESPONSE_HEADER: &str = "HTTP/1.1 200 OK\r\n\
                                    Content-Type: text/event-stream\r\n\
                                    Transfer-Encoding: chunked\r\n\
@@ -113,6 +121,7 @@ impl ApiServer {
         let conns: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
         let conns_for_loop = conns.clone();
 
+        let conn_limit = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
         let accept_handle = tokio::spawn(async move {
             loop {
                 let (socket, _peer) = match listener.accept().await {
@@ -122,11 +131,16 @@ impl ApiServer {
                         continue;
                     }
                 };
+                let Ok(permit) = conn_limit.clone().try_acquire_owned() else {
+                    // Over the connection cap: drop the socket.
+                    continue;
+                };
                 let call = call.clone();
                 let models = models.clone();
                 let tts_call = tts_call.clone();
                 let stt_call = stt_call.clone();
                 let handle = tokio::spawn(async move {
+                    let _permit = permit;
                     if let Err(error) =
                         handle_connection(socket, call, models, tts_call, stt_call).await
                     {
@@ -272,7 +286,9 @@ async fn read_body(
     }
     let mut chunk = [0u8; 8192];
     while leftover.len() < content_length {
-        let n = stream.read(&mut chunk).await?;
+        let n = tokio::time::timeout(BODY_IDLE_TIMEOUT, stream.read(&mut chunk))
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "body read timed out"))??;
         if n == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
@@ -283,6 +299,116 @@ async fn read_body(
         leftover.extend_from_slice(&chunk[..take]);
     }
     Ok(leftover)
+}
+
+/// Whether `content_type` (a raw header value) is `application/json`,
+/// ignoring case and parameters such as `; charset=utf-8`.
+fn content_type_is_json(content_type: Option<&str>) -> bool {
+    content_type
+        .and_then(|v| v.split(';').next())
+        .is_some_and(|m| m.trim().eq_ignore_ascii_case("application/json"))
+}
+
+/// Same rule as the dashboard's `host_is_allowed` (DNS-rebinding guard):
+/// loopback names with an optional port, or the literal IP the connection
+/// was actually accepted on.
+fn host_is_allowed(host: &str, local_addr: &SocketAddr) -> bool {
+    let host = host.trim();
+    if host.is_empty() {
+        return false;
+    }
+    let valid_port = |p: &str| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit());
+    let matches_local = |name: &str, port: Option<&str>| {
+        let Ok(ip) = name.parse::<std::net::IpAddr>() else {
+            return false;
+        };
+        if ip != local_addr.ip() {
+            return false;
+        }
+        match port {
+            Some(port) => port.parse::<u16>() == Ok(local_addr.port()),
+            None => true,
+        }
+    };
+    if let Some(rest) = host.strip_prefix('[') {
+        let Some(end) = rest.find(']') else {
+            return false;
+        };
+        let addr = &rest[..end];
+        let after = &rest[end + 1..];
+        if !(after.is_empty() || (after.starts_with(':') && valid_port(&after[1..]))) {
+            return false;
+        }
+        return addr == "::1" || matches_local(addr, None);
+    }
+    let (name, port) = match host.rsplit_once(':') {
+        Some((name, port)) if valid_port(port) => (name, Some(port)),
+        _ => (host, None),
+    };
+    if name.eq_ignore_ascii_case("127.0.0.1") || name.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    matches_local(name, port)
+}
+
+/// Whether an `Origin` header value names this server on loopback
+/// (`http://127.0.0.1:<port>`, `http://localhost:<port>`, `http://[::1]:<port>`).
+/// Browsers attach `Origin` to cross-site POSTs; native OpenAI clients send
+/// none, so a present-but-foreign origin is always refused.
+fn origin_is_allowed(origin: &str, local_addr: &SocketAddr) -> bool {
+    let Some(authority) = origin.trim().strip_prefix("http://") else {
+        return false;
+    };
+    let (name, port) = if let Some(rest) = authority.strip_prefix('[') {
+        let Some(end) = rest.find(']') else {
+            return false;
+        };
+        let after = &rest[end + 1..];
+        (
+            format!("[{}]", &rest[..end]),
+            after.strip_prefix(':').map(str::to_string),
+        )
+    } else {
+        match authority.rsplit_once(':') {
+            Some((n, p)) => (n.to_string(), Some(p.to_string())),
+            None => (authority.to_string(), None),
+        }
+    };
+    let name_ok = name.eq_ignore_ascii_case("127.0.0.1")
+        || name.eq_ignore_ascii_case("localhost")
+        || name == "[::1]";
+    let port_ok = match port {
+        Some(p) => p.parse::<u16>() == Ok(local_addr.port()),
+        None => local_addr.port() == 80,
+    };
+    name_ok && port_ok
+}
+
+/// Request-level guards run before any routing: request-smuggling shapes,
+/// DNS rebinding (`Host`), and cross-site browser requests (`Origin`).
+/// `Err` carries `(status, reason, message)`.
+fn check_request_guards(
+    head: &RequestHead,
+    local_addr: &SocketAddr,
+) -> Result<(), (u16, &'static str, &'static str)> {
+    let count = |name: &str| {
+        head.headers
+            .iter()
+            .filter(|(k, _)| k.eq_ignore_ascii_case(name))
+            .count()
+    };
+    if count("host") > 1 || count("content-length") > 1 || count("transfer-encoding") > 0 {
+        return Err((400, "Bad Request", "unsupported request framing"));
+    }
+    if !host_is_allowed(head.header("host").unwrap_or(""), local_addr) {
+        return Err((403, "Forbidden", "host not allowed"));
+    }
+    if let Some(origin) = head.header("origin") {
+        if !origin_is_allowed(origin, local_addr) {
+            return Err((403, "Forbidden", "origin not allowed"));
+        }
+    }
+    Ok(())
 }
 
 async fn write_json_response(
@@ -370,14 +496,31 @@ async fn handle_connection(
     tts_call: TtsFn,
     stt_call: SttFn,
 ) -> Result<()> {
-    let (head, leftover) = match read_request_head(&mut stream).await {
-        Ok(Some(pair)) => pair,
-        Ok(None) => return Ok(()),
-        Err(_) => {
-            let _ = write_error(&mut stream, 400, "Bad Request", "malformed request").await;
-            return Ok(());
-        }
-    };
+    let local_addr = stream.local_addr().context("reading local address")?;
+    let (head, leftover) =
+        match tokio::time::timeout(HEAD_READ_TIMEOUT, read_request_head(&mut stream)).await {
+            Ok(Ok(Some(pair))) => pair,
+            Ok(Ok(None)) => return Ok(()),
+            Ok(Err(_)) => {
+                let _ = write_error(&mut stream, 400, "Bad Request", "malformed request").await;
+                return Ok(());
+            }
+            Err(_) => {
+                let _ = write_error(
+                    &mut stream,
+                    408,
+                    "Request Timeout",
+                    "request head timed out",
+                )
+                .await;
+                return Ok(());
+            }
+        };
+
+    if let Err((status, reason, message)) = check_request_guards(&head, &local_addr) {
+        let _ = write_error(&mut stream, status, reason, message).await;
+        return Ok(());
+    }
 
     let is_post = head.method.eq_ignore_ascii_case("POST");
     let is_get = head.method.eq_ignore_ascii_case("GET");
@@ -404,12 +547,28 @@ async fn handle_connection(
                 return Ok(());
             }
         };
-        if content_length > MAX_BODY_BYTES {
+        let is_transcription = path == "/v1/audio/transcriptions";
+        let body_cap = if is_transcription {
+            MAX_BODY_BYTES
+        } else {
+            MAX_JSON_BODY_BYTES
+        };
+        if content_length > body_cap {
             let _ = write_error(
                 &mut stream,
                 413,
                 "Payload Too Large",
                 "request body too large",
+            )
+            .await;
+            return Ok(());
+        }
+        if !is_transcription && !content_type_is_json(head.header("content-type")) {
+            let _ = write_error(
+                &mut stream,
+                415,
+                "Unsupported Media Type",
+                "Content-Type must be application/json",
             )
             .await;
             return Ok(());
@@ -1022,7 +1181,7 @@ mod tests {
         let raw = send_request(
             server.addr(),
             &format!(
-                "POST /v1/audio/speech HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{payload}",
+                "POST /v1/audio/speech HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{payload}",
                 payload.len()
             ),
         )
@@ -1046,7 +1205,7 @@ mod tests {
         let raw = send_request(
             server.addr(),
             &format!(
-                "POST /v1/audio/speech HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{payload}",
+                "POST /v1/audio/speech HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{payload}",
                 payload.len()
             ),
         )
@@ -1076,7 +1235,7 @@ mod tests {
         let raw = send_request(
             server.addr(),
             &format!(
-                "POST /v1/audio/transcriptions HTTP/1.1\r\nHost: x\r\nContent-Type: multipart/form-data; boundary=B\r\nContent-Length: {}\r\n\r\n{body}",
+                "POST /v1/audio/transcriptions HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: multipart/form-data; boundary=B\r\nContent-Length: {}\r\n\r\n{body}",
                 body.len()
             ),
         )
@@ -1095,7 +1254,7 @@ mod tests {
         let server = start_test_server(fake_call_ok(), fake_models()).await;
         let raw = send_request(
             server.addr(),
-            "POST /v1/audio/transcriptions HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
+            "POST /v1/audio/transcriptions HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
         )
         .await;
         assert!(
@@ -1154,7 +1313,11 @@ mod tests {
     #[tokio::test]
     async fn get_models_returns_expected_shape() {
         let server = start_test_server(fake_call_ok(), fake_models()).await;
-        let raw = send_request(server.addr(), "GET /v1/models HTTP/1.1\r\nHost: x\r\n\r\n").await;
+        let raw = send_request(
+            server.addr(),
+            "GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+        )
+        .await;
         let (head, body) = split_response(&raw);
         assert_eq!(status_code(&head), 200);
         let json: Value = serde_json::from_slice(body).expect("valid json");
@@ -1176,7 +1339,7 @@ mod tests {
         let payload =
             json!({"messages": [{"role": "user", "content": "hi"}], "stream": false}).to_string();
         let request = format!(
-            "POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
             payload.len(),
             payload
         );
@@ -1196,7 +1359,7 @@ mod tests {
         let server = start_test_server(fake_call_ok(), fake_models()).await;
         let payload = json!({"model": "gpt-x", "messages": [{"role": "user", "content": "hi"}], "stream": true}).to_string();
         let request = format!(
-            "POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n{}",
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
             payload.len(),
             payload
         );
@@ -1253,7 +1416,7 @@ mod tests {
         })
         .to_string();
         let request = format!(
-            "POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n{}",
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
             payload.len(),
             payload
         );
@@ -1280,7 +1443,7 @@ mod tests {
         })
         .to_string();
         let request = format!(
-            "POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n{}",
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
             payload.len(),
             payload
         );
@@ -1325,7 +1488,7 @@ mod tests {
         let server = start_test_server(fake_call_ok(), fake_models()).await;
         let payload = "not json";
         let request = format!(
-            "POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n{}",
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
             payload.len(),
             payload
         );
@@ -1341,7 +1504,7 @@ mod tests {
         let server = start_test_server(fake_call_ok(), fake_models()).await;
         let payload = json!({"messages": [{"role": "user", "content": 42}]}).to_string();
         let request = format!(
-            "POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n{}",
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
             payload.len(),
             payload
         );
@@ -1353,7 +1516,11 @@ mod tests {
     #[tokio::test]
     async fn unknown_path_is_404() {
         let server = start_test_server(fake_call_ok(), fake_models()).await;
-        let raw = send_request(server.addr(), "GET /nope HTTP/1.1\r\nHost: x\r\n\r\n").await;
+        let raw = send_request(
+            server.addr(),
+            "GET /nope HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+        )
+        .await;
         let (head, _body) = split_response(&raw);
         assert_eq!(status_code(&head), 404);
     }
@@ -1363,7 +1530,7 @@ mod tests {
         let server = start_test_server(fake_call_err(), fake_models()).await;
         let payload = json!({"messages": [{"role": "user", "content": "hi"}]}).to_string();
         let request = format!(
-            "POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n{}",
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
             payload.len(),
             payload
         );
@@ -1379,7 +1546,7 @@ mod tests {
         let server = start_test_server(fake_call_ok(), fake_models()).await;
         let raw = send_request(
             server.addr(),
-            "POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\n\r\n",
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
         )
         .await;
         let (head, _body) = split_response(&raw);
@@ -1392,7 +1559,7 @@ mod tests {
         let addr = server.addr();
 
         // Sanity: works before stop.
-        let raw = send_request(addr, "GET /v1/models HTTP/1.1\r\nHost: x\r\n\r\n").await;
+        let raw = send_request(addr, "GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").await;
         assert_eq!(status_code(&split_response(&raw).0), 200);
 
         server.stop();
@@ -1405,5 +1572,93 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         panic!("expected connections to start failing after stop()");
+    }
+
+    fn local(port: u16) -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], port))
+    }
+
+    #[test]
+    fn host_check_accepts_loopback_and_local_ip_only() {
+        let l = SocketAddr::from(([192, 168, 1, 5], 8080));
+        assert!(host_is_allowed("127.0.0.1:8080", &l));
+        assert!(host_is_allowed("localhost", &l));
+        assert!(host_is_allowed("[::1]:8080", &l));
+        assert!(host_is_allowed("192.168.1.5:8080", &l));
+        assert!(!host_is_allowed("192.168.1.5:9", &l));
+        assert!(!host_is_allowed("evil.example.com", &l));
+        assert!(!host_is_allowed("", &l));
+    }
+
+    #[test]
+    fn origin_check_requires_own_loopback_origin() {
+        let l = local(8080);
+        assert!(origin_is_allowed("http://127.0.0.1:8080", &l));
+        assert!(origin_is_allowed("http://localhost:8080", &l));
+        assert!(!origin_is_allowed("http://localhost:9999", &l));
+        assert!(!origin_is_allowed("https://evil.example.com", &l));
+        assert!(!origin_is_allowed("http://evil.example.com:8080", &l));
+        assert!(!origin_is_allowed("null", &l));
+    }
+
+    #[test]
+    fn json_content_type_accepts_params_and_rejects_others() {
+        assert!(content_type_is_json(Some("application/json")));
+        assert!(content_type_is_json(Some(
+            "Application/JSON; charset=utf-8"
+        )));
+        assert!(!content_type_is_json(Some("text/plain")));
+        assert!(!content_type_is_json(Some(
+            "application/x-www-form-urlencoded"
+        )));
+        assert!(!content_type_is_json(None));
+    }
+
+    #[tokio::test]
+    async fn cross_site_and_malformed_requests_are_refused() {
+        let server = start_test_server(fake_call_ok(), fake_models()).await;
+        let addr = server.addr();
+        let body = "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}";
+        let mk = |extra: &str, host: &str, ct: &str| {
+            format!(
+                "POST /v1/chat/completions HTTP/1.1\r\nHost: {host}\r\n{ct}{extra}Content-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+        };
+        let json = "Content-Type: application/json\r\n";
+        // Foreign Origin.
+        let raw = send_request(
+            addr,
+            &mk("Origin: http://evil.example.com\r\n", "127.0.0.1", json),
+        )
+        .await;
+        assert_eq!(status_code(&split_response(&raw).0), 403);
+        // Rebinding Host.
+        let raw = send_request(addr, &mk("", "evil.example.com", json)).await;
+        assert_eq!(status_code(&split_response(&raw).0), 403);
+        // Non-JSON content type (form-encoded CSRF).
+        let raw = send_request(
+            addr,
+            &mk(
+                "",
+                "127.0.0.1",
+                "Content-Type: application/x-www-form-urlencoded\r\n",
+            ),
+        )
+        .await;
+        assert_eq!(status_code(&split_response(&raw).0), 415);
+        // Duplicate Content-Length and Transfer-Encoding.
+        let raw = send_request(addr, &mk("Content-Length: 1\r\n", "127.0.0.1", json)).await;
+        assert_eq!(status_code(&split_response(&raw).0), 400);
+        let raw = send_request(
+            addr,
+            &mk("Transfer-Encoding: chunked\r\n", "127.0.0.1", json),
+        )
+        .await;
+        assert_eq!(status_code(&split_response(&raw).0), 400);
+        // Same-origin browser request is fine.
+        let origin = format!("Origin: http://127.0.0.1:{}\r\n", addr.port());
+        let raw = send_request(addr, &mk(&origin, "127.0.0.1", json)).await;
+        assert_eq!(status_code(&split_response(&raw).0), 200);
     }
 }

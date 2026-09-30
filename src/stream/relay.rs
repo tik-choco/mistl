@@ -1593,13 +1593,21 @@ async fn summary_task(
 struct AuAssembler {
     ts: Option<u32>,
     buf: Vec<u8>,
+    /// Set when the in-progress AU exceeded [`MAX_AU_BYTES`]: the rest of
+    /// that AU (same timestamp) is discarded until the next one starts.
+    dropping: bool,
 }
+
+/// Largest access unit the assembler will buffer; a stream that never sends
+/// a marker or a new timestamp can't grow memory past this.
+const MAX_AU_BYTES: usize = 8 * 1024 * 1024;
 
 impl AuAssembler {
     fn new() -> Self {
         Self {
             ts: None,
             buf: Vec::new(),
+            dropping: false,
         }
     }
 
@@ -1611,17 +1619,31 @@ impl AuAssembler {
 
         if let Some(current_ts) = self.ts {
             if current_ts != ts {
-                if !self.buf.is_empty() {
+                if !self.buf.is_empty() && !self.dropping {
                     completed.push((current_ts, std::mem::take(&mut self.buf)));
                 }
+                self.buf.clear();
+                self.dropping = false;
                 self.ts = None;
             }
         }
         self.ts.get_or_insert(ts);
-        self.buf.extend_from_slice(chunk);
+        if !self.dropping {
+            if self.buf.len() + chunk.len() > MAX_AU_BYTES {
+                warn!("relay: access unit exceeds {MAX_AU_BYTES} bytes, dropping it");
+                self.buf.clear();
+                self.dropping = true;
+            } else {
+                self.buf.extend_from_slice(chunk);
+            }
+        }
 
         if marker {
-            completed.push((ts, std::mem::take(&mut self.buf)));
+            if !self.dropping {
+                completed.push((ts, std::mem::take(&mut self.buf)));
+            }
+            self.buf.clear();
+            self.dropping = false;
             self.ts = None;
         }
 
@@ -2233,6 +2255,20 @@ mod tests {
             vec![(1000, vec![0xAA])],
             "closed AU keeps its own timestamp"
         );
+    }
+
+    #[test]
+    fn au_assembler_drops_oversized_au_and_recovers_on_next_timestamp() {
+        let mut assembler = AuAssembler::new();
+        let big = vec![0u8; MAX_AU_BYTES / 2 + 1];
+        assert!(assembler.push(1, false, &big).is_empty());
+        // Second chunk pushes the AU over the cap: dropped, nothing buffered.
+        assert!(assembler.push(1, false, &big).is_empty());
+        assert!(assembler.buf.is_empty());
+        // The marker of the dropped AU emits nothing.
+        assert!(assembler.push(1, true, &[1]).is_empty());
+        // The next AU assembles normally.
+        assert_eq!(assembler.push(2, true, &[7]), vec![(2, vec![7])]);
     }
 
     #[test]

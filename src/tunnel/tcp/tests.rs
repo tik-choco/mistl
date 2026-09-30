@@ -714,3 +714,97 @@ async fn close_all_for_peer_removes_a_conn_even_when_briefly_lock_contended() {
         "conn should be closed once its briefly-contended lock is released"
     );
 }
+
+// --- ownership + caps (security hardening) ----------------------------------
+
+#[tokio::test]
+async fn non_owner_peer_cannot_feed_or_close_a_conn() {
+    let mgr = test_manager();
+    let (write_half, mut read_half) = connected_write_and_readback().await;
+    mgr.track_conn("conn-1", write_half, "peer-owner", true)
+        .await;
+
+    // Another room peer guessing the conn id: data must not reach the
+    // backend socket, and its close must not tear the conn down.
+    let msg = data_msg("conn-1", &mgr.target, b"evil", Some(1));
+    mgr.on_tunnel_message("peer-evil", &serde_json::to_vec(&msg).unwrap())
+        .await;
+    let close = TunnelMessage {
+        msg_type: MSG_TYPE_CLOSE.into(),
+        conn_id: "conn-1".to_string(),
+        target: mgr.target.clone(),
+        payload: None,
+        seq: None,
+    };
+    mgr.on_tunnel_message("peer-evil", &serde_json::to_vec(&close).unwrap())
+        .await;
+
+    let mut buf = [0u8; 4];
+    let res = tokio::time::timeout(Duration::from_millis(100), read_half.read(&mut buf)).await;
+    assert!(res.is_err(), "non-owner data must not be written");
+    assert!(mgr.conns.read().await.contains_key("conn-1"));
+
+    // The owner still works, and seq state was not consumed by the intruder.
+    let msg = data_msg("conn-1", &mgr.target, b"ok", Some(1));
+    mgr.on_tunnel_message("peer-owner", &serde_json::to_vec(&msg).unwrap())
+        .await;
+    let mut ok = [0u8; 2];
+    tokio::time::timeout(Duration::from_secs(1), read_half.read_exact(&mut ok))
+        .await
+        .expect("owner data should arrive")
+        .unwrap();
+    assert_eq!(&ok, b"ok");
+
+    mgr.on_tunnel_message("peer-owner", &serde_json::to_vec(&close).unwrap())
+        .await;
+    assert!(!mgr.conns.read().await.contains_key("conn-1"));
+}
+
+/// Authorizer that never answers, keeping every conn `Pending`.
+struct NeverAuthorizer;
+
+impl ConnectionAuthorizer for NeverAuthorizer {
+    fn authorize<'a>(&'a self, _req: &'a AuthRequest) -> AuthFuture<'a> {
+        Box::pin(std::future::pending())
+    }
+}
+
+#[tokio::test]
+async fn pending_conns_are_capped_per_peer() {
+    let (addr, _listener) = spawn_backend_listener().await;
+    let mgr = test_manager_with(addr, Arc::new(NeverAuthorizer));
+
+    for i in 0..(MAX_PENDING_CONNS_PER_PEER + 4) {
+        let connect = connect_msg(&format!("conn-{i}"), &mgr.target);
+        mgr.on_tunnel_message("peer-1", &serde_json::to_vec(&connect).unwrap())
+            .await;
+    }
+    assert_eq!(mgr.conns.read().await.len(), MAX_PENDING_CONNS_PER_PEER);
+
+    // Another peer is not starved by peer-1's flood.
+    let connect = connect_msg("other-conn", &mgr.target);
+    mgr.on_tunnel_message("peer-2", &serde_json::to_vec(&connect).unwrap())
+        .await;
+    assert!(mgr.conns.read().await.contains_key("other-conn"));
+}
+
+#[tokio::test]
+async fn total_conns_are_capped_per_peer() {
+    let (addr, _listener) = spawn_backend_listener().await;
+    let mgr = test_manager_with(addr, allow_all());
+    for i in 0..MAX_CONNS_PER_PEER {
+        mgr.track_conn(
+            &format!("conn-{i}"),
+            dummy_write_half().await,
+            "peer-1",
+            true,
+        )
+        .await;
+    }
+
+    let connect = connect_msg("one-too-many", &mgr.target);
+    mgr.on_tunnel_message("peer-1", &serde_json::to_vec(&connect).unwrap())
+        .await;
+    assert!(!mgr.conns.read().await.contains_key("one-too-many"));
+    assert_eq!(mgr.conns.read().await.len(), MAX_CONNS_PER_PEER);
+}

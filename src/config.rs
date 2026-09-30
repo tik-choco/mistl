@@ -803,6 +803,137 @@ fn substitute_masked_provider_keys(
     Ok(value)
 }
 
+const MASK: &str = "***";
+
+/// Masks a webhook URL for `config.show`: userinfo becomes `***@` and a
+/// query string becomes `?***`. A URL with neither is returned unchanged
+/// (nothing secret to hide), so the mask is deterministic and
+/// [`substitute_masked_webhook_secrets`] can recognise a round-tripped one.
+pub fn mask_webhook_url(url: &str) -> String {
+    let (scheme, rest) = match url.split_once("://") {
+        Some((scheme, rest)) => (format!("{scheme}://"), rest),
+        None => (String::new(), url),
+    };
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(end);
+    let (userinfo, host) = match authority.rsplit_once('@') {
+        Some((_, host)) => (true, host),
+        None => (false, authority),
+    };
+    let (path, query) = match tail.find(['?', '#']) {
+        Some(i) => (&tail[..i], true),
+        None => (tail, false),
+    };
+    if !userinfo && !query {
+        return url.to_string();
+    }
+    format!(
+        "{scheme}{}{host}{path}{}",
+        if userinfo { "***@" } else { "" },
+        if query { "?***" } else { "" }
+    )
+}
+
+/// `config.show` support: masks secrets inside `bot.pipelines[].sinks[]`
+/// webhook sinks -- every non-empty header value becomes `"***"` and the
+/// URL's userinfo/query is hidden (see [`mask_webhook_url`]). Empty header
+/// values stay as-is so a client can tell "set" from "not set".
+pub fn mask_bot_webhook_secrets(value: &mut serde_json::Value) {
+    let Some(pipelines) = value["bot"]["pipelines"].as_array_mut() else {
+        return;
+    };
+    for pipeline in pipelines {
+        let Some(sinks) = pipeline["sinks"].as_array_mut() else {
+            continue;
+        };
+        for sink in sinks {
+            if sink["kind"] != "webhook" {
+                continue;
+            }
+            if let Some(url) = sink["url"].as_str() {
+                sink["url"] = serde_json::Value::String(mask_webhook_url(url));
+            }
+            if let Some(headers) = sink["headers"].as_array_mut() {
+                for header in headers {
+                    if matches!(header["value"].as_str(), Some(v) if !v.is_empty()) {
+                        header["value"] = serde_json::Value::String(MASK.into());
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// `set_by_path("bot.pipelines", ...)` support, mirroring
+/// [`substitute_masked_provider_keys`]: a webhook sink whose `url` equals the
+/// masked form of the current sink's URL (same pipeline id, same sink
+/// index) gets the real URL back, and a header value of `"***"` gets the
+/// real value of the same-named header of that sink. A mask with nothing to
+/// substitute from is an error -- the placeholder is never stored.
+fn substitute_masked_webhook_secrets(
+    config: &Config,
+    mut value: serde_json::Value,
+) -> Result<serde_json::Value> {
+    let Some(pipelines) = value.as_array_mut() else {
+        return Ok(value);
+    };
+    for pipeline in pipelines.iter_mut() {
+        let pid = pipeline
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let current = config.bot.pipelines.iter().find(|p| p.id == pid);
+        let Some(sinks) = pipeline.get_mut("sinks").and_then(|s| s.as_array_mut()) else {
+            continue;
+        };
+        for (index, sink) in sinks.iter_mut().enumerate() {
+            if sink.get("kind").and_then(serde_json::Value::as_str) != Some("webhook") {
+                continue;
+            }
+            let current_sink = current.and_then(|p| match p.sinks.get(index) {
+                Some(SinkConfig::Webhook { url, headers, .. }) => Some((url, headers)),
+                _ => None,
+            });
+            if let Some(submitted) = sink.get("url").and_then(serde_json::Value::as_str) {
+                match current_sink {
+                    Some((real, _)) if submitted == mask_webhook_url(real) => {
+                        sink["url"] = serde_json::Value::String(real.clone());
+                    }
+                    _ if submitted.contains("?***") || submitted.contains("***@") => {
+                        anyhow::bail!(
+                            "bot.pipelines: masked webhook url for pipeline {pid:?} sink {index} has nothing to restore it from (re-enter the real url)"
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            let Some(headers) = sink.get_mut("headers").and_then(|h| h.as_array_mut()) else {
+                continue;
+            };
+            for header in headers.iter_mut() {
+                if header.get("value").and_then(serde_json::Value::as_str) != Some(MASK) {
+                    continue;
+                }
+                let name = header
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let real = current_sink
+                    .and_then(|(_, hs)| hs.iter().find(|h| h.name == name))
+                    .with_context(|| {
+                        format!(
+                            "bot.pipelines: masked header {name:?} for pipeline {pid:?} sink {index} has nothing to restore it from"
+                        )
+                    })?;
+                header["value"] = serde_json::Value::String(real.value.clone());
+            }
+        }
+    }
+    Ok(value)
+}
+
 /// Set one config field addressed as `section.field` (e.g.
 /// "ai.default_preset_id"), returning the updated config. Values round-trip
 /// through serde so types are validated against the real Config shape;
@@ -812,6 +943,8 @@ pub fn set_by_path(config: &Config, path: &str, value: serde_json::Value) -> Res
     // generic "***" rejection below -- see `substitute_masked_provider_keys`.
     let value = if path == "ai.providers" {
         substitute_masked_provider_keys(config, value)?
+    } else if path == "bot.pipelines" {
+        substitute_masked_webhook_secrets(config, value)?
     } else {
         value
     };
@@ -933,6 +1066,7 @@ impl Config {
             config.save()?;
             return Ok(config);
         }
+        crate::statefile::restrict_existing(&path);
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
         let mut config: Self =
@@ -945,7 +1079,9 @@ impl Config {
 
     pub fn save(&self) -> Result<()> {
         let path = config_path()?;
-        std::fs::write(&path, toml::to_string_pretty(self)?)
+        // config.toml holds API keys and webhook credentials: owner-only and
+        // atomically replaced.
+        crate::statefile::write_private(&path, toml::to_string_pretty(self)?.as_bytes())
             .with_context(|| format!("writing {}", path.display()))?;
         Ok(())
     }
@@ -2138,5 +2274,121 @@ mod tests {
         // `auto_accept` are both turned on for TCP/UDP forwarding.
         assert!(!config.tunnel.stdio_enabled);
         assert!(config.tunnel.stdio_command.is_empty());
+    }
+
+    fn webhook_pipeline(url: &str, headers: &[(&str, &str)]) -> PipelineConfig {
+        let mut pipeline = sample_pipeline_v2();
+        pipeline.id = "hooked".into();
+        pipeline.sinks = vec![
+            SinkConfig::ChatPost { room: "r".into() },
+            SinkConfig::Webhook {
+                url: url.into(),
+                include_audio: false,
+                max_audio_bytes: None,
+                method: None,
+                body_template: None,
+                sign: true,
+                include_body: false,
+                headers: headers
+                    .iter()
+                    .map(|(n, v)| WebhookHeader {
+                        name: (*n).into(),
+                        value: (*v).into(),
+                    })
+                    .collect(),
+            },
+        ];
+        pipeline
+    }
+
+    #[test]
+    fn mask_webhook_url_hides_userinfo_and_query_only() {
+        assert_eq!(
+            mask_webhook_url("https://h.example/p"),
+            "https://h.example/p"
+        );
+        assert_eq!(
+            mask_webhook_url("https://h.example/p?token=abc"),
+            "https://h.example/p?***"
+        );
+        assert_eq!(
+            mask_webhook_url("https://user:pw@h.example:8443/p?x=1#f"),
+            "https://***@h.example:8443/p?***"
+        );
+        assert_eq!(
+            mask_webhook_url("https://u@h.example"),
+            "https://***@h.example"
+        );
+    }
+
+    #[test]
+    fn config_show_masking_hides_webhook_headers_and_url_secrets() {
+        let mut config = Config::default();
+        config.bot.pipelines.push(webhook_pipeline(
+            "https://h.example/p?key=SECRET",
+            &[("Authorization", "Bearer SECRET"), ("X-Empty", "")],
+        ));
+        let mut value = serde_json::to_value(&config).unwrap();
+        mask_bot_webhook_secrets(&mut value);
+        let text = value.to_string();
+        assert!(!text.contains("SECRET"), "{text}");
+        let sink = &value["bot"]["pipelines"][0]["sinks"][1];
+        assert_eq!(sink["url"], "https://h.example/p?***");
+        assert_eq!(sink["headers"][0]["value"], "***");
+        assert_eq!(sink["headers"][1]["value"], "");
+    }
+
+    #[test]
+    fn set_by_path_bot_pipelines_restores_masked_webhook_secrets() {
+        let mut config = Config::default();
+        config.bot.pipelines.push(webhook_pipeline(
+            "https://h.example/p?key=SECRET",
+            &[("Authorization", "Bearer SECRET")],
+        ));
+        let mut shown = serde_json::to_value(&config).unwrap();
+        mask_bot_webhook_secrets(&mut shown);
+        let updated =
+            set_by_path(&config, "bot.pipelines", shown["bot"]["pipelines"].clone()).unwrap();
+        match &updated.bot.pipelines[0].sinks[1] {
+            SinkConfig::Webhook { url, headers, .. } => {
+                assert_eq!(url, "https://h.example/p?key=SECRET");
+                assert_eq!(headers[0].value, "Bearer SECRET");
+            }
+            other => panic!("expected webhook, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_by_path_bot_pipelines_accepts_new_secrets_and_rejects_orphan_masks() {
+        let mut config = Config::default();
+        config
+            .bot
+            .pipelines
+            .push(webhook_pipeline("https://h.example/p", &[]));
+        // A freshly typed secret is stored as-is.
+        let fresh = serde_json::to_value(vec![webhook_pipeline(
+            "https://h.example/p?k=NEW",
+            &[("X-Api-Key", "NEW")],
+        )])
+        .unwrap();
+        let updated = set_by_path(&config, "bot.pipelines", fresh).unwrap();
+        match &updated.bot.pipelines[0].sinks[1] {
+            SinkConfig::Webhook { url, headers, .. } => {
+                assert_eq!(url, "https://h.example/p?k=NEW");
+                assert_eq!(headers[0].value, "NEW");
+            }
+            other => panic!("expected webhook, got {other:?}"),
+        }
+        // A masked header with no counterpart in the current config errors.
+        let orphan = serde_json::to_value(vec![webhook_pipeline(
+            "https://h.example/p",
+            &[("Authorization", "***")],
+        )])
+        .unwrap();
+        assert!(set_by_path(&config, "bot.pipelines", orphan).is_err());
+        // So does a masked url that no longer matches.
+        let orphan_url =
+            serde_json::to_value(vec![webhook_pipeline("https://h.example/p?***", &[])]).unwrap();
+        assert!(set_by_path(&config, "bot.pipelines", orphan_url).is_err());
     }
 }

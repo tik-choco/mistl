@@ -31,11 +31,27 @@ use rtsp_types::headers::{
 use rtsp_types::{Method, Request, Response, StatusCode, Version};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, Semaphore, mpsc};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use super::rtp_out::{self, DUMMY_NALU, RtpHeaderFields};
+
+/// Maximum buffered size of an incomplete RTSP request; a client exceeding
+/// it is disconnected instead of growing the buffer without bound.
+const MAX_REQUEST_BUF: usize = 64 * 1024;
+
+/// Maximum simultaneous RTSP client connections.
+const MAX_CONNECTIONS: usize = 16;
+
+/// How long a connection may sit on a partial request, or (before it has
+/// created any session) send nothing at all, before it is dropped. Playing
+/// connections that are between requests are deliberately not timed out.
+const REQUEST_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Outbound frames queued per connection; when full, media frames are
+/// dropped (see the `try_send` call sites) rather than growing memory.
+const WRITER_QUEUE_FRAMES: usize = 1024;
 
 /// How long after the last real access unit the dummy keepalive resumes.
 const REAL_DATA_IDLE: Duration = Duration::from_millis(1000);
@@ -93,7 +109,7 @@ enum SessionTransport {
     Tcp {
         rtp_channel: u8,
         rtcp_channel: u8,
-        tx: mpsc::UnboundedSender<Vec<u8>>,
+        tx: mpsc::Sender<Vec<u8>>,
     },
 }
 
@@ -267,13 +283,19 @@ impl RtspServer {
         let server = Self::new(rtp_socket, frame_rate, audio);
 
         let accept_server = server.clone();
+        let conn_slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
         let accept_task = tokio::spawn(async move {
             loop {
                 match listener.accept().await {
                     Ok((socket, peer_addr)) => {
+                        let Ok(permit) = conn_slots.clone().try_acquire_owned() else {
+                            warn!(%peer_addr, "RTSP connection limit reached, rejecting");
+                            continue;
+                        };
                         let server = accept_server.clone();
                         tokio::spawn(async move {
                             handle_connection(server, socket, peer_addr).await;
+                            drop(permit);
                         });
                     }
                     Err(error) => warn!(%error, "rtsp accept failed"),
@@ -666,7 +688,7 @@ impl RtspServer {
                     framed.push(*rtp_channel);
                     framed.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
                     framed.extend_from_slice(bytes);
-                    if let Err(error) = tx.send(framed) {
+                    if let Err(error) = tx.try_send(framed) {
                         warn!(%session_id, %error, "RTP TCP-interleaved send failed");
                     }
                 }
@@ -699,7 +721,7 @@ impl RtspServer {
                 framed.push(*rtcp_channel);
                 framed.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
                 framed.extend_from_slice(bytes);
-                if let Err(error) = tx.send(framed) {
+                if let Err(error) = tx.try_send(framed) {
                     warn!(%session_id, %error, "RTCP TCP-interleaved send failed");
                 }
             }
@@ -725,7 +747,7 @@ impl RtspServer {
     pub async fn send_keyframe_to_session(&self, session_id: &str) -> Option<(u16, u32)> {
         enum TargetTransport {
             Udp(SocketAddr),
-            Tcp(u8, mpsc::UnboundedSender<Vec<u8>>),
+            Tcp(u8, mpsc::Sender<Vec<u8>>),
         }
 
         let mut inner = self.inner.lock().await;
@@ -812,7 +834,7 @@ impl RtspServer {
                     framed.push(*rtp_channel);
                     framed.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
                     framed.extend_from_slice(&bytes);
-                    if let Err(error) = tx.send(framed) {
+                    if let Err(error) = tx.try_send(framed) {
                         warn!(%session_id, %error, "keyframe TCP-interleaved send failed");
                     }
                 }
@@ -1058,7 +1080,7 @@ async fn handle_connection(server: Arc<RtspServer>, stream: TcpStream, peer_addr
     info!(%peer_addr, "RTSP connection accepted");
 
     let (mut read_half, write_half) = stream.into_split();
-    let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(WRITER_QUEUE_FRAMES);
 
     let writer_task = tokio::spawn(async move {
         let mut write_half = write_half;
@@ -1120,7 +1142,7 @@ async fn handle_connection(server: Arc<RtspServer>, stream: TcpStream, peer_addr
                         }
 
                         let mut out = Vec::new();
-                        if response.write(&mut out).is_err() || tx.send(out).is_err() {
+                        if response.write(&mut out).is_err() || tx.try_send(out).is_err() {
                             break 'conn;
                         }
                         // Only now that the response is queued do we blast the
@@ -1161,7 +1183,20 @@ async fn handle_connection(server: Arc<RtspServer>, stream: TcpStream, peer_addr
             }
         }
 
-        match read_half.read(&mut read_buf).await {
+        // Bound how long we wait on a half-sent request or a connection that
+        // never established a session; established sessions may idle freely.
+        let read_result = if !buf.is_empty() || session_ids.is_empty() {
+            match tokio::time::timeout(REQUEST_IDLE_TIMEOUT, read_half.read(&mut read_buf)).await {
+                Ok(result) => result,
+                Err(_) => {
+                    info!(%peer_addr, request_count, "RTSP connection closed: idle timeout");
+                    break;
+                }
+            }
+        } else {
+            read_half.read(&mut read_buf).await
+        };
+        match read_result {
             Ok(0) => {
                 info!(%peer_addr, request_count, "RTSP connection closed: EOF");
                 break;
@@ -1170,7 +1205,13 @@ async fn handle_connection(server: Arc<RtspServer>, stream: TcpStream, peer_addr
                 info!(%peer_addr, request_count, %error, "RTSP connection closed: read error");
                 break;
             }
-            Ok(n) => buf.extend_from_slice(&read_buf[..n]),
+            Ok(n) => {
+                if buf.len() + n > MAX_REQUEST_BUF {
+                    info!(%peer_addr, request_count, "RTSP connection closed: request buffer overflow");
+                    break;
+                }
+                buf.extend_from_slice(&read_buf[..n]);
+            }
         }
     }
 
@@ -1205,7 +1246,7 @@ async fn handle_request(
     server: &Arc<RtspServer>,
     request: &Request<Vec<u8>>,
     peer_addr: SocketAddr,
-    tcp_tx: mpsc::UnboundedSender<Vec<u8>>,
+    tcp_tx: mpsc::Sender<Vec<u8>>,
 ) -> (Response<Vec<u8>>, Option<String>, Option<String>) {
     // Returns (response, new_session_to_clean_up, play_keyframe_session). The
     // third element, set only by PLAY, tells the connection loop to blast the
@@ -1318,7 +1359,7 @@ async fn handle_setup(
     server: &Arc<RtspServer>,
     request: &Request<Vec<u8>>,
     peer_addr: SocketAddr,
-    tcp_tx: mpsc::UnboundedSender<Vec<u8>>,
+    tcp_tx: mpsc::Sender<Vec<u8>>,
     version: Version,
     cseq: Option<headers::CSeq>,
 ) -> (Response<Vec<u8>>, Option<String>) {
@@ -1609,7 +1650,7 @@ mod tests {
         let request = Request::builder(Method::Options, Version::V1_0)
             .header(headers::CSEQ, "1")
             .build(Vec::new());
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(WRITER_QUEUE_FRAMES);
 
         let (response, session, _) = handle_request(&server, &request, peer(), tx).await;
 
@@ -1629,7 +1670,7 @@ mod tests {
             .request_uri(Url::parse("rtsp://127.0.0.1:8554/stream").unwrap())
             .header(headers::CSEQ, "2")
             .build(Vec::new());
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(WRITER_QUEUE_FRAMES);
 
         let (response, session, _) = handle_request(&server, &request, peer(), tx).await;
 
@@ -1795,7 +1836,7 @@ mod tests {
             .header(headers::CSEQ, "1")
             .header(headers::TRANSPORT, "RTP/AVP;unicast;client_port=5000-5001")
             .build(Vec::new());
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(WRITER_QUEUE_FRAMES);
         let (response, session_id, _) =
             handle_request(&server, &setup_request, peer(), tx.clone()).await;
         assert_eq!(response.status(), StatusCode::Ok);
@@ -1825,7 +1866,7 @@ mod tests {
         // timestamp base) look like far-future data: video played, audio
         // stayed silent. PLAY must emit one entry per set-up track.
         let server = test_server_with_audio(rtp_out::AudioCodec::Aac).await;
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(WRITER_QUEUE_FRAMES);
 
         let setup_video = Request::builder(Method::Setup, Version::V1_0)
             .request_uri(Url::parse("rtsp://127.0.0.1:8554/stream/trackID=0").unwrap())
@@ -1886,7 +1927,7 @@ mod tests {
             .header(headers::CSEQ, "1")
             .header(headers::TRANSPORT, "RTP/AVP;unicast;client_port=5000-5001")
             .build(Vec::new());
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(WRITER_QUEUE_FRAMES);
         let (response, session_id, _) = handle_request(&server, &setup_request, peer(), tx).await;
 
         assert_eq!(response.status(), StatusCode::Ok);
@@ -1902,7 +1943,7 @@ mod tests {
             .header(headers::CSEQ, "1")
             .header(headers::TRANSPORT, "RTP/AVP/TCP;unicast;interleaved=0-1")
             .build(Vec::new());
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(WRITER_QUEUE_FRAMES);
         let (response, session_id, _) = handle_request(&server, &setup_request, peer(), tx).await;
 
         assert_eq!(response.status(), StatusCode::Ok);
@@ -1920,7 +1961,7 @@ mod tests {
             .header(headers::CSEQ, "1")
             .header(headers::TRANSPORT, "RTP/AVP;unicast;client_port=5000-5001")
             .build(Vec::new());
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(WRITER_QUEUE_FRAMES);
         let (response, session_id, _) =
             handle_request(&server, &video_setup, peer(), tx.clone()).await;
         assert_eq!(response.status(), StatusCode::Ok);
@@ -1953,7 +1994,7 @@ mod tests {
             .header(headers::TRANSPORT, "RTP/AVP;unicast;client_port=6000-6001")
             .header(headers::SESSION, "does-not-exist".to_string())
             .build(Vec::new());
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(WRITER_QUEUE_FRAMES);
         let (response, session_id, _) = handle_request(&server, &setup_request, peer(), tx).await;
 
         assert_eq!(response.status(), StatusCode::SessionNotFound);
@@ -1967,7 +2008,7 @@ mod tests {
             .header(headers::CSEQ, "1")
             .header(headers::TRANSPORT, "RTP/AVP;unicast;client_port=6000-6001")
             .build(Vec::new());
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(WRITER_QUEUE_FRAMES);
         let (_, session_id, _) = handle_request(&server, &setup_request, peer(), tx.clone()).await;
         let session_id = session_id.unwrap();
 
@@ -2131,7 +2172,7 @@ mod tests {
             .header(headers::CSEQ, "1")
             .header(headers::TRANSPORT, "RTP/AVP/TCP;unicast;interleaved=2-3")
             .build(Vec::new());
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(WRITER_QUEUE_FRAMES);
         let (response, session_id, _) =
             handle_request(&server, &setup_request, peer(), tx.clone()).await;
         assert_eq!(response.status(), StatusCode::Ok);
@@ -2174,7 +2215,7 @@ mod tests {
     // --- delivery-aware flow indicator ---------------------------------------
 
     fn tcp_session(playing: bool, video: bool, audio: bool) -> Session {
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(WRITER_QUEUE_FRAMES);
         Session {
             video: video.then(|| SessionTransport::Tcp {
                 rtp_channel: 0,

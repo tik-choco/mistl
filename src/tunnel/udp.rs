@@ -24,6 +24,9 @@ pub mod lifecycle;
 pub mod local;
 pub mod tunnel;
 
+#[cfg(test)]
+mod tests;
+
 use lifecycle::{forward_key, spawn_handler_cleanup};
 
 pub const UDP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -31,6 +34,12 @@ pub const TUNNEL_READY_TIMEOUT: Duration = Duration::from_secs(30);
 pub const MAX_UDP_SIZE: usize = 65535;
 pub const CLEANUP_INTERVAL: Duration = Duration::from_secs(10);
 pub const RETRY_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Per-peer cap on serve-side UDP sessions (established plus awaiting
+/// authorization), and on packets queued for one session while its
+/// authorization is in flight.
+pub const MAX_UDP_SESSIONS_PER_PEER: usize = 64;
+pub const MAX_PENDING_UDP_PACKETS: usize = 32;
 
 struct UdpConn {
     target_conn: Option<Arc<UdpSocket>>,
@@ -40,10 +49,17 @@ struct UdpConn {
     client_addr: Option<std::net::SocketAddr>,
 }
 
+/// A serve-side session whose authorization is still in flight.
+struct PendingUdp {
+    peer_id: String,
+    queued: Vec<Vec<u8>>,
+}
+
 pub struct UdpManager {
     rtc_manager: RTCManager,
     conns: Arc<RwLock<HashMap<String, UdpConn>>>,
     remote_addr: String,
+    pending: Arc<tokio::sync::Mutex<HashMap<String, PendingUdp>>>,
     local_socket: Arc<RwLock<Option<Arc<UdpSocket>>>>,
     target: String,
     runtime: ForwardRuntime,
@@ -86,6 +102,7 @@ impl UdpManager {
             target,
             runtime,
             allow_all(),
+            "127.0.0.1".to_string(),
         )
         .await
     }
@@ -97,10 +114,12 @@ impl UdpManager {
         target: String,
         runtime: ForwardRuntime,
         authorizer: SharedAuthorizer,
+        listen_host: String,
     ) -> Result<()> {
         let mgr = Arc::new(Self {
             rtc_manager: rtc_manager.clone(),
             conns: Arc::new(RwLock::new(HashMap::new())),
+            pending: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             remote_addr,
             local_socket: Arc::new(RwLock::new(None)),
             target: target.clone(),
@@ -135,7 +154,7 @@ impl UdpManager {
         }
 
         if listen_port != -1 {
-            let addr = format!("0.0.0.0:{}", listen_port);
+            let addr = crate::tunnel::forward_args::listen_bind_addr(&listen_host, listen_port);
             let socket = Arc::new(UdpSocket::bind(&addr).await?);
             *mgr.local_socket.write().await = Some(socket.clone());
             debug!("UDP server listening on port {}", listen_port);
@@ -151,7 +170,7 @@ impl UdpManager {
         Ok(())
     }
 
-    async fn on_tunnel_message(&self, peer_id: &str, data: &[u8]) {
+    async fn on_tunnel_message(self: &Arc<Self>, peer_id: &str, data: &[u8]) {
         let tm: TunnelMessage = match serde_json::from_slice(data) {
             Ok(m) => m,
             Err(_) => return,

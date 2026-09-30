@@ -150,12 +150,25 @@ pub fn mac_key(code: &str) -> [u8; 32] {
 /// -- the spec's message authentication for both directions of the pairing
 /// protocol.
 fn compute_mac(msg: &Value, key: &[u8; 32]) -> String {
+    URL_SAFE_NO_PAD.encode(mac_for(msg, key).finalize().into_bytes())
+}
+
+fn mac_for(msg: &Value, key: &[u8; 32]) -> Hmac<Sha256> {
     let mut map = msg.as_object().cloned().unwrap_or_default();
     map.remove("mac");
     let payload = crate::wiresign::stable_stringify(&Value::Object(map));
     let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC-SHA256 accepts any key length");
     mac.update(payload.as_bytes());
-    URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
+    mac
+}
+
+/// Constant-time check that `claimed` (base64url, no padding) is the MAC of
+/// `msg` under `key`.
+fn verify_mac(msg: &Value, key: &[u8; 32], claimed: &str) -> bool {
+    match URL_SAFE_NO_PAD.decode(claimed) {
+        Ok(bytes) => mac_for(msg, key).verify_slice(&bytes).is_ok(),
+        Err(_) => false,
+    }
 }
 
 /// `key.pair.start`: begin a new pairing session, replacing (and, if it was
@@ -355,7 +368,7 @@ async fn handle_pair_request(state: &Arc<AppState>, room: &str, msg: Value) {
     };
     // MAC first (proves the sender knows the code) -- only then look at
     // `leaf`, so a non-holder of the code can't even probe leaf validation.
-    if compute_mac(&msg, &key) != mac {
+    if !verify_mac(&msg, &key, mac) {
         return;
     }
     let Some(leaf) = msg.get("leaf").and_then(Value::as_str) else {
@@ -483,6 +496,19 @@ mod tests {
             compute_mac(&without_mac, &key),
             compute_mac(&with_mac, &key)
         );
+    }
+
+    #[test]
+    fn verify_mac_accepts_only_the_exact_mac() {
+        let key = [7u8; 32];
+        let mut msg = json!({ "v": 1, "leaf": "did:key:zabc" });
+        let good = compute_mac(&msg, &key);
+        assert!(verify_mac(&msg, &key, &good));
+        assert!(!verify_mac(&msg, &key, "not-base64!"));
+        assert!(!verify_mac(&msg, &key, &good[..good.len() - 2]));
+        assert!(!verify_mac(&msg, &[8u8; 32], &good));
+        msg["leaf"] = json!("did:key:zdef");
+        assert!(!verify_mac(&msg, &key, &good));
     }
 
     #[test]

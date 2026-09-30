@@ -83,6 +83,12 @@ pub const TUNNEL_KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::
 pub const PENDING_DATA_BUFFER_MAX_MSGS: usize = 256;
 pub const PENDING_DATA_BUFFER_MAX_BYTES: usize = 1024 * 1024;
 
+/// Per-peer caps on tracked conns: how many may be `Pending` (unauthorized) at
+/// once, and how many may exist in total. A room peer can otherwise open
+/// unbounded conns and pending-approval rows just by sending `connect`s.
+pub const MAX_PENDING_CONNS_PER_PEER: usize = 8;
+pub const MAX_CONNS_PER_PEER: usize = 64;
+
 /// Tunnel message-type discriminants (the `type` field of [`TunnelMessage`]).
 /// Unknown/unrecognized types (e.g. from a newer or older peer) are ignored
 /// gracefully by `on_tunnel_message` -- do not add a type here without
@@ -190,6 +196,7 @@ impl TcpManager {
             target,
             runtime,
             allow_all(),
+            "127.0.0.1".to_string(),
         )
         .await
     }
@@ -201,6 +208,7 @@ impl TcpManager {
         target: String,
         runtime: ForwardRuntime,
         authorizer: SharedAuthorizer,
+        listen_host: String,
     ) -> Result<()> {
         let resolved = if !remote_addr.is_empty() {
             if remote_addr.contains(':') {
@@ -285,7 +293,7 @@ impl TcpManager {
             return Ok(());
         }
 
-        let addr = format!("0.0.0.0:{}", listen_port);
+        let addr = crate::tunnel::forward_args::listen_bind_addr(&listen_host, listen_port);
         let listener = TcpListener::bind(&addr).await?;
         debug!("TCP server listening on port {}", listen_port);
 
@@ -345,7 +353,11 @@ impl TcpManager {
     /// Deliberately does not call `ensure_keepalive_task`: a pending conn
     /// isn't a live backend connection yet, so there's nothing to keep warm
     /// until `promote_pending_conn` runs.
-    async fn track_pending_conn(&self, conn_id: &str, peer_id: &str) {
+    ///
+    /// Returns `false` (tracking nothing) if `peer_id` is already at
+    /// `MAX_PENDING_CONNS_PER_PEER` pending or `MAX_CONNS_PER_PEER` total conns;
+    /// the caller rejects the `connect` via the normal close path.
+    async fn track_pending_conn(&self, conn_id: &str, peer_id: &str) -> bool {
         let metrics = self.runtime.peer(peer_id);
         let tc = TunnelConn {
             state: ConnState::Pending {
@@ -357,10 +369,27 @@ impl TcpManager {
             notify_remote: true,
             recv_seq: tunnel::SeqState::new(),
         };
-        self.conns
-            .write()
-            .await
-            .insert(conn_id.to_string(), Arc::new(RwLock::new(tc)));
+        let mut conns = self.conns.write().await;
+        let (mut total, mut pending) = (0usize, 0usize);
+        for existing in conns.values() {
+            // A conn whose lock is momentarily held is counted as an
+            // established one: over-counting the total is the safe side.
+            match existing.try_read() {
+                Ok(guard) if guard.peer_id != peer_id => {}
+                Ok(guard) => {
+                    total += 1;
+                    if matches!(guard.state, ConnState::Pending { .. }) {
+                        pending += 1;
+                    }
+                }
+                Err(_) => total += 1,
+            }
+        }
+        if total >= MAX_CONNS_PER_PEER || pending >= MAX_PENDING_CONNS_PER_PEER {
+            return false;
+        }
+        conns.insert(conn_id.to_string(), Arc::new(RwLock::new(tc)));
+        true
     }
 
     /// Promotes a tracked `Pending` conn to `Active` once authorization has
@@ -431,6 +460,25 @@ impl TcpManager {
             metrics.record_bytes_out(payload.len());
         }
         true
+    }
+
+    /// Handles a peer-sent `close`: only the conn's owning peer may close it.
+    async fn close_conn_from_peer(&self, conn_id: &str, peer_id: &str) {
+        let owner_matches = {
+            let tc = self.conns.read().await.get(conn_id).cloned();
+            match tc {
+                Some(tc) => tc.read().await.peer_id == peer_id,
+                None => return,
+            }
+        };
+        if owner_matches {
+            self.close_conn(conn_id, false).await;
+        } else {
+            debug!(
+                "ignoring tunnel close for conn {} from non-owner peer {}",
+                conn_id, peer_id
+            );
+        }
     }
 
     async fn close_conn(&self, conn_id: &str, notify_remote: bool) {

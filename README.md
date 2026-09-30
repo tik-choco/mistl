@@ -495,8 +495,9 @@ descendant processes are not yet fully supervised.
   `voice_error`); `raft_message` scheduling is passed through untouched
 - The local API server (`ai serve`) has no auth; keep `api_listen` on loopback unless
   the network is trusted
-- The web dashboard has no login; it rejects cross-origin and non-localhost requests,
-  but anyone with local access can use it — keep `[ui] listen` on loopback
+- The web dashboard requires a session. Open it with `mistl ui`, the tray, or the URL
+  shown by `mistl daemon status`; keep `[ui] listen` on loopback unless the network is
+  trusted
 
 ## License
 

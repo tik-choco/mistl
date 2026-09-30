@@ -128,6 +128,7 @@ pub(super) async fn handle_join(inner: Arc<RTCManagerInner>, peer_id: String) {
     inner.peers.write().await.insert(peer_id.clone());
     notify(&inner.peer_conn_handlers, peer_id.clone()).await;
     notify(&inner.tunnel_open_handlers, peer_id.clone()).await;
+    inner.stdio_opened.write().await.insert(peer_id.clone());
     notify(&inner.stdio_open_handlers, peer_id.clone()).await;
     notify_epoch(&inner.peer_join_handlers, peer_id.clone(), epoch).await;
 
@@ -150,6 +151,7 @@ pub(super) async fn handle_leave(inner: Arc<RTCManagerInner>, peer_id: String) {
     // `peers` (current-presence) is cleared; routing filters on that, and a
     // fresh JOIN resets the retained state (see `handle_join`).
     inner.peers.write().await.remove(&peer_id);
+    inner.stdio_opened.write().await.remove(&peer_id);
     inner.graph.forget_peer(&peer_id).await;
     let epoch = inner
         .peer_epochs
@@ -174,7 +176,6 @@ pub(super) async fn handle_payload(inner: Arc<RTCManagerInner>, peer_id: String,
     if inner.peers.write().await.insert(peer_id.clone()) {
         notify(&inner.peer_conn_handlers, peer_id.clone()).await;
         notify(&inner.tunnel_open_handlers, peer_id.clone()).await;
-        notify(&inner.stdio_open_handlers, peer_id.clone()).await;
     }
 
     // Silently ignore anything that isn't our own P2pPayload envelope: this
@@ -246,6 +247,11 @@ pub(super) async fn handle_payload(inner: Arc<RTCManagerInner>, peer_id: String,
         P2pPayload::Stdio { data } => {
             if !inner.graph.allows_traffic(&peer_id).await {
                 return;
+            }
+            // Only an explicit stdio packet (not e.g. a first Chat/Role
+            // payload) can open a stdio session for a peer we saw no JOIN for.
+            if inner.stdio_opened.write().await.insert(peer_id.clone()) {
+                notify(&inner.stdio_open_handlers, peer_id.clone()).await;
             }
             let handlers = inner.stdio_msg_handlers.read().await;
             for h in handlers.iter() {

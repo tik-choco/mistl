@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TrustKey {
@@ -48,22 +48,48 @@ pub struct TrustEntry {
 pub struct TrustStore {
     path: PathBuf,
     entries: Arc<RwLock<HashMap<TrustKey, TrustDecision>>>,
+    /// Serializes persists so two concurrent `remember`/`remove` calls can't
+    /// interleave their temp-file writes and renames.
+    persist_lock: Arc<Mutex<()>>,
 }
 
 impl TrustStore {
     pub async fn load(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
         let entries = match tokio::fs::read_to_string(&path).await {
-            Ok(text) => serde_json::from_str::<Vec<TrustEntry>>(&text)?
-                .into_iter()
-                .map(|entry| (entry.key, entry.decision))
-                .collect(),
+            Ok(text) => match serde_json::from_str::<Vec<TrustEntry>>(&text) {
+                Ok(entries) => entries
+                    .into_iter()
+                    .map(|entry| (entry.key, entry.decision))
+                    .collect(),
+                Err(err) => {
+                    // Keep the unreadable file for inspection rather than
+                    // failing the whole tunnel start (or silently overwriting
+                    // it on the next persist), and start with no remembered
+                    // decisions.
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_millis());
+                    let mut name = path.file_name().unwrap_or_default().to_os_string();
+                    name.push(format!(".corrupt-{ts}"));
+                    let backup = path.with_file_name(name);
+                    tracing::warn!(
+                        "trust store {} is unreadable ({}); moving it to {} and starting empty",
+                        path.display(),
+                        err,
+                        backup.display()
+                    );
+                    tokio::fs::rename(&path, &backup).await?;
+                    HashMap::new()
+                }
+            },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
             Err(e) => return Err(e.into()),
         };
         Ok(Self {
             path,
             entries: Arc::new(RwLock::new(entries)),
+            persist_lock: Arc::new(Mutex::new(())),
         })
     }
 
@@ -105,11 +131,18 @@ impl TrustStore {
     }
 
     async fn persist(&self) -> Result<()> {
+        let _guard = self.persist_lock.lock().await;
         if let Some(parent) = self.path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
+        // Snapshot under the persist lock so the last writer always writes the
+        // newest state, then swap it in atomically (tmp + rename).
         let text = serde_json::to_string_pretty(&self.list().await)?;
-        tokio::fs::write(&self.path, text).await?;
+        let mut tmp_name = self.path.file_name().unwrap_or_default().to_os_string();
+        tmp_name.push(".tmp");
+        let temporary = self.path.with_file_name(tmp_name);
+        tokio::fs::write(&temporary, text).await?;
+        tokio::fs::rename(&temporary, &self.path).await?;
         Ok(())
     }
 }

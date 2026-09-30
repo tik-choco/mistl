@@ -22,6 +22,12 @@ use crate::tunnel::auth::{
     SharedAuthorizer, TrustDecision, TrustKey, TrustStore,
 };
 
+/// Caps on parked approval rows: per peer and in total. Beyond them a request
+/// is denied outright instead of queued, so a peer cannot flood the pending
+/// pane (or pin memory) just by opening connections.
+pub const MAX_PENDING_PER_PEER: usize = 8;
+pub const MAX_PENDING_TOTAL: usize = 64;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PendingAuthorization {
     pub id: u64,
@@ -108,9 +114,20 @@ impl PendingAuthorizations {
         count
     }
 
-    async fn enqueue(&self, request: AuthRequest) -> (u64, oneshot::Receiver<AuthDecision>) {
+    async fn enqueue(
+        &self,
+        request: AuthRequest,
+    ) -> Option<(u64, oneshot::Receiver<AuthDecision>)> {
         let (sender, receiver) = oneshot::channel();
         let mut inner = self.inner.lock().await;
+        let from_peer = inner
+            .pending
+            .values()
+            .filter(|item| item.request.peer_id == request.peer_id)
+            .count();
+        if from_peer >= MAX_PENDING_PER_PEER || inner.pending.len() >= MAX_PENDING_TOTAL {
+            return None;
+        }
         let id = inner.next_id;
         inner.next_id += 1;
         inner.pending.insert(
@@ -120,7 +137,7 @@ impl PendingAuthorizations {
                 responder: sender,
             },
         );
-        (id, receiver)
+        Some((id, receiver))
     }
 
     /// Removes a pending entry without resolving it -- used when
@@ -135,7 +152,10 @@ impl PendingAuthorizations {
         &self,
         request: AuthRequest,
     ) -> oneshot::Receiver<AuthDecision> {
-        self.enqueue(request).await.1
+        self.enqueue(request)
+            .await
+            .expect("pending caps not reached in test")
+            .1
     }
 }
 
@@ -205,7 +225,13 @@ impl PendingAuthorizer {
             return decision;
         }
 
-        let (id, receiver) = self.pending.enqueue(req.clone()).await;
+        let Some((id, receiver)) = self.pending.enqueue(req.clone()).await else {
+            // Too many unanswered requests from this peer (or overall): deny
+            // without parking another row or remembering anything.
+            self.record(req, AuthDecision::Deny, AuthEventSource::Pending)
+                .await;
+            return AuthDecision::Deny;
+        };
         let decision = match tokio::time::timeout(DECISION_TIMEOUT, receiver).await {
             Ok(result) => result.unwrap_or(AuthDecision::Deny),
             Err(_elapsed) => {

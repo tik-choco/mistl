@@ -51,9 +51,9 @@ pub fn spawn_dashboard_autoreopen(state: Arc<AppState>, listen: String) {
 
         let url = crate::web::dashboard_url(&listen);
         if crate::web::browser::open_in_browser(&url) {
-            info!(%url, "web: reopened the dashboard after restart");
+            info!(url = %crate::web::auth::redact(&url), "web: reopened the dashboard after restart");
         } else {
-            warn!(%url, "web: failed to reopen the dashboard automatically; open the URL by hand");
+            warn!(url = %crate::web::auth::redact(&url), "web: failed to reopen the dashboard automatically; run `mistl ui` to open it");
         }
     });
 }

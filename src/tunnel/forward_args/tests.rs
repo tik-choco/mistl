@@ -103,3 +103,36 @@ fn forward_key_uses_protocol_and_port() {
     assert_eq!(forward_key("tcp", "127.0.0.1:80"), "tcp:80");
     assert_eq!(forward_key("udp", ":9000"), "udp:9000");
 }
+
+#[test]
+fn listen_host_defaults_to_loopback_unless_explicit() {
+    assert_eq!(listen_host(":8080"), "127.0.0.1");
+    assert_eq!(listen_host(""), "127.0.0.1");
+    assert_eq!(listen_host("127.0.0.1:8080"), "127.0.0.1");
+    assert_eq!(listen_host("0.0.0.0:8080"), "0.0.0.0");
+    assert_eq!(listen_host("[::1]:8080"), "::1");
+    assert_eq!(listen_bind_addr("::1", 80), "[::1]:80");
+    assert_eq!(listen_bind_addr("127.0.0.1", 80), "127.0.0.1:80");
+}
+
+#[test]
+fn link_local_hosts_are_detected() {
+    for addr in [
+        "169.254.169.254:80",
+        "169.254.0.1",
+        "[fe80::1]:80",
+        "fe80::1",
+        "[::ffff:169.254.169.254]:80",
+    ] {
+        assert!(is_link_local_host(addr), "{addr}");
+    }
+    for addr in [
+        "127.0.0.1:80",
+        "10.0.0.1:80",
+        "[::1]:80",
+        "example.com:80",
+        "80",
+    ] {
+        assert!(!is_link_local_host(addr), "{addr}");
+    }
+}

@@ -24,8 +24,8 @@ impl TcpManager {
         };
         match tm.msg_type.as_str() {
             MSG_TYPE_CONNECT => self.handle_remote_connect(peer_id, &tm).await,
-            MSG_TYPE_DATA => self.handle_remote_data(&tm).await,
-            MSG_TYPE_CLOSE => self.close_conn(&tm.conn_id, false).await,
+            MSG_TYPE_DATA => self.handle_remote_data(peer_id, &tm).await,
+            MSG_TYPE_CLOSE => self.close_conn_from_peer(&tm.conn_id, peer_id).await,
             // Keepalive: purely to keep the channel/NAT mapping warm, no
             // action needed on receipt.
             MSG_TYPE_PING => {}
@@ -57,7 +57,21 @@ impl TcpManager {
             return;
         }
 
-        self.track_pending_conn(&tm.conn_id, peer_id).await;
+        if !self.track_pending_conn(&tm.conn_id, peer_id).await {
+            warn!(
+                "rejecting tunnel connect {} from {}: connection limit reached",
+                tm.conn_id, peer_id
+            );
+            let close_msg = TunnelMessage {
+                msg_type: MSG_TYPE_CLOSE.into(),
+                conn_id: tm.conn_id.clone(),
+                target: self.target.clone(),
+                payload: None,
+                seq: None,
+            };
+            let _ = self.send_to(peer_id, &close_msg).await;
+            return;
+        }
 
         let mgr = Arc::new(self.clone_inner());
         let conn_id = tm.conn_id.clone();
@@ -133,7 +147,7 @@ impl TcpManager {
         }
     }
 
-    async fn handle_remote_data(&self, tm: &TunnelMessage) {
+    async fn handle_remote_data(&self, peer_id: &str, tm: &TunnelMessage) {
         // Look the conn up and run every message (even one with an
         // empty/missing payload) through `recv_seq.observe` *before* any
         // early return on payload emptiness below. A zero-byte `data`
@@ -148,6 +162,17 @@ impl TcpManager {
         let Some(tc) = tc else {
             return;
         };
+
+        // Only the peer that owns the conn may feed it: conn ids are chosen by
+        // the sender, so without this any room peer could inject into (or, via
+        // a gap, tear down) another peer's connection by guessing its id.
+        if tc.read().await.peer_id != peer_id {
+            debug!(
+                "dropping tunnel data for conn {} from non-owner peer {}",
+                tm.conn_id, peer_id
+            );
+            return;
+        }
 
         // While the conn is still `Pending` (authorization in flight -- see
         // `authorize_and_activate`), there's no backend `TcpStream` to write

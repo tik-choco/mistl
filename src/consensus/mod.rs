@@ -242,6 +242,12 @@ impl RelayConsensus {
     }
 }
 
+/// A hello is only trusted when its claimed node id is the transport-level
+/// sender; otherwise a peer could register arbitrary ids as Raft voters.
+fn hello_matches_sender(claimed: &str, from_id: &str) -> bool {
+    claimed == from_id
+}
+
 /// Wires the shared `crate::net` raw-message handler for this instance:
 /// demuxes Raft RPCs (fed straight into the driver) and relay hellos
 /// (tracked in `membership`, promoted to `RaftNode::add_peer` on first
@@ -256,6 +262,14 @@ fn register_net_handler(consensus: Arc<RelayConsensus>) {
                 consensus.raft.deliver(NodeId(from_id.to_string()), msg);
             }
             Some(WireMessage::Hello { node }) => {
+                if !hello_matches_sender(&node, from_id) {
+                    tracing::debug!(
+                        claimed = %node,
+                        from = %from_id,
+                        "consensus: ignoring hello whose node id differs from the transport sender"
+                    );
+                    return;
+                }
                 let is_new = consensus
                     .membership
                     .lock()
@@ -377,4 +391,15 @@ fn current() -> Option<Arc<RelayConsensus>> {
         .read()
         .expect("consensus current lock poisoned")
         .clone()
+}
+
+#[cfg(test)]
+mod hello_auth_tests {
+    use super::hello_matches_sender;
+
+    #[test]
+    fn hello_with_mismatched_node_id_is_rejected() {
+        assert!(hello_matches_sender("node-a", "node-a"));
+        assert!(!hello_matches_sender("node-victim", "node-a"));
+    }
 }

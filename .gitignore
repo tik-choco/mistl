@@ -5,3 +5,8 @@
 /.mistlib-consensus-src
 /.work/
 /node_modules/
+
+# Local agent notes (public repo: keep handoffs and open-issue details private)
+/AGENTS.md
+/CLAUDE.md
+/.agents/

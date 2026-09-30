@@ -2,16 +2,19 @@
 //! daemon, plus a small JSON bridge (`POST /api/call`) that routes straight
 //! into [`crate::daemon::dispatch`] -- the same router the CLI IPC uses.
 //!
-//! Loopback-only by default and unauthenticated; cross-origin requests are
+//! Loopback-only by default; every route but the favicon needs the persistent
+//! dashboard token (see `auth`). Cross-origin requests are also
 //! rejected via a required custom header (browsers can't send it cross-site
 //! without a CORS preflight, which this server never grants).
 
 mod assets;
+pub mod auth;
 pub mod autoreopen;
 pub mod browser;
 pub mod server;
 pub mod ui_state;
 
+pub use auth::dashboard_url;
 pub use server::serve;
 
 /// Builds the dashboard URL to show (or open) from a resolved `ui.listen`
@@ -20,7 +23,7 @@ pub use server::serve;
 /// the dashboard over loopback, even when the server itself is bound to every
 /// interface (e.g. `--host 0.0.0.0` for LAN access), and `http://0.0.0.0:.../`
 /// is not a URL a browser can usefully open.
-pub fn dashboard_url(listen: &str) -> String {
+pub fn dashboard_base_url(listen: &str) -> String {
     let (host, port) = listen.rsplit_once(':').unwrap_or((listen, "6480"));
     let host = match host {
         "0.0.0.0" | "[::]" | "::" => "127.0.0.1",
@@ -38,7 +41,7 @@ pub(crate) const FAVICON_PNG: &[u8] = include_bytes!("assets/favicon.png");
 
 #[cfg(test)]
 mod tests {
-    use super::dashboard_url;
+    use super::dashboard_base_url as dashboard_url;
 
     #[test]
     fn dashboard_url_keeps_explicit_host() {

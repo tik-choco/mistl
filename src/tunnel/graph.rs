@@ -361,6 +361,14 @@ impl SessionContext {
                 target,
             } => {
                 let spec = forward_spec(&direction, &proto, &addr, &target, owner)?;
+                // A remote actor with the add-forwards grant must not be able to aim
+                // a serve forward at link-local targets (e.g. cloud metadata).
+                ensure!(
+                    actor == owner
+                        || spec.direction != Direction::Serve
+                        || !super::forward_args::is_link_local_host(&spec.addr),
+                    "link-local targets cannot be proposed remotely"
+                );
                 if spec.direction == Direction::Connect {
                     let (_, peer) = super::forward_args::split_node_scope(&target);
                     let peer = peer.ok_or_else(|| {

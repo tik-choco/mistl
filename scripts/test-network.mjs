@@ -41,11 +41,16 @@ try {
   assert.notEqual(a.dashboard,b.dashboard);
   assert.equal(a.build.channel,'dev');
   const identity = `${a.build.instance_id}/${a.build.build_id}`;
+  // The dashboard URL carries ?token=; exchange it for the session cookie.
+  assert.equal((await fetch(new URL('/api/call',a.dashboard),{method:'POST'})).status,401,'no session, no API');
+  const login=await fetch(a.dashboard,{redirect:'manual'});
+  assert.equal(login.status,303);
+  const cookie=login.headers.get('set-cookie').split(';')[0];
   const api = async (cmd,args={},header=identity) => {
-    const r=await fetch(new URL('/api/call',a.dashboard), {method:'POST',headers:{'content-type':'application/json','x-mistl-ui':'1','x-mistl-instance':header},body:JSON.stringify({cmd,args})});
+    const r=await fetch(new URL('/api/call',a.dashboard), {method:'POST',headers:{'content-type':'application/json','x-mistl-ui':'1','x-mistl-instance':header,cookie},body:JSON.stringify({cmd,args})});
     return {status:r.status,body:await r.json()};
   };
-  const html=await (await fetch(a.dashboard)).text();
+  const html=await (await fetch(new URL('/',a.dashboard),{headers:{cookie}})).text();
   assert.ok(html.includes('window.mistlRuntime=')); assert.ok(html.includes(a.build.build_id));
   assert.equal((await api('network.status')).body.data.state,'off');
   assert.equal((await api('network.set',{enabled:true},'stale-instance')).status,409);

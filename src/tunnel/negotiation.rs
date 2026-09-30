@@ -17,9 +17,19 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::time::Instant;
 
 use serde::Serialize;
 use tokio::sync::Mutex;
+
+/// Caps on unanswered incoming proposals: per peer, in total, and how long one
+/// may sit unanswered before it is swept. Without them any room peer can grow
+/// the pending pane (and daemon memory) without bound.
+pub const MAX_INCOMING_PER_PEER: usize = 32;
+pub const MAX_INCOMING_TOTAL: usize = 128;
+pub const INCOMING_TTL: Duration = Duration::from_secs(5 * 60);
 
 /// An incoming forward proposal from a peer, awaiting a local approve/deny in
 /// the TUI pending pane.
@@ -72,6 +82,7 @@ pub struct ForwardNegotiator {
 struct Inner {
     next_id: u64,
     incoming: BTreeMap<u64, IncomingForward>,
+    incoming_at: BTreeMap<u64, Instant>,
     outgoing: BTreeMap<String, OutgoingForward>,
     outcomes: Vec<ForwardOutcome>,
 }
@@ -81,7 +92,10 @@ impl ForwardNegotiator {
         Self::default()
     }
 
-    /// Records an incoming proposal and returns its local id.
+    /// Records an incoming proposal and returns its local id. A repeat of an
+    /// already-pending `(peer, req_id)` returns the existing id; a proposal
+    /// over the per-peer or total cap is dropped (`None`). Proposals older than
+    /// [`INCOMING_TTL`] are swept first.
     pub async fn record_incoming(
         &self,
         req_id: String,
@@ -89,10 +103,41 @@ impl ForwardNegotiator {
         proto: String,
         remote_addr: String,
         target: String,
-    ) -> u64 {
+    ) -> Option<u64> {
         let mut inner = self.inner.lock().await;
+        let now = Instant::now();
+        let expired: Vec<u64> = inner
+            .incoming_at
+            .iter()
+            .filter(|(_, at)| now.duration_since(**at) > INCOMING_TTL)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in expired {
+            inner.incoming.remove(&id);
+            inner.incoming_at.remove(&id);
+        }
+        if let Some(existing) = inner
+            .incoming
+            .values()
+            .find(|f| f.peer_id == peer_id && f.req_id == req_id)
+        {
+            return Some(existing.id);
+        }
+        let from_peer = inner
+            .incoming
+            .values()
+            .filter(|f| f.peer_id == peer_id)
+            .count();
+        if from_peer >= MAX_INCOMING_PER_PEER || inner.incoming.len() >= MAX_INCOMING_TOTAL {
+            tracing::warn!(
+                "dropping forward request from {}: too many pending",
+                peer_id
+            );
+            return None;
+        }
         inner.next_id += 1;
         let id = inner.next_id;
+        inner.incoming_at.insert(id, now);
         inner.incoming.insert(
             id,
             IncomingForward {
@@ -104,7 +149,7 @@ impl ForwardNegotiator {
                 target,
             },
         );
-        id
+        Some(id)
     }
 
     pub async fn list_incoming(&self) -> Vec<IncomingForward> {
@@ -113,7 +158,9 @@ impl ForwardNegotiator {
 
     /// Removes and returns the incoming proposal with the given local id.
     pub async fn take_incoming(&self, id: u64) -> Option<IncomingForward> {
-        self.inner.lock().await.incoming.remove(&id)
+        let mut inner = self.inner.lock().await;
+        inner.incoming_at.remove(&id);
+        inner.incoming.remove(&id)
     }
 
     /// Remembers a request the local node just sent, keyed by protocol req id.
@@ -178,6 +225,8 @@ impl ForwardNegotiator {
 
         let before = inner.incoming.len();
         inner.incoming.retain(|_, req| req.peer_id != peer_id);
+        let live: std::collections::BTreeSet<u64> = inner.incoming.keys().copied().collect();
+        inner.incoming_at.retain(|id, _| live.contains(id));
         let incoming_removed = before - inner.incoming.len();
 
         let stale_req_ids: Vec<String> = inner
@@ -227,13 +276,80 @@ mod tests {
                 "127.0.0.1:80".into(),
                 "tcp:127.0.0.1:80".into(),
             )
-            .await;
+            .await
+            .unwrap();
 
         assert_eq!(neg.list_incoming().await.len(), 1);
         let taken = neg.take_incoming(id).await.unwrap();
         assert_eq!(taken.req_id, "r1");
         assert!(neg.list_incoming().await.is_empty());
         assert!(neg.take_incoming(id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn duplicate_req_id_from_same_peer_is_deduped() {
+        let neg = ForwardNegotiator::new();
+        let rec = |peer: &str, req: String| {
+            neg.record_incoming(
+                req,
+                peer.into(),
+                "tcp".into(),
+                "127.0.0.1:80".into(),
+                "t".into(),
+            )
+        };
+        let a = rec("p1", "r1".into()).await.unwrap();
+        let b = rec("p1", "r1".into()).await.unwrap();
+        assert_eq!(a, b);
+        assert_eq!(neg.list_incoming().await.len(), 1);
+        // Same req_id from another peer is a distinct proposal.
+        assert_ne!(rec("p2", "r1".into()).await.unwrap(), a);
+    }
+
+    #[tokio::test]
+    async fn incoming_is_capped_per_peer_and_in_total() {
+        let neg = ForwardNegotiator::new();
+        let rec = |peer: String, req: String| {
+            neg.record_incoming(req, peer, "tcp".into(), "127.0.0.1:80".into(), "t".into())
+        };
+        for i in 0..MAX_INCOMING_PER_PEER {
+            assert!(rec("p1".into(), format!("r{i}")).await.is_some());
+        }
+        assert!(rec("p1".into(), "extra".into()).await.is_none());
+        // Other peers still fit, up to the global cap.
+        let mut n = 0;
+        while rec(format!("q{}", n / MAX_INCOMING_PER_PEER), format!("r{n}"))
+            .await
+            .is_some()
+        {
+            n += 1;
+        }
+        assert_eq!(neg.list_incoming().await.len(), MAX_INCOMING_TOTAL);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stale_incoming_is_swept_after_ttl() {
+        let neg = ForwardNegotiator::new();
+        neg.record_incoming(
+            "r1".into(),
+            "p1".into(),
+            "tcp".into(),
+            "127.0.0.1:80".into(),
+            "t".into(),
+        )
+        .await;
+        tokio::time::advance(INCOMING_TTL + Duration::from_secs(1)).await;
+        neg.record_incoming(
+            "r2".into(),
+            "p2".into(),
+            "tcp".into(),
+            "127.0.0.1:80".into(),
+            "t".into(),
+        )
+        .await;
+        let listed = neg.list_incoming().await;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].req_id, "r2");
     }
 
     #[tokio::test]

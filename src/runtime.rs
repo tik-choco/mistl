@@ -93,7 +93,7 @@ pub fn dirs(config: bool) -> Result<PathBuf> {
             .join(CHANNEL)
             .join(&context().instance)
     };
-    std::fs::create_dir_all(&path)?;
+    crate::statefile::create_private_dir(&path)?;
     Ok(path)
 }
 pub fn child_args(command: &mut std::process::Command) {

@@ -10,10 +10,13 @@ use tracing::{debug, error};
 use crate::tunnel::auth::AuthRequest;
 use crate::tunnel::rtc::{RTCManager, TunnelMessage};
 
-use super::{MAX_UDP_SIZE, UdpConn, UdpManager};
+use super::{
+    MAX_PENDING_UDP_PACKETS, MAX_UDP_SESSIONS_PER_PEER, MAX_UDP_SIZE, PendingUdp, UdpConn,
+    UdpManager,
+};
 
 impl UdpManager {
-    pub async fn handle_data(&self, peer_id: &str, tm: &TunnelMessage) {
+    pub async fn handle_data(self: &Arc<Self>, peer_id: &str, tm: &TunnelMessage) {
         let payload = match &tm.payload {
             Some(p) if !p.is_empty() => p,
             _ => return,
@@ -34,9 +37,21 @@ impl UdpManager {
         let existing = {
             let conns = self.conns.read().await;
             if let Some(uc) = conns.get(&tm.conn_id) {
+                // Conn ids are chosen by the sender: only the peer that owns
+                // a session may feed it, otherwise any room peer could inject
+                // into (or reflect through) someone else's session.
+                if uc.peer_id != peer_id {
+                    debug!(
+                        "dropping udp data for conn {} from non-owner peer {}",
+                        tm.conn_id, peer_id
+                    );
+                    return;
+                }
                 if let Some(target) = &uc.target_conn {
                     Some(SendTarget::Connected(target.clone(), uc.metrics.clone()))
                 } else if let Some(addr) = uc.client_addr {
+                    // Replies go only to the local client that opened this
+                    // session, never to an address supplied by the remote.
                     let sock = self.local_socket.read().await.clone();
                     sock.map(|sock| SendTarget::Local(sock, addr, uc.metrics.clone()))
                 } else {
@@ -61,63 +76,118 @@ impl UdpManager {
             return;
         }
 
-        if !self.remote_addr.is_empty() {
-            if !self.authorize_remote_session(peer_id).await {
+        // No session for this conn id. On the connect side (no `remote_addr`)
+        // there is nothing to open: sessions there are created only by local
+        // client packets, so unsolicited remote data is dropped.
+        if self.remote_addr.is_empty() {
+            return;
+        }
+
+        // Serve side: a new session needs authorization first. That can block
+        // on a human, so it runs off this message loop; packets for the conn
+        // that arrive meanwhile are queued (bounded) on `pending`.
+        let sessions = {
+            let conns = self.conns.read().await;
+            conns.values().filter(|uc| uc.peer_id == peer_id).count()
+        };
+        {
+            let mut pending = self.pending.lock().await;
+            if let Some(entry) = pending.get_mut(&tm.conn_id) {
+                if entry.peer_id == peer_id && entry.queued.len() < MAX_PENDING_UDP_PACKETS {
+                    entry.queued.push(payload.clone());
+                }
+                return;
+            }
+            let pending_for_peer = pending.values().filter(|p| p.peer_id == peer_id).count();
+            if sessions + pending_for_peer >= MAX_UDP_SESSIONS_PER_PEER {
                 debug!(
-                    "denied udp tunnel session from {} to {}",
-                    peer_id, self.target
+                    "udp session limit reached for {}; dropping new conn {}",
+                    peer_id, tm.conn_id
                 );
                 return;
             }
-
-            match UdpSocket::bind("0.0.0.0:0").await {
-                Ok(sock) => {
-                    if let Err(e) = sock.connect(&self.remote_addr).await {
-                        error!("Failed to connect UDP: {}", e);
-                        return;
-                    }
-                    let sock = Arc::new(sock);
-                    let metrics = self.runtime.peer(peer_id);
-                    if sock.send(payload).await.is_ok() {
-                        metrics.record_bytes_out(payload.len());
-                    }
-
-                    let mut conns = self.conns.write().await;
-                    let old = conns.insert(
-                        tm.conn_id.clone(),
-                        UdpConn {
-                            target_conn: Some(sock.clone()),
-                            last_seen: Instant::now(),
-                            peer_id: peer_id.to_string(),
-                            metrics: metrics.clone(),
-                            client_addr: None,
-                        },
-                    );
-                    if old.is_none() {
-                        metrics.record_conn_open();
-                    }
-
-                    let mgr_conns = self.conns.clone();
-                    let rtc = self.rtc_manager.clone();
-                    let cid = tm.conn_id.clone();
-                    let pid = peer_id.to_string();
-                    let target = self.target.clone();
-                    let runtime = self.runtime.clone();
-                    tokio::spawn(async move {
-                        Self::forward_target_to_tunnel(
-                            sock, mgr_conns, rtc, cid, pid, target, runtime,
-                        )
-                        .await;
-                    });
-                }
-                Err(e) => error!("Failed to bind UDP: {}", e),
-            }
-        } else if let Some(ref sock) = *self.local_socket.read().await
-            && let Ok(addr) = tm.conn_id.parse::<std::net::SocketAddr>()
-            && sock.send_to(payload, &addr).await.is_ok()
-        {
-            self.runtime.peer(peer_id).record_bytes_out(payload.len());
+            pending.insert(
+                tm.conn_id.clone(),
+                PendingUdp {
+                    peer_id: peer_id.to_string(),
+                    queued: vec![payload.clone()],
+                },
+            );
         }
+
+        let mgr = self.clone();
+        let conn_id = tm.conn_id.clone();
+        let peer_id = peer_id.to_string();
+        tokio::spawn(async move { mgr.authorize_and_open(conn_id, peer_id).await });
+    }
+
+    /// Resolves authorization for a pending serve-side session (spawned by
+    /// `handle_data`) and, if allowed, opens the backend socket, flushes the
+    /// packets queued meanwhile and starts relaying replies.
+    async fn authorize_and_open(self: Arc<Self>, conn_id: String, peer_id: String) {
+        let allowed = self.authorize_remote_session(&peer_id).await;
+        if !allowed || self.runtime.is_cancelled() {
+            self.pending.lock().await.remove(&conn_id);
+            debug!(
+                "denied udp tunnel session from {} to {}",
+                peer_id, self.target
+            );
+            return;
+        }
+
+        let sock = match UdpSocket::bind("0.0.0.0:0").await {
+            Ok(sock) => sock,
+            Err(e) => {
+                error!("Failed to bind UDP: {}", e);
+                self.pending.lock().await.remove(&conn_id);
+                return;
+            }
+        };
+        if let Err(e) = sock.connect(&self.remote_addr).await {
+            error!("Failed to connect UDP: {}", e);
+            self.pending.lock().await.remove(&conn_id);
+            return;
+        }
+        let sock = Arc::new(sock);
+        let metrics = self.runtime.peer(&peer_id);
+
+        // Lock order is conns -> pending (`handle_data` never holds `pending`
+        // while taking `conns`), so the session becomes visible in `conns`
+        // in the same step its pending entry disappears.
+        let queued = {
+            let mut conns = self.conns.write().await;
+            let Some(entry) = self.pending.lock().await.remove(&conn_id) else {
+                return;
+            };
+            let old = conns.insert(
+                conn_id.clone(),
+                UdpConn {
+                    target_conn: Some(sock.clone()),
+                    last_seen: Instant::now(),
+                    peer_id: peer_id.clone(),
+                    metrics: metrics.clone(),
+                    client_addr: None,
+                },
+            );
+            if old.is_none() {
+                metrics.record_conn_open();
+            }
+            entry.queued
+        };
+        for packet in queued {
+            if sock.send(&packet).await.is_ok() {
+                metrics.record_bytes_out(packet.len());
+            }
+        }
+
+        let mgr_conns = self.conns.clone();
+        let rtc = self.rtc_manager.clone();
+        let target = self.target.clone();
+        let runtime = self.runtime.clone();
+        tokio::spawn(async move {
+            Self::forward_target_to_tunnel(sock, mgr_conns, rtc, conn_id, peer_id, target, runtime)
+                .await;
+        });
     }
 
     async fn authorize_remote_session(&self, peer_id: &str) -> bool {

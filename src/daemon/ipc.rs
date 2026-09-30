@@ -11,7 +11,7 @@ use anyhow::{Context, Result, bail};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader as TokioBufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader as TokioBufReader};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
@@ -102,7 +102,7 @@ pub async fn serve(state: Arc<AppState>) -> Result<IpcServer> {
         port,
         token: token.clone(),
     };
-    crate::statefile::write_bytes(&info_path()?, &serde_json::to_vec(&info)?)?;
+    crate::statefile::write_private(&info_path()?, &serde_json::to_vec(&info)?)?;
 
     let handle = tokio::spawn(async move {
         loop {
@@ -131,18 +131,72 @@ pub async fn serve(state: Arc<AppState>) -> Result<IpcServer> {
     })
 }
 
+/// Longest request line accepted from a client; longer lines drop the
+/// connection instead of buffering without bound (the peer may be
+/// unauthenticated).
+const MAX_LINE_BYTES: usize = 1024 * 1024;
+/// How long a fresh connection has to deliver its first (authenticating) line.
+const FIRST_LINE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Constant-time equality for the shared token.
+fn token_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    let mut diff = a.len() ^ b.len();
+    for i in 0..a.len().max(b.len()) {
+        diff |= usize::from(a.get(i).copied().unwrap_or(0) ^ b.get(i).copied().unwrap_or(0));
+    }
+    diff == 0
+}
+
+/// Reads one `\n`-terminated line of at most `max` bytes. `Ok(None)` means
+/// clean EOF; a line that exceeds `max` is an error.
+async fn read_line_limited<R>(reader: &mut R, max: usize) -> Result<Option<String>>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    let mut buf = Vec::new();
+    let read = (&mut *reader)
+        .take(max as u64 + 1)
+        .read_until(b'\n', &mut buf)
+        .await?;
+    if read == 0 {
+        return Ok(None);
+    }
+    if buf.last() == Some(&b'\n') {
+        buf.pop();
+    } else if buf.len() > max {
+        bail!("ipc request line exceeds {max} bytes");
+    }
+    Ok(Some(
+        String::from_utf8(buf).context("ipc request is not UTF-8")?,
+    ))
+}
+
 async fn handle_connection(
     socket: tokio::net::TcpStream,
     state: Arc<AppState>,
     token: String,
 ) -> Result<()> {
     let (read_half, mut write_half) = socket.into_split();
-    let mut lines = TokioBufReader::new(read_half).lines();
+    let mut reader = TokioBufReader::new(read_half);
+    let mut first = true;
 
-    while let Some(line) = lines.next_line().await? {
+    loop {
+        let line = if first {
+            first = false;
+            tokio::time::timeout(
+                FIRST_LINE_TIMEOUT,
+                read_line_limited(&mut reader, MAX_LINE_BYTES),
+            )
+            .await
+            .context("ipc client sent no request in time")??
+        } else {
+            read_line_limited(&mut reader, MAX_LINE_BYTES).await?
+        };
+        let Some(line) = line else { break };
         let response = match serde_json::from_str::<Request>(&line) {
             Ok(request)
-                if request.token == token
+                if token_eq(&request.token, &token)
                     && request.channel == crate::runtime::CHANNEL
                     && request.instance == crate::runtime::context().instance
                     && request.ipc_version == crate::runtime::IPC_VERSION =>
@@ -245,5 +299,50 @@ pub fn client_request(cmd: &str, args: Value) -> Result<Value> {
                 .error
                 .unwrap_or_else(|| "unknown daemon error".into())
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_eq_matches_only_identical_tokens() {
+        assert!(token_eq("abc", "abc"));
+        assert!(!token_eq("abc", "abd"));
+        assert!(!token_eq("abc", "abcd"));
+        assert!(!token_eq("", "a"));
+        assert!(token_eq("", ""));
+    }
+
+    #[tokio::test]
+    async fn read_line_limited_splits_lines_and_caps_length() {
+        let data = b"hello\nworld\n".to_vec();
+        let mut reader = TokioBufReader::new(&data[..]);
+        assert_eq!(
+            read_line_limited(&mut reader, 16).await.unwrap().as_deref(),
+            Some("hello")
+        );
+        assert_eq!(
+            read_line_limited(&mut reader, 16).await.unwrap().as_deref(),
+            Some("world")
+        );
+        assert!(read_line_limited(&mut reader, 16).await.unwrap().is_none());
+
+        let long = [b'a'; 100];
+        let mut reader = TokioBufReader::new(&long[..]);
+        assert!(read_line_limited(&mut reader, 16).await.is_err());
+
+        // Exactly `max` bytes plus the newline is still accepted.
+        let exact = b"0123456789abcdef\n".to_vec();
+        let mut reader = TokioBufReader::new(&exact[..]);
+        assert_eq!(
+            read_line_limited(&mut reader, 16)
+                .await
+                .unwrap()
+                .unwrap()
+                .len(),
+            16
+        );
     }
 }

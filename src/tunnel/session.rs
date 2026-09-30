@@ -353,6 +353,13 @@ impl SessionContext {
             let neg = negotiator.clone();
             manager
                 .on_forward_request(move |peer_id, ev| {
+                    if super::forward_args::is_link_local_host(&ev.remote_addr) {
+                        warn!(
+                            "ignoring forward request from {} targeting link-local address {}",
+                            peer_id, ev.remote_addr
+                        );
+                        return;
+                    }
                     let neg = neg.clone();
                     tokio::spawn(async move {
                         neg.record_incoming(
@@ -491,6 +498,11 @@ impl SessionContext {
             return Ok(format!("denied forward {}", req.target));
         }
 
+        if super::forward_args::is_link_local_host(&req.remote_addr) {
+            return Err(SessionError::Invalid(
+                "refusing forward to a link-local address".into(),
+            ));
+        }
         let proto = Proto::from_name(&req.proto)
             .map_err(|e| SessionError::Invalid(format!("invalid proto: {}", e)))?;
         let spec = ForwardSpec {

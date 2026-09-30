@@ -178,7 +178,7 @@ async fn daemon_main(host_override: Option<String>) -> Result<()> {
                 let url = crate::web::dashboard_url(&listen);
                 state.set_dashboard_url(url.clone());
                 println!("mistl dashboard: {url}");
-                info!(%url, bind = %web.url(), "web dashboard ready");
+                info!(url = %crate::web::auth::redact(&url), bind = %web.url(), "web dashboard ready");
                 // Restore "the dashboard was open" across restarts: if
                 // `ui-state.json` says a tab was open when the previous run
                 // shut down, reopen it -- after a grace period that lets an
@@ -479,6 +479,9 @@ pub async fn dispatch(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<V
                     }
                 }
             }
+            // Webhook sink header values and URL credentials/query strings
+            // are secrets too; set_by_path restores them on a round trip.
+            config::mask_bot_webhook_secrets(&mut value);
             Ok(value)
         }
         "config.set" => {

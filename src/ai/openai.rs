@@ -52,12 +52,47 @@ pub struct UpstreamConfig {
     pub reasoning_effort: Option<String>,
 }
 
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+const TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// An upstream HTTP non-2xx reply. A typed error so the provider can send
+/// peers only the status (the detail carries the upstream body) while
+/// still logging everything locally.
+#[derive(Debug)]
+pub struct UpstreamHttpError {
+    pub label: &'static str,
+    pub status: u16,
+    pub detail: String,
+}
+
+impl std::fmt::Display for UpstreamHttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} returned an error ({}): {}",
+            self.label,
+            reqwest::StatusCode::from_u16(self.status)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|_| self.status.to_string()),
+            self.detail
+        )
+    }
+}
+
+impl std::error::Error for UpstreamHttpError {}
+
 /// Builds a fresh client for one call. `no_proxy()` matters here: upstreams
 /// are typically local (Ollama/llama.cpp on 127.0.0.1) and this machine may
 /// have proxy env vars set that would otherwise break loopback requests.
 fn build_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .no_proxy()
+        .connect_timeout(CONNECT_TIMEOUT)
+        // Per-read idle bound (streams keep resetting it) plus an overall
+        // ceiling so a trickling upstream cannot hold a request forever.
+        .read_timeout(READ_TIMEOUT)
+        .timeout(TOTAL_TIMEOUT)
         .build()
         .context("ai: building upstream HTTP client")
 }
@@ -118,10 +153,11 @@ pub async fn stream_chat_completion(
     if !response.status().is_success() {
         let status = response.status();
         let body_text = response.text().await.unwrap_or_default();
-        bail!(
-            "LLM API returned an error ({status}): {}",
-            truncate_500(&body_text)
-        );
+        return Err(anyhow::Error::new(UpstreamHttpError {
+            label: "LLM API",
+            status: status.as_u16(),
+            detail: truncate_500(&body_text),
+        }));
     }
 
     let content_type = response

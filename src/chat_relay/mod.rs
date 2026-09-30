@@ -73,7 +73,7 @@
 //! on failure a few times with a short backoff -- the same idiom
 //! `crate::stream::relay`'s cascade republish uses.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -136,8 +136,107 @@ const REPLAY_THROTTLE: Duration = Duration::from_secs(3);
 /// the room's session (and other subscribers) time to settle after join --
 /// matches tc-chat's own `REQUEST_DELAY_MS`.
 const HISTORY_REQUEST_DELAY: Duration = Duration::from_millis(700);
+/// Largest raw wire accepted from a peer (checked before any parsing,
+/// verification or persistence).
+const MAX_WIRE_BYTES: usize = 64 * 1024;
+/// Extra lines the log may grow past [`WIRELOG_CAP`] before it is compacted,
+/// so a full log is not rewritten on every single message.
+const WIRELOG_COMPACT_SLACK: usize = 64;
+/// Minimum gap between two history replays across all requesters/rooms.
+const REPLAY_GLOBAL_THROTTLE: Duration = Duration::from_secs(1);
+/// Signature verifications per transport node: burst, refill per minute.
+const NODE_VERIFY_BURST: f64 = 600.0;
+const NODE_VERIFY_PER_MIN: f64 = 120.0;
+/// Stored wires per signed `fromId`: burst, refill per minute.
+const FROM_ID_BURST: f64 = 60.0;
+const FROM_ID_PER_MIN: f64 = 20.0;
+/// Stored wires overall: burst (a full catch-up replay), refill per minute.
+const GLOBAL_STORE_BURST: f64 = 600.0;
+const GLOBAL_STORE_PER_MIN: f64 = 300.0;
+/// Bucket-map size beyond which idle (full) buckets are pruned.
+const MAX_TRACKED_KEYS: usize = 4096;
 const SEND_RETRY_ATTEMPTS: u32 = 3;
 const SEND_RETRY_DELAY: Duration = Duration::from_secs(1);
+
+/// Token-bucket rate limiter keyed by string (`""` for a global bucket).
+struct RateLimiter {
+    burst: f64,
+    per_sec: f64,
+    buckets: HashMap<String, (f64, Instant)>,
+}
+
+impl RateLimiter {
+    fn new(burst: f64, per_minute: f64) -> Self {
+        Self {
+            burst,
+            per_sec: per_minute / 60.0,
+            buckets: HashMap::new(),
+        }
+    }
+
+    /// Takes one token for `key`; false when the bucket is empty.
+    fn allow(&mut self, key: &str, now: Instant) -> bool {
+        let (burst, per_sec) = (self.burst, self.per_sec);
+        if self.buckets.len() >= MAX_TRACKED_KEYS && !self.buckets.contains_key(key) {
+            self.buckets.retain(|_, (tokens, last)| {
+                *tokens + now.saturating_duration_since(*last).as_secs_f64() * per_sec < burst
+            });
+        }
+        let entry = self.buckets.entry(key.to_string()).or_insert((burst, now));
+        let elapsed = now.saturating_duration_since(entry.1).as_secs_f64();
+        entry.0 = (entry.0 + elapsed * per_sec).min(burst);
+        entry.1 = now;
+        if entry.0 >= 1.0 {
+            entry.0 -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Inbound-wire abuse limits (see the `MAX_*` / `*_BURST` constants).
+struct WireLimits {
+    node_verify: RateLimiter,
+    from_id: RateLimiter,
+    global_store: RateLimiter,
+    last_replay: Option<Instant>,
+}
+
+impl WireLimits {
+    fn new() -> Self {
+        Self {
+            node_verify: RateLimiter::new(NODE_VERIFY_BURST, NODE_VERIFY_PER_MIN),
+            from_id: RateLimiter::new(FROM_ID_BURST, FROM_ID_PER_MIN),
+            global_store: RateLimiter::new(GLOBAL_STORE_BURST, GLOBAL_STORE_PER_MIN),
+            last_replay: None,
+        }
+    }
+}
+
+/// In-memory index of one room's wirelog: the stored wire ids in file order
+/// (oldest first) plus a set for O(1) dedupe.
+#[derive(Default)]
+struct RoomIds {
+    order: VecDeque<String>,
+    set: HashSet<String>,
+}
+
+impl RoomIds {
+    fn from_lines(lines: &[Vec<u8>]) -> Self {
+        let mut ids = Self::default();
+        for id in lines.iter().filter_map(|line| line_id(line)) {
+            ids.push(id);
+        }
+        ids
+    }
+
+    fn push(&mut self, id: String) {
+        if self.set.insert(id.clone()) {
+            self.order.push_back(id);
+        }
+    }
+}
 
 /// Lazily-initialized relay state, `None` when unconfigured
 /// (`chat_relay.enabled = false`, or `chat_relay.rooms` empty).
@@ -153,8 +252,12 @@ pub struct ChatRelayService {
     /// `<data_dir>/relay`; each room gets its own `<room>/wirelog.jsonl`.
     data_dir: PathBuf,
     /// Guards wirelog file read-modify-write sequences so concurrent IPC
-    /// requests and inbound-wire appends never race on the same file.
-    wirelog_lock: Mutex<()>,
+    /// requests and inbound-wire appends never race on the same file. The
+    /// guarded map indexes each room's stored wire ids (loaded lazily) so
+    /// persisting a wire never re-reads or re-parses the whole log.
+    wirelog_lock: Mutex<HashMap<String, RoomIds>>,
+    /// Abuse limits for inbound wires and history replays.
+    limits: std::sync::Mutex<WireLimits>,
     /// Per-`(room, requester)` last-replay time (see [`REPLAY_THROTTLE`]).
     replay_throttle: std::sync::Mutex<HashMap<(String, String), Instant>>,
     /// Handle to the daemon's own tokio runtime, captured so the (plain,
@@ -228,7 +331,8 @@ async fn init_service(state: &Arc<AppState>) -> Result<Option<Arc<ChatRelayServi
         node_id,
         rooms: rooms.clone(),
         data_dir,
-        wirelog_lock: Mutex::new(()),
+        wirelog_lock: Mutex::new(HashMap::new()),
+        limits: std::sync::Mutex::new(WireLimits::new()),
         replay_throttle: std::sync::Mutex::new(HashMap::new()),
         runtime: tokio::runtime::Handle::current(),
     });
@@ -261,6 +365,9 @@ fn register_handler(service: Arc<ChatRelayService>) {
             return; // some other joined room (ai/stream/tunnel, or a
             // tc-chat room this daemon isn't configured to relay)
         }
+        if data.len() > MAX_WIRE_BYTES {
+            return; // oversized: never parse, verify or persist
+        }
         let Ok(value) = serde_json::from_slice::<Value>(data) else {
             return; // not JSON (or truncated); not ours
         };
@@ -290,6 +397,9 @@ async fn handle_wire(
     raw: Vec<u8>,
     value: Value,
 ) -> Result<()> {
+    if raw.len() > MAX_WIRE_BYTES {
+        return Ok(());
+    }
     let Value::Object(obj) = value else {
         return Ok(());
     };
@@ -309,6 +419,26 @@ async fn handle_wire(
         return Ok(());
     };
 
+    // Already stored (live delivery overlapping a replay): nothing to verify.
+    if wire_known(service, room, id).await? {
+        return Ok(());
+    }
+
+    let verify_allowed = service
+        .limits
+        .lock()
+        .expect("chat relay limits poisoned")
+        .node_verify
+        .allow(from_node, Instant::now());
+    if !verify_allowed {
+        debug!(
+            room,
+            from = from_node,
+            "chat relay: peer over verify rate limit; dropping wire"
+        );
+        return Ok(());
+    }
+
     if !verify_wire(&obj) {
         warn!(
             id,
@@ -317,6 +447,23 @@ async fn handle_wire(
             "chat relay: dropping tc-chat wire with an invalid signature"
         );
         return Ok(());
+    }
+
+    // The signed `fromId` is the rate key: it is what the signature binds.
+    let from_id = obj
+        .get("fromId")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    {
+        let mut limits = service.limits.lock().expect("chat relay limits poisoned");
+        let now = Instant::now();
+        if !limits.from_id.allow(from_id, now) || !limits.global_store.allow("", now) {
+            debug!(
+                room,
+                from_id, "chat relay: wire rate limit hit; dropping wire"
+            );
+            return Ok(());
+        }
     }
 
     persist_wire(service, room, id, &raw).await
@@ -367,6 +514,14 @@ async fn handle_history_request(
         {
             return Ok(());
         }
+        let mut limits = service.limits.lock().expect("chat relay limits poisoned");
+        if limits
+            .last_replay
+            .is_some_and(|last| now.duration_since(last) < REPLAY_GLOBAL_THROTTLE)
+        {
+            return Ok(());
+        }
+        limits.last_replay = Some(now);
         throttle.insert(key, now);
     }
 
@@ -374,7 +529,8 @@ async fn handle_history_request(
         let _guard = service.wirelog_lock.lock().await;
         read_wirelog_lines(&wirelog_path(&service.data_dir, room))?
     };
-    for line in lines {
+    let skip = lines.len().saturating_sub(WIRELOG_CAP);
+    for line in lines.into_iter().skip(skip) {
         // Best-effort, matching tc-chat's own fire-and-forget replay: one
         // failed unicast shouldn't abort the rest of the log.
         if let Err(err) = crate::net::send_direct(room, from_node, line).await {
@@ -489,21 +645,59 @@ async fn persist_wire(
         );
         return Ok(());
     }
-    let _guard = service.wirelog_lock.lock().await;
+    let mut guard = service.wirelog_lock.lock().await;
     let path = wirelog_path(&service.data_dir, room);
-    let mut lines = read_wirelog_lines(&path)?;
-    if lines
-        .iter()
-        .any(|line| line_id(line).as_deref() == Some(id))
-    {
+    let ids = room_ids(&mut guard, &path, room)?;
+    if ids.set.contains(id) {
         return Ok(());
     }
-    lines.push(raw.to_vec());
-    if lines.len() > WIRELOG_CAP {
-        let excess = lines.len() - WIRELOG_CAP;
-        lines.drain(0..excess);
+
+    let dir = path
+        .parent()
+        .context("wirelog path has no parent directory")?;
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let mut line = raw.to_vec();
+    line.push(b'\n');
+    {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("opening {}", path.display()))?;
+        file.write_all(&line)
+            .with_context(|| format!("appending to {}", path.display()))?;
     }
-    write_wirelog_lines(&path, &lines)
+    ids.push(id.to_string());
+
+    if ids.order.len() > WIRELOG_CAP + WIRELOG_COMPACT_SLACK {
+        let mut lines = read_wirelog_lines(&path)?;
+        let excess = lines.len().saturating_sub(WIRELOG_CAP);
+        lines.drain(0..excess);
+        write_wirelog_lines(&path, &lines)?;
+        *ids = RoomIds::from_lines(&lines);
+    }
+    Ok(())
+}
+
+/// The room's in-memory id index, loading it from the log on first use.
+fn room_ids<'a>(
+    map: &'a mut HashMap<String, RoomIds>,
+    path: &Path,
+    room: &str,
+) -> Result<&'a mut RoomIds> {
+    if !map.contains_key(room) {
+        let lines = read_wirelog_lines(path)?;
+        map.insert(room.to_string(), RoomIds::from_lines(&lines));
+    }
+    Ok(map.get_mut(room).expect("just inserted"))
+}
+
+/// Whether wire `id` is already stored for `room`.
+async fn wire_known(service: &Arc<ChatRelayService>, room: &str, id: &str) -> Result<bool> {
+    let mut guard = service.wirelog_lock.lock().await;
+    let path = wirelog_path(&service.data_dir, room);
+    Ok(room_ids(&mut guard, &path, room)?.set.contains(id))
 }
 
 /// Backs `chat.rooms`: configured rooms plus whether each is
@@ -538,7 +732,7 @@ async fn chat_log(state: &Arc<AppState>, room: &str, limit: usize) -> Result<Val
         let _guard = service.wirelog_lock.lock().await;
         read_wirelog_lines(&wirelog_path(&service.data_dir, room))?
     };
-    let limit = limit.max(1);
+    let limit = limit.clamp(1, WIRELOG_CAP);
     let tail: Vec<&Vec<u8>> = lines.iter().rev().take(limit).collect();
 
     let mut items = Vec::with_capacity(tail.len());
@@ -690,7 +884,8 @@ mod tests {
             node_id: "test-local-node".into(),
             rooms,
             data_dir,
-            wirelog_lock: Mutex::new(()),
+            wirelog_lock: Mutex::new(HashMap::new()),
+            limits: std::sync::Mutex::new(WireLimits::new()),
             replay_throttle: std::sync::Mutex::new(HashMap::new()),
             runtime: tokio::runtime::Handle::current(),
         })
@@ -805,6 +1000,78 @@ mod tests {
             .unwrap();
         let lines = read_wirelog_lines(&wirelog_path(&service.data_dir, "room-a")).unwrap();
         assert_eq!(lines.len(), 1, "the same wire id must not be stored twice");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rate_limiter_enforces_burst_and_refills() {
+        let mut limiter = RateLimiter::new(3.0, 60.0); // 1 token / s
+        let t0 = Instant::now();
+        assert!(limiter.allow("a", t0));
+        assert!(limiter.allow("a", t0));
+        assert!(limiter.allow("a", t0));
+        assert!(!limiter.allow("a", t0));
+        assert!(limiter.allow("b", t0), "keys are independent");
+        assert!(limiter.allow("a", t0 + Duration::from_secs(2)));
+    }
+
+    #[tokio::test]
+    async fn handle_wire_drops_oversized_wires_and_rate_limits_per_from_id() {
+        let (did, signing_key) = test_did_and_signer();
+        let dir = scratch_dir("limits");
+        let service = test_service(dir.clone(), vec!["room-a".into()]);
+
+        // Oversized: dropped before verification even if otherwise valid.
+        let mut fields = sample_post_fields(&did);
+        fields.insert("id".into(), json!("big"));
+        fields.insert("pad".into(), json!("x".repeat(MAX_WIRE_BYTES)));
+        let raw = sign_wire(&signing_key, fields);
+        let value: Value = serde_json::from_slice(&raw).unwrap();
+        handle_wire(&service, "room-a", "peer", WIRE_POST, raw, value)
+            .await
+            .unwrap();
+        let path = wirelog_path(&service.data_dir, "room-a");
+        assert!(read_wirelog_lines(&path).unwrap().is_empty());
+
+        // Per-fromId bucket: only FROM_ID_BURST of many valid wires stored.
+        let total = FROM_ID_BURST as usize + 10;
+        for n in 0..total {
+            let mut fields = sample_post_fields(&did);
+            fields.insert("id".into(), json!(format!("w{n}")));
+            let raw = sign_wire(&signing_key, fields);
+            let value: Value = serde_json::from_slice(&raw).unwrap();
+            handle_wire(&service, "room-a", "peer", WIRE_POST, raw, value)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            read_wirelog_lines(&path).unwrap().len(),
+            FROM_ID_BURST as usize
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn persist_wire_caps_the_log_after_compaction() {
+        let dir = scratch_dir("cap");
+        let service = test_service(dir.clone(), vec!["room-a".into()]);
+        let total = WIRELOG_CAP + WIRELOG_COMPACT_SLACK + 5;
+        for n in 0..total {
+            let id = format!("id{n}");
+            let raw = format!(r#"{{"id":"{id}"}}"#);
+            persist_wire(&service, "room-a", &id, raw.as_bytes())
+                .await
+                .unwrap();
+        }
+        let lines = read_wirelog_lines(&wirelog_path(&service.data_dir, "room-a")).unwrap();
+        assert!(lines.len() <= WIRELOG_CAP + WIRELOG_COMPACT_SLACK);
+        assert!(lines.len() >= WIRELOG_CAP);
+        assert_eq!(
+            line_id(lines.last().unwrap()).unwrap(),
+            format!("id{}", total - 1)
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -284,6 +284,9 @@ pub(super) fn decrypt_folder_key_grant(
         .decode(cipher_text_b64)
         .context("grant ciphertext")?;
     let cipher = Aes256Gcm::new_from_slice(key_bytes.as_slice()).context("grant key")?;
+    if iv.len() != 12 {
+        bail!("grant iv must be 12 bytes");
+    }
     let nonce = Nonce::from_slice(&iv);
     let plain = cipher
         .decrypt(nonce, cipher_text.as_slice())
@@ -633,15 +636,44 @@ pub(super) async fn p2p_storage_add(name: &str, data: Vec<u8>) -> Result<String>
     .context("p2p storage_add task")?
 }
 
+/// Largest encrypted JSON bundle (folder bundle / manifest) accepted from a
+/// peer.
+pub(super) const MAX_JSON_BLOB_BYTES: usize = 16 * 1024 * 1024;
+/// Largest encrypted file-content blob accepted from a peer.
+pub(super) const MAX_FILE_BLOB_BYTES: usize = 512 * 1024 * 1024;
+/// Largest number of folders / files accepted in one folder bundle.
+pub(super) const MAX_BUNDLE_ENTRIES: usize = 100_000;
+
+/// [`fetch_blob`] that rejects blobs larger than `max` bytes.
+async fn fetch_blob_capped(store: &Store, cid: &str, max: usize) -> Result<Vec<u8>> {
+    let raw = fetch_blob(store, cid).await?;
+    if raw.len() > max {
+        bail!("blob {cid} is too large ({} bytes, limit {max})", raw.len());
+    }
+    Ok(raw)
+}
+
+/// Reject folder bundles with an absurd number of folders or files.
+fn check_bundle_entry_counts(bundle: &super::domain::FolderBundle) -> Result<()> {
+    let folders = bundle.folders.as_ref().map_or(0, Vec::len);
+    if folders > MAX_BUNDLE_ENTRIES || bundle.files.len() > MAX_BUNDLE_ENTRIES {
+        bail!("folder bundle has too many entries (limit {MAX_BUNDLE_ENTRIES})");
+    }
+    Ok(())
+}
+
 pub(super) async fn fetch_folder_bundle(
     store: &Store,
     cid: &str,
     folder_key: &str,
 ) -> Result<super::domain::FolderBundle> {
-    let raw = fetch_blob(store, cid).await?;
+    let raw = fetch_blob_capped(store, cid, MAX_JSON_BLOB_BYTES).await?;
     let payload: super::crypto::EncryptedPayload =
         serde_json::from_slice(&raw).context("folder bundle parse")?;
-    super::crypto::decrypt_json(&payload, folder_key)
+    let bundle: super::domain::FolderBundle =
+        super::crypto::decrypt_json_async(payload, folder_key.to_string()).await?;
+    check_bundle_entry_counts(&bundle)?;
+    Ok(bundle)
 }
 
 pub(super) async fn fetch_file_content(
@@ -649,22 +681,52 @@ pub(super) async fn fetch_file_content(
     cid: &str,
     folder_key: &str,
 ) -> Result<Vec<u8>> {
-    let raw = fetch_blob(store, cid).await?;
+    let raw = fetch_blob_capped(store, cid, MAX_FILE_BLOB_BYTES).await?;
     let payload: super::crypto::EncryptedPayload =
         serde_json::from_slice(&raw).context("file bundle parse")?;
-    let bundle: super::domain::FileBundle = super::crypto::decrypt_json(&payload, folder_key)?;
+    drop(raw);
+    let bundle: super::domain::FileBundle =
+        super::crypto::decrypt_json_async(payload, folder_key.to_string()).await?;
     let data_url = bundle.file.data_url.context("file has no content")?;
     decode_data_url(&data_url)
 }
 
-/// Replace path separators and reject empty/`.`/`..` names, matching Go's
-/// `sanitizeName`.
+/// Windows reserved device names (matched case-insensitively on the stem).
+fn is_reserved_device_name(stem: &str) -> bool {
+    let upper = stem.to_ascii_uppercase();
+    matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ((upper.starts_with("COM") || upper.starts_with("LPT"))
+            && upper.len() == 4
+            && upper.as_bytes()[3].is_ascii_digit()
+            && upper.as_bytes()[3] != b'0')
+}
+
+/// Turn a remote-supplied name into a single safe path component on every
+/// platform (a share may later be synced on Windows): separators, Windows
+/// forbidden characters and control characters become `_`, trailing dots and
+/// spaces are trimmed, reserved device names (`CON`, `nul.txt`, ...) get a
+/// `_` prefix, and empty/`.`/`..` names become `_`.
 pub(super) fn sanitize_name(name: &str) -> String {
-    let trimmed = name.trim().replace(['/', '\\'], "_");
-    if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
-        "untitled".to_string()
+    let replaced: String = name
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let trimmed = replaced.trim_end_matches(['.', ' ']);
+    if trimmed.is_empty() {
+        return "_".to_string();
+    }
+    let stem = trimmed.split('.').next().unwrap_or(trimmed).trim_end();
+    if is_reserved_device_name(stem) {
+        format!("_{trimmed}")
     } else {
-        trimmed
+        trimmed.to_string()
     }
 }
 
@@ -997,6 +1059,35 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use super::*;
+
+    #[test]
+    fn sanitize_name_neutralizes_hostile_names() {
+        assert_eq!(sanitize_name("a/b\\c"), "a_b_c");
+        assert_eq!(sanitize_name("../x"), ".._x");
+        assert_eq!(sanitize_name(".."), "_");
+        assert_eq!(sanitize_name("."), "_");
+        assert_eq!(sanitize_name("   "), "_");
+        assert_eq!(sanitize_name("a:b<c>d\"e|f?g*h"), "a_b_c_d_e_f_g_h");
+        assert_eq!(sanitize_name("nul\0x\u{1}y"), "nul_x_y");
+        assert_eq!(sanitize_name("report. . "), "report");
+        assert_eq!(sanitize_name("CON"), "_CON");
+        assert_eq!(sanitize_name("nul.txt"), "_nul.txt");
+        assert_eq!(sanitize_name("Com1"), "_Com1");
+        assert_eq!(sanitize_name("LPT9.log"), "_LPT9.log");
+        assert_eq!(sanitize_name("COM0"), "COM0");
+        assert_eq!(sanitize_name("console.txt"), "console.txt");
+        assert_eq!(sanitize_name("plain.txt"), "plain.txt");
+    }
+
+    #[test]
+    fn decrypt_folder_key_grant_rejects_short_iv() {
+        let secret = EphemeralSecret::random(&mut rand::rngs::OsRng);
+        let peer = EphemeralSecret::random(&mut rand::rngs::OsRng);
+        let peer_pub = URL_SAFE_NO_PAD.encode(peer.public_key().to_encoded_point(false).as_bytes());
+        let short_iv = BASE64_STANDARD.encode([0u8; 5]);
+        let ct = BASE64_STANDARD.encode([0u8; 32]);
+        assert!(decrypt_folder_key_grant(&ct, &short_iv, &secret, &peer_pub).is_err());
+    }
 
     #[tokio::test]
     async fn single_flight_joins_concurrent_calls_for_the_same_key() {
