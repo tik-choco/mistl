@@ -31,6 +31,11 @@
       proposeNote:'相手が承認すると転送が始まります。', proposeSent:'相手に提案しました。相手が受け入れると転送が始まります。',
       badAddr:'「ホスト:ポート」の形式で入力してください（例: 127.0.0.1:8080）。', proto:'プロトコル',
       portBusy:'このアドレスは他のプログラムが使用中です。別のポートを指定してください。', portUnusable:'このアドレスでは待ち受けできません', useSuggestion:'{addr} を使う',
+      waitAccept:'{peer} の承認待ち', waitApprove:'{peer} の接続承認待ち', deniedBy:'{peer} が接続を拒否しました',
+      cancel:'提案を取り消す', cancelled:'提案を取り消しました。', proposalWire:'承認待ち', toPeer:'→ {peer}（{addr}）',
+      nDenied:'{peer} が提案を断りました（{target}）。', nTimeout:'{peer} から応答がなく、提案がタイムアウトしました（{target}）。',
+      nPeerLeft:'{peer} が応答する前に退出しました（{target}）。', nFailed:'提案が失敗しました（{target}）: {detail}',
+      nAccepted:'{peer} が承認しました。{local} への接続が {target} へ転送されます。', nAddFailed:'{peer} は承認しましたが、このノードでポートを開けませんでした: {detail}',
     },
     en: {
       title:'Build your connections', help:'Drag between ports (or click two ports in turn) to link nodes. Click a link for details.',
@@ -62,6 +67,19 @@
       proposeNote:'The forward starts once the peer accepts.', proposeSent:'Proposal sent. The forward starts once the peer accepts.',
       badAddr:'Enter host:port (for example 127.0.0.1:8080).', proto:'Protocol',
       portBusy:'Another program is using this address. Choose a different port.', portUnusable:'Cannot listen on this address', useSuggestion:'Use {addr}',
+      waitAccept:'Waiting for {peer} to accept', waitApprove:'Waiting for {peer} to approve the connection', deniedBy:'{peer} denied the connection',
+      cancel:'Cancel proposal', cancelled:'Proposal cancelled.', proposalWire:'Waiting for approval', toPeer:'→ {peer} ({addr})',
+      nDenied:'{peer} denied your proposal for {target}.', nTimeout:'{peer} did not answer your proposal for {target} (timed out).',
+      nPeerLeft:'{peer} left before answering your proposal for {target}.', nFailed:'Proposal for {target} failed: {detail}',
+      nAccepted:'{peer} accepted. Connections to {local} are now forwarded to {target}.', nAddFailed:'{peer} accepted, but this node could not open the port: {detail}',
+    },
+    // Only the strings added after the first release; the rest fall back to English.
+    zh: {
+      waitAccept:'等待 {peer} 接受', waitApprove:'等待 {peer} 批准连接', deniedBy:'{peer} 拒绝了连接',
+      cancel:'取消提议', cancelled:'提议已取消。', proposalWire:'等待批准', toPeer:'→ {peer}（{addr}）',
+      nDenied:'{peer} 拒绝了你的提议（{target}）。', nTimeout:'{peer} 未回应，提议已超时（{target}）。',
+      nPeerLeft:'{peer} 在回应之前已离开（{target}）。', nFailed:'提议失败（{target}）：{detail}',
+      nAccepted:'{peer} 已接受。到 {local} 的连接将转发到 {target}。', nAddFailed:'{peer} 已接受，但本节点无法打开端口：{detail}',
     }
   };
   const ADDR = /^\S+:\d{1,5}$/;
@@ -69,6 +87,7 @@
 
   function create(options) {
     const doc = options.document, host = options.host;
+    let noticeSeen = null, subscribed = false;
     let snapshot = null, models = [], positions = {}, source = null, drag = null, busy = false, signature = '', room = '', language = '';
     const statsEls = new Map();
     function statKey(f) { return f.target || f.addr; }
@@ -79,7 +98,14 @@
     }
     function statsText(f) { return (f.state || '') + ' · ' + (f.active_conns || 0) + ' ' + t('conns') + ' · ↑' + formatBytes(f.bytes_out) + ' ↓' + formatBytes(f.bytes_in); }
     function updateStats(forwards) { (forwards || []).forEach(f => { const e = statsEls.get(statKey(f)); if (e) e.textContent = statsText(f); }); }
-    const t = key => (words[doc.documentElement.lang === 'ja' ? 'ja' : 'en'][key] || key);
+    const lang = () => { const l = String(doc.documentElement.lang || '').slice(0, 2); return l === 'ja' || l === 'zh' ? l : 'en'; };
+    const t = key => (words[lang()][key] || words.en[key] || key);
+    const fmt = (key, vars) => t(key).replace(/\{(\w+)\}/g, (m, name) => (vars && vars[name] != null ? String(vars[name]) : m));
+    // Peer names are self-claimed display text; ids stay visible next to them.
+    const peersApi = () => root.MistlPeers && typeof root.MistlPeers.label === 'function' ? root.MistlPeers : null;
+    const peerName = id => { const p = peersApi(); const peer = p && p.byNode && p.byNode(id); return peer && peer.name ? p.label(id) : ''; };
+    const peerLabel = id => peerName(id) || id;
+    const peerText = id => { const name = peerName(id); return name && name !== id ? name + ' (' + id + ')' : id; };
     const el = (tag, cls, text) => { const e = doc.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
     const button = (text, cls, action) => { const e = el('button', cls, text); e.type = 'button'; e.addEventListener('click', action); return e; };
     const line = el('div', 'tg-toolbar'), title = el('h3'), hint = el('p', 'tg-help');
@@ -168,7 +194,9 @@
         const card = el('article','tg-node' + (model.self ? ' tg-self' : '')); card.dataset.nodeId = model.id;
         const pos = position(model,index); card.style.left = Math.max(8,pos.x) + 'px'; card.style.top = Math.max(8,pos.y) + 'px';
         const head = el('div','tg-node-head'); head.tabIndex = 0; head.title = model.id; head.setAttribute('aria-label', model.id + ' — ' + t('help'));
-        head.append(el('span','tg-node-dot'), el('strong','',model.self ? t('self') : t('peer')));
+        const named = !model.self && peerName(model.id);
+        const avatar = named && peersApi().avatarEl ? peersApi().avatarEl(model.id, 18) : null;
+        head.append(avatar || el('span','tg-node-dot'), el('strong','',model.self ? t('self') : (named || t('peer'))));
         const id = el('div','tg-node-id', model.id); id.title = model.id;
         function connector(side) {
           const port = button('', 'tg-port' + (side === 'left' ? ' tg-port-in' : ''), () => choose(model.id)); port.title = t('connect'); port.setAttribute('aria-label', t('connect') + ' — ' + model.id + ' (' + side + ')'); port.dataset.port = model.id;
@@ -195,11 +223,16 @@
           if (model.node.locked) badges.append(el('span','tg-badge',t('locked')));
           if (badges.childNodes.length) card.append(badges);
           const list = el('div','tg-forwards');
-          if (!model.node.forwards.length) list.append(el('p','tg-empty',t('empty')));
+          const outgoing = model.node.outgoing || [];
+          if (!model.node.forwards.length && !outgoing.length) list.append(el('p','tg-empty',t('empty')));
+          // Proposals this node sent that the peer has not answered yet.
+          outgoing.forEach(o => list.append(outgoingRow(o)));
           model.node.forwards.forEach(f => {
             const row = el('div','tg-forward'), text = el('div','tg-forward-text');
             text.append(el('span','tg-proto',String(f.proto || '').toUpperCase()),el('span','',f.direction === 'serve' ? ' ↑ ' : ' ↓ '),el('span','',f.addr));
             if (f.direction === 'connect') { const dest = el('small','',f.target); dest.title=f.target; text.append(dest); }
+            if (f.awaiting_approval) text.append(pill('tg-wait','⏳ '+fmt('waitApprove',{peer:peerLabel(f.approval_peer_id||'')}),f.approval_peer_id));
+            else if (f.denied_at_ms) text.append(pill('tg-denied','✕ '+fmt('deniedBy',{peer:peerLabel(f.approval_peer_id||'')}),f.approval_peer_id));
             if (f.state === 'error') text.append(el('small','tg-error', t('error') + ': ' + f.error));
             if (model.self) { const stats = el('small','tg-stats'); stats.textContent = statsText(f); text.append(stats); statsEls.set(statKey(f), stats); }
             row.append(text);
@@ -226,17 +259,46 @@
       drawWires();
       if(focusId&&focusIndex>=0) [...nodes.children].find(c=>c.dataset.nodeId===focusId)?.querySelectorAll('button,input,[tabindex]')[focusIndex]?.focus({preventScroll:true});
     }
+    // A status pill; the full peer id stays reachable next to a claimed name.
+    function pill(cls, text, peerId) {
+      const wrap = el('span','tg-pill-wrap'), p = el('span','tg-pill '+cls,text); p.setAttribute('role','status'); wrap.append(p);
+      if (peerId && peerLabel(peerId) !== peerId) wrap.append(el('small','tg-peer-id',peerId));
+      return wrap;
+    }
+    function outgoingRow(o) {
+      const row = el('div','tg-forward tg-outgoing'), text = el('div','tg-forward-text');
+      text.append(el('span','tg-proto',String(o.proto || '').toUpperCase()),el('span','',' ↓ '),el('span','',o.local_addr || String(o.listen_port || '')));
+      const dest = el('small','',fmt('toPeer',{peer:peerLabel(o.peer_id),addr:o.remote_addr || ''})); dest.title = o.target || ''; text.append(dest);
+      text.append(pill('tg-wait','⏳ '+fmt('waitAccept',{peer:peerLabel(o.peer_id)}),o.peer_id));
+      row.append(text);
+      if (o.req_id) {
+        const cancel = button('×','tg-remove',() => perform(async () => { await options.api('tunnel.forward.propose.cancel',{req_id:o.req_id}); return t('cancelled'); }));
+        cancel.title = t('cancel'); cancel.setAttribute('aria-label',t('cancel')+' '+(o.local_addr || '')); row.append(cancel);
+      }
+      return row;
+    }
+    // Peers this node is waiting on: an unanswered proposal, or a connection the owner parked for approval.
+    function waitingPeers() {
+      const self = models.find(m => m.self), set = new Set();
+      if (!self || !self.node) return set;
+      (self.node.outgoing || []).forEach(o => o.peer_id && set.add(o.peer_id));
+      self.node.forwards.forEach(f => { if (f.awaiting_approval && f.approval_peer_id) set.add(f.approval_peer_id); });
+      return set;
+    }
     function drawWires() {
       svg.replaceChildren();
       let width=660,height=380;
       const cards = new Map([...nodes.children].map(c=>[c.dataset.nodeId,c]));
       cards.forEach(c=>{width=Math.max(width,parseFloat(c.style.left)+310);height=Math.max(height,parseFloat(c.style.top)+(c.offsetHeight||250)+40);c.classList.toggle('tg-connecting',c.dataset.nodeId===source);});
       canvas.style.width=width+'px';canvas.style.height=height+'px'; svg.setAttribute('width',width);svg.setAttribute('height',height);
+      const waiting=waitingPeers();
       models.forEach((a,i)=>models.slice(i+1).forEach(b=>{
-        if (!a.node || !b.node) return;
-        const ab=a.node.links.includes(b.id), ba=b.node.links.includes(a.id), explicit=ab||ba;
-        const allowed=(a.node.broadcast||ab)&&(b.node.broadcast||ba);
-        if (!explicit&&!allowed) return;
+        // The self <-> peer wire is pending while a proposal or approval is outstanding.
+        const awaiting=(a.self&&waiting.has(b.id))||(b.self&&waiting.has(a.id));
+        const ab=!!a.node?.links.includes(b.id), ba=!!b.node?.links.includes(a.id), explicit=ab||ba;
+        const allowed=!!a.node&&!!b.node&&(a.node.broadcast||ab)&&(b.node.broadcast||ba);
+        if (!awaiting&&(!a.node||!b.node)) return;
+        if (!explicit&&!allowed&&!awaiting) return;
         let ca=cards.get(a.id),cb=cards.get(b.id);
         if(parseFloat(ca.style.left)>parseFloat(cb.style.left)) [ca,cb]=[cb,ca];
         const leftA=parseFloat(ca.style.left),leftB=parseFloat(cb.style.left),x1=leftA+282,y1=parseFloat(ca.style.top)+48,y2=parseFloat(cb.style.top)+48;
@@ -246,9 +308,9 @@
         path.setAttribute('d',horizontal
           ? (leftB-leftA<400?`M ${x1} ${y1} C ${x1+22} ${y1}, ${x2-22} ${y2}, ${x2} ${y2}`:`M ${x1} ${y1} L ${x1+18} ${y1} L ${x1+18} ${lane} L ${x2-18} ${lane} L ${x2-18} ${y2} L ${x2} ${y2}`)
           : `M ${x1} ${y1} C ${Math.max(x1,x2)+80} ${y1}, ${Math.max(x1,x2)+80} ${y2}, ${x2} ${y2}`);
-        path.setAttribute('class','tg-wire '+(explicit?(allowed?'tg-direct':'tg-pending'):'tg-broadcast'));
-        path.setAttribute('role','button');path.setAttribute('tabindex','0');path.setAttribute('aria-label',`${a.id} ↔ ${b.id} · ${t(explicit?(allowed?'direct':'pending'):'room')}`);
-        const open=()=>showEdge(a,b,explicit,allowed);path.addEventListener('click',open);path.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();open();}});svg.append(path);
+        path.setAttribute('class','tg-wire '+(explicit||allowed?(explicit?(allowed?'tg-direct':'tg-pending'):'tg-broadcast'):'')+(awaiting?' tg-awaiting':''));
+        path.setAttribute('role','button');path.setAttribute('tabindex','0');path.setAttribute('aria-label',`${a.id} ↔ ${b.id} · ${awaiting?t('proposalWire'):t(explicit?(allowed?'direct':'pending'):'room')}`);
+        const open=()=>{ if(a.node&&b.node) showEdge(a,b,explicit,allowed); };path.addEventListener('click',open);path.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();open();}});svg.append(path);
       }));
     }
     function showEdge(a,b,explicit,allowed) {
@@ -261,7 +323,7 @@
       if (!allowed || !explicit) { const connect=button(t('direct'),'primary',()=>{closeModal();link(a,b,true);});connect.disabled=![a,b].every(m=>can(m,'edit_links'));foot.append(connect); }
       pane.append(foot);focusFirst();
     }
-    function nodeLabel(model) { return model.self ? t('self') : model.id; }
+    function nodeLabel(model) { return model.self ? t('self') : peerText(model.id); }
     // A two-box "from → to" picture used by the link editor and the wizard summary.
     function flow(from,to,arrow) {
       const wrap=el('div','tg-flow');
@@ -313,7 +375,7 @@
     function renderStep() {
       const w=wizard,model=w.model,steps=wizardSteps(w),step=steps[w.index];
       const pane=modal(t('addTitle'));pane.dataset.step=step;
-      if (!model.self) pane.append(el('p','tg-dialog-node',model.id));
+      if (!model.self) pane.append(el('p','tg-dialog-node',peerText(model.id)));
       if (w.type) pane.append(el('p','tg-step',t('step').replace('{n}',w.index+1).replace('{total}',steps.length)));
       const form=el('form','tg-wizard');form.noValidate=true;pane.append(form);
       const ask=key=>form.append(el('h4','tg-question',t(key)));
@@ -331,12 +393,12 @@
         ask('askPeer');
         const peers=peersFor(model);
         if (!peers.length) form.append(el('p','tg-empty',t('noPeers')));
-        peers.forEach(p=>form.append(choice(p.id,'',p.id,w.peer===p.id,()=>{w.peer=p.id;go(1);},true)));
+        peers.forEach(p=>{const name=peerName(p.id);form.append(choice(name||p.id,name?p.id:'',p.id,w.peer===p.id,()=>{w.peer=p.id;go(1);},true));});
       } else if (step==='service') {
         ask('askService');
         const services=servicesFor(model);
         if (!services.length) form.append(el('p','tg-empty',t('noService')));
-        services.forEach(s=>form.append(choice(String(s.proto||'').toUpperCase()+'  '+s.addr,s.node,s.target,w.service?.target===s.target,()=>{w.service=s;w.proto=s.proto;go(1);},true)));
+        services.forEach(s=>form.append(choice(String(s.proto||'').toUpperCase()+'  '+s.addr,peerText(s.node),s.target,w.service?.target===s.target,()=>{w.service=s;w.proto=s.proto;go(1);},true)));
       } else if (step==='remote'||step==='local'||step==='serve') {
         const key={remote:'remote',local:'local',serve:'addr'}[step];
         ask({remote:'askRemote',local:'askLocal',serve:'askServe'}[step]);
@@ -357,8 +419,8 @@
       } else if (step==='confirm') {
         ask('askConfirm');
         const proto=String(w.proto).toUpperCase(),self=nodeLabel(model);
-        if (w.type==='propose') { const peer=w.peer||peersFor(model)[0]?.id||'';w.peer=peer;form.append(flow([self,w.local],[peer,w.remote])); }
-        else if (w.type==='connect') form.append(flow([self,w.local],[w.service.node,w.service.addr]));
+        if (w.type==='propose') { const peer=w.peer||peersFor(model)[0]?.id||'';w.peer=peer;form.append(flow([self,w.local],[peerText(peer),w.remote])); }
+        else if (w.type==='connect') form.append(flow([self,w.local],[peerText(w.service.node),w.service.addr]));
         else form.append(flow([self,w.addr],[t('published'),'']));
         form.append(el('p','tg-summary-proto',t('proto')+': '+proto));
         if (w.type==='propose') form.append(el('p','tg-help',t('proposeNote')));
@@ -467,7 +529,30 @@
     doc.addEventListener('pointercancel',()=>{drag=null;source=null;drawWires();});
     doc.addEventListener('keydown',e=>{if(e.key==='Escape'){source=null;drag=null;notice('');drawWires();}});
 
+    // Localized text for a session notice that carries a machine-readable code
+    // (the outcome of a proposal); anything else keeps the daemon's text.
+    function noticeText(n) {
+      const codes={proposal_denied:'nDenied',proposal_timeout:'nTimeout',proposal_peer_left:'nPeerLeft',proposal_failed:'nFailed',proposal_accepted:'nAccepted',proposal_add_failed:'nAddFailed'};
+      if (!codes[n.code]) return String(n.text||'');
+      return fmt(codes[n.code],{peer:peerText(n.peer_id||''),target:String(n.target||'').replace(/@[^@]*$/,''),local:n.detail||'',detail:n.detail||''});
+    }
+    // Shows each notice once as it appears (the first snapshot only sets the
+    // baseline, so old notices are not replayed on page load). The answer to a
+    // proposal -- denied, timed out, accepted -- thus never goes unnoticed.
+    function announce(list) {
+      list=Array.isArray(list)?list.filter(n=>n&&typeof n==='object'):[];
+      const keys=new Set(list.map(n=>(n.timestamp_ms||0)+'|'+(n.text||'')));
+      if (noticeSeen===null) { noticeSeen=keys; return; }
+      list.forEach(n=>{
+        if (noticeSeen.has((n.timestamp_ms||0)+'|'+(n.text||''))) return;
+        const text=noticeText(n),bad=n.kind==='error';
+        notice(text,bad);
+        if (options.toast) options.toast(text,bad?'error':'success');
+      });
+      noticeSeen=keys;
+    }
     function render(data) {
+      announce(data&&data.notices);
       snapshot=data;
       const nextRoom=data?.room||'';
       if(room!==nextRoom){room=nextRoom;source=null;closeModal();positions={};try{positions=JSON.parse(root.localStorage.getItem('mistl-tunnel-layout:'+room)||'{}')||{};}catch(_){} signature='';}
@@ -476,8 +561,10 @@
       if(!data?.running){models=[];signature='';source=null;closeModal();nodes.replaceChildren();svg.replaceChildren();statsEls.clear();return;}
       if(!data.graph){hint.textContent=t('unavailable');models=[];signature='';closeModal();nodes.replaceChildren();svg.replaceChildren();statsEls.clear();return;}
       const policy=data.graph.policy;
-      models=[{id:data.self_id,self:true,node:{...policy,forwards:data.forwards||[]}},...(data.graph.nodes||[]).map(m=>({...m,self:false}))].map(m=>({...m,room,node:m.node?{...m.node,forwards:(m.node.forwards||[]).filter(f=>f&&typeof f.addr==='string'&&typeof f.target==='string')}:null}));
-      const next=JSON.stringify(models.map(m=>({...m,node:m.node?{...m.node,forwards:m.node.forwards.map(({active_conns,bytes_in,bytes_out,peers,...f})=>f)}:null}))),lang=doc.documentElement.lang;
+      if(!subscribed&&peersApi()&&typeof peersApi().subscribe==='function'){subscribed=true;peersApi().subscribe(()=>{signature='';if(snapshot&&!drag)render(snapshot);});}
+      models=[{id:data.self_id,self:true,node:{...policy,forwards:data.forwards||[],outgoing:data.pending_outgoing||[]}},...(data.graph.nodes||[]).map(m=>({...m,self:false}))].map(m=>({...m,room,node:m.node?{...m.node,forwards:(m.node.forwards||[]).filter(f=>f&&typeof f.addr==='string'&&typeof f.target==='string')}:null}));
+      const names=models.map(m=>peerName(m.id)).join('\u0001');
+      const next=JSON.stringify(models.map(m=>({...m,node:m.node?{...m.node,forwards:m.node.forwards.map(({active_conns,bytes_in,bytes_out,peers,...f})=>f)}:null})))+names,lang=doc.documentElement.lang;
       updateStats(data.forwards);
       if(drag||(next===signature&&lang===language))return;
       signature=next;language=lang;drawNodes();

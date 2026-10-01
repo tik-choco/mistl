@@ -283,6 +283,11 @@ pub(super) async fn handle_payload(inner: Arc<RTCManagerInner>, peer_id: String,
     // payloads land on the same wire (see `TUNNEL_INTEGRATION_CONTRACT.md`
     // seam 2).
     let Ok(payload) = serde_json::from_slice::<P2pPayload>(&data) else {
+        // Not a `kind` envelope. A `t`-tagged side message (the connect-time
+        // approval notice, a proposal cancel) goes to its subscribers; anything
+        // else (tc-chat, ai, consensus, ...) is not ours. Subscribers only see
+        // messages whose `t` starts with the tunnel prefix.
+        dispatch_aux(&inner, peer_id, &data).await;
         return;
     };
 
@@ -313,12 +318,10 @@ pub(super) async fn handle_payload(inner: Arc<RTCManagerInner>, peer_id: String,
                 .await
                 .insert(peer_id, forwards.into_iter().collect());
         }
-        P2pPayload::Chat { text } => {
-            let handlers = inner.chat_handlers.read().await;
-            for h in handlers.iter() {
-                h(peer_id.clone(), text.clone());
-            }
-        }
+        // Room chat was removed (mistl has direct messages now). Older mistl
+        // builds and the p2p crate still send it, so the variant stays in the
+        // envelope to parse it, and the content is dropped.
+        P2pPayload::Chat { .. } => {}
         P2pPayload::Tunnel { data } => {
             if !inner.graph.allows_traffic(&peer_id).await {
                 return;
@@ -347,7 +350,7 @@ pub(super) async fn handle_payload(inner: Arc<RTCManagerInner>, peer_id: String,
             if !inner.graph.allows_traffic(&peer_id).await {
                 return;
             }
-            // Only an explicit stdio packet (not e.g. a first Chat/Role
+            // Only an explicit stdio packet (not e.g. a first Role
             // payload) can open a stdio session for a peer we saw no JOIN for.
             if inner.stdio_opened.write().await.insert(peer_id.clone()) {
                 notify(&inner.stdio_open_handlers, peer_id.clone()).await;
@@ -408,6 +411,30 @@ pub(super) async fn handle_payload(inner: Arc<RTCManagerInner>, peer_id: String,
 ///
 /// The empty-`msg.target` -> `default_target` rule is unrelated to scoping
 /// and is preserved as-is.
+/// Hands a tunnel `t`-tagged side message to the `on_aux_message`
+/// subscribers. The cheap substring test keeps this off the hot path for
+/// every other module's traffic that shares the wire.
+async fn dispatch_aux(inner: &Arc<RTCManagerInner>, peer_id: String, data: &[u8]) {
+    const PREFIX: &[u8] = b"\"mistl-tunnel-";
+    if !data.windows(PREFIX.len()).any(|w| w == PREFIX) {
+        return;
+    }
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(data) else {
+        return;
+    };
+    if !value
+        .get("t")
+        .and_then(|t| t.as_str())
+        .is_some_and(|t| t.starts_with(crate::tunnel::notice::TAG_PREFIX))
+    {
+        return;
+    }
+    let handlers = inner.aux_handlers.read().await;
+    for h in handlers.iter() {
+        h(peer_id.clone(), value.clone());
+    }
+}
+
 fn tunnel_handler_matches(
     handler_target: Option<&str>,
     msg: Option<&TunnelMessage>,

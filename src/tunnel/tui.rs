@@ -39,7 +39,7 @@ use app::App;
 /// 120ms, which was cheap (just reading local `Mutex`-guarded state). Here
 /// each tick is a real IPC round-trip to the daemon over a loopback TCP
 /// socket, so this is a little more relaxed; still fast enough that new
-/// peers/forwards/chat messages show up well within a third of a second.
+/// peers/forwards/notices show up well within a third of a second.
 const TICK: Duration = Duration::from_millis(250);
 const EVENT_POLL: Duration = Duration::from_millis(100);
 

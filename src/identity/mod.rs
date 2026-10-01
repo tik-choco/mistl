@@ -287,6 +287,9 @@ pub struct Profile {
     /// which keeps the profile portable without inlining image data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avatar_cid: Option<String>,
+    /// Small inline thumbnail for signed peer profile exchange.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_thumb: Option<String>,
     /// RFC 3339 timestamp of the last `profile.set`, so a peer that holds
     /// several observed copies of a profile can pick the freshest one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -304,6 +307,7 @@ impl Profile {
             "display_name" => self.display_name = value,
             "bio" => self.bio = value,
             "avatar_cid" => self.avatar_cid = value,
+            "avatar_thumb" => self.avatar_thumb = value,
             other => match value {
                 Some(v) => {
                     self.extra.insert(other.to_string(), v);
@@ -316,7 +320,28 @@ impl Profile {
     }
 }
 
-fn load_profile() -> Result<Profile> {
+fn validate_profile_field(field: &str, value: &str) -> Result<()> {
+    let cap = match field {
+        "display_name" => Some(64),
+        "bio" => Some(280),
+        "avatar_cid" => Some(128),
+        _ => None,
+    };
+    if cap.is_some_and(|cap| value.chars().count() > cap) {
+        bail!("profile field `{field}` is too long");
+    }
+    if field == "avatar_thumb"
+        && !value.is_empty()
+        && !crate::net::peer_profile::valid_avatar(value)
+    {
+        bail!(
+            "avatar_thumb must be a WebP, PNG or JPEG base64 data URL of at most 16384 characters"
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn load_profile() -> Result<Profile> {
     let path = profile_path()?;
     if !path.exists() {
         return Ok(Profile::default());
@@ -344,7 +369,7 @@ fn profile_with_did(profile: &Profile, did: &str) -> Result<Value> {
 
 /// Handle `profile.*` and `key.*` IPC commands:
 /// - `profile.show` `{}` -> profile JSON (`{did, display_name?, bio?,
-///   avatar_cid?, updated_at?, ...}`) -- the interop document read by peers
+///   avatar_cid?, avatar_thumb?, updated_at?, ...}`) -- the interop document read by peers
 /// - `profile.set` `{field, value}` -> updated profile JSON; setting
 ///   `avatar_cid` points the profile at an image already in the content
 ///   store, and an empty `value` clears the field. Every set stamps
@@ -386,9 +411,11 @@ pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Val
 
             let identity = current(state).await?;
             let mut profile = load_profile()?;
+            validate_profile_field(field, value)?;
             profile.set_field(field, value.to_string());
             profile.updated_at = Some(Utc::now().to_rfc3339());
             save_profile(&profile)?;
+            crate::net::peer_profile::broadcast(&identity, &profile).await;
             profile_with_did(&profile, identity.did())
         }
         "key.generate" => {
@@ -492,6 +519,51 @@ pub(crate) fn did_for_seed(seed: u8) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn avatar_thumb_validation_set_and_clear() {
+        let mut p = Profile::default();
+        for mime in ["webp", "png", "jpeg"] {
+            let value = format!("data:image/{mime};base64,YWJj");
+            validate_profile_field("avatar_thumb", &value).unwrap();
+            p.set_field("avatar_thumb", value.clone());
+            assert_eq!(p.avatar_thumb.as_deref(), Some(value.as_str()));
+            assert!(!p.extra.contains_key("avatar_thumb"));
+            assert_eq!(serde_json::to_value(&p).unwrap()["avatar_thumb"], value);
+        }
+        for bad in [
+            "https://example.com/avatar.png",
+            "data:image/svg+xml;base64,YWJj",
+            "data:image/png;base64,",
+            "data:image/png;base64,!!!!",
+        ] {
+            assert!(validate_profile_field("avatar_thumb", bad).is_err());
+        }
+        assert!(
+            validate_profile_field(
+                "avatar_thumb",
+                &format!("data:image/png;base64,{}", "A".repeat(16384))
+            )
+            .is_err()
+        );
+        validate_profile_field("avatar_thumb", "").unwrap();
+        p.set_field("avatar_thumb", String::new());
+        assert!(p.avatar_thumb.is_none());
+        assert!(
+            serde_json::to_value(p)
+                .unwrap()
+                .get("avatar_thumb")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn profile_exchange_field_caps() {
+        for (field, cap) in [("display_name", 64), ("bio", 280), ("avatar_cid", 128)] {
+            assert!(validate_profile_field(field, &"名".repeat(cap)).is_ok());
+            assert!(validate_profile_field(field, &"名".repeat(cap + 1)).is_err());
+        }
+    }
 
     fn fresh_identity() -> Identity {
         let signing_key = SigningKey::generate(&mut OsRng);

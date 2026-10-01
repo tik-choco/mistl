@@ -612,7 +612,7 @@ pub(crate) mod tests {
             negotiator: ForwardNegotiator::new(),
             forward_store: ForwardStore::load(dir.join("forwards.json")).await.unwrap(),
             notices: Arc::new(Mutex::new(Vec::new())),
-            chat_log: Arc::new(Mutex::new(Vec::new())),
+            approvals: crate::tunnel::notice::ApprovalBook::new(),
         };
         *ctx.manager.graph().path.write().await = Some(dir.join("graph.json"));
         (ctx, dir)

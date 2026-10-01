@@ -155,6 +155,51 @@ assert.deepEqual(proposeCalls.at(-1),{cmd:'tunnel.forward.propose',args:{proto:'
 assert.equal(proposeHost.querySelector('.tg-message').textContent,'ok-from-server','server-provided message is shown on success');
 assert.equal(pModal.hidden,true,'dialog closes after a successful proposal');
 proposeHost.remove();
+// Waiting for the other side: own proposals, parked connections, denials.
+document.documentElement.lang='en';
+const waitHost=document.createElement('div');document.body.append(waitHost);
+const waitPeer='0123456789abcdef';
+const waitData={running:true,room:'wait-room',self_id:'self',notices:[{timestamp_ms:1,kind:'info',text:'old, must not be replayed',code:''}],
+  forwards:[{direction:'connect',proto:'tcp',addr:'127.0.0.1:3333',target:'tcp:127.0.0.1:22@'+waitPeer,key:'tcp:127.0.0.1:22@'+waitPeer,state:'listening',awaiting_approval:true,awaiting_since_ms:5,approval_peer_id:waitPeer}],
+  pending_outgoing:[{req_id:'req-1',sent_at_ms:7,peer_id:waitPeer,proto:'tcp',local_addr:'127.0.0.1:2222',remote_addr:'127.0.0.1:22',target:'tcp:127.0.0.1:22@'+waitPeer}],
+  graph:{policy:{broadcast:false,locked:false,links:[],permissions:{}},nodes:[{id:waitPeer,node:{broadcast:false,locked:false,links:[],permissions:{},forwards:[]}}]}};
+const waitCalls=[],toasts=[];
+window.MistlPeers={label:id=>id===waitPeer?'Alice':id.slice(0,8),byNode:id=>id===waitPeer?{node_id:id,name:'Alice'}:null,avatarEl:()=>document.createElement('span'),subscribe:()=>{}};
+const waitFeature=window.MistlTunnelGraph.create({document,host:waitHost,toast:(text,kind)=>toasts.push([text,kind]),refresh:async()=>waitFeature.render(structuredClone(waitData)),confirm:()=>true,api:async(cmd,args)=>{waitCalls.push({cmd,args:structuredClone(args)});return {ok:true};}});
+waitFeature.render(structuredClone(waitData));
+const waitSelf=[...waitHost.querySelectorAll('.tg-node')].find(n=>n.dataset.nodeId==='self');
+const outgoingRow=waitSelf.querySelector('.tg-outgoing');
+assert.ok(outgoingRow,'an unanswered proposal is a row on the self node card');
+assert.ok(outgoingRow.textContent.includes('127.0.0.1:2222')&&outgoingRow.textContent.includes('Alice')&&outgoingRow.textContent.includes('127.0.0.1:22'),'the row shows local address, peer and remote address');
+assert.equal(outgoingRow.querySelector('.tg-wait').textContent,'⏳ Waiting for Alice to accept');
+assert.ok(outgoingRow.textContent.includes(waitPeer),'the full peer id stays next to the claimed name');
+assert.equal(waitSelf.querySelectorAll('.tg-wait').length,2,'the parked connect forward shows its own waiting pill');
+assert.ok([...waitSelf.querySelectorAll('.tg-wait')].some(e=>e.textContent==='⏳ Waiting for Alice to approve the connection'));
+assert.equal(waitHost.querySelectorAll('.tg-wire.tg-awaiting').length,1,'the self-peer wire is styled as pending without any explicit link');
+assert.equal([...waitHost.querySelectorAll('.tg-node')].find(n=>n.dataset.nodeId===waitPeer).querySelector('.tg-node-head strong').textContent,'Alice');
+document.documentElement.lang='ja';waitFeature.render(structuredClone(waitData));
+assert.equal(waitHost.querySelector('.tg-outgoing .tg-wait').textContent,'⏳ Alice の承認待ち','ja pill text');
+document.documentElement.lang='en';waitFeature.render(structuredClone(waitData));
+waitHost.querySelector('.tg-outgoing .tg-remove').click();await flush();
+assert.deepEqual(waitCalls.at(-1),{cmd:'tunnel.forward.propose.cancel',args:{req_id:'req-1'}},'cancel withdraws the proposal by req_id');
+// The answer arrives: denied -> a notice and a toast, never silent.
+waitData.pending_outgoing=[];
+waitData.notices=[...waitData.notices,{timestamp_ms:2,kind:'error',text:'peer denied tcp:127.0.0.1:22@'+waitPeer,code:'proposal_denied',peer_id:waitPeer,target:'tcp:127.0.0.1:22@'+waitPeer}];
+waitFeature.render(structuredClone(waitData));
+assert.equal(toasts.length,1,'old notices are not replayed, the new one is shown once');
+assert.equal(toasts[0][1],'error');
+assert.ok(toasts[0][0].includes('Alice')&&toasts[0][0].includes(waitPeer)&&toasts[0][0].includes('denied'),'the toast names the peer and says it was denied');
+assert.ok(waitHost.querySelector('.tg-message').classList.contains('tg-error'));
+waitFeature.render(structuredClone(waitData));assert.equal(toasts.length,1,'polling again does not repeat the toast');
+waitData.notices=[...waitData.notices,{timestamp_ms:3,kind:'info',text:'forward established: x',code:'proposal_accepted',peer_id:waitPeer,target:'tcp:127.0.0.1:22@'+waitPeer,detail:'127.0.0.1:2222'}];
+waitFeature.render(structuredClone(waitData));
+assert.equal(toasts.length,2);assert.equal(toasts[1][1],'success');assert.ok(toasts[1][0].includes('accepted'));
+// A denied connection leaves a marker on the forward.
+waitData.forwards[0]={...waitData.forwards[0],awaiting_approval:false,denied_at_ms:9};
+waitFeature.render(structuredClone(waitData));
+assert.ok([...waitHost.querySelectorAll('.tg-denied')].some(e=>e.textContent==='✕ Alice denied the connection'));
+assert.equal(waitHost.querySelectorAll('.tg-wire.tg-awaiting').length,0,'nothing is waiting any more, so the wire is no longer pending');
+delete window.MistlPeers;waitHost.remove();document.documentElement.lang='ja';
 const head=card('self').querySelector('.tg-node-head');head.focus();head.dispatchEvent(new window.KeyboardEvent('keydown',{key:'ArrowRight',cancelable:true}));
 assert.equal(card('self').style.left,'50px','keyboard can rearrange nodes');
 assert.equal(document.activeElement.className,'tg-node-head');
@@ -166,4 +211,4 @@ feature.render({...structuredClone(data),room:'another-room'});assert.equal(card
 card('self').querySelector('.tg-add').click();feature.render({...structuredClone(data),room:'third-room'});
 assert.equal([...document.querySelectorAll('.tg-modal')][0].hidden,true,'room changes close stale editors');
 await window.happyDOM.close();
-console.log('PASS: graph wiring, forward wizard steps, remote-to-remote edits, permission/lock gates, forwarding forms, draft preservation, room isolation, restart, layout keyboard, localization and literal content');
+console.log('PASS: graph wiring, forward wizard steps, remote-to-remote edits, permission/lock gates, forwarding forms, draft preservation, room isolation, restart, layout keyboard, localization, literal content, waiting-for-approval rows/wires/pills, cancel, outcome toasts');

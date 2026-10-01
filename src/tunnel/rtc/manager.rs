@@ -440,10 +440,13 @@ impl RTCManagerHandle {
         self.send_capabilities_to_all().await;
     }
 
-    pub async fn send_chat_to_all(&self, msg: &str) {
-        let _ = self
-            .send_payload("", P2pPayload::Chat { text: msg.into() })
-            .await;
+    /// Sends a `t`-tagged side message (see [`crate::tunnel::notice`]) to one
+    /// peer in the tunnel room. Not subject to the graph traffic policy: it
+    /// carries UI state only, never tunneled data.
+    pub async fn send_aux_to(&self, peer_id: &str, message: &serde_json::Value) -> Result<()> {
+        let data = serde_json::to_vec(message)?;
+        let room = self.current_room().await;
+        crate::net::send_direct(&room, peer_id, data).await
     }
 
     pub async fn send_tunnel_to(&self, peer_id: &str, data: Vec<u8>) -> Result<()> {

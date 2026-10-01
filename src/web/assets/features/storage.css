@@ -131,3 +131,24 @@
 .store-access-info { display: flex; flex-direction: column; gap: 2px; min-width: 0; font-size: 12px; }
 .store-access-who, .store-access-meta { color: var(--text-dim); font-size: 11px; overflow-wrap: anywhere; }
 .store-access-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+
+/* Owner-side shared folders and the sequential sharing dialog. */
+.store-share-heading, .store-share-row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.store-share-heading h3 { margin: 0 auto 0 0; font-size: 14px; }
+.store-share-list { margin-top: 12px; }
+.store-share-row { justify-content: space-between; padding: 12px 0; border-top: 1px solid var(--panel-border); }
+.store-share-info { display: flex; flex-direction: column; flex: 1 1 220px; min-width: 0; gap: 5px; font-size: 12px; overflow-wrap: anywhere; }
+.store-share-path { overflow-wrap: anywhere; white-space: pre-wrap; color: var(--text-dim); font-size: 12px; }
+.store-share-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.store-share-status { color: var(--text-dim); font-size: 12px; overflow-wrap: anywhere; }
+.store-share-status:empty { display: none; }
+.store-share-modal .modal-panel { max-width: 520px; max-height: calc(100dvh - 32px); overflow-y: auto; }
+.store-share-body, .store-share-body form { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.store-share-body input { width: 100%; min-width: 0; }
+.store-share-body p { margin: 0; line-height: 1.7; }
+.store-share-body .store-share-actions { justify-content: flex-end; margin-top: 6px; }
+.store-share-body .muted { color: var(--text-dim); font-size: 12px; }
+.store-share-dirs { display: flex; flex-wrap: wrap; gap: 8px; max-height: 240px; overflow-y: auto; }
+.store-share-dirs:empty { display: none; }
+.store-share-dirs .store-share-dir { width: 100%; text-align: left; overflow-wrap: anywhere; }
+.store-share-modal button:focus-visible, .store-share-modal input:focus-visible { outline: 2px solid var(--ok); outline-offset: 2px; }

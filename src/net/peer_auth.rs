@@ -319,6 +319,18 @@ impl Registry {
             .map(|(_, entry)| entry.did.clone())
     }
 
+    /// Every live `(room, node, did)` binding, sorted by room then node.
+    pub fn live_entries(&self, now: Instant) -> Vec<(String, String, String)> {
+        let mut out: Vec<_> = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| now.saturating_duration_since(entry.last_seen) <= VERIFIED_TTL)
+            .map(|((room, node), entry)| (room.clone(), node.clone(), entry.did.clone()))
+            .collect();
+        out.sort();
+        out
+    }
+
     pub fn remove(&mut self, room: &str, node: &str) -> bool {
         self.entries
             .remove(&(room.to_string(), node.to_string()))
@@ -370,6 +382,24 @@ pub fn verified_did_any_room(node: &str) -> Option<String> {
         .lock()
         .expect("peer auth registry poisoned")
         .did_for_any_room(node, Instant::now())
+}
+
+/// Every live verified `(room, node, did)` binding across joined rooms.
+pub fn verified_peers() -> Vec<(String, String, String)> {
+    REGISTRY
+        .lock()
+        .expect("peer auth registry poisoned")
+        .live_entries(Instant::now())
+}
+
+/// The `(room, node)` pairs where `did` is currently verified, so a caller
+/// can address a direct send to a DID without knowing its room.
+pub fn rooms_for_did(did: &str) -> Vec<(String, String)> {
+    verified_peers()
+        .into_iter()
+        .filter(|(_, _, verified)| verified == did)
+        .map(|(room, node, _)| (room, node))
+        .collect()
 }
 
 /// Forget `node`'s verification in `room` (it left).
@@ -464,6 +494,7 @@ fn hello_bytes(room: &str, identity: &Identity, reply: bool) -> Vec<u8> {
 /// periodic broadcast into every joined room. Called once from
 /// `net::start_engine`.
 pub(super) fn start(identity: Arc<Identity>, runtime: tokio::runtime::Handle) {
+    super::peer_profile::start(identity.clone(), runtime.clone());
     let handler_identity = identity.clone();
     let handler_runtime = runtime.clone();
     super::register_room_handler(move |event_type, room, from, data| match event_type {
@@ -481,8 +512,20 @@ pub(super) fn start(identity: Arc<Identity>, runtime: tokio::runtime::Handle) {
                     Ok(is_new) => {
                         if is_new {
                             debug!(%room, node = %from, did = %proof.did, "peer auth: node verified");
+                            super::peer_profile::send_to(
+                                room,
+                                from,
+                                handler_identity.clone(),
+                                &handler_runtime,
+                            );
                         }
                         if !proof.reply && reply_allowed(room, from, Instant::now()) {
+                            super::peer_profile::send_to(
+                                room,
+                                from,
+                                handler_identity.clone(),
+                                &handler_runtime,
+                            );
                             let bytes = hello_bytes(room, &handler_identity, true);
                             let room = room.to_string();
                             let to = from.to_string();

@@ -63,11 +63,12 @@ pub async fn handle(cmd: &str, _args: Value, state: &Arc<AppState>) -> Result<Va
 /// modules, consensus, stream}`:
 /// - `self`: `{node_id, did, display_name}` -- this node's identity
 /// - `rooms`: joined room ids (`net::joined_rooms`)
-/// - `peers`: `[{node_id, state}]` -- every node mistlib currently sees as
+/// - `peers`: `[{node_id, state, did, name}]` -- every node mistlib currently sees as
 ///   connected (any joined room), with its best-known connection state --
 ///   a process-wide overview, kept for compatibility; see `room_peers` for
 ///   the room-scoped view
-/// - `room_peers`: `[{room, peers: [{node_id, state}]}]` -- per-room peer
+///   `did` is a live verified binding; `name` is self-claimed display metadata.
+/// - `room_peers`: `[{room, peers: [{node_id, state, did, name}]}]` -- per-room peer
 ///   membership (`net::room_connections`), one entry for every room this
 ///   process has joined (`net::joined_rooms`) unioned with every room
 ///   mistlib currently reports a session for; a joined room with no
@@ -105,7 +106,8 @@ async fn status(state: &Arc<AppState>) -> Result<Value> {
     let mut peers = Vec::new();
     for node_id in crate::net::connected_nodes().await {
         let conn_state = crate::net::peer_connection_state(&node_id).await;
-        peers.push(json!({ "node_id": node_id, "state": conn_state }));
+        let did = crate::net::peer_auth::verified_did_any_room(&node_id);
+        peers.push(peer_json(&node_id, &conn_state, did));
     }
 
     let net_snapshot = NetSnapshot {
@@ -256,11 +258,25 @@ fn build_room_peers(
             peers.sort_by(|a, b| a.0.cmp(b.0));
             let peers_json: Vec<Value> = peers
                 .into_iter()
-                .map(|(node_id, state)| json!({ "node_id": node_id, "state": state }))
+                .map(|(node_id, state)| {
+                    peer_json(
+                        node_id,
+                        state,
+                        crate::net::peer_auth::verified_did(room, node_id),
+                    )
+                })
                 .collect();
             json!({ "room": room, "peers": peers_json })
         })
         .collect()
+}
+
+/// Only attach display metadata through a currently verified DID binding.
+fn peer_json(node_id: &str, state: &str, did: Option<String>) -> Value {
+    let name = did
+        .as_deref()
+        .and_then(crate::net::peer_profile::display_name);
+    json!({ "node_id": node_id, "state": state, "did": did, "name": name })
 }
 
 /// Build the `activity` array from `net::activity_snapshot`'s plain-data
@@ -311,6 +327,23 @@ fn direction_json(direction: Option<crate::net::DirectionActivity>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unverified_peers_have_explicit_null_identity_and_name() {
+        let peer = peer_json("0123456789abcdef", "connected", None);
+        assert_eq!(
+            peer,
+            json!({"node_id": "0123456789abcdef", "state": "connected", "did": null, "name": null})
+        );
+        let rooms = build_room_peers(
+            &["room".into()],
+            &[(
+                "room".into(),
+                vec![("0123456789abcdef".into(), "connected".into())],
+            )],
+        );
+        assert_eq!(rooms[0]["peers"][0], peer);
+    }
 
     #[test]
     fn build_status_has_the_documented_top_level_shape() {

@@ -755,11 +755,6 @@ pub enum TunnelAction {
         #[arg(long)]
         revoke: Option<String>,
     },
-    /// Send a chat message to every connected peer in the tunnel's room
-    Chat {
-        /// Message text
-        text: String,
-    },
     /// Open the interactive terminal UI. Talks to the daemon over the same
     /// IPC commands as every other `tunnel` subcommand (starts the daemon
     /// first if it isn't running yet, same as the rest of this CLI) rather
@@ -1252,7 +1247,6 @@ pub fn dispatch(cli: Cli) -> Result<()> {
                     Ok(())
                 }
             },
-            TunnelAction::Chat { text } => client_call("tunnel.chat.send", json!({ "text": text })),
             TunnelAction::Tui => crate::tunnel::tui::run(),
         },
         Command::Ui => open_dashboard(),

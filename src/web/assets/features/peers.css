@@ -1,0 +1,10 @@
+.mp-avatar {
+  display: inline-flex; flex: 0 0 auto; width: var(--mp-size, 32px); height: var(--mp-size, 32px);
+  border-radius: 50%; object-fit: cover; vertical-align: middle;
+  border: 1px solid var(--panel-border); box-sizing: border-box;
+}
+.mp-avatar-initials {
+  align-items: center; justify-content: center; color: #fff;
+  font: 600 calc(var(--mp-size, 32px) * .38)/1 var(--sans, sans-serif);
+  user-select: none; overflow: hidden;
+}

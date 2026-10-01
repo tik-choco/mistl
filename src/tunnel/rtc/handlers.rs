@@ -19,10 +19,6 @@ use super::state::DataHandlerEntry;
 
 #[allow(dead_code)]
 impl RTCManagerHandle {
-    pub async fn on_chat_message<F: Fn(String, String) + Send + Sync + 'static>(&self, f: F) {
-        self.inner.chat_handlers.write().await.push(Arc::new(f));
-    }
-
     pub async fn on_forward_request<
         F: Fn(String, super::manager::ForwardRequestEvent) + Send + Sync + 'static,
     >(
@@ -47,6 +43,16 @@ impl RTCManagerHandle {
             .write()
             .await
             .push(Arc::new(f));
+    }
+
+    /// Subscribes to the tunnel's `t`-tagged side messages (see
+    /// [`crate::tunnel::notice`]). Called with the transport sender and the
+    /// parsed JSON; the handler must check `t` itself.
+    pub async fn on_aux_message<F: Fn(String, serde_json::Value) + Send + Sync + 'static>(
+        &self,
+        f: F,
+    ) {
+        self.inner.aux_handlers.write().await.push(Arc::new(f));
     }
 
     pub async fn on_tunnel_message<F: Fn(String, Vec<u8>) + Send + Sync + 'static>(

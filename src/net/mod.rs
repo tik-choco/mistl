@@ -37,6 +37,7 @@ use tracing::warn;
 use crate::daemon::AppState;
 
 pub mod peer_auth;
+pub mod peer_profile;
 
 /// Default rendezvous room used when `[ai] room_id` is unset. Kept at its
 /// historical value for wire compatibility with existing deployments.

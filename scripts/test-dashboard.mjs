@@ -80,7 +80,8 @@ try {
   assert.ok(topologyDialog.textContent.includes(longId), 'detail carries the full node ID');
   topologyDialog.querySelector('.topology-detail-close').click();
 
-  document.querySelector('a[href="#panel-chat-relay"]').click();
+  document.querySelector('a[href="#panel-chat"]').click();
+  document.querySelector('#panel-chat [data-subtab-target="rooms"]').click();
   await flush();
   assert.equal(document.querySelectorAll('.mc-message').length, 1);
   assert.ok(document.querySelector('.mc-message-text').textContent.includes('<script>alert(1)</script>'));
@@ -121,19 +122,19 @@ try {
   assert.equal(roomForm.hidden, true, 'a running session folds the room form behind Switch room');
   document.getElementById('btn-tunnel-room-toggle').click();
   assert.equal(roomForm.hidden, false);
-  // One pending table for all three kinds; ids stay full and literal.
+  // One pending table for decisions this user must make; ids stay full and literal.
   const evilPeer = longId + '<img src=x onerror=alert(1)>';
   Object.assign(fixtures['tunnel.status'], {
     pending_auth: [{id:7, peer_id:evilPeer, verified:false, proto:'tcp', forward_key:'tcp:127.0.0.1:22', target_addr:'127.0.0.1:22'}],
     pending_forwards: [{req_id:'r1', peer_id:'peer-two', proto:'udp', remote_addr:'127.0.0.1:9000', target:'udp:127.0.0.1:9000@self'}],
-    pending_outgoing: [{peer_id:'peer-two', proto:'tcp', local_addr:'127.0.0.1:8080', remote_addr:'127.0.0.1:80', target:'tcp:127.0.0.1:80@peer-two'}],
+    pending_outgoing: [{req_id:'out-1', sent_at_ms:1, peer_id:'peer-two', proto:'tcp', local_addr:'127.0.0.1:8080', remote_addr:'127.0.0.1:80', target:'tcp:127.0.0.1:80@peer-two'}],
   });
   fixtures['tunnel.auth.approve'] = {ok:true};
   document.querySelector('[data-target="tunnel"]').click();
   await flush();
   const pendingRows = document.querySelectorAll('#tunnel-pending-table tbody tr');
   assert.equal(document.getElementById('tunnel-pending-section').hidden, false);
-  assert.equal(pendingRows.length, 3);
+  assert.equal(pendingRows.length, 2, 'own proposals are not decisions for this user, so they are not in the pending table');
   assert.equal(document.getElementById('tunnel-pending-count').textContent, '2', 'only actionable rows are counted');
   assert.equal(document.querySelector('#tunnel-pending-table img'), null);
   assert.ok(pendingRows[0].querySelector('.tunnel-grant-peer').textContent.startsWith(evilPeer), 'peer id is shown in full');
@@ -141,7 +142,10 @@ try {
   pendingRows[0].querySelector('button.primary').click();
   await flush();
   assert.deepEqual(calls.filter(c=>c.cmd==='tunnel.auth.approve').map(c=>c.args), [{id:7, remember:false}]);
-  assert.equal(pendingRows[2].querySelector('button'), null, 'own proposals are informational only');
+  const waiting = document.querySelector('#tunnel-graph .tg-outgoing .tg-wait');
+  assert.ok(waiting && waiting.textContent.includes('peer-two'), 'an unanswered own proposal shows as waiting on the graph');
+  assert.equal(document.getElementById('tunnel-history').tagName, 'DETAILS', 'trust & history no longer needs subtabs');
+  assert.equal(document.querySelector('#panel-tunnel [data-subtab-target]'), null, 'the tunnel panel has no subtabs left');
   assert.deepEqual(errors, []);
   assert.equal(document.querySelectorAll('.toast.error').length, 0, 'no hidden initialization failure');
   console.log('PASS: full dashboard boot, feature composition, long/literal content, topology keyboard details, chat polling, all locales, pending settings action, tunnel session and pending approvals');

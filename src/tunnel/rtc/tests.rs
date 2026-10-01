@@ -173,18 +173,9 @@ async fn role_payload_tracks_server_peers() {
 #[tokio::test]
 async fn message_payloads_are_dispatched_to_registered_handlers() {
     let manager = test_manager("self", PeerRole::Client);
-    let chats = Arc::new(Mutex::new(Vec::new()));
     let tunnels = Arc::new(Mutex::new(Vec::new()));
     let stdio = Arc::new(Mutex::new(Vec::new()));
 
-    {
-        let chats = chats.clone();
-        manager
-            .on_chat_message(move |peer, text| {
-                chats.lock().unwrap().push((peer, text));
-            })
-            .await;
-    }
     {
         let tunnels = tunnels.clone();
         manager
@@ -225,10 +216,6 @@ async fn message_payloads_are_dispatched_to_registered_handlers() {
     )
     .await;
 
-    assert_eq!(
-        *chats.lock().unwrap(),
-        vec![("peer-1".to_string(), "hello".to_string())]
-    );
     assert_eq!(
         *tunnels.lock().unwrap(),
         vec![("peer-1".to_string(), vec![1, 2, 3])]
@@ -313,13 +300,13 @@ async fn legacy_hex_byte_payloads_are_still_accepted() {
 #[tokio::test]
 async fn invalid_and_self_payloads_are_ignored() {
     let manager = test_manager("self", PeerRole::Client);
-    let chats = Arc::new(Mutex::new(Vec::new()));
+    let tunnels = Arc::new(Mutex::new(Vec::new()));
 
     {
-        let chats = chats.clone();
+        let tunnels = tunnels.clone();
         manager
-            .on_chat_message(move |peer, text| {
-                chats.lock().unwrap().push((peer, text));
+            .on_tunnel_message(move |peer, data| {
+                tunnels.lock().unwrap().push((peer, data));
             })
             .await;
     }
@@ -327,9 +314,7 @@ async fn invalid_and_self_payloads_are_ignored() {
     handle_payload(
         manager.inner.clone(),
         "self".to_string(),
-        encode(P2pPayload::Chat {
-            text: "self-message".to_string(),
-        }),
+        encode(P2pPayload::Tunnel { data: vec![1] }),
     )
     .await;
     handle_payload(
@@ -339,7 +324,44 @@ async fn invalid_and_self_payloads_are_ignored() {
     )
     .await;
 
-    assert!(chats.lock().unwrap().is_empty());
+    assert!(tunnels.lock().unwrap().is_empty());
+}
+
+/// Room chat was removed, but an older mistl / the p2p crate still sends
+/// `{"kind":"chat"}`: it must parse (not break the handler) and be dropped.
+#[tokio::test]
+async fn legacy_chat_payload_is_accepted_and_ignored() {
+    let manager = test_manager("self", PeerRole::Client);
+    let tunnels = Arc::new(Mutex::new(Vec::new()));
+    {
+        let tunnels = tunnels.clone();
+        manager
+            .on_tunnel_message(move |peer, data| {
+                tunnels.lock().unwrap().push((peer, data));
+            })
+            .await;
+    }
+
+    handle_payload(
+        manager.inner.clone(),
+        "peer-1".to_string(),
+        encode(P2pPayload::Chat {
+            text: "hello".to_string(),
+        }),
+    )
+    .await;
+    // The sender is still registered as present, and later traffic works.
+    assert!(manager.inner.peers.read().await.contains("peer-1"));
+    handle_payload(
+        manager.inner.clone(),
+        "peer-1".to_string(),
+        encode(P2pPayload::Tunnel { data: vec![9] }),
+    )
+    .await;
+    assert_eq!(
+        *tunnels.lock().unwrap(),
+        vec![("peer-1".to_string(), vec![9])]
+    );
 }
 
 #[tokio::test]
@@ -391,4 +413,55 @@ async fn leave_removes_presence_but_retains_roles_and_notifies_close_handlers() 
     );
     assert_eq!(*tunnel_closed.lock().unwrap(), vec!["peer-1".to_string()]);
     assert_eq!(*stdio_closed.lock().unwrap(), vec!["peer-1".to_string()]);
+}
+
+/// `t`-tagged tunnel side messages reach `on_aux_message` subscribers with the
+/// transport sender; other modules' `t` messages and `kind` envelopes do not.
+#[tokio::test]
+async fn aux_messages_are_dispatched_by_tag_prefix_with_the_transport_sender() {
+    let manager = test_manager("self", PeerRole::Client);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    {
+        let seen = seen.clone();
+        manager
+            .on_aux_message(move |peer, value| {
+                seen.lock().unwrap().push((peer, value));
+            })
+            .await;
+    }
+
+    handle_payload(
+        manager.inner.clone(),
+        "peer-1".to_string(),
+        br#"{"t":"mistl-tunnel-auth-v1","state":"pending","forward_key":"k"}"#.to_vec(),
+    )
+    .await;
+    // Another module's `t` message (consensus / DID hello) is not ours.
+    handle_payload(
+        manager.inner.clone(),
+        "peer-1".to_string(),
+        br#"{"t":"mistl-did-hello-v1","room":"r"}"#.to_vec(),
+    )
+    .await;
+    // A `kind` envelope is never an aux message.
+    handle_payload(
+        manager.inner.clone(),
+        "peer-1".to_string(),
+        encode(P2pPayload::Role {
+            role: "client".into(),
+        }),
+    )
+    .await;
+    // Our own echo is dropped before any parsing.
+    handle_payload(
+        manager.inner.clone(),
+        "self".to_string(),
+        br#"{"t":"mistl-tunnel-auth-v1","state":"pending","forward_key":"k"}"#.to_vec(),
+    )
+    .await;
+
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].0, "peer-1");
+    assert_eq!(seen[0].1["state"], "pending");
 }

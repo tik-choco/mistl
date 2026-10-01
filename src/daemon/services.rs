@@ -17,6 +17,10 @@ pub(super) fn spawn(state: Arc<AppState>) {
     // while nobody is asking.
     crate::chat_relay::spawn_background(state.clone());
 
+    // mistl-to-mistl direct messages: registers the inbound handler so
+    // messages from verified peers are received while nobody is asking.
+    crate::dm::spawn_background(state.clone());
+
     // tc-storage folder-share sync (requester side) and owner
     // responder/announcer: both no-ops unless syncs/shares are persisted.
     crate::storage::folder_sync::spawn_background(state.clone());

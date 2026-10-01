@@ -146,16 +146,6 @@ pub(super) struct NoticeRow {
     pub(super) text: String,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-#[allow(dead_code)]
-pub(super) struct ChatRow {
-    pub(super) timestamp_ms: u64,
-    pub(super) peer_id: String,
-    pub(super) mine: bool,
-    pub(super) text: String,
-}
-
 /// Mirrors the full `tunnel.status` response: `Snapshot::to_json()`'s fields
 /// plus the `enabled`/`running` flags `tunnel.status` adds on top.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -171,7 +161,6 @@ pub(super) struct Snapshot {
     pub(super) trust: Vec<TrustRow>,
     pub(super) events: Vec<EventRow>,
     pub(super) notices: Vec<NoticeRow>,
-    pub(super) chat: Vec<ChatRow>,
     pub(super) enabled: bool,
     pub(super) running: bool,
 }
@@ -234,15 +223,9 @@ pub(super) enum Popup {
     None,
     Add(AddForm),
     Trust(usize),
-    /// Chat input buffer. New relative to upstream (which had no chat pane
-    /// in the ratatui TUI at all -- chat was a separate `p2p chat` terminal
-    /// mode, see `p2p/src/app/chat.rs`). The integration contract calls for
-    /// "send a chat message" as one of the TUI's key actions, so it's
-    /// folded in here as an overlay instead of disturbing the main layout.
-    Chat(String),
     /// Room-id input buffer, prefilled with the current room. New relative
-    /// to upstream for the same reason as `Chat`: "change room" is one of
-    /// the contract's required key actions.
+    /// to upstream: "change room" is one of the contract's required key
+    /// actions.
     Room(String),
 }
 
@@ -335,7 +318,6 @@ impl App {
         match std::mem::replace(&mut self.popup, Popup::None) {
             Popup::Add(form) => self.handle_add_key(key, form),
             Popup::Trust(sel) => self.handle_trust_key(key, sel),
-            Popup::Chat(input) => self.handle_chat_key(key, input),
             Popup::Room(input) => self.handle_room_key(key, input),
             Popup::None => self.handle_main_key(key),
         }
@@ -352,7 +334,6 @@ impl App {
             }
             KeyCode::Char('a') => self.popup = Popup::Add(AddForm::default()),
             KeyCode::Char('t') => self.popup = Popup::Trust(0),
-            KeyCode::Char('c') => self.popup = Popup::Chat(String::new()),
             KeyCode::Char('r') => self.popup = Popup::Room(self.snapshot.room.clone()),
             KeyCode::Char('s') => self.toggle_running(),
             KeyCode::Enter | KeyCode::Char(' ') if self.focus == Focus::Forwards => {
@@ -599,36 +580,6 @@ impl App {
             _ => {}
         }
         self.popup = Popup::Trust(sel);
-    }
-
-    /// Handles keys while the chat popup (`c`) is open. Unlike `Add`/`Room`,
-    /// `Enter` does not close the popup -- it sends the message and clears
-    /// the input line so the user can keep chatting, matching how a normal
-    /// chat client behaves. Only `Esc` closes it.
-    fn handle_chat_key(&mut self, key: KeyEvent, mut input: String) {
-        match key.code {
-            KeyCode::Esc => return,
-            KeyCode::Enter => {
-                let text = input.trim().to_string();
-                if !text.is_empty() {
-                    let res = crate::daemon::ipc::client_request(
-                        "tunnel.chat.send",
-                        serde_json::json!({ "text": text }),
-                    );
-                    if let Err(e) = res {
-                        self.message = Some(e.to_string());
-                    }
-                    self.refresh();
-                }
-                input.clear();
-            }
-            KeyCode::Backspace => {
-                input.pop();
-            }
-            KeyCode::Char(c) => input.push(c),
-            _ => {}
-        }
-        self.popup = Popup::Chat(input);
     }
 
     /// Handles keys while the room-change popup (`r`) is open. `Enter`
