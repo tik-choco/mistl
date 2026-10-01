@@ -10,3 +10,9 @@
 /AGENTS.md
 /CLAUDE.md
 /.agents/
+
+# Claude Code local state (agent worktrees are full checkouts; locks and
+# personal settings never belong in the public repo)
+/.claude/worktrees/
+/.claude/scheduled_tasks.lock
+/.claude/settings.local.json
