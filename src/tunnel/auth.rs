@@ -28,7 +28,7 @@ use serde::Serialize;
 pub use audit::{AuthAuditLog, AuthEvent, AuthEventSource};
 #[allow(unused_imports)]
 pub use pending::PendingAuthorization;
-pub use pending::{PendingAuthorizations, PendingAuthorizer};
+pub use pending::{PendingAuthorizations, PendingAuthorizer, PendingEvent};
 pub use trust::{TrustDecision, TrustEntry, TrustKey, TrustStore, default_trust_store_path};
 
 pub mod audit;

@@ -24,7 +24,7 @@
 //! | [`negotiation`], [`auth`] | the two independent gates: negotiating a forward with a peer, and authorizing an incoming connection |
 //! | [`room_store`] | recently-used room ids, for the dashboard/TUI room picker |
 //! | [`session`] | [`session::SessionContext`], the shared state every front end (this module's IPC handler, the dashboard, the TUI) drives |
-//! | [`chat`], [`stdio`], [`control_shell`] | side channels riding the same `RTCManager` (chat messages, a stdio command bridge, a line-oriented shell) |
+//! | [`stdio`], [`control_shell`] | side channels riding the same `RTCManager` (a stdio command bridge, a line-oriented shell) |
 //! | [`tui`] | `mistl tunnel tui`: a daemon IPC client, not an in-process session (see its own module doc) |
 //!
 //! ## Sharing `crate::net` with ai/chat_relay/stream
@@ -77,7 +77,6 @@
 //!   changing a shape here is a wire break for both.
 
 pub mod auth;
-pub mod chat;
 pub mod control_shell;
 pub mod controller;
 pub mod forward_args;
@@ -85,6 +84,7 @@ pub mod forward_runtime;
 pub mod forward_store;
 pub mod graph;
 pub mod negotiation;
+pub mod notice;
 pub mod proxy;
 pub mod room_store;
 pub mod rtc;
@@ -343,7 +343,6 @@ fn empty_snapshot_json(room_id: &str) -> Value {
         "trust": [],
         "events": [],
         "notices": [],
-        "chat": [],
     })
 }
 
@@ -603,6 +602,7 @@ async fn forward_propose(args: Value) -> Result<Value> {
             local_addr: local.to_string(),
             remote_addr: remote.to_string(),
             target,
+            ..Default::default()
         }
     } else {
         let peer_id = args
@@ -633,6 +633,7 @@ async fn forward_propose(args: Value) -> Result<Value> {
                 .unwrap_or_default()
                 .to_string(),
             target,
+            ..Default::default()
         }
     };
 
@@ -650,6 +651,21 @@ async fn forward_propose(args: Value) -> Result<Value> {
         .await
         .map_err(session_err)?;
     Ok(json!({ "ok": true, "message": message, "peer_id": peer_id, "target": target }))
+}
+
+/// `tunnel.forward.propose.cancel {"req_id":".."} -> {"ok":bool}`. Withdraws
+/// a proposal this node sent and the peer has not answered yet (`req_id` is
+/// `pending_outgoing[].req_id`). The peer is told best-effort so its approval
+/// row disappears; `ok` is `false` when the proposal was already answered or
+/// is unknown.
+async fn forward_propose_cancel(args: Value) -> Result<Value> {
+    let ctx = running_ctx().await?;
+    let req_id = args
+        .get("req_id")
+        .and_then(Value::as_str)
+        .context("tunnel.forward.propose.cancel requires `req_id`")?;
+    let ok = ctx.cancel_outgoing_forward(req_id).await;
+    Ok(json!({ "ok": ok }))
 }
 
 /// `tunnel.forward.remove {"target":".."} -> {"removed":true}`
@@ -796,17 +812,6 @@ async fn trust_revoke(args: Value) -> Result<Value> {
     Ok(json!({ "ok": removed }))
 }
 
-/// `tunnel.chat.send {"text":".."} -> {"ok":true}`
-async fn chat_send(args: Value) -> Result<Value> {
-    let ctx = running_ctx().await?;
-    let text = args
-        .get("text")
-        .and_then(Value::as_str)
-        .context("tunnel.chat.send requires `text`")?;
-    ctx.send_chat(text).await.map_err(session_err)?;
-    Ok(json!({ "ok": true }))
-}
-
 /// IPC entry point for every `tunnel.*` command (see the integration
 /// contract's frozen `tunnel.*` list -- W6's dashboard panel and W7's `mistl
 /// tunnel tui` are both plain clients of exactly this list, so every
@@ -835,6 +840,7 @@ pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Val
         "tunnel.room.list" => room_list().await,
         "tunnel.forward.add" => forward_add(args).await,
         "tunnel.forward.propose" => forward_propose(args).await,
+        "tunnel.forward.propose.cancel" => forward_propose_cancel(args).await,
         "tunnel.forward.remove" => forward_remove(args).await,
         "tunnel.port.check" => port_check(args).await,
         "tunnel.auth.approve" => auth_resolve(args, true).await,
@@ -842,7 +848,6 @@ pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Val
         "tunnel.forward.accept" => forward_resolve(args, true).await,
         "tunnel.forward.reject" => forward_resolve(args, false).await,
         "tunnel.trust.revoke" => trust_revoke(args).await,
-        "tunnel.chat.send" => chat_send(args).await,
         _ => bail!("unknown command: {cmd}"),
     }
 }

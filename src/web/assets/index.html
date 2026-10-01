@@ -272,7 +272,7 @@
     align-items: center;
     gap: 10px;
   }
-  .panel h2 .spacer { flex: 1; }
+  .panel h2 .spacer, .chat-page-head .spacer { flex: 1; }
   .panel-span2 { grid-column: auto; }   /* legacy hook: single-view is full width */
 
   /* ---- in-panel sub-tabs ----
@@ -325,6 +325,7 @@
      into a page doesn't change their spacing */
   .subtab-page { display: none; flex-direction: column; gap: 16px; min-width: 0; }
   .subtab-page.active { display: flex; animation: risein var(--dur) var(--ease); }
+  .chat-page-head { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; color: var(--text-dim); }
 
   .hint-banner {
     display: flex;
@@ -1713,13 +1714,11 @@
   #bot-editor > summary { color: var(--accent); font-weight: 600; }
   #bot-editor .bot-recipe-grid { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
   .chat-history { height: clamp(260px, 48vh, 640px); overflow-y: auto; padding: 20px; background: var(--bg-alt); border: 1px solid var(--panel-border); border-radius: var(--radius); overflow-anchor: none; }
-  #tunnel-chat-messages { display: flex; flex-direction: column; gap: 16px; }
   .chat-message { max-width: 85%; align-self: flex-start; min-width: 0; }
   .chat-message.mine { align-self: flex-end; }
   .chat-message-meta { display: flex; flex-wrap: wrap; gap: 8px; color: var(--text-dim); font-size: 11px; margin-bottom: 5px; overflow-wrap: anywhere; }
   .chat-message-body { margin: 0; padding: 10px 14px; background: var(--panel); border: 1px solid var(--panel-border); border-radius: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
   .chat-message.mine .chat-message-body { background: var(--accent-dim); }
-  #tunnel-chat-form { margin-top: 12px; align-items: flex-end; }
   @media (min-width: 1280px) {
     .shell { max-width: 1920px; display: grid; grid-template-columns: var(--sidenav-w) minmax(0, 1fr) minmax(340px, 30vw); }
     #topology-dock { position: sticky; top: 76px; max-height: calc(100vh - 92px); overflow: auto; padding: 20px 20px 20px 0; }
@@ -1742,6 +1741,8 @@
 <link rel="stylesheet" href="/assets/features/storage.css">
 <link rel="stylesheet" href="/assets/features/chat.css">
 <link rel="stylesheet" href="/assets/features/tunnel-graph.css">
+<link rel="stylesheet" href="/assets/features/peers.css">
+<link rel="stylesheet" href="/assets/features/messenger.css">
 <script>
   /* Seed the theme before first paint (no flash). Light is the default; an
      explicit choice the user made with the toggle (stored in localStorage)
@@ -1780,9 +1781,8 @@
 <div class="shell">
   <nav class="sidenav" id="sidenav" aria-label="Sections">
     <a href="#panel-overview"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9.5 12 3l9 6.5"/><path d="M5 9.5V21h14V9.5"/></svg><span data-i18n="nav.overview">Overview</span></a>
-    <a href="#panel-stream"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg><span data-i18n="nav.stream">Stream</span></a>
+    <a href="#panel-chat"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg><span data-i18n="nav.chat">Chat</span></a>
     <a href="#panel-ai"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3"/></svg><span data-i18n="nav.ai">AI</span></a>
-    <a href="#panel-chat-relay"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg><span data-i18n="nav.chatRelay">tc-chat Relay</span></a>
     <a href="#panel-store"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.7 4 3 9 3s9-1.3 9-3V5"/><path d="M3 12c0 1.7 4 3 9 3s9-1.3 9-3"/></svg><span data-i18n="nav.store">Store</span></a>
     <a href="#panel-scheduler"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l3 2"/><path d="M9 2h6"/></svg><span data-i18n="nav.scheduler">Scheduler</span></a>
     <a href="#panel-bot"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="2"/><circle cx="9" cy="14" r="1.2"/><circle cx="15" cy="14" r="1.2"/><path d="M12 8V4"/><circle cx="12" cy="3" r="1"/><path d="M2 13h2M20 13h2"/></svg><span data-i18n="nav.bot">Bot</span></a>
@@ -1811,10 +1811,42 @@
     <div class="topology-slot" id="topology-slot-overview"></div>
   </section>
 
-  <section class="panel" id="panel-stream">
-    <h2><span data-i18n="stream.title">Stream</span> <span class="spacer"></span>
+  <section class="panel panel-span2" id="panel-chat">
+    <h2><span data-i18n="chat.title">Chat</span></h2>
+    <div class="subtabs" role="tablist" data-i18n-aria-label="chat.title" aria-label="Chat sections">
+      <button type="button" data-subtab-target="direct" data-i18n="chat.tabs.direct">Direct</button>
+      <button type="button" data-subtab-target="rooms" data-i18n="chat.tabs.rooms">tc-chat rooms</button>
+      <button type="button" data-subtab-target="stream" data-i18n="chat.tabs.stream">Screen share</button>
+    </div>
+    <div class="subtab-page" data-subtab="direct">
+      <div id="dm-app"></div>
+    </div>
+    <div class="subtab-page chat-page" data-subtab="rooms" id="panel-chat-relay">
+    <div class="chat-page-head"><span class="spacer"></span>
+      <button type="button" id="btn-chat-relay-refresh" data-i18n="chatRelay.log.refresh">Refresh</button>
+    </div>
+    <div class="topo-strip" id="topo-strip-chat-relay">
+      <span class="topo-strip-label" data-i18n="topoStrip.room">room</span>
+      <span class="mono" data-role="room">&mdash;</span>
+      <span class="topo-strip-note" data-role="note" hidden></span>
+      <span class="topo-strip-peers" data-role="peers"></span>
+      <a href="#topology-card" data-i18n="topoStrip.viewFull">View full topology</a>
+    </div>
+    <div id="chat-relay-app"></div>
+    <div class="topology-slot" id="topology-slot-chat-relay"></div>
+    <details class="settings-drawer" id="settings-drawer-chat-relay">
+      <summary>
+        <svg class="gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg>
+        <span data-i18n="settings.drawer.chat_relay">tc-chat relay settings</span>
+        <span class="drawer-chevron" aria-hidden="true"></span>
+      </summary>
+      <div class="settings-drawer-body" id="settings-drawer-body-chat-relay"></div>
+    </details>
+    </div>
+    <div class="subtab-page chat-page" data-subtab="stream" id="panel-stream">
+    <div class="chat-page-head"><span class="spacer"></span>
       <button data-role="refresh" data-target="stream" data-i18n="common.refresh">Refresh</button>
-    </h2>
+    </div>
     <div class="flow-grid">
       <div class="flow-card">
         <h3 data-i18n="stream.share.title">Share this PC&#39;s screen</h3>
@@ -1890,6 +1922,7 @@
       </summary>
       <div class="settings-drawer-body" id="settings-drawer-body-stream"></div>
     </details>
+    </div>
   </section>
 
   <section class="panel panel-span2" id="panel-ai">
@@ -1949,29 +1982,6 @@
     </div>
     <div class="topology-slot" id="topology-slot-ai"></div>
 
-  </section>
-
-  <section class="panel panel-span2" id="panel-chat-relay">
-    <h2><span data-i18n="chatRelay.title">tc-chat Relay</span> <span class="spacer"></span>
-      <button type="button" id="btn-chat-relay-refresh" data-i18n="chatRelay.log.refresh">Refresh</button>
-    </h2>
-    <div class="topo-strip" id="topo-strip-chat-relay">
-      <span class="topo-strip-label" data-i18n="topoStrip.room">room</span>
-      <span class="mono" data-role="room">&mdash;</span>
-      <span class="topo-strip-note" data-role="note" hidden></span>
-      <span class="topo-strip-peers" data-role="peers"></span>
-      <a href="#topology-card" data-i18n="topoStrip.viewFull">View full topology</a>
-    </div>
-    <div id="chat-relay-app"></div>
-    <div class="topology-slot" id="topology-slot-chat-relay"></div>
-    <details class="settings-drawer" id="settings-drawer-chat-relay">
-      <summary>
-        <svg class="gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg>
-        <span data-i18n="settings.drawer.chat_relay">tc-chat relay settings</span>
-        <span class="drawer-chevron" aria-hidden="true"></span>
-      </summary>
-      <div class="settings-drawer-body" id="settings-drawer-body-chat-relay"></div>
-    </details>
   </section>
 
   <section class="panel panel-span2" id="panel-store">
@@ -2117,6 +2127,7 @@
         </table>
         <div class="empty-note" id="store-sync-empty" data-i18n="store.sync.none">No active folder syncs.</div>
       </div>
+      <div id="store-folder-share"></div>
       <div class="store-folder-access" id="store-folder-access" hidden></div>
     </div>
     </div>
@@ -2520,7 +2531,7 @@
 
     <!-- Pending: pinned above everything else and hidden when empty, so an
          approval can never be missed behind an unopened tab. One table for
-         all three kinds, but every row still shows the full peer id and the
+         both kinds of decision, but every row still shows the full peer id and the
          exact target (this is the security surface). -->
     <div class="tunnel-pending-card" id="tunnel-pending-section" hidden>
       <h3><span data-i18n="tunnel.pending.title">Waiting for your decision</span><span class="badge tunnel-pending-badge" id="tunnel-pending-count"></span></h3>
@@ -2540,26 +2551,10 @@
 
     <div class="tunnel-graph" id="tunnel-graph"></div>
 
-    <div class="subtabs" role="tablist" data-i18n-aria-label="tunnel.title" aria-label="Tunnel sections">
-      <button type="button" data-subtab-target="chat" data-i18n="tunnel.tabs.chat">Chat</button>
-      <button type="button" data-subtab-target="history" data-i18n="tunnel.tabs.history">Trust &amp; history</button>
-    </div>
-
-    <div class="subtab-page" data-subtab="chat">
-      <div class="chat-history" id="tunnel-chat-history" tabindex="0" role="region" data-i18n-aria-label="tunnel.tabs.chat" aria-label="Chat">
-        <div id="tunnel-chat-messages" role="log" aria-live="polite" aria-relevant="additions" aria-atomic="false"></div>
-        <div class="empty-note" id="tunnel-chat-empty" data-i18n="tunnel.chat.empty">No chat messages yet.</div>
-      </div>
-      <form class="inline" id="tunnel-chat-form">
-        <div class="field" style="flex: 1;">
-          <label for="tunnel-chat-input" data-i18n="tunnel.chat.inputLabel">Message</label>
-          <input type="text" id="tunnel-chat-input" autocomplete="off">
-        </div>
-        <button type="submit" class="primary" id="btn-tunnel-chat-send" data-i18n="common.send">Send</button>
-      </form>
-    </div>
-
-    <div class="subtab-page" data-subtab="history">
+    <!-- Trust, notices and the audit log: the only secondary content left now
+         that the room chat is gone (direct messages live in the Messenger). -->
+    <details class="tunnel-history" id="tunnel-history">
+      <summary data-i18n="tunnel.tabs.history">Trust &amp; history</summary>
       <h3 style="margin: 0 0 8px;" data-i18n="tunnel.trust.heading">Remembered decisions</h3>
       <p class="muted" style="font-size: 12px;" data-i18n="tunnel.trust.hint">Saved when you approve or deny with &quot;Remember&quot; checked. Revoking forgets the decision; it does not close a forward that is already open.</p>
       <div class="table-wrap">
@@ -2595,7 +2590,7 @@
         </table>
         <div class="empty-note" id="tunnel-events-empty" data-i18n="tunnel.activity.eventsEmpty">No events yet.</div>
       </div>
-    </div>
+    </details>
   </section>
 
   <section class="panel" id="panel-profile">
@@ -2722,10 +2717,12 @@
 
 <div class="toast-stack" id="toast-stack" role="status" aria-live="polite"></div>
 
+<script src="/assets/features/peers.js"></script>
 <script src="/assets/features/topology.js"></script>
 <script src="/assets/features/storage.js"></script>
 <script src="/assets/features/chat.js"></script>
 <script src="/assets/features/tunnel-graph.js"></script>
+<script src="/assets/features/messenger.js"></script>
 <script>
 (function () {
   "use strict";
@@ -2748,6 +2745,11 @@
       "nav.stream": "Stream",
       "nav.ai": "AI",
       "nav.chatRelay": "Chat",
+      "nav.chat": "Chat",
+      "chat.title": "Chat",
+      "chat.tabs.direct": "Direct",
+      "chat.tabs.rooms": "tc-chat rooms",
+      "chat.tabs.stream": "Screen share",
       "nav.store": "Storage",
       "nav.scheduler": "Scheduler",
       "nav.bot": "Bot",
@@ -3427,8 +3429,6 @@
       "tunnel.pending.hint": "Before approving, check that the peer id and the target are exactly what you expect.",
       "tunnel.pending.kind.auth": "Connect to this node",
       "tunnel.pending.kind.incoming": "Forward proposal",
-      "tunnel.pending.kind.outgoing": "Your proposal",
-      "tunnel.pending.waiting": "Waiting for the peer…",
       "tunnel.table.request": "Request",
       "tunnel.tabs.history": "Trust & history",
       "tunnel.subtitle": "Forward TCP/UDP ports between nodes in the same room. Nothing reaches this node until you approve it here.",
@@ -3450,7 +3450,6 @@
       "tunnel.room.switched": "Joined room {room}.",
       "tunnel.room.switchConfirm": "Switching rooms disconnects {count} connected peer(s) and leaves existing forwards without their peer. Continue?",
       "tunnel.pending.title": "Waiting for your decision",
-      "tunnel.tabs.chat": "Chat",
       "tunnel.trust.heading": "Remembered decisions",
       "tunnel.trust.hint": "Saved when you approve or deny with \"Remember\" checked. Revoking forgets the decision; it does not close a forward that is already open.",
       "tunnel.trust.empty": "No remembered decisions.",
@@ -3458,9 +3457,6 @@
       "tunnel.activity.noticesEmpty": "No notices.",
       "tunnel.activity.eventsHeading": "Audit log",
       "tunnel.activity.eventsEmpty": "No events yet.",
-      "tunnel.chat.empty": "No chat messages yet.",
-      "tunnel.chat.inputLabel": "Message",
-      "tunnel.chat.you": "me",
       "tunnel.table.peer": "Peer",
       "tunnel.table.target": "Target",
       "tunnel.table.actions": "Actions",
@@ -3498,6 +3494,11 @@
       "nav.stream": "ストリーム",
       "nav.ai": "AI",
       "nav.chatRelay": "チャット",
+      "nav.chat": "チャット",
+      "chat.title": "チャット",
+      "chat.tabs.direct": "ダイレクト",
+      "chat.tabs.rooms": "tc-chatルーム",
+      "chat.tabs.stream": "画面共有",
       "nav.store": "ストレージ",
       "nav.scheduler": "スケジューラ",
       "nav.bot": "Bot",
@@ -4177,8 +4178,6 @@
       "tunnel.pending.hint": "承認する前に、ピアIDと接続先が意図したものか必ず確認してください。",
       "tunnel.pending.kind.auth": "このノードへの接続",
       "tunnel.pending.kind.incoming": "転送の提案",
-      "tunnel.pending.kind.outgoing": "自分の提案",
-      "tunnel.pending.waiting": "相手の応答待ち…",
       "tunnel.table.request": "要求",
       "tunnel.tabs.history": "信頼と履歴",
       "tunnel.subtitle": "同じルームのノード同士で TCP/UDP ポートを転送します。このノードへの接続は、ここで承認するまで通りません。",
@@ -4200,7 +4199,6 @@
       "tunnel.room.switched": "ルーム {room} に入りました。",
       "tunnel.room.switchConfirm": "ルームを切り替えると接続中の {count} 台のピアが切断され、既存のフォワードは相手を失います。続行しますか？",
       "tunnel.pending.title": "あなたの判断が必要です",
-      "tunnel.tabs.chat": "チャット",
       "tunnel.trust.heading": "記憶した判断",
       "tunnel.trust.hint": "「記憶する」にチェックして承認・拒否したものが保存されます。取り消すと判断を忘れますが、すでに開いている転送は閉じません。",
       "tunnel.trust.empty": "記憶した判断はありません。",
@@ -4208,9 +4206,6 @@
       "tunnel.activity.noticesEmpty": "通知はありません。",
       "tunnel.activity.eventsHeading": "監査ログ",
       "tunnel.activity.eventsEmpty": "イベントはまだありません。",
-      "tunnel.chat.empty": "チャットメッセージはまだありません。",
-      "tunnel.chat.inputLabel": "メッセージ",
-      "tunnel.chat.you": "自分",
       "tunnel.table.peer": "ピア",
       "tunnel.table.target": "ターゲット",
       "tunnel.table.actions": "操作",
@@ -4248,6 +4243,11 @@
       "nav.stream": "串流",
       "nav.ai": "AI",
       "nav.chatRelay": "聊天",
+      "nav.chat": "聊天",
+      "chat.title": "聊天",
+      "chat.tabs.direct": "私信",
+      "chat.tabs.rooms": "tc-chat 房间",
+      "chat.tabs.stream": "屏幕共享",
       "nav.store": "存储",
       "nav.scheduler": "调度器",
       "nav.bot": "Bot",
@@ -4927,8 +4927,6 @@
       "tunnel.pending.hint": "批准前，请确认节点 ID 和目标与预期完全一致。",
       "tunnel.pending.kind.auth": "连接到此节点",
       "tunnel.pending.kind.incoming": "转发提议",
-      "tunnel.pending.kind.outgoing": "我的提议",
-      "tunnel.pending.waiting": "等待对方响应…",
       "tunnel.table.request": "请求",
       "tunnel.tabs.history": "信任与记录",
       "tunnel.subtitle": "在同一房间的节点之间转发 TCP/UDP 端口。在此处批准之前，任何连接都无法到达此节点。",
@@ -4950,7 +4948,6 @@
       "tunnel.room.switched": "已进入房间 {room}。",
       "tunnel.room.switchConfirm": "切换房间会断开 {count} 个已连接的对端，现有转发将失去对应的对端。是否继续？",
       "tunnel.pending.title": "需要你的决定",
-      "tunnel.tabs.chat": "聊天",
       "tunnel.trust.heading": "已记住的决定",
       "tunnel.trust.hint": "勾选“记住”后批准或拒绝的决定会被保存。撤销只会忘记该决定，不会关闭已经打开的转发。",
       "tunnel.trust.empty": "没有记住的决定。",
@@ -4958,9 +4955,6 @@
       "tunnel.activity.noticesEmpty": "暂无通知。",
       "tunnel.activity.eventsHeading": "审计日志",
       "tunnel.activity.eventsEmpty": "暂无事件。",
-      "tunnel.chat.empty": "暂无聊天消息。",
-      "tunnel.chat.inputLabel": "消息",
-      "tunnel.chat.you": "我",
       "tunnel.table.peer": "节点",
       "tunnel.table.target": "目标",
       "tunnel.table.actions": "操作",
@@ -6834,7 +6828,7 @@
      simply misses and the line stays hidden until/unless it's added).
      Multi-room modules (Store, chat_relay) aren't listed here since their
      mini-strip already shows every room as its own chip. */
-  var TOPOLOGY_PANEL_MODULE = { "panel-stream": "stream", "panel-ai": "ai" };
+  var TOPOLOGY_PANEL_MODULE = { "panel-chat": "stream", "panel-ai": "ai" };
 
   function renderTopologyContext() {
     if (!topologyContextEl) return;
@@ -7331,6 +7325,15 @@
     }
   });
 
+  /* ---------- peers (signed profiles) + direct messages ---------- */
+
+  window.MistlPeers.init({ call: api });
+  var dmView = window.MistlMessenger.mount(document.getElementById("dm-app"), {
+    call: api,
+    peers: window.MistlPeers,
+    lang: function () { return currentLang; }
+  });
+
   /* ---------- tc-chat: explicit transport and configuration ports ---------- */
 
   var chatRelayView = window.MistlChat.create({
@@ -7820,8 +7823,16 @@
     t: t
   });
 
+  var storeFolderShare = window.MistlStorage.createFolderShare({
+    mount: document.getElementById("store-folder-share"),
+    call: api,
+    getLocale: function () { return currentLang; },
+    copy: copyToClipboard
+  });
+
   function pollStoreSyncList() {
     storeFolderAccess.refresh();
+    storeFolderShare.refresh();
     return api("store.folder-sync.ls", {}).then(renderStoreSyncList, function () {});
   }
 
@@ -9205,13 +9216,6 @@
   var tunnelNoticesEmpty = document.getElementById("tunnel-notices-empty");
   var tunnelEventsTbody = document.querySelector("#tunnel-events-table tbody");
   var tunnelEventsEmpty = document.getElementById("tunnel-events-empty");
-  var tunnelChatMessages = document.getElementById("tunnel-chat-messages");
-  var tunnelChatSnapshot = [];
-  var tunnelChatLanguage = null;
-  var tunnelChatEmpty = document.getElementById("tunnel-chat-empty");
-  var tunnelChatForm = document.getElementById("tunnel-chat-form");
-  var tunnelChatInput = document.getElementById("tunnel-chat-input");
-  var tunnelChatSendBtn = document.getElementById("btn-tunnel-chat-send");
   // While running, the room form is only shown after "Switch room".
   var tunnelRoomFormOpen = false;
 
@@ -9220,7 +9224,18 @@
   function tunnelPendingRow(kind, peerId, target, detail) {
     var tr = el("tr", {});
     tr.appendChild(el("td", { text: t(kind) }));
-    var peerCell = el("td", { class: "mono tunnel-grant-peer", text: peerId || "-" });
+    var peerCell = el("td", { class: "mono tunnel-grant-peer" });
+    // A self-claimed name (and avatar) is shown above the id, never instead of
+    // it: the full id is what the user is actually approving.
+    var peers = window.MistlPeers;
+    var known = peers && typeof peers.byNode === "function" ? peers.byNode(peerId) : null;
+    if (known && known.name && typeof peers.label === "function") {
+      var who = el("div", { class: "tunnel-peer-who" });
+      if (typeof peers.avatarEl === "function") who.appendChild(peers.avatarEl(peerId, 20));
+      who.appendChild(el("span", { class: "tunnel-peer-name", text: peers.label(peerId) }));
+      peerCell.appendChild(who);
+    }
+    peerCell.appendChild(document.createTextNode(peerId || "-"));
     tr.appendChild(peerCell);
     var targetCell = el("td", {});
     targetCell.appendChild(el("div", { class: "mono tunnel-grant-target", text: target || "-" }));
@@ -9244,7 +9259,7 @@
     return btn;
   }
 
-  function renderTunnelPending(auth, incoming, outgoing) {
+  function renderTunnelPending(auth, incoming) {
     tunnelPendingTbody.innerHTML = "";
     // A peer wants to reach a target on this node.
     auth.forEach(function (item) {
@@ -9279,16 +9294,9 @@
       row.actionCell.appendChild(tunnelDecisionButton("tunnel.action.accept", "primary", "tunnel.forward.accept", { req_id: item.req_id }, "tunnel.toast.accepted"));
       row.actionCell.appendChild(tunnelDecisionButton("tunnel.action.reject", "danger", "tunnel.forward.reject", { req_id: item.req_id }, "tunnel.toast.rejected"));
     });
-    // This node's own proposals, waiting on the peer. The negotiator keeps
-    // no request id for these, so they are informational only.
-    outgoing.forEach(function (item) {
-      item = item || {};
-      var local = item.local_addr || (item.listen_port ? String(item.listen_port) : "");
-      var route = local && item.remote_addr ? local + " → " + item.remote_addr : (local || item.remote_addr || "");
-      var row = tunnelPendingRow("tunnel.pending.kind.outgoing", item.peer_id, item.target,
-        [item.proto, route].filter(Boolean).join(" · "));
-      row.actionCell.appendChild(el("span", { class: "muted", text: t("tunnel.pending.waiting") }));
-    });
+    // This node's own proposals (and connections the owner has parked) are
+    // NOT decisions for this user: they are shown on the graph, on the
+    // self node card, as "Waiting for <peer> to accept" (tunnel-graph.js).
   }
 
   function renderTunnelTrust(items) {
@@ -9350,34 +9358,6 @@
     });
   }
 
-  function renderTunnelChat(items) {
-    items = items || [];
-    var keys = items.map(function (msg) { return JSON.stringify(msg || {}); });
-    var sameLanguage = tunnelChatLanguage === currentLang;
-    if (sameLanguage && JSON.stringify(keys) === JSON.stringify(tunnelChatSnapshot)) return;
-    var wrap = document.getElementById("tunnel-chat-history");
-    var atBottom = wrap.scrollHeight - wrap.scrollTop - wrap.clientHeight < 48;
-    var oldScroll = wrap.scrollTop;
-    var appendOnly = sameLanguage && tunnelChatSnapshot.length <= keys.length && tunnelChatSnapshot.every(function (key, i) { return key === keys[i]; });
-    var offset = appendOnly ? tunnelChatSnapshot.length : 0;
-    if (!appendOnly) tunnelChatMessages.replaceChildren();
-    tunnelChatEmpty.hidden = items.length > 0;
-    items.slice(offset).forEach(function (msg) {
-      msg = msg || {};
-      var row = el("article", { class: msg.mine ? "chat-message mine" : "chat-message" });
-      var meta = el("div", { class: "chat-message-meta" });
-      meta.appendChild(el("span", { text: msg.mine ? t("tunnel.chat.you") : (msg.peer_id || "-") }));
-      meta.appendChild(el("time", { text: fmtEpochMs(msg.timestamp_ms) }));
-      row.appendChild(meta);
-      row.appendChild(el("p", { class: "chat-message-body", text: msg.text || "" }));
-      tunnelChatMessages.appendChild(row);
-    });
-    tunnelChatSnapshot = keys;
-    tunnelChatLanguage = currentLang;
-    // Preserve the reader's position when earlier messages are being read.
-    wrap.scrollTop = atBottom ? wrap.scrollHeight : oldScroll;
-  }
-
   // Recent rooms are offered as suggestions on the one room input instead
   // of a separate popover list.
   function renderTunnelRoomList(rooms) {
@@ -9423,6 +9403,7 @@
     document: document,
     host: tunnelGraphHost,
     api: api,
+    toast: showToast,
     refresh: pollTunnelStatus
   });
 
@@ -9440,16 +9421,14 @@
 
     var pendingAuth = data.pending_auth || [];
     var pendingForwards = data.pending_forwards || [];
-    var pendingOutgoing = data.pending_outgoing || [];
     var actionable = pendingAuth.length + pendingForwards.length;
-    tunnelPendingSection.hidden = actionable + pendingOutgoing.length === 0;
+    tunnelPendingSection.hidden = actionable === 0;
     tunnelPendingCountEl.textContent = actionable > 0 ? String(actionable) : "";
-    renderTunnelPending(pendingAuth, pendingForwards, pendingOutgoing);
+    renderTunnelPending(pendingAuth, pendingForwards);
 
     renderTunnelTrust(data.trust || []);
     renderTunnelNotices(data.notices || []);
     renderTunnelEvents(data.events || []);
-    renderTunnelChat(data.chat || []);
   }
 
   function pollTunnelStatus() {
@@ -9544,16 +9523,6 @@
     tunnelEnterRoom(tunnelRoomConnectBtn, "tunnel.room.set", { room: room }, room);
   });
 
-  tunnelChatForm.addEventListener("submit", function (e) {
-    e.preventDefault();
-    var text = tunnelChatInput.value.trim();
-    if (!text) return;
-    runAction(tunnelChatSendBtn, "tunnel.chat.send", { text: text }, function () {
-      if (tunnelChatInput.value.trim() === text) tunnelChatInput.value = "";
-      pollTunnelStatus();
-    });
-  });
-
   /* ---------- profile ---------- */
 
   var profileKv = document.getElementById("profile-kv");
@@ -9602,7 +9571,7 @@
     if (data.avatar_cid) addKv(profileKv, t("profile.avatarCid"), truncateMiddle(data.avatar_cid, 10, 6), true);
     if (data.updated_at) addKv(profileKv, t("profile.updatedAt"), data.updated_at);
     Object.keys(data).forEach(function (key) {
-      if (["did", "display_name", "bio", "avatar_cid", "updated_at"].indexOf(key) === -1) {
+      if (["did", "display_name", "bio", "avatar_cid", "avatar_thumb", "updated_at"].indexOf(key) === -1) {
         addKv(profileKv, key, data[key]);
       }
     });
@@ -9613,10 +9582,59 @@
     if (!profileHintDismissed) {
       profileHintBanner.hidden = !!data.display_name;
     }
+    backfillAvatarThumb(data);
   }
 
   /* ---------- profile avatar: downscale client-side, store as a blob,
      reference by CID ----------------------------------------------------- */
+
+  /* Peers only receive a small inline thumbnail (`avatar_thumb`, a data URL
+     the daemon caps at 16384 chars) inside the signed profile message, so
+     they can show the avatar without fetching the full image by CID. */
+  var AVATAR_THUMB_MAX_CHARS = 16384;
+  var avatarThumbBackfilled = {};
+
+  function makeAvatarThumb(source) {
+    var side = Math.min(source.width, source.height);
+    if (!side) return "";
+    var attempts = [[96, "image/webp", 0.82], [64, "image/webp", 0.75], [64, "image/jpeg", 0.7], [48, "image/jpeg", 0.6]];
+    for (var i = 0; i < attempts.length; i++) {
+      var size = attempts[i][0];
+      var canvas = document.createElement("canvas");
+      canvas.width = size;
+      canvas.height = size;
+      canvas.getContext("2d").drawImage(source.drawable,
+        (source.width - side) / 2, (source.height - side) / 2, side, side, 0, 0, size, size);
+      var url = canvas.toDataURL(attempts[i][1], attempts[i][2]);
+      /* toDataURL silently falls back to PNG when a type is unsupported */
+      if (url.indexOf("data:" + attempts[i][1] + ";base64,") === 0 && url.length <= AVATAR_THUMB_MAX_CHARS) return url;
+    }
+    return "";
+  }
+
+  function thumbFromUrl(url) {
+    return new Promise(function (resolve, reject) {
+      var img = new Image();
+      img.onload = function () {
+        resolve(makeAvatarThumb({ width: img.naturalWidth, height: img.naturalHeight, drawable: img }));
+      };
+      img.onerror = function () { reject(new Error(t("profile.avatarBadType"))); };
+      img.src = url;
+    });
+  }
+
+  function saveAvatarThumb(thumb) {
+    if (!thumb) return Promise.resolve(null);
+    return api("profile.set", { field: "avatar_thumb", value: thumb });
+  }
+
+  function backfillAvatarThumb(data) {
+    if (!data || !data.avatar_cid || data.avatar_thumb || avatarThumbBackfilled[data.avatar_cid]) return;
+    avatarThumbBackfilled[data.avatar_cid] = true;
+    thumbFromUrl("/api/store/download?cid=" + encodeURIComponent(data.avatar_cid))
+      .then(saveAvatarThumb)
+      .then(function (profile) { if (profile) state.identity = profile; }, function () {});
+  }
 
   function processAvatarImage(file) {
     return new Promise(function (resolve, reject) {
@@ -9682,6 +9700,16 @@
       return uploadBlobToStore(out.blob, "avatar." + out.ext).then(function (uploaded) {
         return api("profile.set", { field: "avatar_cid", value: uploaded.cid });
       }).then(function (profile) {
+        avatarThumbBackfilled[profile.avatar_cid] = true;
+        var thumbUrl = URL.createObjectURL(out.blob);
+        return thumbFromUrl(thumbUrl).then(saveAvatarThumb).then(function (withThumb) {
+          URL.revokeObjectURL(thumbUrl);
+          return withThumb || profile;
+        }, function () {
+          URL.revokeObjectURL(thumbUrl);
+          return profile;
+        });
+      }).then(function (profile) {
         avatarDropzone.classList.remove("busy-zone");
         showToast(t("profile.avatarUpdated"), "success");
         renderProfile(profile);
@@ -9716,9 +9744,11 @@
   });
 
   avatarRemoveBtn.addEventListener("click", function (e) {
-    runAction(e.currentTarget, "profile.set", { field: "avatar_cid", value: "" }, function (profile) {
-      showToast(t("profile.avatarRemoved"), "success");
-      renderProfile(profile);
+    runAction(e.currentTarget, "profile.set", { field: "avatar_cid", value: "" }, function () {
+      api("profile.set", { field: "avatar_thumb", value: "" }).then(function (profile) {
+        showToast(t("profile.avatarRemoved"), "success");
+        renderProfile(profile);
+      }, function (err) { showToast(err.message || String(err), "error"); });
     });
   });
 
@@ -11056,14 +11086,27 @@
   /* ---------- view router (single-view navigation) ---------- */
 
   var PANEL_IDS = [
-    "panel-overview", "panel-stream", "panel-ai",
-    "panel-chat-relay", "panel-store", "panel-scheduler", "panel-bot", "panel-tunnel", "panel-profile", "panel-update", "panel-settings"
+    "panel-overview", "panel-chat", "panel-ai",
+    "panel-store", "panel-scheduler", "panel-bot", "panel-tunnel", "panel-profile", "panel-update", "panel-settings"
   ];
   var sideLinks = Array.prototype.slice.call(document.querySelectorAll("#sidenav a"));
 
+  /* Former top-level views that now live as tabs of another panel: old
+     links and settings shortcuts keep working and open the right tab. */
+  var PANEL_ALIASES = {
+    "panel-stream": { panel: "panel-chat", tab: "stream" },
+    "panel-chat-relay": { panel: "panel-chat", tab: "rooms" }
+  };
+
   function panelFromHash() {
     var id = (location.hash || "").replace(/^#/, "");
+    if (PANEL_ALIASES[id]) return PANEL_ALIASES[id].panel;
     return PANEL_IDS.indexOf(id) >= 0 ? id : "panel-overview";
+  }
+
+  function revealAliasTab(id) {
+    var alias = PANEL_ALIASES[id];
+    if (alias && subtabActivate[alias.panel]) subtabActivate[alias.panel](alias.tab);
   }
 
   // One persistent host: navigation never hides or recreates the graph.
@@ -11103,9 +11146,16 @@
     });
   }
 
-  function routeFromHash() { showPanel(panelFromHash()); }
+  function routeFromHash() {
+    revealAliasTab((location.hash || "").replace(/^#/, ""));
+    showPanel(panelFromHash());
+  }
 
   function navigateTo(id) {
+    if (PANEL_ALIASES[id]) {
+      revealAliasTab(id);
+      id = PANEL_ALIASES[id].panel;
+    }
     if (location.hash === "#" + id) showPanel(id);   /* same hash: no hashchange fires */
     else location.hash = "#" + id;                   /* else hashchange -> routeFromHash */
   }
@@ -11116,7 +11166,7 @@
     var a = e.target.closest ? e.target.closest('a[href^="#panel-"]') : null;
     if (!a) return;
     var id = a.getAttribute("href").replace(/^#/, "");
-    if (PANEL_IDS.indexOf(id) < 0) return;
+    if (PANEL_IDS.indexOf(id) < 0 && !PANEL_ALIASES[id]) return;
     e.preventDefault();
     navigateTo(id);
   });

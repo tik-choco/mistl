@@ -57,6 +57,12 @@
 @keyframes topology-preview-in { from { opacity: 0; } to { opacity: 1; } }
 .topology-preview[hidden] { display: none; }
 .topology-preview > * { display: block; }
+.topology-preview > .mp-avatar { display: inline-flex; margin-bottom: 6px; }
+.topology-detail-body > .mp-avatar { margin-bottom: 8px; }
+#topology-card .topology-peer-name {
+  max-width: 18em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--sans); color: var(--text);
+}
 .topology-preview-name { font-size: 13px; max-height: 4.7em; overflow: auto; }
 .topology-preview-id { font: 11px/1.65 var(--mono); margin-top: 6px; max-height: 8em; overflow: auto; }
 .topology-preview-meta, .topology-preview-hint { color: var(--text-dim); }

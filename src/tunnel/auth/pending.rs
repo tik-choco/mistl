@@ -38,9 +38,31 @@ pub struct PendingAuthorization {
     pub request: AuthRequest,
 }
 
-#[derive(Debug, Clone)]
+/// What a [`PendingAuthorizations`] notifier is told about a request: it was
+/// parked for a human, or it was resolved. Lets the session tell the
+/// connecting peer (see `crate::tunnel::notice`); the queue itself stays
+/// transport-agnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingEvent {
+    Parked,
+    Allowed,
+    Denied,
+}
+
+/// Called with the request a [`PendingEvent`] is about. Must not block.
+pub type PendingNotifier = Arc<dyn Fn(&AuthRequest, PendingEvent) + Send + Sync>;
+
+#[derive(Clone)]
 pub struct PendingAuthorizations {
     inner: Arc<Mutex<Inner>>,
+    notifier: Arc<std::sync::Mutex<Option<PendingNotifier>>>,
+}
+
+impl std::fmt::Debug for PendingAuthorizations {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingAuthorizations")
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug)]
@@ -79,6 +101,24 @@ impl PendingAuthorizations {
                 next_id: 1,
                 pending: BTreeMap::new(),
             })),
+            notifier: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    /// Installs the callback told when a request is parked and when it is
+    /// resolved (once per coalesced row, not per waiting connection).
+    pub fn set_notifier(&self, notifier: PendingNotifier) {
+        *self.notifier.lock().unwrap_or_else(|e| e.into_inner()) = Some(notifier);
+    }
+
+    fn notify(&self, request: &AuthRequest, event: PendingEvent) {
+        let notifier = self
+            .notifier
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(notifier) = notifier {
+            notifier(request, event);
         }
     }
 
@@ -99,6 +139,14 @@ impl PendingAuthorizations {
         let item = self.inner.lock().await.pending.remove(&id);
         match item {
             Some(item) => {
+                self.notify(
+                    &item.request,
+                    if decision.is_allowed() {
+                        PendingEvent::Allowed
+                    } else {
+                        PendingEvent::Denied
+                    },
+                );
                 item.answer(decision);
                 true
             }
@@ -129,10 +177,12 @@ impl PendingAuthorizations {
         count
     }
 
+    /// Parks `request`. The flag is `true` when it opened a new row (as
+    /// opposed to joining an identical one that is already waiting).
     async fn enqueue(
         &self,
         request: AuthRequest,
-    ) -> Option<(u64, oneshot::Receiver<AuthDecision>)> {
+    ) -> Option<(u64, oneshot::Receiver<AuthDecision>, bool)> {
         let (sender, receiver) = oneshot::channel();
         let mut inner = self.inner.lock().await;
         if let Some((id, item)) = inner
@@ -145,7 +195,7 @@ impl PendingAuthorizations {
                 return None;
             }
             item.responders.push(sender);
-            return Some((*id, receiver));
+            return Some((*id, receiver, false));
         }
         let from_peer = inner
             .pending
@@ -164,7 +214,7 @@ impl PendingAuthorizations {
                 responders: vec![sender],
             },
         );
-        Some((id, receiver))
+        Some((id, receiver, true))
     }
 
     /// Drops waiters whose wait ended without a decision -- used when
@@ -174,11 +224,16 @@ impl PendingAuthorizations {
     /// coalesced row keep it until their own timeout.
     async fn remove_unresolved(&self, id: u64) {
         let mut inner = self.inner.lock().await;
+        let mut expired = None;
         if let Some(item) = inner.pending.get_mut(&id) {
             item.responders.retain(|r| !r.is_closed());
             if item.responders.is_empty() {
-                inner.pending.remove(&id);
+                expired = inner.pending.remove(&id);
             }
+        }
+        drop(inner);
+        if let Some(item) = expired {
+            self.notify(&item.request, PendingEvent::Denied);
         }
     }
 
@@ -254,16 +309,25 @@ impl PendingAuthorizer {
             };
             self.record(req, decision, AuthEventSource::TrustStore)
                 .await;
+            // A remembered deny is final: tell the peer why its connection
+            // dies (a remembered allow just works, nothing to say).
+            if decision == AuthDecision::Deny {
+                self.pending.notify(req, PendingEvent::Denied);
+            }
             return decision;
         }
 
-        let Some((id, receiver)) = self.pending.enqueue(req.clone()).await else {
+        let Some((id, receiver, parked)) = self.pending.enqueue(req.clone()).await else {
             // Too many unanswered requests from this peer (or overall): deny
             // without parking another row or remembering anything.
             self.record(req, AuthDecision::Deny, AuthEventSource::Pending)
                 .await;
+            self.pending.notify(req, PendingEvent::Denied);
             return AuthDecision::Deny;
         };
+        if parked {
+            self.pending.notify(req, PendingEvent::Parked);
+        }
         let decision = match tokio::time::timeout(DECISION_TIMEOUT, receiver).await {
             Ok(result) => result.unwrap_or(AuthDecision::Deny),
             // `timeout` consumed and dropped the receiver, which is what lets

@@ -7,6 +7,7 @@
     var win = options.window;
     var t = options.t;
     var models = new Map();
+    var sourceModels = [];
     var triggers = new Map();
     var selected = null;
     var selectedModel = null;
@@ -23,6 +24,61 @@
       if (className) node.className = className;
       if (text != null) node.textContent = text;
       return node;
+    }
+
+    function peerFor(model) {
+      return root.MistlPeers && (root.MistlPeers.byDid(model.did) || root.MistlPeers.byNode(model.id));
+    }
+
+    function refreshModels() {
+      models = new Map(sourceModels.map(function (node) {
+        var peer = peerFor(node);
+        var model = Object.assign({}, node);
+        if (model.name || peer) {
+          model.label = model.name || root.MistlPeers.label(peer);
+          model.did = model.did || peer && peer.did;
+          model.avatar = peer && peer.avatar;
+        }
+        return [model.key, model];
+      }));
+      updateLabels();
+      if (dialog.open) renderDetail();
+      if (hovered && !dialog.open) showPreview(hovered, hovered.getAttribute("data-topology-key"));
+    }
+
+    function compactLabel(text, maxUnits) {
+      var chars = Array.from(String(text));
+      var units = chars.reduce(function (n, ch) { return n + (ch.codePointAt(0) > 255 ? 2 : 1); }, 0);
+      if (units <= maxUnits) return text;
+      var result = "", used = 0;
+      chars.some(function (ch) {
+        var weight = ch.codePointAt(0) > 255 ? 2 : 1;
+        if (used + weight > maxUnits - 1) return true;
+        result += ch; used += weight; return false;
+      });
+      return result + "…";
+    }
+
+    function updateLabels() {
+      triggers.forEach(function (nodes, key) {
+        var model = models.get(key);
+        if (!model) return;
+        nodes.forEach(function (node) {
+          node.setAttribute("aria-label", [model.label, model.state, t("topology.details.open")].filter(Boolean).join(" · "));
+          if (!node.querySelector) return;
+          var label = node.querySelector(".topology-node-label");
+          if (label) {
+            var hit = node.querySelector(".topology-node-hit");
+            var width = hit && Number(hit.getAttribute("width")) || 180;
+            label.textContent = compactLabel(model.label, Math.max(8, Math.floor((width - 20) / 7.4)));
+          } else if (node.classList.contains("topology-room-peer")) {
+            label = node.querySelector(".mono, .topology-peer-name");
+            if (label) { label.textContent = model.label; label.classList.add("topology-peer-name"); }
+          }
+          var title = node.querySelector("title");
+          if (title) title.textContent = [model.label, model.id, model.role, model.state].filter(Boolean).join(" · ");
+        });
+      });
     }
 
     var fitButton;
@@ -97,6 +153,8 @@
       hidePreview();
       hovered = trigger;
       preview.replaceChildren();
+      var peer = peerFor(model);
+      if (peer) preview.appendChild(root.MistlPeers.avatarEl(peer, 32));
       preview.appendChild(element("strong", "topology-preview-name", model.label));
       preview.appendChild(element("span", "topology-preview-meta", [model.role, model.state].filter(Boolean).join(" · ")));
       if (model.id) preview.appendChild(element("span", "topology-preview-id", model.id));
@@ -127,6 +185,8 @@
       copy.textContent = t("topology.details.copy");
       copy.hidden = !model.id;
       content.replaceChildren();
+      var peer = peerFor(model);
+      if (peer) content.appendChild(root.MistlPeers.avatarEl(peer, 48));
       content.appendChild(element("h3", "topology-detail-name", model.label));
       if (unavailable) {
         var notice = element("p", "topology-detail-notice", t("topology.details.unavailable"));
@@ -140,6 +200,10 @@
         list.appendChild(element("dd", mono ? "mono" : null, value));
       }
       row("topology.details.id", model.id, true);
+      if (model.did) {
+        list.appendChild(element("dt", null, "DID"));
+        list.appendChild(element("dd", "mono", model.did));
+      }
       row("topology.details.role", model.role);
       row("topology.details.state", model.state);
       row("topology.details.connection", model.connection);
@@ -199,11 +263,13 @@
     win.addEventListener("scroll", hidePreview, true);
     win.addEventListener("resize", function () { hidePreview(); applyGraphScale(); });
 
+    if (root.MistlPeers) root.MistlPeers.subscribe(refreshModels);
+
     return {
       setGraphWidth: function (width) { graphWidth = width; applyGraphScale(); },
       setSnapshot: function (nodes) {
-        models = new Map(nodes.map(function (node) { return [node.key, node]; }));
-        if (dialog.open) renderDetail();
+        sourceModels = nodes;
+        refreshModels();
       },
       beginRender: function () {
         restoreKey = doc.activeElement && doc.activeElement.getAttribute("data-topology-key");
@@ -232,6 +298,7 @@
         node.addEventListener("blur", scheduleHide);
       },
       endRender: function () {
+        updateLabels();
         markSelected();
         if (!dialog.open && restoreKey) {
           var nodes = triggers.get(restoreKey);

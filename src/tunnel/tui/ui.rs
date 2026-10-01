@@ -5,15 +5,15 @@
 //! (`super::app`) instead of live session state, there's a dedicated
 //! "daemon not connected" screen, and three small additions the integration
 //! contract calls for that upstream's TUI didn't have: a self-id/room/status
-//! header field, a notice line, and the chat/room popups.
+//! header field, a notice line, and the room popup.
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table};
 
 use super::app::{App, Focus, PendingRow, Popup};
 use super::format::{
-    endpoint, format_chat, format_event, format_notice, format_pending_outgoing, human_bytes,
-    is_error_notice, proto_name, role_label, short_id, state_name, trust_name,
+    endpoint, format_event, format_notice, format_pending_outgoing, human_bytes, is_error_notice,
+    proto_name, role_label, short_id, state_name, trust_name,
 };
 
 pub(super) fn draw(f: &mut Frame, app: &App) {
@@ -45,7 +45,6 @@ pub(super) fn draw(f: &mut Frame, app: &App) {
     match &app.popup {
         Popup::Add(form) => draw_add_popup(f, form, app.message.as_deref()),
         Popup::Trust(sel) => draw_trust_popup(f, app, *sel),
-        Popup::Chat(input) => draw_chat_popup(f, app, input),
         Popup::Room(input) => draw_room_popup(f, input),
         Popup::None => {}
     }
@@ -270,7 +269,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
         format!(" {} ", msg)
     } else {
         " [a]dd forward  [d]elete  [Enter]expand  [Tab]focus  [t]rust  [y/n]approve  \
-          [c]hat  [r]oom  [s]tart/stop  [q]uit — dashboard: `mistl ui` "
+          [r]oom  [s]tart/stop  [q]uit — dashboard: `mistl ui` "
             .to_string()
     };
     let p = Paragraph::new(hint).style(Style::default().add_modifier(Modifier::DIM));
@@ -384,38 +383,6 @@ fn draw_trust_popup(f: &mut Frame, app: &App, sel: usize) {
             .title(" Trust store ([x]remove  [Esc]close) "),
     );
     f.render_widget(list, area);
-}
-
-/// New relative to upstream: a scrollback + input-line popup for
-/// `tunnel.chat.send`. Mirrors the styling of the other popups (one bordered
-/// `Block`, unbordered content laid out inside via `Layout::margin`) rather
-/// than upstream's separate raw-terminal `p2p chat` mode
-/// (`p2p/src/app/chat.rs`), since this is now just another `App` popup.
-fn draw_chat_popup(f: &mut Frame, app: &App, input: &str) {
-    let area = centered_rect(70, 60, f.area());
-    f.render_widget(Clear, area);
-    f.render_widget(Block::default().borders(Borders::ALL).title(" Chat "), area);
-    let inner = Layout::vertical([Constraint::Min(3), Constraint::Length(1)])
-        .margin(1)
-        .split(area);
-
-    let max = inner[0].height as usize;
-    let items: Vec<ListItem> = app
-        .snapshot
-        .chat
-        .iter()
-        .rev()
-        .take(max)
-        .map(|m| ListItem::new(format_chat(m)))
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-    let list = List::new(items);
-    f.render_widget(list, inner[0]);
-
-    let input_p = Paragraph::new(format!("> {}_", input));
-    f.render_widget(input_p, inner[1]);
 }
 
 /// New relative to upstream: a single-field popup for `tunnel.room.set`.

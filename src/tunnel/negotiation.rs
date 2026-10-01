@@ -13,7 +13,7 @@
 //! matches the Rust field names already), so:
 //!
 //! `IncomingForward` -> `{"id":0,"req_id":"..","peer_id":"..","proto":"..","remote_addr":"..","target":".."}`
-//! `OutgoingForward` -> `{"peer_id":"..","proto":"..","listen_port":0,"local_addr":"..","remote_addr":"..","target":".."}`
+//! `OutgoingForward` -> `{"req_id":"..","sent_at_ms":0,"peer_id":"..","proto":"..","listen_port":0,"local_addr":"..","remote_addr":"..","target":".."}`
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -30,6 +30,18 @@ use tokio::sync::Mutex;
 pub const MAX_INCOMING_PER_PEER: usize = 32;
 pub const MAX_INCOMING_TOTAL: usize = 128;
 pub const INCOMING_TTL: Duration = Duration::from_secs(5 * 60);
+/// How long we wait for a peer to answer a proposal we sent. Matches the
+/// peer's [`INCOMING_TTL`] (after which it forgets the proposal and can no
+/// longer answer it), so a proposal nobody will ever answer does not sit in
+/// the UI as "waiting" forever.
+pub const OUTGOING_TTL: Duration = Duration::from_secs(5 * 60);
+/// `ForwardOutcome::reason` values the negotiator itself produces (the
+/// session maps them to notice codes).
+pub const REASON_TIMEOUT: &str = "no answer from the peer (timed out)";
+pub const REASON_PEER_LEFT: &str = "peer disconnected";
+/// Cap on our own unanswered proposals (they are user-driven, so this only
+/// guards against a runaway script).
+pub const MAX_OUTGOING: usize = 64;
 
 /// An incoming forward proposal from a peer, awaiting a local approve/deny in
 /// the TUI pending pane.
@@ -48,8 +60,15 @@ pub struct IncomingForward {
 
 /// State the requester remembers between sending a `ForwardRequest` and
 /// receiving the matching `ForwardResponse`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct OutgoingForward {
+    /// Protocol-level request id; filled in by [`ForwardNegotiator::record_outgoing`]
+    /// (what `tunnel.forward.propose.cancel` identifies a proposal by).
+    pub req_id: String,
+    /// Wall-clock send time (ms since the epoch), filled in by
+    /// [`ForwardNegotiator::record_outgoing`]; lets the UI show how long we
+    /// have been waiting.
+    pub sent_at_ms: u64,
     pub peer_id: String,
     pub proto: String,
     pub listen_port: i32,
@@ -84,6 +103,7 @@ struct Inner {
     incoming: BTreeMap<u64, IncomingForward>,
     incoming_at: BTreeMap<u64, Instant>,
     outgoing: BTreeMap<String, OutgoingForward>,
+    outgoing_at: BTreeMap<String, Instant>,
     outcomes: Vec<ForwardOutcome>,
 }
 
@@ -164,8 +184,21 @@ impl ForwardNegotiator {
     }
 
     /// Remembers a request the local node just sent, keyed by protocol req id.
-    pub async fn record_outgoing(&self, req_id: String, outgoing: OutgoingForward) {
-        self.inner.lock().await.outgoing.insert(req_id, outgoing);
+    /// Returns `false` (and records nothing) when [`MAX_OUTGOING`] unanswered
+    /// proposals are already pending.
+    pub async fn record_outgoing(&self, req_id: String, mut outgoing: OutgoingForward) -> bool {
+        let mut inner = self.inner.lock().await;
+        if inner.outgoing.len() >= MAX_OUTGOING {
+            return false;
+        }
+        outgoing.req_id = req_id.clone();
+        outgoing.sent_at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        inner.outgoing_at.insert(req_id.clone(), Instant::now());
+        inner.outgoing.insert(req_id, outgoing);
+        true
     }
 
     /// Lists requests the local node has sent and is still waiting on a
@@ -178,7 +211,34 @@ impl ForwardNegotiator {
     /// Used to roll back `record_outgoing` when the send that was supposed
     /// to follow it fails.
     pub async fn remove_outgoing(&self, req_id: &str) -> Option<OutgoingForward> {
-        self.inner.lock().await.outgoing.remove(req_id)
+        let mut inner = self.inner.lock().await;
+        inner.outgoing_at.remove(req_id);
+        inner.outgoing.remove(req_id)
+    }
+
+    /// Withdraws a proposal the user no longer wants answered. No outcome is
+    /// queued (the user cancelled it themselves, so there is nothing to
+    /// report); a late response for it is dropped as an unknown req id.
+    pub async fn cancel_outgoing(&self, req_id: &str) -> Option<OutgoingForward> {
+        self.remove_outgoing(req_id).await
+    }
+
+    /// Drops the pending incoming proposal `(peer_id, req_id)` because that
+    /// peer withdrew it. Bound to the transport sender: only the peer that
+    /// sent a proposal can cancel it. Returns whether one was removed.
+    pub async fn cancel_incoming(&self, peer_id: &str, req_id: &str) -> bool {
+        let mut inner = self.inner.lock().await;
+        let Some(id) = inner
+            .incoming
+            .values()
+            .find(|f| f.peer_id == peer_id && f.req_id == req_id)
+            .map(|f| f.id)
+        else {
+            return false;
+        };
+        inner.incoming.remove(&id);
+        inner.incoming_at.remove(&id);
+        true
     }
 
     /// Matches a received response to a pending outgoing request and queues the
@@ -202,6 +262,7 @@ impl ForwardNegotiator {
             return;
         }
         let outgoing = inner.outgoing.remove(req_id).expect("just checked above");
+        inner.outgoing_at.remove(req_id);
         inner.outcomes.push(ForwardOutcome {
             outgoing,
             accepted,
@@ -209,9 +270,29 @@ impl ForwardNegotiator {
         });
     }
 
-    /// Drains queued outcomes for the requester side to act on.
+    /// Drains queued outcomes for the requester side to act on. Proposals
+    /// that sat unanswered past [`OUTGOING_TTL`] are first failed with a
+    /// "timed out" outcome so they do not wait forever.
     pub async fn drain_outcomes(&self) -> Vec<ForwardOutcome> {
-        std::mem::take(&mut self.inner.lock().await.outcomes)
+        let mut inner = self.inner.lock().await;
+        let now = Instant::now();
+        let stale: Vec<String> = inner
+            .outgoing_at
+            .iter()
+            .filter(|(_, at)| now.duration_since(**at) > OUTGOING_TTL)
+            .map(|(req_id, _)| req_id.clone())
+            .collect();
+        for req_id in stale {
+            inner.outgoing_at.remove(&req_id);
+            if let Some(outgoing) = inner.outgoing.remove(&req_id) {
+                inner.outcomes.push(ForwardOutcome {
+                    outgoing,
+                    accepted: false,
+                    reason: Some(REASON_TIMEOUT.to_string()),
+                });
+            }
+        }
+        std::mem::take(&mut inner.outcomes)
     }
 
     /// Removes state tied to a departed peer: its incoming proposals (there's
@@ -237,11 +318,12 @@ impl ForwardNegotiator {
             .collect();
         let outgoing_failed = stale_req_ids.len();
         for req_id in stale_req_ids {
+            inner.outgoing_at.remove(&req_id);
             if let Some(outgoing) = inner.outgoing.remove(&req_id) {
                 inner.outcomes.push(ForwardOutcome {
                     outgoing,
                     accepted: false,
-                    reason: Some("peer disconnected".to_string()),
+                    reason: Some(REASON_PEER_LEFT.to_string()),
                 });
             }
         }
@@ -262,6 +344,7 @@ mod tests {
             local_addr: "127.0.0.1:8080".into(),
             remote_addr: "127.0.0.1:80".into(),
             target: "tcp:127.0.0.1:80".into(),
+            ..Default::default()
         }
     }
 
@@ -441,5 +524,71 @@ mod tests {
 
         // Purging again is a no-op: nothing left for peer-1.
         assert_eq!(neg.purge_peer("peer-1").await, (0, 0));
+    }
+
+    #[tokio::test]
+    async fn record_outgoing_stamps_req_id_and_time() {
+        let neg = ForwardNegotiator::new();
+        assert!(neg.record_outgoing("r1".into(), sample_outgoing()).await);
+        let listed = neg.list_outgoing().await;
+        assert_eq!(listed[0].req_id, "r1");
+        assert!(listed[0].sent_at_ms > 0);
+    }
+
+    #[tokio::test]
+    async fn outgoing_is_capped() {
+        let neg = ForwardNegotiator::new();
+        for i in 0..MAX_OUTGOING {
+            assert!(
+                neg.record_outgoing(format!("r{i}"), sample_outgoing())
+                    .await
+            );
+        }
+        assert!(!neg.record_outgoing("extra".into(), sample_outgoing()).await);
+    }
+
+    #[tokio::test]
+    async fn cancel_outgoing_removes_without_an_outcome() {
+        let neg = ForwardNegotiator::new();
+        neg.record_outgoing("r1".into(), sample_outgoing()).await;
+        assert!(neg.cancel_outgoing("r1").await.is_some());
+        assert!(neg.list_outgoing().await.is_empty());
+        assert!(neg.drain_outcomes().await.is_empty());
+        // A late answer for the cancelled proposal is dropped.
+        neg.record_response("r1", "peer-1", true).await;
+        assert!(neg.drain_outcomes().await.is_empty());
+        assert!(neg.cancel_outgoing("r1").await.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unanswered_outgoing_times_out_into_a_failed_outcome() {
+        let neg = ForwardNegotiator::new();
+        neg.record_outgoing("r1".into(), sample_outgoing()).await;
+        assert!(neg.drain_outcomes().await.is_empty());
+        tokio::time::advance(OUTGOING_TTL + Duration::from_secs(1)).await;
+        let outcomes = neg.drain_outcomes().await;
+        assert_eq!(outcomes.len(), 1);
+        assert!(!outcomes[0].accepted);
+        assert!(outcomes[0].reason.as_deref().unwrap().contains("timed out"));
+        assert!(neg.list_outgoing().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancel_incoming_is_bound_to_the_sending_peer() {
+        let neg = ForwardNegotiator::new();
+        neg.record_incoming(
+            "r1".into(),
+            "p1".into(),
+            "tcp".into(),
+            "127.0.0.1:80".into(),
+            "t".into(),
+        )
+        .await;
+        // Another peer naming the same req id cannot withdraw p1's proposal.
+        assert!(!neg.cancel_incoming("p2", "r1").await);
+        assert_eq!(neg.list_incoming().await.len(), 1);
+        assert!(neg.cancel_incoming("p1", "r1").await);
+        assert!(neg.list_incoming().await.is_empty());
+        assert!(!neg.cancel_incoming("p1", "r1").await);
     }
 }

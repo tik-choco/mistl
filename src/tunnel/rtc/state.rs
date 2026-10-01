@@ -20,7 +20,6 @@ use std::sync::atomic::AtomicU64;
 
 use tokio::sync::RwLock;
 
-type ChatHandler = Arc<dyn Fn(String, String) + Send + Sync>;
 pub(super) type PeerHandler = Arc<dyn Fn(String) + Send + Sync>;
 /// A peer join/leave hook: `(peer_id, session epoch)`. See
 /// `RTCManagerInner::peer_epochs`.
@@ -29,6 +28,8 @@ pub(super) type FwdReqHandler =
     Arc<dyn Fn(String, super::manager::ForwardRequestEvent) + Send + Sync>;
 pub(super) type FwdRespHandler =
     Arc<dyn Fn(String, super::manager::ForwardResponseEvent) + Send + Sync>;
+/// Handler for `t`-tagged side messages (see [`crate::tunnel::notice`]): `(sender, json)`.
+pub(super) type AuxHandler = Arc<dyn Fn(String, serde_json::Value) + Send + Sync>;
 
 pub(super) type DataHandler = Arc<dyn Fn(String, Vec<u8>) + Send + Sync>;
 
@@ -96,7 +97,6 @@ pub(super) struct RTCManagerInner {
     pub(super) route_pins: RwLock<HashMap<String, String>>,
     pub(super) next_tunnel_handler_id: AtomicU64,
 
-    pub(super) chat_handlers: RwLock<Vec<ChatHandler>>,
     pub(super) tunnel_msg_handlers: RwLock<Vec<DataHandlerEntry>>,
     pub(super) stdio_msg_handlers: RwLock<Vec<DataHandler>>,
     pub(super) tunnel_open_handlers: RwLock<Vec<PeerHandler>>,
@@ -108,6 +108,7 @@ pub(super) struct RTCManagerInner {
     pub(super) peer_leave_handlers: RwLock<Vec<PeerEpochHandler>>,
     pub(super) forward_request_handlers: RwLock<Vec<FwdReqHandler>>,
     pub(super) forward_response_handlers: RwLock<Vec<FwdRespHandler>>,
+    pub(super) aux_handlers: RwLock<Vec<AuxHandler>>,
 }
 
 impl RTCManagerInner {
@@ -126,7 +127,6 @@ impl RTCManagerInner {
             default_tunnel_target: RwLock::new(None),
             route_pins: RwLock::new(HashMap::new()),
             next_tunnel_handler_id: AtomicU64::new(1),
-            chat_handlers: RwLock::new(Vec::new()),
             tunnel_msg_handlers: RwLock::new(Vec::new()),
             stdio_msg_handlers: RwLock::new(Vec::new()),
             tunnel_open_handlers: RwLock::new(Vec::new()),
@@ -138,6 +138,7 @@ impl RTCManagerInner {
             peer_leave_handlers: RwLock::new(Vec::new()),
             forward_request_handlers: RwLock::new(Vec::new()),
             forward_response_handlers: RwLock::new(Vec::new()),
+            aux_handlers: RwLock::new(Vec::new()),
         }
     }
 }

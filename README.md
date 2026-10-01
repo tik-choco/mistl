@@ -19,7 +19,8 @@ It integrates the [tc-storage](https://github.com/tik-choco/tc-storage) CLI and 
   [p2p](https://github.com/tik-choco-lab/p2p)): tunnel TCP/UDP through NAT to a peer,
   with per-connection approval, a persisted trust store, and an audit log. Wire-compatible
   with the standalone `p2p` binary, so a `mistl` node and a `p2p` node can tunnel to
-  each other
+  each other. The dashboard
+  shows plainly when a proposal or a connection is waiting for the peer's approval
 - **ui** — embedded web dashboard (`mistl` with no args, or `mistl ui`): operate all
   of the above from a browser at `http://127.0.0.1:6480/`, bilingual EN/JA, with
   drag-and-drop file storage and live settings

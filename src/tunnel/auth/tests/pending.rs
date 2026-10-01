@@ -344,3 +344,124 @@ async fn a_late_waiter_keeps_a_shared_row_after_the_first_times_out() {
     assert!(pending.resolve(rows[0].id, AuthDecision::Allow).await);
     assert_eq!(late.await.unwrap(), AuthDecision::Allow);
 }
+
+type Seen = std::sync::Arc<std::sync::Mutex<Vec<(String, PendingEvent)>>>;
+
+fn record_events(pending: &PendingAuthorizations) -> Seen {
+    let seen: Seen = Default::default();
+    let sink = seen.clone();
+    pending.set_notifier(std::sync::Arc::new(move |req, event| {
+        sink.lock().unwrap().push((req.forward_key.clone(), event));
+    }));
+    seen
+}
+
+#[tokio::test]
+async fn notifier_hears_one_parked_per_coalesced_row_and_one_resolution() {
+    let store = TrustStore::load(temp_store_path("pending-notify"))
+        .await
+        .unwrap();
+    let pending = PendingAuthorizations::new();
+    let seen = record_events(&pending);
+    let authorizer = PendingAuthorizer::new(store, pending.clone());
+
+    let tasks = (0..5)
+        .map(|_| {
+            let authorizer = authorizer.clone();
+            tokio::spawn(async move { authorizer.authorize(&request("peer-a", "tcp:80")).await })
+        })
+        .collect::<Vec<_>>();
+    let id = wait_for_pending(&pending).await[0].id;
+    for _ in 0..16 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![("tcp:80".to_string(), PendingEvent::Parked)],
+        "five connections, one parked notice"
+    );
+
+    assert!(pending.resolve(id, AuthDecision::Allow).await);
+    for task in tasks {
+        task.await.unwrap();
+    }
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![
+            ("tcp:80".to_string(), PendingEvent::Parked),
+            ("tcp:80".to_string(), PendingEvent::Allowed),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn notifier_hears_a_denial_and_a_remembered_deny() {
+    let path = temp_store_path("pending-notify-deny");
+    let store = TrustStore::load(&path).await.unwrap();
+    store
+        .remember(
+            TrustKey {
+                peer_id: "peer-b".to_string(),
+                forward_key: "tcp:81".to_string(),
+            },
+            TrustDecision::Deny,
+        )
+        .await
+        .unwrap();
+    let pending = PendingAuthorizations::new();
+    let seen = record_events(&pending);
+    let authorizer = PendingAuthorizer::new(store, pending.clone());
+
+    // A remembered deny is final and tells the peer; no row is parked.
+    assert_eq!(
+        authorizer.authorize(&request("peer-b", "tcp:81")).await,
+        AuthDecision::Deny
+    );
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![("tcp:81".to_string(), PendingEvent::Denied)]
+    );
+
+    // A human deny: parked, then denied.
+    seen.lock().unwrap().clear();
+    let task = {
+        let authorizer = authorizer.clone();
+        tokio::spawn(async move { authorizer.authorize(&request("peer-a", "tcp:80")).await })
+    };
+    let id = wait_for_pending(&pending).await[0].id;
+    pending.resolve(id, AuthDecision::Deny).await;
+    task.await.unwrap();
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![
+            ("tcp:80".to_string(), PendingEvent::Parked),
+            ("tcp:80".to_string(), PendingEvent::Denied),
+        ]
+    );
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn notifier_hears_denied_when_the_decision_times_out() {
+    let store = TrustStore::load(temp_store_path("pending-notify-timeout"))
+        .await
+        .unwrap();
+    let pending = PendingAuthorizations::new();
+    let seen = record_events(&pending);
+    let authorizer = PendingAuthorizer::new(store, pending.clone());
+    let task =
+        tokio::spawn(async move { authorizer.authorize(&request("peer-a", "tcp:80")).await });
+    let _ = wait_for_pending(&pending).await;
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(DECISION_TIMEOUT + Duration::from_secs(1)).await;
+    assert_eq!(task.await.unwrap(), AuthDecision::Deny);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![
+            ("tcp:80".to_string(), PendingEvent::Parked),
+            ("tcp:80".to_string(), PendingEvent::Denied),
+        ]
+    );
+}

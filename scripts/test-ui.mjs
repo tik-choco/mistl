@@ -5,41 +5,12 @@ const html = fs.readFileSync(new URL('../src/web/assets/index.html', import.meta
 for (const [, script] of html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)) new vm.Script(script);
 const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map(m => m[1]);
 assert.equal(new Set(ids).size, ids.length, 'HTML IDs must be unique');
+assert.ok(!html.includes('tunnel-chat') && !html.includes('tunnel.chat.'), 'the tunnel room chat is gone (direct messages replace it)');
 class Element {
   constructor(tag, attrs = {}) { this.tag = tag; Object.assign(this, attrs); this.children = []; }
   appendChild(child) { this.children.push(child); }
   replaceChildren() { this.children = []; }
 }
-const messages = new Element('div');
-const wrap = {scrollHeight: 1000, clientHeight: 300, scrollTop: 700};
-const context = vm.createContext({
-  tunnelChatMessages: messages, tunnelChatSnapshot: [], tunnelChatLanguage: null,
-  currentLang: 'ja', tunnelChatEmpty: {}, document: {getElementById: () => wrap},
-  el: (tag, attrs) => new Element(tag, attrs), t: key => key,
-  fmtEpochMs: value => String(value),
-});
-const renderer = html.slice(html.indexOf('  function renderTunnelChat(items)'), html.indexOf('  function renderTunnelRoomList'));
-vm.runInContext(renderer, context);
-const first = {mine: true, timestamp_ms: 1, text: '<script>unsafe</script>'};
-context.renderTunnelChat([first]);
-assert.equal(messages.children.length, 1);
-assert.equal(messages.children[0].children[1].text, first.text, 'Message must remain literal text');
-assert.equal(wrap.scrollTop, 1000, 'Follow messages when at the bottom');
-const initialNode = messages.children[0];
-wrap.scrollTop = 120;
-context.renderTunnelChat([first]);
-assert.equal(messages.children[0], initialNode, 'Unchanged polling preserves DOM and selections');
-context.renderTunnelChat([first, {timestamp_ms: 2, text: 'new'}]);
-assert.equal(messages.children[0], initialNode, 'Appending preserves older message nodes');
-assert.equal(wrap.scrollTop, 120, 'Incoming message must not interrupt reading');
-assert.equal(messages.children.length, 2);
-context.currentLang = 'en';
-context.renderTunnelChat([first]);
-assert.equal(messages.children.length, 1, 'Language switch refreshes messages');
-context.renderTunnelChat([]);
-assert.equal(messages.children.length, 0, 'Room history reset removes old messages');
-assert.equal(context.tunnelChatEmpty.hidden, false);
-console.log('PASS: script syntax, unique IDs, chat text safety, incremental polling, scroll preservation, language switch, history reset');
 // Circular nodes keep labels outside the marker; inspection is delegated.
 const inspected = [];
 function svgElement(tag, attrs = {}) {

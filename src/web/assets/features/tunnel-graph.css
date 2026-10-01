@@ -13,6 +13,10 @@
 .tg-direct { stroke:var(--ok,#74d8ba); }
 .tg-broadcast { stroke:var(--text-faint,#6e8fc0);stroke-dasharray:5 7; }
 .tg-pending { stroke:var(--warn,#e5b666);stroke-dasharray:8 5; }
+/* A proposal (or a connection) is waiting for the other side's approval. */
+.tg-awaiting { stroke:var(--warn,#e5b666);stroke-dasharray:8 6;animation:tg-march 1.1s linear infinite; }
+@keyframes tg-march { to { stroke-dashoffset:-14; } }
+@keyframes tg-pulse { 50% { opacity:.45; } }
 
 /* ---- node card: identity, forwards and one add button; everything else
    lives behind the gear (self) or in the modal editors ---- */
@@ -38,6 +42,13 @@
 .tg-forward { display:flex;gap:6px;align-items:center;padding:8px 0;border-top:1px solid var(--panel-border,#53667e30);font-family:var(--mono,monospace);font-size:11.5px; }
 .tg-forward-text { flex:1;min-width:0;overflow-wrap:anywhere; }
 .tg-forward-text small { display:block;color:var(--text-faint,#909bad);font-size:10.5px;margin-top:3px;max-height:42px;overflow:auto; }
+.tg-pill-wrap { display:block;margin-top:5px; }
+.tg-pill { display:inline-block;max-width:100%;padding:2px 9px;border-radius:999px;font:600 11px var(--sans,system-ui,sans-serif);line-height:1.5;overflow-wrap:anywhere; }
+.tg-pill.tg-wait { color:var(--warn,#e5b666);background:color-mix(in srgb,var(--warn,#e5b666) 16%,transparent);animation:tg-pulse 1.6s ease-in-out infinite; }
+.tg-pill.tg-denied { color:var(--err,#f29b8c);background:color-mix(in srgb,var(--err,#f29b8c) 16%,transparent); }
+.tg-peer-id { display:block;font:10.5px var(--mono,monospace);color:var(--text-faint,#909bad);overflow-wrap:anywhere;margin-top:3px; }
+.tg-outgoing { border-top-style:dashed; }
+@media (prefers-reduced-motion:reduce) { .tg-awaiting,.tg-pill.tg-wait { animation:none; } }
 .tg-proto { font:10px var(--mono,monospace);color:var(--ok,#74d8ba); }
 .tg-node .tg-remove { flex-shrink:0;padding:2px 7px;border:0;background:transparent;color:var(--text-faint,#909bad);font-size:16px; }
 .tg-node .tg-remove:hover:not(:disabled) { color:var(--err,#f29b8c); }
@@ -99,3 +110,10 @@
 .tg-port-note { display:flex;flex-direction:column;align-items:flex-start;gap:6px; }
 .tg-port-note p { margin:0;font-size:12px;line-height:1.6; }
 .tg-port-note .tg-suggest { font-family:var(--mono,monospace);font-size:12px; }
+
+/* ---- "Trust & history" disclosure under the graph, and names in the pending table ---- */
+.tunnel-history { border:1px solid var(--panel-border,#303747);border-radius:10px;padding:12px 16px; }
+.tunnel-history > summary { cursor:pointer;font-size:13px;font-weight:600; }
+.tunnel-history[open] > summary { margin-bottom:12px; }
+.tunnel-peer-who { display:flex;align-items:center;gap:6px;margin-bottom:3px;font-family:var(--sans,system-ui,sans-serif);font-weight:600; }
+.tunnel-peer-name { overflow-wrap:anywhere; }

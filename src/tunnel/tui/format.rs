@@ -9,7 +9,7 @@
 //! take the plain-string/row types deserialized in `super::app` instead, and
 //! degrade gracefully (never panic) on a value they don't recognize.
 
-use super::app::{ChatRow, EventRow, NoticeRow, PendingOutgoingRow};
+use super::app::{EventRow, NoticeRow, PendingOutgoingRow};
 
 /// `"serve"` / `"connect"` -> the same two arrows upstream used. Any other
 /// string (a daemon running a shape this build doesn't know about) is
@@ -91,14 +91,6 @@ pub(super) fn format_notice(n: &NoticeRow) -> String {
 /// representation isn't pinned by the integration contract.
 pub(super) fn is_error_notice(n: &NoticeRow) -> bool {
     n.kind.eq_ignore_ascii_case("error")
-}
-
-pub(super) fn format_chat(m: &ChatRow) -> String {
-    if m.mine {
-        format!("> {}", m.text)
-    } else {
-        format!("[{}] {}", short_id(&m.peer_id), m.text)
-    }
 }
 
 pub(super) fn format_pending_outgoing(o: &PendingOutgoingRow) -> String {

@@ -17,8 +17,8 @@
 //!   session and then blocked in a foreground loop until the user quit; the
 //!   only *logic* worth keeping from them (build a session, decide who gets
 //!   auto-approved, run a peer's stdio command) is folded into this file
-//!   (`build`, `ConfiguredAuthorizer`, `maybe_start_stdio_executor`) and
-//!   `chat.rs`, with the terminal/process-lifecycle plumbing dropped.
+//!   (`build`, `ConfiguredAuthorizer`, `maybe_start_stdio_executor`), with
+//!   the terminal/process-lifecycle plumbing dropped.
 //! - **Identity.** `self_id` used to be a per-install UUID minted once and
 //!   cached at `$P2P_CONFIG_DIR/node_id` by upstream's `app::
 //!   load_or_create_node_id` (see `p2p/src/app.rs`). mistl already has a
@@ -59,14 +59,14 @@
 //! ```json
 //! {
 //!   "self_id": "..", "room": "..", "peers": [".."],
-//!   "forwards": [ /* crate::tunnel::controller::ForwardStatus::to_json */ ],
+//!   "forwards": [ /* crate::tunnel::controller::ForwardStatus::to_json; connect forwards also
+//!                    "awaiting_approval":bool, "awaiting_since_ms", "approval_peer_id", "denied_at_ms" */ ],
 //!   "pending_auth": [{"id":0,"peer_id":"..","forward_key":"..","target_addr":"..","proto":".."}],
 //!   "pending_forwards": [{"id":0,"req_id":"..","peer_id":"..","proto":"..","remote_addr":"..","target":".."}],
-//!   "pending_outgoing": [{"peer_id":"..","proto":"..","listen_port":0,"local_addr":"..","remote_addr":"..","target":".."}],
+//!   "pending_outgoing": [{"req_id":"..","sent_at_ms":0,"peer_id":"..","proto":"..","listen_port":0,"local_addr":"..","remote_addr":"..","target":".."}],
 //!   "trust": [{"key":"..","peer_id":"..","forward_key":"..","decision":"allow|deny"}],
 //!   "events": [{"sequence":0,"timestamp_ms":0,"peer_id":"..","forward_key":"..","target_addr":"..","proto":"..","decision":"allow|deny|allow_always|deny_always","source":"policy|trust_store|pending"}],
-//!   "notices": [{"timestamp_ms":0,"kind":"info|error","text":".."}],
-//!   "chat": [{"timestamp_ms":0,"peer_id":"..","mine":false,"text":".."}]
+//!   "notices": [{"timestamp_ms":0,"kind":"info|error","text":"..","code":"","peer_id":"","target":"","detail":""}]
 //! }
 //! ```
 
@@ -84,14 +84,16 @@ use crate::daemon::AppState;
 use crate::tunnel::auth::{
     AuthAuditLog, AuthDecision, AuthEvent, AuthEventSource, AuthFuture, AuthRequest,
     ConnectionAuthorizer, PendingAuthorization, PendingAuthorizations, PendingAuthorizer,
-    SharedAuthorizer, TrustDecision, TrustEntry, TrustKey, TrustStore, default_trust_store_path,
-    policy_allows, verified_did_for_peer,
+    PendingEvent, SharedAuthorizer, TrustDecision, TrustEntry, TrustKey, TrustStore,
+    default_trust_store_path, policy_allows, verified_did_for_peer,
 };
 use crate::tunnel::controller::{Direction, ForwardController, ForwardSpec, ForwardStatus, Proto};
 use crate::tunnel::forward_store::{ForwardStore, default_forward_store_path};
 use crate::tunnel::negotiation::{
-    ForwardNegotiator, ForwardOutcome, IncomingForward, OutgoingForward,
+    ForwardNegotiator, ForwardOutcome, IncomingForward, OutgoingForward, REASON_PEER_LEFT,
+    REASON_TIMEOUT,
 };
+use crate::tunnel::notice::{self, ApprovalBook, ApprovalMark, ApprovalState, ScopeMatch};
 use crate::tunnel::rtc::RTCManager;
 
 /// How many notices [`SessionContext::push_notice`] retains before dropping
@@ -110,27 +112,22 @@ pub struct SessionNotice {
     pub timestamp_ms: u128,
     pub kind: NoticeKind,
     pub text: String,
+    /// Machine-readable event (`proposal_denied`, `proposal_timeout`,
+    /// `proposal_peer_left`, `proposal_failed`, `proposal_accepted`,
+    /// `proposal_add_failed`) so a front end can localize the message and
+    /// link it to a peer; empty for plain-text notices.
+    pub code: &'static str,
+    /// Peer and target the event is about (empty when not applicable).
+    pub peer_id: String,
+    pub target: String,
+    /// Extra context (the failure reason, or the local address).
+    pub detail: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoticeKind {
     Info,
     Error,
-}
-
-/// How many chat messages [`SessionContext::chat_log`] retains before
-/// dropping the oldest -- mirrors [`MAX_NOTICES`]'s trim pattern.
-const MAX_CHAT_MESSAGES: usize = 200;
-
-/// A single chat message, either sent by this node (`mine: true`) or
-/// received from a peer (`mine: false`). Surfaced to every front end via
-/// `Snapshot::chat` / `Snapshot::to_json`'s `"chat"` array.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ChatMessage {
-    pub timestamp_ms: u128,
-    pub peer_id: String,
-    pub mine: bool,
-    pub text: String,
 }
 
 /// How long to wait after a peer's `EVENT_LEAVE` before treating pending
@@ -159,10 +156,9 @@ pub struct SessionContext {
     /// last, capped at [`MAX_NOTICES`]. Shared (not per-clone) so every handle
     /// to this `SessionContext` sees the same feed.
     pub notices: Arc<Mutex<Vec<SessionNotice>>>,
-    /// Recent chat messages (sent and received), oldest first, capped at
-    /// [`MAX_CHAT_MESSAGES`]. Shared (not per-clone) so every handle to this
-    /// `SessionContext` sees the same feed.
-    pub chat_log: Arc<Mutex<Vec<ChatMessage>>>,
+    /// Connect forwards of ours whose owner has parked the connection for a
+    /// human decision (or refused it), from the owner's approval notices.
+    pub approvals: ApprovalBook,
 }
 
 /// A recoverable failure from a session operation. Carries a human-readable
@@ -204,8 +200,10 @@ pub struct Snapshot {
     pub events: Vec<AuthEvent>,
     /// Recent user-facing notices, oldest first (see [`SessionContext::notices`]).
     pub notices: Vec<SessionNotice>,
-    /// Recent chat messages, oldest first (see [`SessionContext::chat_log`]).
-    pub chat: Vec<ChatMessage>,
+    /// Owner approval marks for our connect forwards (see
+    /// [`SessionContext::approvals`]); merged into `forwards[]` by
+    /// [`Snapshot::to_json`].
+    pub approvals: Vec<ApprovalMark>,
 }
 
 /// Generates an 8-hex-character room id (4 random bytes, hex-encoded).
@@ -352,6 +350,58 @@ impl SessionContext {
         let authorizer = super::graph::authorizer(manager.graph(), authorizer);
         let controller = ForwardController::with_authorizer(manager.clone(), authorizer);
 
+        // Owner side: tell a connecting peer when its connection is parked for
+        // a human decision and when that is resolved. One ordered sender task
+        // so a "pending" can never be overtaken by the matching "allowed".
+        {
+            let (tx, mut rx) =
+                tokio::sync::mpsc::unbounded_channel::<(String, serde_json::Value)>();
+            let sender = manager.clone();
+            tokio::spawn(async move {
+                while let Some((peer_id, message)) = rx.recv().await {
+                    let _ = sender.send_aux_to(&peer_id, &message).await;
+                }
+            });
+            pending_auth.set_notifier(Arc::new(move |req, event| {
+                let state = match event {
+                    PendingEvent::Parked => ApprovalState::Pending,
+                    PendingEvent::Allowed => ApprovalState::Allowed,
+                    PendingEvent::Denied => ApprovalState::Denied,
+                };
+                let message =
+                    notice::auth_notice(state, &req.forward_key, &req.target_addr, &req.proto);
+                let _ = tx.send((req.peer_id.clone(), message));
+            }));
+        }
+
+        let approvals = ApprovalBook::new();
+        // Requester side + proposal withdrawals: `t`-tagged side messages.
+        {
+            let neg = negotiator.clone();
+            let controller = controller.clone();
+            let manager_for_aux = manager.clone();
+            let approvals = approvals.clone();
+            manager
+                .on_aux_message(move |from, value| {
+                    let neg = neg.clone();
+                    let controller = controller.clone();
+                    let manager = manager_for_aux.clone();
+                    let approvals = approvals.clone();
+                    tokio::spawn(async move {
+                        handle_aux_message(&from, &value, &neg, &controller, &manager, &approvals)
+                            .await;
+                    });
+                })
+                .await;
+        }
+
+        {
+            let approvals = approvals.clone();
+            manager
+                .on_peer_leave(move |peer_id, _epoch| approvals.forget_peer(&peer_id))
+                .await;
+        }
+
         // Re-establish previously approved forwards.
         for entry in forward_store.list().await {
             match entry.to_spec() {
@@ -419,19 +469,6 @@ impl SessionContext {
         )
         .await;
 
-        let chat_log = Arc::new(Mutex::new(Vec::new()));
-        {
-            let chat_log = chat_log.clone();
-            manager
-                .on_chat_message(move |peer_id, text| {
-                    let chat_log = chat_log.clone();
-                    tokio::spawn(async move {
-                        push_chat(&chat_log, peer_id, false, text).await;
-                    });
-                })
-                .await;
-        }
-
         let context = Self {
             room: Arc::new(Mutex::new(room)),
             manager,
@@ -442,7 +479,7 @@ impl SessionContext {
             negotiator,
             forward_store,
             notices: Arc::new(Mutex::new(Vec::new())),
-            chat_log,
+            approvals,
         };
         context.restore_graph_forwards().await;
         Ok(context)
@@ -453,11 +490,29 @@ impl SessionContext {
     /// picks them up via `snapshot()` regardless of which one happened to
     /// trigger the underlying event.
     async fn push_notice(&self, kind: NoticeKind, text: String) {
+        self.push_notice_coded(kind, text, "", "", "", "").await;
+    }
+
+    /// [`SessionContext::push_notice`] with the structured fields of
+    /// [`SessionNotice`] filled in.
+    async fn push_notice_coded(
+        &self,
+        kind: NoticeKind,
+        text: String,
+        code: &'static str,
+        peer_id: &str,
+        target: &str,
+        detail: &str,
+    ) {
         let mut notices = self.notices.lock().await;
         notices.push(SessionNotice {
             timestamp_ms: now_ms(),
             kind,
             text,
+            code,
+            peer_id: peer_id.to_string(),
+            target: target.to_string(),
+            detail: detail.to_string(),
         });
         if notices.len() > MAX_NOTICES {
             let drop = notices.len() - MAX_NOTICES;
@@ -487,7 +542,7 @@ impl SessionContext {
             trust: self.trust_store.list().await,
             events,
             notices: self.notices.lock().await.clone(),
-            chat: self.chat_log.lock().await.clone(),
+            approvals: self.approvals.list(),
         }
     }
 
@@ -622,9 +677,15 @@ impl SessionContext {
             remote_addr: draft.remote_addr.clone(),
             target: draft.target.clone(),
         };
-        self.negotiator
+        if !self
+            .negotiator
             .record_outgoing(req_id.clone(), draft.clone())
-            .await;
+            .await
+        {
+            return Err(SessionError::Invalid(
+                "too many proposals are waiting for an answer".into(),
+            ));
+        }
         match self.manager.send_forward_request(&draft.peer_id, ev).await {
             Ok(()) => Ok(format!("request sent: {}", draft.target)),
             Err(e) => {
@@ -632,6 +693,20 @@ impl SessionContext {
                 Err(SessionError::Invalid(format!("send failed: {}", e)))
             }
         }
+    }
+
+    /// Withdraws a proposal we sent that the peer has not answered yet, and
+    /// tells the peer (best effort) so its approval row goes away. `false`
+    /// when `req_id` is unknown (already answered, timed out or cancelled).
+    pub async fn cancel_outgoing_forward(&self, req_id: &str) -> bool {
+        let Some(out) = self.negotiator.cancel_outgoing(req_id).await else {
+            return false;
+        };
+        let _ = self
+            .manager
+            .send_aux_to(&out.peer_id, &notice::cancel_notice(req_id))
+            .await;
+        true
     }
 
     /// Requester-side handling of a peer's answer to a forward we sent:
@@ -648,11 +723,27 @@ impl SessionContext {
     ) -> Result<String, SessionError> {
         let out = &outcome.outgoing;
         if !outcome.accepted {
-            let text = match &outcome.reason {
-                Some(reason) => format!("forward {} failed: {}", out.target, reason),
-                None => format!("peer denied {}", out.target),
+            let (text, code, detail) = match &outcome.reason {
+                Some(reason) => (
+                    format!("forward {} failed: {}", out.target, reason),
+                    match reason.as_str() {
+                        REASON_TIMEOUT => "proposal_timeout",
+                        REASON_PEER_LEFT => "proposal_peer_left",
+                        _ => "proposal_failed",
+                    },
+                    reason.as_str(),
+                ),
+                None => (format!("peer denied {}", out.target), "proposal_denied", ""),
             };
-            self.push_notice(NoticeKind::Error, text.clone()).await;
+            self.push_notice_coded(
+                NoticeKind::Error,
+                text.clone(),
+                code,
+                &out.peer_id,
+                &out.target,
+                detail,
+            )
+            .await;
             return Ok(text);
         }
         let proto = Proto::from_name(&out.proto)
@@ -674,7 +765,15 @@ impl SessionContext {
         });
         if !replacing_own && let Err(e) = super::controller::check_listen_available(&spec) {
             let text = format!("add failed: {}", e);
-            self.push_notice(NoticeKind::Error, text.clone()).await;
+            self.push_notice_coded(
+                NoticeKind::Error,
+                text.clone(),
+                "proposal_add_failed",
+                &out.peer_id,
+                &out.target,
+                &e.to_string(),
+            )
+            .await;
             return Err(SessionError::Invalid(text));
         }
         if let Err(first_err) = self.controller.add_forward(spec.clone()).await {
@@ -698,13 +797,29 @@ impl SessionContext {
             };
             if let Err(e) = retry {
                 let text = format!("add failed: {}", e);
-                self.push_notice(NoticeKind::Error, text.clone()).await;
+                self.push_notice_coded(
+                    NoticeKind::Error,
+                    text.clone(),
+                    "proposal_add_failed",
+                    &out.peer_id,
+                    &out.target,
+                    &e.to_string(),
+                )
+                .await;
                 return Err(SessionError::Invalid(text));
             }
         }
         let _ = self.forward_store.add(&spec).await;
         let text = format!("forward established: {}", out.target);
-        self.push_notice(NoticeKind::Info, text.clone()).await;
+        self.push_notice_coded(
+            NoticeKind::Info,
+            text.clone(),
+            "proposal_accepted",
+            &out.peer_id,
+            &out.target,
+            &out.local_addr,
+        )
+        .await;
         Ok(text)
     }
 
@@ -745,6 +860,7 @@ impl SessionContext {
             .remove_forward(key)
             .await
             .map_err(|e| SessionError::Invalid(format!("remove failed: {}", e)))?;
+        self.approvals.forget_forward(key);
         let _ = self.forward_store.remove(key).await;
         Ok(())
     }
@@ -786,25 +902,6 @@ impl SessionContext {
     /// from being ambiguous with the separator.
     pub fn trust_key_id(peer_id: &str, forward_key: &str) -> String {
         format!("{peer_id}\u{1}{forward_key}")
-    }
-
-    /// Sends a chat message to every connected peer and immediately records
-    /// it in the local chat log (own sends never loop back through
-    /// `on_chat_message`, unlike a received message).
-    pub async fn send_chat(&self, text: &str) -> Result<(), SessionError> {
-        let text = text.trim();
-        if text.is_empty() {
-            return Err(SessionError::Invalid("message must not be empty".into()));
-        }
-        push_chat(
-            &self.chat_log,
-            self.manager.self_id().to_string(),
-            true,
-            text.to_string(),
-        )
-        .await;
-        self.manager.send_chat_to_all(text).await;
-        Ok(())
     }
 
     /// Switches to a different room. Snapshots currently-connected peers
@@ -1093,23 +1190,47 @@ async fn purge_after_grace(
     }
 }
 
-/// Appends a chat message, trimming the oldest entries past
-/// [`MAX_CHAT_MESSAGES`]. Called both from `SessionContext::send_chat` (our
-/// own outbound messages, `mine: true`) and from the `on_chat_message` hook
-/// wired in `SessionContext::build` (peer-received messages, `mine: false`)
-/// -- a free function rather than a method since the hook closure doesn't
-/// have a `self`.
-async fn push_chat(log: &Arc<Mutex<Vec<ChatMessage>>>, peer_id: String, mine: bool, text: String) {
-    let mut chat = log.lock().await;
-    chat.push(ChatMessage {
-        timestamp_ms: now_ms(),
-        peer_id,
-        mine,
-        text,
-    });
-    if chat.len() > MAX_CHAT_MESSAGES {
-        let drop = chat.len() - MAX_CHAT_MESSAGES;
-        chat.drain(0..drop);
+/// Handles one tunnel `t`-tagged side message from transport sender `from`
+/// (see [`crate::tunnel::notice`]):
+///
+/// * an approval notice only updates `approvals` when `from` is the peer one
+///   of OUR connect forwards targets and the notice's forward key matches
+///   that forward -- a peer cannot make an unrelated forward look pending;
+/// * a proposal withdrawal only drops a pending proposal that `from` itself
+///   sent.
+async fn handle_aux_message(
+    from: &str,
+    value: &Value,
+    negotiator: &ForwardNegotiator,
+    controller: &ForwardController,
+    manager: &RTCManager,
+    approvals: &ApprovalBook,
+) {
+    if let Some(req_id) = notice::parse_cancel_notice(value) {
+        if negotiator.cancel_incoming(from, &req_id).await {
+            info!("peer {} withdrew its forward proposal {}", from, req_id);
+        }
+        return;
+    }
+    let Some(parsed) = notice::parse_auth_notice(value) else {
+        return;
+    };
+    for fwd in controller.list_forwards().await {
+        if fwd.spec.direction != Direction::Connect {
+            continue;
+        }
+        let matches = match notice::scope_match(&fwd.spec.target, &parsed.forward_key, from) {
+            ScopeMatch::No => false,
+            ScopeMatch::Scoped => true,
+            ScopeMatch::Unscoped => manager
+                .get_server_peers_for(&fwd.spec.target)
+                .await
+                .iter()
+                .any(|peer| peer == from),
+        };
+        if matches {
+            approvals.apply(from, &fwd.key, &parsed);
+        }
     }
 }
 
@@ -1144,6 +1265,48 @@ fn now_ms() -> u128 {
 }
 
 impl Snapshot {
+    /// `forwards[]` with the owner-approval state of connect forwards folded
+    /// in: `awaiting_approval` (+ `awaiting_since_ms`, `approval_peer_id`)
+    /// while the owner has our connection parked for a human decision, and
+    /// `denied_at_ms` (+ `approval_peer_id`) for a while after it refused.
+    fn forwards_json(&self) -> Vec<Value> {
+        self.forwards
+            .iter()
+            .map(|fwd| {
+                let mut json = fwd.to_json();
+                let mut awaiting: Option<&ApprovalMark> = None;
+                let mut denied: Option<&ApprovalMark> = None;
+                for mark in self.approvals.iter().filter(|m| m.forward_key == fwd.key) {
+                    match mark.state {
+                        ApprovalState::Pending => {
+                            if awaiting.is_none_or(|a| mark.since_ms < a.since_ms) {
+                                awaiting = Some(mark);
+                            }
+                        }
+                        ApprovalState::Denied => {
+                            if denied.is_none_or(|d| mark.since_ms > d.since_ms) {
+                                denied = Some(mark);
+                            }
+                        }
+                        ApprovalState::Allowed => {}
+                    }
+                }
+                if let Some(obj) = json.as_object_mut() {
+                    obj.insert("awaiting_approval".into(), json!(awaiting.is_some()));
+                    if let Some(mark) = awaiting {
+                        obj.insert("awaiting_since_ms".into(), json!(mark.since_ms));
+                        obj.insert("approval_peer_id".into(), json!(mark.peer_id));
+                    }
+                    if let Some(mark) = denied {
+                        obj.insert("denied_at_ms".into(), json!(mark.since_ms));
+                        obj.entry("approval_peer_id").or_insert(json!(mark.peer_id));
+                    }
+                }
+                json
+            })
+            .collect()
+    }
+
     /// Renders this snapshot as the `tunnel.status` IPC payload -- the
     /// single source of truth for the dashboard (`src/web/assets/index.html`,
     /// W6) and the TUI (`src/tunnel/tui.rs`, W7). Both are expected to read
@@ -1167,10 +1330,9 @@ impl Snapshot {
     ///   `u64` local sequence number) alongside `req_id` where one exists,
     ///   rather than only `req_id`; `resolve_forward_by_req_id` lets a
     ///   caller resolve by whichever it has.
-    /// - `pending_outgoing` has no `req_id`/`sent_ms`: upstream's
-    ///   `ForwardNegotiator::list_outgoing` never surfaces the req id (it's
-    ///   only the negotiator's internal map key) or a sent timestamp, and
-    ///   adding either would mean changing `negotiation.rs` (owned by W3).
+    /// - `pending_outgoing` carries `req_id` and `sent_at_ms` (mistl
+    ///   addition) so a UI can cancel a proposal and show how long it has
+    ///   been waiting.
     /// - `trust` entries carry a synthesized `key` (see
     ///   `SessionContext::trust_key_id`) alongside the real `peer_id`/
     ///   `forward_key` pair, so `tunnel.trust.revoke {"key":".."}` has a
@@ -1180,14 +1342,13 @@ impl Snapshot {
             "self_id": self.self_id,
             "room": self.room,
             "peers": self.peers,
-            "forwards": self.forwards.iter().map(ForwardStatus::to_json).collect::<Vec<_>>(),
+            "forwards": self.forwards_json(),
             "pending_auth": self.pending_auth.iter().map(pending_auth_json).collect::<Vec<_>>(),
             "pending_forwards": self.pending_forwards.iter().map(incoming_forward_json).collect::<Vec<_>>(),
             "pending_outgoing": self.pending_outgoing.iter().map(outgoing_forward_json).collect::<Vec<_>>(),
             "trust": self.trust.iter().map(trust_entry_json).collect::<Vec<_>>(),
             "events": self.events.iter().map(auth_event_json).collect::<Vec<_>>(),
             "notices": self.notices.iter().map(notice_json).collect::<Vec<_>>(),
-            "chat": self.chat.iter().map(chat_message_json).collect::<Vec<_>>(),
         })
     }
 }
@@ -1219,6 +1380,8 @@ fn incoming_forward_json(item: &IncomingForward) -> Value {
 
 fn outgoing_forward_json(item: &OutgoingForward) -> Value {
     json!({
+        "req_id": item.req_id,
+        "sent_at_ms": item.sent_at_ms,
         "peer_id": item.peer_id,
         "proto": item.proto,
         "listen_port": item.listen_port,
@@ -1274,15 +1437,10 @@ fn notice_json(n: &SessionNotice) -> Value {
             NoticeKind::Error => "error",
         },
         "text": n.text,
-    })
-}
-
-fn chat_message_json(m: &ChatMessage) -> Value {
-    json!({
-        "timestamp_ms": m.timestamp_ms as u64,
-        "peer_id": m.peer_id,
-        "mine": m.mine,
-        "text": m.text,
+        "code": n.code,
+        "peer_id": n.peer_id,
+        "target": n.target,
+        "detail": n.detail,
     })
 }
 
@@ -1396,7 +1554,7 @@ mod tests {
             negotiator: ForwardNegotiator::new(),
             forward_store: ForwardStore::load(dir.join("forwards.json")).await.unwrap(),
             notices: Arc::new(Mutex::new(Vec::new())),
-            chat_log: Arc::new(Mutex::new(Vec::new())),
+            approvals: ApprovalBook::new(),
         }
     }
 
@@ -1415,6 +1573,7 @@ mod tests {
             local_addr: format!("127.0.0.1:{port}"),
             remote_addr: "127.0.0.1:80".to_string(),
             target: target.to_string(),
+            ..Default::default()
         }
     }
 
@@ -1682,26 +1841,183 @@ mod tests {
         assert!(negotiator.list_incoming().await.is_empty());
     }
 
-    // --- chat -----------------------------------------------------------
+    // --- owner approval notices / proposal cancel ---------------------------
 
-    #[tokio::test]
-    async fn send_chat_pushes_mine_entry_with_own_id() {
-        let ctx = test_session_context().await;
-        ctx.send_chat("hello").await.unwrap();
+    async fn add_connect_forward(ctx: &SessionContext, target: &str) -> String {
+        // Port 0: the OS picks a free one when the listener binds, so these
+        // tests never fight over a port with each other or with
+        // `sample_outgoing_forward`'s pre-picked one.
+        ctx.controller
+            .add_forward(ForwardSpec {
+                direction: Direction::Connect,
+                proto: Proto::Tcp,
+                addr: "127.0.0.1:0".to_string(),
+                listen_port: 0,
+                target: target.to_string(),
+            })
+            .await
+            .unwrap()
+    }
 
-        let chat = ctx.chat_log.lock().await.clone();
-        assert_eq!(chat.len(), 1);
-        assert!(chat[0].mine);
-        assert_eq!(chat[0].peer_id, ctx.manager.self_id());
-        assert_eq!(chat[0].text, "hello");
+    async fn deliver(ctx: &SessionContext, from: &str, message: Value) {
+        handle_aux_message(
+            from,
+            &message,
+            &ctx.negotiator,
+            &ctx.controller,
+            &ctx.manager,
+            &ctx.approvals,
+        )
+        .await;
+    }
+
+    async fn forward_json(ctx: &SessionContext, key: &str) -> Value {
+        let snap = ctx.snapshot().await.to_json();
+        snap["forwards"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["key"] == key)
+            .cloned()
+            .unwrap()
     }
 
     #[tokio::test]
-    async fn send_chat_rejects_empty_message() {
+    async fn approval_notice_marks_the_matching_connect_forward_only() {
         let ctx = test_session_context().await;
-        let err = ctx.send_chat("   ").await.unwrap_err();
-        assert!(matches!(err, SessionError::Invalid(_)));
-        assert!(ctx.chat_log.lock().await.is_empty());
+        let target = "tcp:127.0.0.1:80@owner";
+        let key = add_connect_forward(&ctx, target).await;
+        let other = add_connect_forward(&ctx, "tcp:127.0.0.1:81@owner").await;
+
+        let pending = notice::auth_notice(
+            ApprovalState::Pending,
+            "tcp:127.0.0.1:80@owner",
+            "127.0.0.1:80",
+            "tcp",
+        );
+        deliver(&ctx, "owner", pending.clone()).await;
+        let fwd = forward_json(&ctx, &key).await;
+        assert_eq!(fwd["awaiting_approval"], true);
+        assert_eq!(fwd["approval_peer_id"], "owner");
+        assert!(fwd["awaiting_since_ms"].as_u64().unwrap() > 0);
+        assert_eq!(forward_json(&ctx, &other).await["awaiting_approval"], false);
+
+        // The owner's own key is unscoped: still the same service.
+        let unscoped = notice::auth_notice(
+            ApprovalState::Allowed,
+            "tcp:127.0.0.1:80",
+            "127.0.0.1:80",
+            "tcp",
+        );
+        deliver(&ctx, "owner", unscoped).await;
+        assert_eq!(forward_json(&ctx, &key).await["awaiting_approval"], false);
+    }
+
+    #[tokio::test]
+    async fn approval_notice_from_the_wrong_peer_is_ignored() {
+        let ctx = test_session_context().await;
+        let key = add_connect_forward(&ctx, "tcp:127.0.0.1:80@owner").await;
+        let pending = notice::auth_notice(
+            ApprovalState::Pending,
+            "tcp:127.0.0.1:80",
+            "127.0.0.1:80",
+            "tcp",
+        );
+        // Our forward targets `owner`; `mallory` cannot make it look pending.
+        deliver(&ctx, "mallory", pending).await;
+        assert_eq!(forward_json(&ctx, &key).await["awaiting_approval"], false);
+        assert!(ctx.approvals.list().is_empty());
+    }
+
+    #[tokio::test]
+    async fn denial_notice_leaves_a_denied_marker() {
+        let ctx = test_session_context().await;
+        let key = add_connect_forward(&ctx, "tcp:127.0.0.1:80@owner").await;
+        for state in [ApprovalState::Pending, ApprovalState::Denied] {
+            deliver(
+                &ctx,
+                "owner",
+                notice::auth_notice(state, "tcp:127.0.0.1:80", "127.0.0.1:80", "tcp"),
+            )
+            .await;
+        }
+        let fwd = forward_json(&ctx, &key).await;
+        assert_eq!(fwd["awaiting_approval"], false);
+        assert!(fwd["denied_at_ms"].as_u64().unwrap() > 0);
+        assert_eq!(fwd["approval_peer_id"], "owner");
+
+        // Removing the forward forgets the mark.
+        ctx.remove_forward(&key).await.unwrap();
+        assert!(ctx.approvals.list().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancel_notice_only_withdraws_the_senders_own_proposal() {
+        let ctx = test_session_context().await;
+        ctx.negotiator
+            .record_incoming(
+                "req-1".into(),
+                "proposer".into(),
+                "tcp".into(),
+                "127.0.0.1:80".into(),
+                "tcp:127.0.0.1:80@self".into(),
+            )
+            .await;
+        deliver(&ctx, "mallory", notice::cancel_notice("req-1")).await;
+        assert_eq!(ctx.negotiator.list_incoming().await.len(), 1);
+        deliver(&ctx, "proposer", notice::cancel_notice("req-1")).await;
+        assert!(ctx.negotiator.list_incoming().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancel_outgoing_forward_withdraws_and_reports_unknown() {
+        let ctx = test_session_context().await;
+        ctx.negotiator
+            .record_outgoing(
+                "req-9".into(),
+                sample_outgoing_forward("tcp:127.0.0.1:80@peer-1"),
+            )
+            .await;
+        let snap = ctx.snapshot().await.to_json();
+        assert_eq!(snap["pending_outgoing"][0]["req_id"], "req-9");
+
+        assert!(ctx.cancel_outgoing_forward("req-9").await);
+        assert!(ctx.negotiator.list_outgoing().await.is_empty());
+        assert!(!ctx.cancel_outgoing_forward("req-9").await);
+    }
+
+    #[tokio::test]
+    async fn outcomes_push_coded_notices_for_the_ui() {
+        let ctx = test_session_context().await;
+        let mk = |accepted: bool, reason: Option<&str>| ForwardOutcome {
+            outgoing: sample_outgoing_forward("tcp:127.0.0.1:80@peer-1"),
+            accepted,
+            reason: reason.map(str::to_string),
+        };
+        ctx.apply_forward_outcome(&mk(false, None)).await.unwrap();
+        ctx.apply_forward_outcome(&mk(false, Some(REASON_TIMEOUT)))
+            .await
+            .unwrap();
+        ctx.apply_forward_outcome(&mk(false, Some(REASON_PEER_LEFT)))
+            .await
+            .unwrap();
+        ctx.apply_forward_outcome(&mk(false, Some("something else")))
+            .await
+            .unwrap();
+        let codes: Vec<&str> = ctx.notices.lock().await.iter().map(|n| n.code).collect();
+        assert_eq!(
+            codes,
+            [
+                "proposal_denied",
+                "proposal_timeout",
+                "proposal_peer_left",
+                "proposal_failed"
+            ]
+        );
+        let json = ctx.snapshot().await.to_json();
+        assert_eq!(json["notices"][0]["code"], "proposal_denied");
+        assert_eq!(json["notices"][0]["peer_id"], "peer-1");
+        assert_eq!(json["notices"][0]["target"], "tcp:127.0.0.1:80@peer-1");
     }
 
     // --- room switching ---------------------------------------------------

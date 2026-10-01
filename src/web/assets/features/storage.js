@@ -303,5 +303,228 @@
     return { refresh: refresh };
   }
 
-  global.MistlStorage = Object.freeze({ create: create, createFolderAccess: createFolderAccess, visibleItems: visibleItems });
+  var shareStrings = {
+    en: { title: "My shared folders", share: "Share a folder", empty: "You are not sharing any folders.", path: "Which folder do you want to share?", browse: "Browse…", use: "Use this folder", up: "Up", back: "Back", next: "Next", close: "Close", password: "Choose a passphrase", generate: "Generate", show: "Show", hide: "Hide", passwordHint: "Anyone syncing this folder needs the passphrase. It is not included in the link.", confirm: "Share this folder?", busy: "Encrypting and publishing files… This may take a while.", background: "Sharing continues if you close this window. Check My shared folders for the result.", result: "Folder shared", link: "Share link", copy: "Copy", copied: "Copied", send: "Send this link and passphrase to the other mistl; they paste it in Folder sync.", embedded: "The passphrase is included in this link. Send the link to the other mistl; they paste it in Folder sync.", files: "Files", room: "Room", stop: "Stop", stopConfirm: "Stop sharing {name}? Files already received by others remain on their devices.", required: "Enter a value to continue.", error: "Could not complete the action: ", stopped: "Sharing stopped.", refresh: "Refresh" },
+    ja: { title: "自分が共有中のフォルダー", share: "フォルダーを共有", empty: "共有中のフォルダーはありません。", path: "どのフォルダーを共有しますか？", browse: "参照…", use: "このフォルダーを使う", up: "上へ", back: "戻る", next: "次へ", close: "閉じる", password: "パスフレーズを決めてください", generate: "生成", show: "表示", hide: "隠す", passwordHint: "同期する相手にはパスフレーズが必要です。リンクには含まれません。", confirm: "このフォルダーを共有しますか？", busy: "ファイルを暗号化して公開しています… 時間がかかる場合があります。", background: "閉じても共有処理は続きます。結果は共有中の一覧で確認できます。", result: "フォルダーを共有しました", link: "共有リンク", copy: "コピー", copied: "コピーしました", send: "このリンクとパスフレーズを相手の mistl に送り、「フォルダー同期」に貼り付けてもらってください。", embedded: "このリンクにはパスフレーズが含まれます。相手の mistl に送り、「フォルダー同期」に貼り付けてもらってください。", files: "ファイル", room: "ルーム", stop: "停止", stopConfirm: "{name} の共有を停止しますか？ 相手が受信済みのファイルは残ります。", required: "値を入力してください。", error: "操作を完了できませんでした: ", stopped: "共有を停止しました。", refresh: "更新" },
+    zh: { title: "我共享的文件夹", share: "共享文件夹", empty: "您尚未共享任何文件夹。", path: "要共享哪个文件夹？", browse: "浏览…", use: "使用此文件夹", up: "上一级", back: "返回", next: "下一步", close: "关闭", password: "设置口令", generate: "生成", show: "显示", hide: "隐藏", passwordHint: "同步此文件夹的人需要口令。链接不包含口令。", confirm: "共享此文件夹？", busy: "正在加密并发布文件… 可能需要一些时间。", background: "关闭窗口后共享仍会继续。请在共享列表中查看结果。", result: "文件夹已共享", link: "共享链接", copy: "复制", copied: "已复制", send: "将此链接和口令发送给另一台 mistl，在“文件夹同步”中粘贴。", embedded: "此链接包含口令。将链接发送给另一台 mistl，在“文件夹同步”中粘贴。", files: "文件", room: "房间", stop: "停止", stopConfirm: "停止共享 {name}？其他人已接收的文件将保留。", required: "请输入内容以继续。", error: "无法完成操作: ", stopped: "共享已停止。", refresh: "刷新" }
+  };
+
+  function generateSharePassphrase(crypto) {
+    // 24 unbiased base64url characters = 144 bits of entropy.
+    var alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    return Array.from(crypto.getRandomValues(new Uint8Array(24)), function (b) { return alphabet[b & 63]; }).join("");
+  }
+  function encodeSharePayload(payload) {
+    var bytes = new TextEncoder().encode(JSON.stringify(payload));
+    return "#tc-share=" + global.btoa(Array.from(bytes, function (b) { return String.fromCharCode(b); }).join("")).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+  function folderShareLink(share, ownerDid) {
+    if (share.share_url) return share.share_url;
+    if (!ownerDid) throw new Error("Missing owner identity");
+    // Mirrors storage::sharelink::build_folder_share_link; never include the key.
+    return encodeSharePayload({ v: 1, type: "folder-share", roomId: share.room_id, folderId: share.folder_id, folderName: share.folder_name, ownerNodeId: ownerDid, accessGrantMode: share.access_grant_mode || "shared", folderKeyHash: share.folder_key_hash, senderProfile: { name: "mistl" } });
+  }
+  function shareLinkHasKey(link) {
+    try {
+      var token = new URLSearchParams(String(link).split("#").pop()).get("tc-share");
+      if (!token) return false;
+      var base64 = token.replace(/-/g, "+").replace(/_/g, "/");
+      var payload = JSON.parse(global.atob(base64 + "=".repeat((4 - base64.length % 4) % 4)));
+      return typeof payload.key === "string" && !!payload.key.trim();
+    } catch (_) { return false; }
+  }
+
+  /* options: { mount, call(cmd,args) -> Promise, getLocale?, copy? }.
+     The host owns transport; refresh can join the Folder sync polling loop. */
+  function createFolderShare(options) {
+    var mount = options.mount, doc = mount.ownerDocument;
+    var shares = [], snapshot = null, refreshing = null, modal = null, draft = null, publishing = false;
+    function t(key, vars) {
+      var locale = String(options.getLocale ? options.getLocale() : doc.documentElement.lang || "en").split("-")[0];
+      var text = (shareStrings[locale] || shareStrings.en)[key];
+      return vars ? text.replace(/\{(\w+)\}/g, function (_, k) { return vars[k]; }) : text;
+    }
+    function node(tag, cls, text) {
+      var n = doc.createElement(tag);
+      if (cls) n.className = cls;
+      if (text != null) n.textContent = String(text);
+      return n;
+    }
+    function button(text, cls, action) {
+      var b = node("button", cls, text); b.type = "button"; b.addEventListener("click", action); return b;
+    }
+    var heading = node("div", "store-share-heading"), title = node("h3"), list = node("div", "store-share-list"), status = node("p", "store-share-status");
+    status.setAttribute("role", "status");
+    var add = button("", "primary", openWizard), reload = button("", "", function () { refresh(); });
+    heading.append(title, add, reload); mount.append(heading, list, status);
+    function failure(error, target) { (target || status).textContent = t("error") + String(error.message || error); }
+    async function copy(text, b, target) {
+      try {
+        if (options.copy) await options.copy(text);
+        else await doc.defaultView.navigator.clipboard.writeText(text);
+        b.textContent = t("copied");
+      } catch (e) { failure(e, target); }
+    }
+    async function copyLink(share, b) {
+      b.disabled = true;
+      try {
+        var identity = share.share_url ? null : await options.call("key.did", {});
+        await copy(folderShareLink(share, identity && identity.did), b);
+      } catch (e) { failure(e); }
+      finally { if (b.isConnected) b.disabled = false; }
+    }
+    function render() {
+      title.textContent = t("title"); add.textContent = t("share"); reload.textContent = t("refresh"); add.disabled = publishing;
+      var next = JSON.stringify([t("title"), shares]);
+      if (snapshot === next) return;
+      snapshot = next;
+      var active = doc.activeElement, focusId = active && active.dataset.shareId, focusAction = active && active.dataset.shareAction;
+      list.replaceChildren();
+      if (!shares.length) list.append(node("p", "muted", t("empty")));
+      shares.forEach(function (share) {
+        var row = node("article", "store-share-row"), info = node("div", "store-share-info"), actions = node("div", "store-share-actions");
+        info.append(node("strong", "", share.folder_name || share.folder_id), node("span", "store-share-path", share.local_dir));
+        var count = (share.files || []).filter(function (file) { return !file.deletedAt; }).length;
+        info.append(node("span", "muted", t("files") + ": " + count + " · " + t("room") + ": " + share.room_id));
+        var link = button(t("link") + " · " + t("copy"), "", function () { copyLink(share, link); });
+        var stop = button(t("stop"), "danger", function () { openStop(share); });
+        [link, stop].forEach(function (b, i) { b.dataset.shareId = share.folder_id; b.dataset.shareAction = String(i); });
+        actions.append(link, stop); row.append(info, actions); list.append(row);
+      });
+      Array.from(list.querySelectorAll("button")).some(function (b) {
+        if (b.dataset.shareId !== focusId || b.dataset.shareAction !== focusAction) return false;
+        b.focus(); return true;
+      });
+    }
+    function refresh() {
+      if (refreshing) return refreshing;
+      refreshing = Promise.resolve().then(function () { return options.call("store.folder-share.ls", {}); }).then(function (data) {
+        shares = Array.isArray(data && data.shares) ? data.shares : []; render();
+      }, function (e) { failure(e); }).finally(function () { refreshing = null; });
+      return refreshing;
+    }
+    function close() {
+      if (!modal) return;
+      var opener = modal.opener; modal.overlay.remove(); modal = null; draft = null;
+      if (opener && opener.isConnected) opener.focus();
+    }
+    function open(titleText) {
+      close();
+      var overlay = node("div", "modal-overlay store-share-modal"), panel = node("div", "modal-panel"), head = node("div", "modal-header"), h = node("h3", "", titleText);
+      var body = node("div", "store-share-body"), note = node("p", "store-share-status");
+      panel.setAttribute("role", "dialog"); panel.setAttribute("aria-modal", "true"); panel.setAttribute("aria-label", titleText); panel.tabIndex = -1;
+      note.setAttribute("role", "status");
+      var x = button("×", "modal-close", close); x.setAttribute("aria-label", t("close"));
+      head.append(h, x); panel.append(head, body, note); overlay.append(panel);
+      modal = { overlay: overlay, panel: panel, body: body, note: note, opener: doc.activeElement, title: h };
+      overlay.addEventListener("click", function (e) { if (e.target === overlay) close(); });
+      overlay.addEventListener("keydown", function (e) {
+        if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close(); }
+        if (e.key !== "Tab") return;
+        var items = Array.from(panel.querySelectorAll("button, input")).filter(function (n) { return !n.disabled; });
+        var first = items[0], last = items[items.length - 1];
+        if (e.shiftKey && doc.activeElement === first) { e.preventDefault(); last.focus(); }
+        else if (!e.shiftKey && doc.activeElement === last) { e.preventDefault(); first.focus(); }
+      });
+      doc.body.append(overlay); panel.focus();
+    }
+    function openWizard() {
+      if (publishing) return;
+      open(t("share")); draft = { path: "", passphrase: "", step: "path" }; step();
+    }
+    function step() {
+      var current = modal, value = draft;
+      current.body.replaceChildren(); current.note.textContent = "";
+      current.body.dataset.step = value.step;
+      current.title.textContent = t(value.step === "path" ? "path" : value.step === "password" ? "password" : "confirm");
+      var form = node("form"), footer = node("div", "store-share-actions"), input;
+      if (value.step !== "confirm") {
+        input = node("input"); input.type = value.step === "password" ? "password" : "text";
+        input.autocomplete = "off"; input.spellcheck = false; input.value = value.step === "path" ? value.path : value.passphrase;
+        input.setAttribute("aria-label", current.title.textContent);
+        input.addEventListener("input", function () { value[value.step === "path" ? "path" : "passphrase"] = input.value; });
+        form.append(input);
+        if (value.step === "path") {
+          var dirs = node("div", "store-share-dirs");
+          form.append(button(t("browse"), "", function () { browse({}, dirs, input, current); }), dirs);
+        } else {
+          form.append(button(t("generate"), "", function () {
+            try { input.value = value.passphrase = generateSharePassphrase(doc.defaultView.crypto); }
+            catch (e) { failure(e, current.note); }
+          }), button(t("show"), "", function (e) { input.type = input.type === "password" ? "text" : "password"; e.currentTarget.textContent = t(input.type === "password" ? "show" : "hide"); }), node("p", "muted", t("passwordHint")));
+        }
+      } else {
+        form.append(node("p", "store-share-path", value.path), node("p", "muted", t("passwordHint")));
+      }
+      if (value.step !== "path") footer.append(button(t("back"), "", function () { value.step = value.step === "confirm" ? "password" : "path"; step(); }));
+      var next = node("button", "primary", t(value.step === "confirm" ? "share" : "next")); next.type = "submit";
+      footer.append(next); form.append(footer); current.body.append(form);
+      form.addEventListener("submit", function (e) {
+        e.preventDefault();
+        if (publishing) return;
+        if (input) {
+          value[value.step === "path" ? "path" : "passphrase"] = input.value.trim();
+          if (!input.value.trim()) { current.note.textContent = t("required"); input.focus(); return; }
+          value.step = value.step === "path" ? "password" : "confirm"; step();
+        } else publish(current, value);
+      });
+      if (input) input.focus(); else next.focus();
+    }
+    async function browse(args, target, input, current) {
+      var request = {}; current.browseRequest = request;
+      target.replaceChildren(node("p", "muted", "…"));
+      try {
+        var data = await options.call("store.browse-dirs", args);
+        if (modal !== current || current.browseRequest !== request || !target.isConnected) return;
+        target.replaceChildren();
+        (data.roots || []).forEach(function (r) { target.append(button(r.label, "", function () { browse({ path: r.path }, target, input, current); })); });
+        if (data.path) {
+          target.append(node("p", "store-share-path", data.path), button(t("use"), "primary", function () { input.value = draft.path = data.path; target.replaceChildren(); input.focus(); }));
+        }
+        if (data.parent) target.append(button(t("up"), "", function () { browse({ path: data.parent }, target, input, current); }));
+        (data.dirs || []).forEach(function (d) { target.append(button(d.name, "store-share-dir", function () { browse({ path: d.path }, target, input, current); })); });
+      } catch (e) { if (modal === current && current.browseRequest === request) { target.replaceChildren(); failure(e, current.note); } }
+    }
+    async function publish(current, value) {
+      publishing = true; render();
+      current.body.dataset.step = "busy"; current.body.replaceChildren(node("p", "", t("busy")), node("p", "muted", t("background")));
+      current.panel.setAttribute("aria-busy", "true"); current.panel.focus();
+      try {
+        var result = await options.call("store.folder-share", { path: value.path, passphrase: value.passphrase });
+        if (!result || !result.share_url) throw new Error("Missing share link in response");
+        if (modal === current) {
+          current.body.dataset.step = "result"; current.title.textContent = t("result");
+          current.body.replaceChildren();
+          var link = node("input"); link.type = "text"; link.readOnly = true; link.value = result.share_url; link.setAttribute("aria-label", t("link"));
+          var copyButton = button(t("copy"), "", function () { copy(result.share_url, copyButton, current.note); });
+          current.body.append(link, copyButton, node("p", "muted", t(shareLinkHasKey(result.share_url) ? "embedded" : "send")));
+          if (!shareLinkHasKey(result.share_url)) {
+            var secret = node("input"); secret.type = "password"; secret.readOnly = true; secret.value = value.passphrase; secret.setAttribute("aria-label", t("password"));
+            var secretCopy = button(t("copy"), "", function () { copy(secret.value, secretCopy, current.note); });
+            current.body.append(secret, secretCopy, button(t("show"), "", function (e) { secret.type = secret.type === "password" ? "text" : "password"; e.currentTarget.textContent = t(secret.type === "password" ? "show" : "hide"); }));
+          }
+          current.body.append(button(t("close"), "primary", close)); link.focus();
+        }
+      } catch (e) {
+        if (modal === current) { value.step = "confirm"; step(); failure(e, current.note); }
+        else failure(e);
+      } finally {
+        publishing = false; if (modal === current) current.panel.removeAttribute("aria-busy"); render(); await refresh();
+      }
+    }
+    function openStop(share) {
+      open(t("stop")); var current = modal;
+      current.body.append(node("p", "", t("stopConfirm", { name: share.folder_name || share.folder_id })));
+      var stop = button(t("stop"), "danger", async function () {
+        stop.disabled = true;
+        try { await options.call("store.folder-share.stop", { folder_id: share.folder_id }); if (modal === current) close(); status.textContent = t("stopped"); await refresh(); }
+        catch (e) { stop.disabled = false; failure(e, modal === current ? current.note : status); }
+      });
+      current.body.append(button(t("back"), "", close), stop);
+    }
+    render();
+    return { refresh: refresh, open: openWizard };
+  }
+
+  global.MistlStorage = Object.freeze({ create: create, createFolderAccess: createFolderAccess, createFolderShare: createFolderShare, visibleItems: visibleItems, generateSharePassphrase: generateSharePassphrase, folderShareLink: folderShareLink, shareLinkHasKey: shareLinkHasKey });
 })(window);

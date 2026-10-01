@@ -36,6 +36,22 @@ pub(super) fn feature_asset(path: &str) -> Option<(&'static str, &'static [u8])>
             "text/css; charset=utf-8",
             include_bytes!("assets/features/chat.css"),
         ),
+        "/assets/features/messenger.js" => (
+            "text/javascript; charset=utf-8",
+            include_bytes!("assets/features/messenger.js"),
+        ),
+        "/assets/features/messenger.css" => (
+            "text/css; charset=utf-8",
+            include_bytes!("assets/features/messenger.css"),
+        ),
+        "/assets/features/peers.js" => (
+            "text/javascript; charset=utf-8",
+            include_bytes!("assets/features/peers.js"),
+        ),
+        "/assets/features/peers.css" => (
+            "text/css; charset=utf-8",
+            include_bytes!("assets/features/peers.css"),
+        ),
         _ => return None,
     };
     Some((content_type, body))
@@ -47,7 +63,14 @@ mod tests {
 
     #[test]
     fn only_embedded_features_are_public() {
-        for feature in ["topology", "storage", "chat", "tunnel-graph"] {
+        for feature in [
+            "topology",
+            "storage",
+            "chat",
+            "tunnel-graph",
+            "messenger",
+            "peers",
+        ] {
             for extension in ["js", "css"] {
                 let (mime, bytes) =
                     feature_asset(&format!("/assets/features/{feature}.{extension}")).unwrap();

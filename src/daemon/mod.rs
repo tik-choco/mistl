@@ -681,6 +681,8 @@ pub async fn dispatch_as(
             Some("store") => crate::storage::handle(cmd, args, state).await,
             Some("stream") => crate::stream::handle(cmd, args, state).await,
             Some("chat") => crate::chat_relay::handle(cmd, args, state).await,
+            Some("dm") => crate::dm::handle(cmd, args, state).await,
+            Some("peers") => crate::net::peer_profile::handle(cmd, args, state).await,
             Some("sched") => crate::scheduler::handle(cmd, args, state).await,
             Some("bot") => crate::bot::handle(cmd, args, state).await,
             Some("consensus") => crate::consensus::handle(cmd, args, state).await,
