@@ -37,9 +37,9 @@
 //!   Otherwise, immediate `voice_error { code: "unsupported_service" }`,
 //!   without ever buffering.
 //!
-//! `services` advertised in [`Provider::hello`] always includes `"chat"`
-//! and additionally `"tts"`/`"stt"` exactly when the corresponding closure
-//! is configured.
+//! `services` advertised in [`Provider::hello`] always includes `"chat"` and
+//! `"tools"` (tool calling is executed by the upstream) and additionally
+//! `"tts"`/`"stt"` exactly when the corresponding closure is configured.
 //!
 //! Keeps a ring buffer of request logs (default cap 50, oldest dropped;
 //! re-logging an id replaces the previous entry): status progresses
@@ -58,6 +58,7 @@ use tracing::warn;
 
 use crate::config::ResolvedAiPreset;
 
+use super::openai::ToolOptions;
 use super::openai::{self, UpstreamConfig};
 use super::protocol::ProtocolMessage;
 use super::tts::TtsAudio;
@@ -127,11 +128,30 @@ const BUSY_MESSAGE: &str = "The provider is busy; try again later.";
 const REQUEST_TOO_LARGE_MESSAGE: &str = "The request is too large for this provider.";
 
 /// Checks the size limits of a remote `llm_request` before any upstream call.
-fn validate_llm_messages(messages: &[super::protocol::ChatMessage]) -> Result<(), &'static str> {
+fn validate_llm_messages(
+    messages: &[super::protocol::ChatMessage],
+    tools: &ToolOptions,
+) -> Result<(), &'static str> {
+    use super::protocol::{MAX_TOOL_CALLS, MAX_TOOLS, MAX_TOOLS_BYTES};
     if messages.len() > MAX_LLM_MESSAGES {
         return Err(REQUEST_TOO_LARGE_MESSAGE);
     }
-    let total: usize = messages.iter().map(|m| m.content.len()).sum();
+    if let Some(t) = &tools.tools {
+        let too_many = t.as_array().is_none_or(|a| a.len() > MAX_TOOLS);
+        if too_many || t.to_string().len() > MAX_TOOLS_BYTES {
+            return Err(REQUEST_TOO_LARGE_MESSAGE);
+        }
+    }
+    let mut total: usize = 0;
+    for m in messages {
+        total = total.saturating_add(m.content.len());
+        if let Some(calls) = &m.tool_calls {
+            if calls.as_array().is_none_or(|a| a.len() > MAX_TOOL_CALLS) {
+                return Err(REQUEST_TOO_LARGE_MESSAGE);
+            }
+            total = total.saturating_add(calls.to_string().len());
+        }
+    }
     if total > MAX_LLM_CONTENT_BYTES {
         return Err(REQUEST_TOO_LARGE_MESSAGE);
     }
@@ -492,13 +512,17 @@ impl Provider {
         self.models.clone()
     }
 
-    /// Services this provider actually offers right now: always `"chat"`,
+    /// Services this provider actually offers right now: always `"chat"` and `"tools"`,
     /// plus `"tts"`/`"stt"` exactly when the corresponding closure is
     /// configured. Backs both [`Provider::hello`] (the wire announcement)
     /// and `super::status`'s `services` field, so the dashboard reflects
     /// the same capability set peers see in `provider_hello`.
     pub fn services(&self) -> Vec<String> {
-        let mut services = vec![super::protocol::SERVICE_CHAT.to_string()];
+        // Tool calling rides along with chat: the upstream executes it.
+        let mut services = vec![
+            super::protocol::SERVICE_CHAT.to_string(),
+            super::protocol::SERVICE_TOOLS.to_string(),
+        ];
         if self.tts.is_some() {
             services.push(super::protocol::SERVICE_TTS.to_string());
         }
@@ -557,8 +581,12 @@ impl Provider {
                 id,
                 messages,
                 model,
+                tools,
+                tool_choice,
             } => {
-                self.handle_llm_request(from, id, messages, model).await;
+                let tools = ToolOptions { tools, tool_choice };
+                self.handle_llm_request(from, id, messages, tools, model)
+                    .await;
             }
             ProtocolMessage::TtsRequest {
                 id,
@@ -827,6 +855,7 @@ impl Provider {
         from: String,
         id: String,
         messages: Vec<super::protocol::ChatMessage>,
+        tools: ToolOptions,
         model: Option<String>,
     ) {
         let started_at = chrono::Utc::now().to_rfc3339();
@@ -840,7 +869,7 @@ impl Provider {
             detail: None,
         });
 
-        let refusal = validate_llm_messages(&messages).err();
+        let refusal = validate_llm_messages(&messages, &tools).err();
         let job = if refusal.is_none() {
             self.limiter.try_acquire(&from, MAX_JOBS_PER_PEER)
         } else {
@@ -913,16 +942,17 @@ impl Provider {
                     reasoning_effort: resolved.reasoning_effort,
                 };
                 Box::pin(async move {
-                    openai::stream_chat_completion(
+                    openai::stream_chat_completion_tools(
                         &upstream,
                         &messages,
                         Some(&call_model),
+                        &tools,
                         Some(delta_tx),
                     )
                     .await
                 })
             }
-            LlmCallResolution::Default => (self.call)(messages, None, Some(delta_tx)),
+            LlmCallResolution::Default => (self.call)(messages, tools, None, Some(delta_tx)),
             LlmCallResolution::Reject => unreachable!("handled and returned above"),
         };
         tokio::pin!(call_fut);
@@ -975,12 +1005,16 @@ impl Provider {
         }
 
         match result {
-            Ok(content) => {
+            Ok(super::openai::ChatOutput {
+                content,
+                tool_calls,
+            }) => {
                 (self.send)(
                     &from,
                     ProtocolMessage::LlmResponseDone {
                         id: id.clone(),
                         content: Some(content.clone()),
+                        tool_calls,
                     },
                 );
                 self.push_log(RequestLog {
@@ -1069,9 +1103,10 @@ impl Provider {
     pub async fn call_upstream(
         &self,
         messages: Vec<super::protocol::ChatMessage>,
+        tools: ToolOptions,
         model: Option<String>,
         delta_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<super::openai::ChatOutput> {
         match self.resolve_llm_call(&model) {
             LlmCallResolution::Resolved(resolved) => {
                 // Same as the p2p path: a named preset may point at a
@@ -1085,10 +1120,16 @@ impl Provider {
                     temperature: resolved.temperature,
                     reasoning_effort: resolved.reasoning_effort,
                 };
-                openai::stream_chat_completion(&upstream, &messages, Some(&call_model), delta_tx)
-                    .await
+                openai::stream_chat_completion_tools(
+                    &upstream,
+                    &messages,
+                    Some(&call_model),
+                    &tools,
+                    delta_tx,
+                )
+                .await
             }
-            LlmCallResolution::Default => (self.call)(messages, None, delta_tx).await,
+            LlmCallResolution::Default => (self.call)(messages, tools, None, delta_tx).await,
             // Named a model that is not in the advertised list. The p2p
             // path answers `model_not_shared`; the local caller gets the
             // same refusal as an error rather than an unrelated preset's
@@ -1136,7 +1177,7 @@ mod tests {
     fn fake_call_success(deltas: Vec<&'static str>, content: &'static str) -> LlmCallFn {
         let deltas: Vec<String> = deltas.into_iter().map(String::from).collect();
         let content = content.to_string();
-        Arc::new(move |_messages, _model, delta_tx| {
+        Arc::new(move |_messages, _tools, _model, delta_tx| {
             let deltas = deltas.clone();
             let content = content.clone();
             Box::pin(async move {
@@ -1145,19 +1186,21 @@ mod tests {
                         let _ = tx.send(d.clone());
                     }
                 }
-                Ok(content)
+                Ok(content.into())
             })
         })
     }
 
     fn fake_call_error(message: &'static str) -> LlmCallFn {
-        Arc::new(move |_messages, _model, _delta_tx| {
+        Arc::new(move |_messages, _tools, _model, _delta_tx| {
             Box::pin(async move { anyhow::bail!(message) })
         })
     }
 
     fn messages() -> Vec<ChatMessage> {
         vec![ChatMessage {
+            tool_calls: None,
+            tool_call_id: None,
             role: "user".into(),
             content: "hi".into(),
         }]
@@ -1174,6 +1217,8 @@ mod tests {
             .handle_message(
                 "consumer1".into(),
                 ProtocolMessage::LlmRequest {
+                    tools: None,
+                    tool_choice: None,
                     id: "req1".into(),
                     messages: messages(),
                     model: None,
@@ -1202,7 +1247,7 @@ mod tests {
             other => panic!("unexpected second message: {other:?}"),
         }
         match &sent[2] {
-            (to, ProtocolMessage::LlmResponseDone { id, content }) => {
+            (to, ProtocolMessage::LlmResponseDone { id, content, .. }) => {
                 assert_eq!(to, "consumer1");
                 assert_eq!(id, "req1");
                 assert_eq!(content.as_deref(), Some("Hello"));
@@ -1227,6 +1272,8 @@ mod tests {
             .handle_message(
                 "consumer1".into(),
                 ProtocolMessage::LlmRequest {
+                    tools: None,
+                    tool_choice: None,
                     id: "req1".into(),
                     messages: messages(),
                     model: None,
@@ -1264,7 +1311,7 @@ mod tests {
             provider.hello(),
             ProtocolMessage::ProviderHello {
                 models: None,
-                services: Some(vec!["chat".into()]),
+                services: Some(vec!["chat".into(), "tools".into()]),
                 voices: None,
             }
         );
@@ -1286,7 +1333,7 @@ mod tests {
             provider.hello(),
             ProtocolMessage::ProviderHello {
                 models: Some(vec!["gpt-4o".into(), "gpt-4o-mini".into()]),
-                services: Some(vec!["chat".into()]),
+                services: Some(vec!["chat".into(), "tools".into()]),
                 voices: None,
             }
         );
@@ -1299,7 +1346,10 @@ mod tests {
         let provider = Provider::new_with_voice(send, call, vec![], None, None, vec![]);
         match provider.hello() {
             ProtocolMessage::ProviderHello { services, .. } => {
-                assert_eq!(services, Some(vec!["chat".to_string()]));
+                assert_eq!(
+                    services,
+                    Some(vec!["chat".to_string(), "tools".to_string()])
+                );
             }
             other => panic!("expected ProviderHello, got {other:?}"),
         }
@@ -1353,6 +1403,8 @@ mod tests {
             .handle_message(
                 "consumer1".into(),
                 ProtocolMessage::LlmRequest {
+                    tools: None,
+                    tool_choice: None,
                     id: "req1".into(),
                     messages: messages(),
                     model: Some("gpt-4o".into()),
@@ -1385,6 +1437,8 @@ mod tests {
                 .handle_message(
                     format!("consumer{i}"),
                     ProtocolMessage::LlmRequest {
+                        tools: None,
+                        tool_choice: None,
                         id: format!("req{i}"),
                         messages: messages(),
                         model: None,
@@ -1416,6 +1470,8 @@ mod tests {
             .handle_message(
                 "consumer1".into(),
                 ProtocolMessage::LlmRequest {
+                    tools: None,
+                    tool_choice: None,
                     id: "req1".into(),
                     messages: messages(),
                     model: None,
@@ -1521,6 +1577,8 @@ mod tests {
             .handle_message(
                 "consumer1".into(),
                 ProtocolMessage::LlmRequest {
+                    tools: None,
+                    tool_choice: None,
                     id: "llm-req".into(),
                     messages: messages(),
                     model: None,
@@ -1556,11 +1614,11 @@ mod tests {
 
         let (delta_tx, mut delta_rx) = tokio::sync::mpsc::unbounded_channel();
         let content = provider
-            .call_upstream(messages(), None, Some(delta_tx))
+            .call_upstream(messages(), ToolOptions::default(), None, Some(delta_tx))
             .await
             .unwrap();
 
-        assert_eq!(content, "x");
+        assert_eq!(content.content, "x");
         assert_eq!(delta_rx.try_recv().unwrap(), "x");
         assert!(
             sent.lock().unwrap().is_empty(),
@@ -1603,7 +1661,12 @@ mod tests {
         );
 
         let result = provider
-            .call_upstream(messages(), Some("Chat".to_string()), None)
+            .call_upstream(
+                messages(),
+                ToolOptions::default(),
+                Some("Chat".to_string()),
+                None,
+            )
             .await;
 
         // `sample_resolved_preset`'s base_url is unroutable, so this errors
@@ -1632,7 +1695,12 @@ mod tests {
         );
 
         let error = provider
-            .call_upstream(messages(), Some("not-shared".to_string()), None)
+            .call_upstream(
+                messages(),
+                ToolOptions::default(),
+                Some("not-shared".to_string()),
+                None,
+            )
             .await
             .expect_err("an unadvertised name must be refused, not forwarded upstream");
         assert!(error.to_string().contains(MODEL_NOT_SHARED_MESSAGE));
@@ -1738,6 +1806,8 @@ mod tests {
             .handle_message(
                 "consumer1".into(),
                 ProtocolMessage::LlmRequest {
+                    tools: None,
+                    tool_choice: None,
                     id: "req1".into(),
                     messages: messages(),
                     model: Some("not-advertised".into()),
@@ -1853,6 +1923,8 @@ mod tests {
             .handle_message(
                 "consumer1".into(),
                 ProtocolMessage::LlmRequest {
+                    tools: None,
+                    tool_choice: None,
                     id: "req1".into(),
                     messages: messages(),
                     model: Some("Chat".into()),
@@ -1873,7 +1945,7 @@ mod tests {
 
         let sent = sent.lock().unwrap();
         match sent.last().unwrap() {
-            (to, ProtocolMessage::LlmResponseDone { id, content }) => {
+            (to, ProtocolMessage::LlmResponseDone { id, content, .. }) => {
                 assert_eq!(to, "consumer1");
                 assert_eq!(id, "req1");
                 assert_eq!(content.as_deref(), Some("hi from resolved preset"));
@@ -1960,6 +2032,7 @@ mod tests {
                     services,
                     Some(vec![
                         "chat".to_string(),
+                        "tools".to_string(),
                         "tts".to_string(),
                         "stt".to_string()
                     ])
@@ -1989,7 +2062,11 @@ mod tests {
             provider.hello(),
             ProtocolMessage::ProviderHello {
                 models: None,
-                services: Some(vec!["chat".to_string(), "tts".to_string()]),
+                services: Some(vec![
+                    "chat".to_string(),
+                    "tools".to_string(),
+                    "tts".to_string()
+                ]),
                 voices: Some(vec!["alloy".to_string()]),
             }
         );
@@ -2367,14 +2444,19 @@ mod tests {
     async fn legacy_mode_ignores_the_peer_supplied_model() {
         let seen: Arc<Mutex<Option<Option<String>>>> = Arc::new(Mutex::new(None));
         let seen2 = seen.clone();
-        let call: LlmCallFn = Arc::new(move |_m, model, _tx| {
+        let call: LlmCallFn = Arc::new(move |_m, _tools, model, _tx| {
             *seen2.lock().unwrap() = Some(model);
-            Box::pin(async { Ok("ok".to_string()) })
+            Box::pin(async { Ok("ok".to_string().into()) })
         });
         let (send, _sent) = fake_send();
         let provider = Provider::new_with_voice(send, call, vec![], None, None, vec![]);
         provider
-            .call_upstream(messages(), Some("gpt-expensive".into()), None)
+            .call_upstream(
+                messages(),
+                ToolOptions::default(),
+                Some("gpt-expensive".into()),
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(seen.lock().unwrap().clone(), Some(None));
@@ -2383,13 +2465,18 @@ mod tests {
     #[test]
     fn validate_llm_messages_caps_count_and_bytes() {
         let m = |n: usize| ChatMessage {
+            tool_calls: None,
+            tool_call_id: None,
             role: "user".into(),
             content: "x".repeat(n),
         };
-        assert!(validate_llm_messages(&[m(10)]).is_ok());
+        assert!(validate_llm_messages(&[m(10)], &ToolOptions::default()).is_ok());
         let many: Vec<_> = (0..=MAX_LLM_MESSAGES).map(|_| m(1)).collect();
-        assert!(validate_llm_messages(&many).is_err());
-        assert!(validate_llm_messages(&[m(MAX_LLM_CONTENT_BYTES + 1)]).is_err());
+        assert!(validate_llm_messages(&many, &ToolOptions::default()).is_err());
+        assert!(
+            validate_llm_messages(&[m(MAX_LLM_CONTENT_BYTES + 1)], &ToolOptions::default())
+                .is_err()
+        );
     }
 
     #[test]
@@ -2552,5 +2639,165 @@ mod tests {
         ));
         assert_eq!(b.map.len(), 1);
         assert_eq!(b.total_bytes, 1);
+    }
+
+    // ---- tool calling -------------------------------------------------
+
+    #[test]
+    fn validate_llm_messages_enforces_tool_limits() {
+        use crate::ai::protocol::{MAX_TOOL_CALLS, MAX_TOOLS, MAX_TOOLS_BYTES};
+        let ok_tool = serde_json::json!({"type":"function","function":{"name":"f"}});
+        let tools = |n: usize| ToolOptions {
+            tools: Some(serde_json::Value::Array(vec![ok_tool.clone(); n])),
+            tool_choice: None,
+        };
+        let msg = [ChatMessage::new("user", "x")];
+        assert!(validate_llm_messages(&msg, &tools(MAX_TOOLS)).is_ok());
+        assert!(validate_llm_messages(&msg, &tools(MAX_TOOLS + 1)).is_err());
+        // Within the entry cap but over the byte cap.
+        let fat = ToolOptions {
+            tools: Some(serde_json::json!([{"description": "x".repeat(MAX_TOOLS_BYTES)}])),
+            tool_choice: None,
+        };
+        assert!(validate_llm_messages(&msg, &fat).is_err());
+        // Not an array at all.
+        let bad = ToolOptions {
+            tools: Some(serde_json::json!({})),
+            tool_choice: None,
+        };
+        assert!(validate_llm_messages(&msg, &bad).is_err());
+
+        let calls = |n: usize| ChatMessage {
+            role: "assistant".into(),
+            content: String::new(),
+            tool_calls: Some(serde_json::Value::Array(vec![
+                serde_json::json!({"id":"c"});
+                n
+            ])),
+            tool_call_id: None,
+        };
+        assert!(validate_llm_messages(&[calls(MAX_TOOL_CALLS)], &ToolOptions::default()).is_ok());
+        assert!(
+            validate_llm_messages(&[calls(MAX_TOOL_CALLS + 1)], &ToolOptions::default()).is_err()
+        );
+    }
+
+    #[test]
+    fn hello_advertises_tools_with_chat() {
+        let (send, _sent) = fake_send();
+        let provider = Provider::new_with_voice(
+            send,
+            fake_call_success(vec![], ""),
+            vec![],
+            None,
+            None,
+            vec![],
+        );
+        match provider.hello() {
+            ProtocolMessage::ProviderHello { services, .. } => {
+                assert!(crate::ai::protocol::advertises_service(
+                    &services,
+                    crate::ai::protocol::SERVICE_TOOLS
+                ));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_request_reaches_the_call_and_tool_calls_come_back_in_done() {
+        let seen: Arc<Mutex<Option<(Vec<ChatMessage>, ToolOptions)>>> = Arc::new(Mutex::new(None));
+        let seen2 = seen.clone();
+        let calls = serde_json::json!([{"id":"c1","type":"function",
+            "function":{"name":"get_weather","arguments":"{\"city\":\"Tokyo\"}"}}]);
+        let calls2 = calls.clone();
+        let call: LlmCallFn = Arc::new(move |m, t, _model, _tx| {
+            *seen2.lock().unwrap() = Some((m, t));
+            let calls = calls2.clone();
+            Box::pin(async move {
+                Ok(crate::ai::openai::ChatOutput {
+                    content: String::new(),
+                    tool_calls: Some(calls),
+                })
+            })
+        });
+        let (send, sent) = fake_send();
+        let provider = Provider::new_with_voice(send, call, vec![], None, None, vec![]);
+        let tools = serde_json::json!([{"type":"function","function":{"name":"get_weather"}}]);
+        provider
+            .clone()
+            .handle_message(
+                "consumer1".into(),
+                ProtocolMessage::LlmRequest {
+                    id: "req1".into(),
+                    messages: vec![
+                        ChatMessage::new("user", "weather?"),
+                        ChatMessage {
+                            role: "tool".into(),
+                            content: "sunny".into(),
+                            tool_calls: None,
+                            tool_call_id: Some("c0".into()),
+                        },
+                    ],
+                    model: None,
+                    tools: Some(tools.clone()),
+                    tool_choice: Some(serde_json::json!("auto")),
+                },
+            )
+            .await;
+
+        let (msgs, opts) = seen.lock().unwrap().clone().expect("call invoked");
+        assert_eq!(msgs[1].tool_call_id.as_deref(), Some("c0"));
+        assert_eq!(opts.tools, Some(tools));
+        assert_eq!(opts.tool_choice, Some(serde_json::json!("auto")));
+
+        let sent = sent.lock().unwrap();
+        match &sent.last().unwrap().1 {
+            ProtocolMessage::LlmResponseDone {
+                id,
+                content,
+                tool_calls,
+            } => {
+                assert_eq!(id, "req1");
+                assert_eq!(content.as_deref(), Some(""));
+                assert_eq!(*tool_calls, Some(calls));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_tools_get_an_llm_error_and_no_upstream_call() {
+        let called = Arc::new(Mutex::new(false));
+        let called2 = called.clone();
+        let call: LlmCallFn = Arc::new(move |_m, _t, _model, _tx| {
+            *called2.lock().unwrap() = true;
+            Box::pin(async { Ok("x".to_string().into()) })
+        });
+        let (send, sent) = fake_send();
+        let provider = Provider::new_with_voice(send, call, vec![], None, None, vec![]);
+        let tools = serde_json::Value::Array(vec![
+            serde_json::json!({"type":"function"});
+            crate::ai::protocol::MAX_TOOLS + 1
+        ]);
+        provider
+            .clone()
+            .handle_message(
+                "consumer1".into(),
+                ProtocolMessage::LlmRequest {
+                    id: "req1".into(),
+                    messages: messages(),
+                    model: None,
+                    tools: Some(tools),
+                    tool_choice: None,
+                },
+            )
+            .await;
+        assert!(!*called.lock().unwrap());
+        let sent = sent.lock().unwrap();
+        assert!(matches!(
+            &sent.last().unwrap().1,
+            ProtocolMessage::LlmError { id, .. } if id == "req1"
+        ));
     }
 }

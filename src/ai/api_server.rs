@@ -10,9 +10,14 @@
 //!
 //! - `GET /v1/models` -> `{"object":"list","data":[{"id":"<m>","object":"model","owned_by":"mistl"}]}`
 //!   from the injected models fn.
-//! - `POST /v1/chat/completions` -> body `{model?, messages, stream?}`.
-//!   `messages` entries must have string `role`/`content` (400 otherwise).
-//!   Calls the injected [`super::LlmCallFn`].
+//! - `POST /v1/chat/completions` -> body `{model?, messages, stream?,
+//!   tools?, tool_choice?}`. `messages` entries must have a string `role`
+//!   and string `content` (`null` is accepted only for an assistant turn
+//!   with `tool_calls`; `tool` turns need `tool_call_id`) -- 400 otherwise.
+//!   Calls the injected [`super::LlmCallFn`]. Tool calls come back as
+//!   `message.tool_calls` / `finish_reason: "tool_calls"` (streaming: one
+//!   `delta.tool_calls` chunk after the last text delta). A tool request
+//!   the network provider cannot serve -> `400` code `tools_unsupported`.
 //!   - `stream: false`/absent: respond `200` JSON (OpenAI chat.completion
 //!     shape): `{"id","object":"chat.completion","created",<unix secs>,
 //!     "model","choices":[{"index":0,"message":{"role":"assistant",
@@ -73,8 +78,9 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::warn;
 
+use super::openai::{ChatOutput, ToolOptions};
 use super::protocol::ChatMessage;
-use super::{LlmCallFn, ModelsFn, SttFn, TtsFn, stt, tts};
+use super::{LlmCallFn, ModelsFn, SttFn, ToolsUnsupported, TtsFn, stt, tts};
 
 /// Header section size cap (request-line + headers), matches doc.
 const MAX_HEADER_BYTES: usize = 16 * 1024;
@@ -483,16 +489,182 @@ fn models_response(models: &ModelsFn) -> Value {
     json!({"object": "list", "data": data})
 }
 
-/// Request body shape for `POST /v1/chat/completions`. Reuses
-/// [`ChatMessage`]'s derive so malformed `role`/`content` fields (wrong
-/// type or missing) simply fail to deserialize -> 400.
+/// One request message as an OpenAI client sends it. `content` may be
+/// `null` (assistant turns that only call tools); other malformed fields
+/// (wrong type) fail to deserialize -> 400.
+#[derive(serde::Deserialize)]
+struct ApiMessage {
+    role: String,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Value>,
+    #[serde(default)]
+    tool_call_id: Option<String>,
+}
+
+/// Request body shape for `POST /v1/chat/completions`.
 #[derive(serde::Deserialize)]
 struct ChatRequestBody {
     #[serde(default)]
     model: Option<String>,
-    messages: Vec<ChatMessage>,
+    messages: Vec<ApiMessage>,
     #[serde(default)]
     stream: bool,
+    #[serde(default)]
+    tools: Option<Value>,
+    #[serde(default)]
+    tool_choice: Option<Value>,
+}
+
+/// A validated chat request, ready for the injected call fn.
+#[derive(Debug)]
+struct ParsedChat {
+    model: Option<String>,
+    messages: Vec<ChatMessage>,
+    tools: ToolOptions,
+    stream: bool,
+}
+
+/// Parses and validates a `/v1/chat/completions` body. `Err` is the 400
+/// message. Bounded: the caller already capped the body size, and the tool
+/// fields are checked against the same limits the network enforces.
+fn parse_chat_request(body: &[u8]) -> std::result::Result<ParsedChat, String> {
+    use super::protocol::{MAX_TOOL_CALLS, MAX_TOOLS, MAX_TOOLS_BYTES};
+
+    let req: ChatRequestBody =
+        serde_json::from_slice(body).map_err(|e| format!("invalid request body: {e}"))?;
+
+    let mut messages = Vec::with_capacity(req.messages.len());
+    for (i, m) in req.messages.into_iter().enumerate() {
+        let tool_calls = match m.tool_calls {
+            None => None,
+            Some(Value::Array(a)) if a.is_empty() => None,
+            Some(Value::Array(a)) if a.len() > MAX_TOOL_CALLS => {
+                return Err(format!(
+                    "messages[{i}].tool_calls has more than {MAX_TOOL_CALLS} entries"
+                ));
+            }
+            Some(v @ Value::Array(_)) => Some(v),
+            Some(_) => return Err(format!("messages[{i}].tool_calls must be an array")),
+        };
+        let content = match m.content {
+            Some(c) => c,
+            // `content: null` is only meaningful for an assistant turn that
+            // calls tools; it travels as "" (the wire content is a string).
+            None if m.role == "assistant" && tool_calls.is_some() => String::new(),
+            None => return Err(format!("messages[{i}].content is required")),
+        };
+        if m.role == "tool" && m.tool_call_id.is_none() {
+            return Err(format!(
+                "messages[{i}].tool_call_id is required for tool messages"
+            ));
+        }
+        messages.push(ChatMessage {
+            role: m.role,
+            content,
+            tool_calls,
+            tool_call_id: m.tool_call_id,
+        });
+    }
+
+    // Clients commonly send `tools: []` / `tools: null`; both mean "no
+    // tools". `tool_choice` without tools is meaningless (upstreams reject
+    // it), so it is dropped too.
+    let tools = match req.tools {
+        None => None,
+        Some(Value::Array(a)) if a.is_empty() => None,
+        Some(Value::Array(a)) => {
+            if a.len() > MAX_TOOLS {
+                return Err(format!("`tools` has more than {MAX_TOOLS} entries"));
+            }
+            let v = Value::Array(a);
+            if v.to_string().len() > MAX_TOOLS_BYTES {
+                return Err("`tools` is too large".to_string());
+            }
+            Some(v)
+        }
+        Some(_) => return Err("`tools` must be an array".to_string()),
+    };
+    let tool_choice = match req.tool_choice {
+        None => None,
+        Some(v @ (Value::String(_) | Value::Object(_))) => tools.is_some().then_some(v),
+        Some(_) => return Err("`tool_choice` must be a string or an object".to_string()),
+    };
+
+    Ok(ParsedChat {
+        model: req.model,
+        messages,
+        tools: ToolOptions { tools, tool_choice },
+        stream: req.stream,
+    })
+}
+
+/// Whether `err` is the "remote provider lacks tools" refusal.
+fn is_tools_unsupported(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|e| e.downcast_ref::<ToolsUnsupported>().is_some())
+}
+
+/// The 400 body for a tool request the backend cannot serve.
+fn tools_unsupported_body() -> Value {
+    json!({"error": {
+        "message": "the AI provider on the network does not support tools",
+        "type": "invalid_request_error",
+        "code": "tools_unsupported",
+    }})
+}
+
+/// `choices[0].message` for a finished answer: `content` is `null` when
+/// empty alongside tool calls; `tool_calls` only when present.
+fn completion_message(output: &ChatOutput) -> Value {
+    let mut message = json!({"role": "assistant"});
+    if output.tool_calls.is_some() && output.content.is_empty() {
+        message["content"] = Value::Null;
+    } else {
+        message["content"] = json!(output.content);
+    }
+    if let Some(calls) = &output.tool_calls {
+        message["tool_calls"] = calls.clone();
+    }
+    message
+}
+
+fn finish_reason(output: &ChatOutput) -> &'static str {
+    if output.tool_calls.is_some() {
+        "tool_calls"
+    } else {
+        "stop"
+    }
+}
+
+/// The single streaming chunk that carries all tool calls (each with its
+/// `index`), emitted after the last text delta.
+fn tool_calls_stream_delta(calls: &Value) -> Value {
+    let indexed: Vec<Value> = calls
+        .as_array()
+        .map(|a| a.as_slice())
+        .unwrap_or_default()
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let mut c = c.clone();
+            c["index"] = json!(i);
+            c
+        })
+        .collect();
+    json!({"tool_calls": indexed})
+}
+
+/// Writes the error for a failed backend call before any response bytes
+/// were committed: 400 `tools_unsupported`, else the generic 502.
+async fn write_backend_failure(stream: &mut TcpStream, error: &anyhow::Error) {
+    if is_tools_unsupported(error) {
+        let _ = write_json_response(stream, 400, "Bad Request", &tools_unsupported_body()).await;
+    } else {
+        warn!("api_server: backend error: {error:#}");
+        let _ = write_error(stream, 502, "Bad Gateway", BACKEND_ERROR_MESSAGE).await;
+    }
 }
 
 async fn handle_connection(
@@ -892,16 +1064,10 @@ async fn handle_chat_completions(
     body: &[u8],
     call: &LlmCallFn,
 ) -> Result<()> {
-    let req: ChatRequestBody = match serde_json::from_slice(body) {
+    let req = match parse_chat_request(body) {
         Ok(req) => req,
-        Err(error) => {
-            let _ = write_error(
-                stream,
-                400,
-                "Bad Request",
-                &format!("invalid request body: {error}"),
-            )
-            .await;
+        Err(message) => {
+            let _ = write_error(stream, 400, "Bad Request", &message).await;
             return Ok(());
         }
     };
@@ -911,9 +1077,9 @@ async fn handle_chat_completions(
     let created = unix_now();
 
     if !req.stream {
-        let fut = (call)(req.messages, req.model, None);
+        let fut = (call)(req.messages, req.tools, req.model, None);
         return match fut.await {
-            Ok(content) => {
+            Ok(output) => {
                 let resp = json!({
                     "id": id,
                     "object": "chat.completion",
@@ -921,16 +1087,15 @@ async fn handle_chat_completions(
                     "model": resp_model,
                     "choices": [{
                         "index": 0,
-                        "message": {"role": "assistant", "content": content},
-                        "finish_reason": "stop",
+                        "message": completion_message(&output),
+                        "finish_reason": finish_reason(&output),
                     }],
                 });
                 write_json_response(stream, 200, "OK", &resp).await?;
                 Ok(())
             }
             Err(error) => {
-                warn!("api_server: backend error: {error:#}");
-                let _ = write_error(stream, 502, "Bad Gateway", BACKEND_ERROR_MESSAGE).await;
+                write_backend_failure(stream, &error).await;
                 Ok(())
             }
         };
@@ -939,9 +1104,9 @@ async fn handle_chat_completions(
     // Streaming path: run the call future concurrently with draining its
     // delta channel, writing one SSE event per delta as an HTTP chunk.
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
-    let mut call_fut = Box::pin((call)(req.messages, req.model, Some(tx)));
+    let mut call_fut = Box::pin((call)(req.messages, req.tools, req.model, Some(tx)));
 
-    let mut done: Option<Result<String>> = None;
+    let mut done: Option<Result<ChatOutput>> = None;
     let mut rx_closed = false;
     // Do not commit a 200 response until the first delta is ready. If the
     // backend fails before then we can still return a useful HTTP 502 rather
@@ -988,12 +1153,29 @@ async fn handle_chat_completions(
     }
 
     match done.expect("loop only exits once the call future has resolved") {
-        Ok(_content) => {
+        Ok(output) => {
             // A successful backend is allowed to produce no content. It is
             // still a valid empty SSE completion, so commit the response now.
             if !stream_started {
                 stream.write_all(SSE_RESPONSE_HEADER.as_bytes()).await?;
                 stream.flush().await?;
+            }
+            // Tool calls arrive complete (not streamed upstream-to-us), so
+            // they go out as one chunk after the last text delta.
+            if let Some(calls) = &output.tool_calls {
+                let chunk = json!({
+                    "id": id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": resp_model,
+                    "choices": [{
+                        "index": 0,
+                        "delta": tool_calls_stream_delta(calls),
+                        "finish_reason": null,
+                    }],
+                });
+                let event = format!("data: {chunk}\n\n");
+                write_http_chunk(stream, event.as_bytes()).await?;
             }
             let final_chunk = json!({
                 "id": id,
@@ -1003,7 +1185,7 @@ async fn handle_chat_completions(
                 "choices": [{
                     "index": 0,
                     "delta": {},
-                    "finish_reason": "stop",
+                    "finish_reason": finish_reason(&output),
                 }],
             });
             let event = format!("data: {final_chunk}\n\n");
@@ -1015,9 +1197,8 @@ async fn handle_chat_completions(
             if !stream_started {
                 // No response bytes have been committed, so answer with a
                 // normal OpenAI-shaped HTTP failure (generic text; see
-                // BACKEND_ERROR_MESSAGE).
-                warn!("api_server: backend error: {error:#}");
-                let _ = write_error(stream, 502, "Bad Gateway", BACKEND_ERROR_MESSAGE).await;
+                // BACKEND_ERROR_MESSAGE), or 400 `tools_unsupported`.
+                write_backend_failure(stream, &error).await;
             } else {
                 // HTTP status is already committed. Surface a generic error in
                 // band and always finish the chunked body; abruptly closing it
@@ -1049,25 +1230,25 @@ mod tests {
     use super::*;
 
     fn fake_call_ok() -> LlmCallFn {
-        Arc::new(|_messages, _model, delta_tx| {
+        Arc::new(|_messages, _tools, _model, delta_tx| {
             Box::pin(async move {
                 if let Some(tx) = delta_tx {
                     let _ = tx.send("Hel".to_string());
                     let _ = tx.send("lo".to_string());
                 }
-                Ok("Hello".to_string())
+                Ok("Hello".to_string().into())
             })
         })
     }
 
     fn fake_call_err() -> LlmCallFn {
-        Arc::new(|_messages, _model, _delta_tx| {
+        Arc::new(|_messages, _tools, _model, _delta_tx| {
             Box::pin(async move { Err(anyhow::anyhow!("upstream exploded")) })
         })
     }
 
     fn fake_call_midstream_err() -> LlmCallFn {
-        Arc::new(|_messages, _model, delta_tx| {
+        Arc::new(|_messages, _tools, _model, delta_tx| {
             Box::pin(async move {
                 if let Some(tx) = delta_tx {
                     let _ = tx.send("partial".to_string());
@@ -1693,5 +1874,237 @@ mod tests {
         let origin = format!("Origin: http://127.0.0.1:{}\r\n", addr.port());
         let raw = send_request(addr, &mk(&origin, "127.0.0.1", json)).await;
         assert_eq!(status_code(&split_response(&raw).0), 200);
+    }
+
+    // ---- tool calling -------------------------------------------------
+
+    fn sample_calls() -> Value {
+        json!([
+            {"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Tokyo\"}"}},
+            {"id":"call_2","type":"function","function":{"name":"get_time","arguments":"{}"}},
+        ])
+    }
+
+    /// Asserts the call fn saw tools, and returns tool calls.
+    fn fake_call_tools() -> LlmCallFn {
+        Arc::new(|messages, tools, _model, delta_tx| {
+            Box::pin(async move {
+                assert!(tools.tools.is_some());
+                assert_eq!(messages.last().unwrap().role, "tool");
+                if let Some(tx) = delta_tx {
+                    let _ = tx.send("Checking. ".to_string());
+                }
+                Ok(ChatOutput {
+                    content: "Checking. ".to_string(),
+                    tool_calls: Some(sample_calls()),
+                })
+            })
+        })
+    }
+
+    fn tool_request_body(stream: bool) -> String {
+        json!({
+            "messages": [
+                {"role": "user", "content": "weather?"},
+                {"role": "assistant", "content": null, "tool_calls": [
+                    {"id":"c0","type":"function","function":{"name":"f","arguments":"{}"}}]},
+                {"role": "tool", "tool_call_id": "c0", "content": "sunny"},
+            ],
+            "tools": [{"type":"function","function":{"name":"get_weather"}}],
+            "tool_choice": "auto",
+            "stream": stream,
+        })
+        .to_string()
+    }
+
+    fn post_chat(payload: &str) -> String {
+        format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            payload.len(),
+            payload
+        )
+    }
+
+    #[test]
+    fn parse_chat_request_accepts_tool_fields() {
+        let parsed = parse_chat_request(tool_request_body(false).as_bytes()).unwrap();
+        assert_eq!(parsed.messages.len(), 3);
+        // `content: null` on a tool-calling assistant turn becomes "".
+        assert_eq!(parsed.messages[1].content, "");
+        assert!(parsed.messages[1].tool_calls.is_some());
+        assert_eq!(parsed.messages[2].tool_call_id.as_deref(), Some("c0"));
+        assert!(parsed.tools.tools.is_some());
+        assert_eq!(parsed.tools.tool_choice, Some(json!("auto")));
+        assert!(!parsed.stream);
+    }
+
+    #[test]
+    fn parse_chat_request_plain_request_has_no_tool_fields() {
+        let p = parse_chat_request(
+            br#"{"messages":[{"role":"user","content":"hi"}],"tools":null,"tool_choice":null}"#,
+        )
+        .unwrap();
+        assert!(p.tools.is_empty());
+        assert!(!p.tools.request_uses_tools(&p.messages));
+        // Empty tools array means no tools; a dangling tool_choice is dropped.
+        let p = parse_chat_request(
+            br#"{"messages":[{"role":"user","content":"hi"}],"tools":[],"tool_choice":"auto"}"#,
+        )
+        .unwrap();
+        assert!(p.tools.is_empty());
+    }
+
+    #[test]
+    fn parse_chat_request_rejects_bad_tool_input() {
+        let msg = r#""messages":[{"role":"user","content":"hi"}]"#;
+        for extra in [
+            r#","tools":{}"#,
+            r#","tools":"x""#,
+            r#","tools":[{}],"tool_choice":5"#,
+        ] {
+            assert!(
+                parse_chat_request(format!("{{{msg}{extra}}}").as_bytes()).is_err(),
+                "{extra}"
+            );
+        }
+        // content null only for assistant with tool_calls.
+        assert!(parse_chat_request(br#"{"messages":[{"role":"user","content":null}]}"#).is_err());
+        assert!(
+            parse_chat_request(br#"{"messages":[{"role":"assistant","content":null}]}"#).is_err()
+        );
+        // tool message needs its id.
+        assert!(parse_chat_request(br#"{"messages":[{"role":"tool","content":"x"}]}"#).is_err());
+        // tool_calls must be an array.
+        assert!(
+            parse_chat_request(
+                br#"{"messages":[{"role":"assistant","content":"","tool_calls":{}}]}"#
+            )
+            .is_err()
+        );
+        // Limits.
+        let many: Vec<Value> = (0..=super::super::protocol::MAX_TOOLS)
+            .map(|_| json!({"type":"function"}))
+            .collect();
+        let body = json!({"messages":[{"role":"user","content":"x"}],"tools":many}).to_string();
+        assert!(parse_chat_request(body.as_bytes()).is_err());
+        let fat = json!({"messages":[{"role":"user","content":"x"}],
+            "tools":[{"d":"x".repeat(super::super::protocol::MAX_TOOLS_BYTES)}]})
+        .to_string();
+        assert!(parse_chat_request(fat.as_bytes()).is_err());
+        let calls: Vec<Value> = (0..=super::super::protocol::MAX_TOOL_CALLS)
+            .map(|_| json!({"id":"c"}))
+            .collect();
+        let body =
+            json!({"messages":[{"role":"assistant","content":"","tool_calls":calls}]}).to_string();
+        assert!(parse_chat_request(body.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn completion_message_shapes() {
+        let plain = ChatOutput::from("hi".to_string());
+        assert_eq!(
+            completion_message(&plain),
+            json!({"role":"assistant","content":"hi"})
+        );
+        assert_eq!(finish_reason(&plain), "stop");
+        let only_calls = ChatOutput {
+            content: String::new(),
+            tool_calls: Some(sample_calls()),
+        };
+        let m = completion_message(&only_calls);
+        assert_eq!(m["content"], Value::Null);
+        assert_eq!(m["tool_calls"], sample_calls());
+        assert_eq!(finish_reason(&only_calls), "tool_calls");
+        let mixed = ChatOutput {
+            content: "text".into(),
+            tool_calls: Some(sample_calls()),
+        };
+        assert_eq!(completion_message(&mixed)["content"], "text");
+    }
+
+    #[tokio::test]
+    async fn non_stream_tool_calls_response() {
+        let server = start_test_server(fake_call_tools(), fake_models()).await;
+        let raw = send_request(server.addr(), &post_chat(&tool_request_body(false))).await;
+        let (head, body) = split_response(&raw);
+        assert_eq!(status_code(&head), 200, "{head}");
+        let v: Value = serde_json::from_slice(body).unwrap();
+        let choice = &v["choices"][0];
+        assert_eq!(choice["finish_reason"], "tool_calls");
+        assert_eq!(choice["message"]["role"], "assistant");
+        assert_eq!(choice["message"]["content"], "Checking. ");
+        assert_eq!(choice["message"]["tool_calls"], sample_calls());
+    }
+
+    #[tokio::test]
+    async fn stream_tool_calls_come_after_text_in_one_chunk() {
+        let server = start_test_server(fake_call_tools(), fake_models()).await;
+        let raw = send_request(server.addr(), &post_chat(&tool_request_body(true))).await;
+        let (head, body) = split_response(&raw);
+        assert_eq!(status_code(&head), 200, "{head}");
+        let text = String::from_utf8(de_chunk(body)).unwrap();
+        let events: Vec<&str> = text
+            .split("\n\n")
+            .filter(|s| !s.is_empty())
+            .filter_map(|e| e.strip_prefix("data: "))
+            .collect();
+        assert_eq!(*events.last().unwrap(), "[DONE]");
+        let chunks: Vec<Value> = events[..events.len() - 1]
+            .iter()
+            .map(|e| serde_json::from_str(e).unwrap())
+            .collect();
+        assert_eq!(chunks.len(), 3, "{text}");
+        assert_eq!(chunks[0]["choices"][0]["delta"]["content"], "Checking. ");
+        let tc = &chunks[1]["choices"][0];
+        assert_eq!(tc["finish_reason"], Value::Null);
+        let deltas = tc["delta"]["tool_calls"].as_array().unwrap();
+        assert_eq!(deltas.len(), 2);
+        assert_eq!(deltas[0]["index"], 0);
+        assert_eq!(deltas[1]["index"], 1);
+        assert_eq!(deltas[0]["id"], "call_1");
+        assert_eq!(deltas[0]["type"], "function");
+        assert_eq!(deltas[0]["function"]["name"], "get_weather");
+        assert_eq!(deltas[0]["function"]["arguments"], "{\"city\":\"Tokyo\"}");
+        let last = &chunks[2]["choices"][0];
+        assert_eq!(last["delta"], json!({}));
+        assert_eq!(last["finish_reason"], "tool_calls");
+    }
+
+    fn fake_call_tools_unsupported() -> LlmCallFn {
+        Arc::new(|_m, _t, _model, _tx| {
+            Box::pin(async { Err(anyhow::Error::new(ToolsUnsupported)) })
+        })
+    }
+
+    #[tokio::test]
+    async fn tools_unsupported_is_a_400_before_streaming() {
+        let server = start_test_server(fake_call_tools_unsupported(), fake_models()).await;
+        for stream in [false, true] {
+            let raw = send_request(server.addr(), &post_chat(&tool_request_body(stream))).await;
+            let (head, body) = split_response(&raw);
+            assert_eq!(status_code(&head), 400, "{head}");
+            assert!(
+                !head
+                    .to_ascii_lowercase()
+                    .contains("transfer-encoding: chunked"),
+                "{head}"
+            );
+            let v: Value = serde_json::from_slice(body).unwrap();
+            assert_eq!(
+                v,
+                json!({"error":{
+                    "message":"the AI provider on the network does not support tools",
+                    "type":"invalid_request_error",
+                    "code":"tools_unsupported"}})
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn other_backend_errors_stay_generic_502() {
+        let server = start_test_server(fake_call_err(), fake_models()).await;
+        let raw = send_request(server.addr(), &post_chat(&tool_request_body(false))).await;
+        let (head, _) = split_response(&raw);
+        assert_eq!(status_code(&head), 502, "{head}");
     }
 }

@@ -60,8 +60,9 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, warn};
 
-use super::SendFn;
+use super::openai::{ChatOutput, ToolOptions};
 use super::protocol::{self, ChatMessage, ProtocolMessage};
+use super::{SendFn, ToolsUnsupported};
 
 /// The provider this consumer has locked onto.
 #[derive(Debug, Clone)]
@@ -113,6 +114,7 @@ enum Event {
     },
     Done {
         content: Option<String>,
+        tool_calls: Option<serde_json::Value>,
     },
     /// `code` is the wire `llm_error.code` (e.g. `"unsupported_service"`),
     /// when present.
@@ -264,12 +266,17 @@ impl Consumer {
                     },
                 );
             }
-            ProtocolMessage::LlmResponseDone { id, content } => {
+            ProtocolMessage::LlmResponseDone {
+                id,
+                content,
+                tool_calls,
+            } => {
                 self.send_event(
                     from,
                     id,
                     Event::Done {
                         content: content.clone(),
+                        tool_calls: tool_calls.clone(),
                     },
                 );
             }
@@ -344,6 +351,8 @@ impl Consumer {
 
     /// Run one chat request against `provider_id` per the module doc.
     /// `inactivity_timeout` resets on every chunk.
+    /// Text-only convenience over [`Consumer::request_tools`] (test helper).
+    #[cfg(test)]
     pub async fn request(
         &self,
         provider_id: &str,
@@ -352,6 +361,44 @@ impl Consumer {
         inactivity_timeout: Duration,
         delta_tx: Option<UnboundedSender<String>>,
     ) -> Result<String> {
+        Ok(self
+            .request_tools(
+                provider_id,
+                messages,
+                ToolOptions::default(),
+                model,
+                inactivity_timeout,
+                delta_tx,
+            )
+            .await?
+            .content)
+    }
+
+    /// [`Consumer::request`] with the optional tool-calling fields. When the
+    /// request uses any tool field (`tools`/`tool_choice`, or messages with
+    /// the `tool` role / `tool_calls` / `tool_call_id`) the provider must
+    /// currently advertise `"tools"`; otherwise this fails with
+    /// [`ToolsUnsupported`] **before anything is sent**, so peers that
+    /// predate the extension never see the new fields.
+    pub async fn request_tools(
+        &self,
+        provider_id: &str,
+        messages: Vec<ChatMessage>,
+        tools: ToolOptions,
+        model: Option<String>,
+        inactivity_timeout: Duration,
+        delta_tx: Option<UnboundedSender<String>>,
+    ) -> Result<ChatOutput> {
+        if tools.request_uses_tools(&messages) {
+            let supported = self.provider().is_some_and(|info| {
+                info.node_id == provider_id
+                    && protocol::advertises_service(&info.services, protocol::SERVICE_TOOLS)
+            });
+            if !supported {
+                return Err(anyhow::Error::new(ToolsUnsupported));
+            }
+        }
+        let ToolOptions { tools, tool_choice } = tools;
         let id = protocol::random_id();
         let (tx, mut rx) = mpsc::unbounded_channel::<Event>();
         self.pending
@@ -384,6 +431,8 @@ impl Consumer {
                 id: id.clone(),
                 messages,
                 model,
+                tools,
+                tool_choice,
             },
         );
 
@@ -454,14 +503,32 @@ impl Consumer {
                 },
                 Event::Done {
                     content: final_content,
+                    tool_calls,
                 } => {
+                    if let Some(calls) = &tool_calls {
+                        let too_many = calls
+                            .as_array()
+                            .is_none_or(|a| a.len() > protocol::MAX_TOOL_CALLS);
+                        if too_many || calls.to_string().len() > MAX_RESPONSE_BYTES {
+                            bail!("provider response exceeded the maximum size");
+                        }
+                    }
+                    // An empty array means "no calls".
+                    let tool_calls =
+                        tool_calls.filter(|c| c.as_array().is_some_and(|a| !a.is_empty()));
                     if let Some(final_content) = final_content {
                         if final_content.len() > MAX_RESPONSE_BYTES {
                             bail!("provider response exceeded the maximum size");
                         }
-                        return Ok(final_content);
+                        return Ok(ChatOutput {
+                            content: final_content,
+                            tool_calls,
+                        });
                     }
-                    return Ok(content);
+                    return Ok(ChatOutput {
+                        content,
+                        tool_calls,
+                    });
                 }
                 Event::Error { message, code } => {
                     // `code` (e.g. "unsupported_service") is appended for
@@ -523,6 +590,8 @@ mod tests {
 
     fn chat(content: &str) -> ChatMessage {
         ChatMessage {
+            tool_calls: None,
+            tool_call_id: None,
             role: "user".into(),
             content: content.into(),
         }
@@ -574,6 +643,7 @@ mod tests {
         consumer.handle_message(
             "provider1",
             &ProtocolMessage::LlmResponseDone {
+                tool_calls: None,
                 id: id.clone(),
                 content: None,
             },
@@ -635,6 +705,7 @@ mod tests {
         consumer.handle_message(
             "provider1",
             &ProtocolMessage::LlmResponseDone {
+                tool_calls: None,
                 id: id.clone(),
                 content: None,
             },
@@ -675,6 +746,7 @@ mod tests {
         consumer.handle_message(
             "provider1",
             &ProtocolMessage::LlmResponseDone {
+                tool_calls: None,
                 id: id.clone(),
                 content: None,
             },
@@ -713,6 +785,7 @@ mod tests {
         consumer.handle_message(
             "provider1",
             &ProtocolMessage::LlmResponseDone {
+                tool_calls: None,
                 id: id.clone(),
                 content: Some("server copy wins".into()),
             },
@@ -751,6 +824,7 @@ mod tests {
         consumer.handle_message(
             "provider1",
             &ProtocolMessage::LlmResponseDone {
+                tool_calls: None,
                 id: id.clone(),
                 content: None,
             },
@@ -822,6 +896,7 @@ mod tests {
         consumer.handle_message(
             "provider1",
             &ProtocolMessage::LlmResponseDone {
+                tool_calls: None,
                 id: id.clone(),
                 content: None,
             },
@@ -1282,6 +1357,7 @@ mod tests {
         consumer.handle_message(
             "attacker",
             &ProtocolMessage::LlmResponseDone {
+                tool_calls: None,
                 id: id.clone(),
                 content: Some("forged".into()),
             },
@@ -1289,6 +1365,7 @@ mod tests {
         consumer.handle_message(
             "provider1",
             &ProtocolMessage::LlmResponseDone {
+                tool_calls: None,
                 id,
                 content: Some("real".into()),
             },
@@ -1388,11 +1465,172 @@ mod tests {
         consumer.handle_message(
             "provider1",
             &ProtocolMessage::LlmResponseDone {
+                tool_calls: None,
                 id,
                 content: Some("x".repeat(MAX_RESPONSE_BYTES + 1)),
             },
         );
         let err = handle.await.unwrap().unwrap_err();
         assert!(err.to_string().contains("maximum size"), "{err}");
+    }
+
+    // ---- tool calling -------------------------------------------------
+
+    fn tool_opts() -> ToolOptions {
+        ToolOptions {
+            tools: Some(serde_json::json!([{"type":"function","function":{"name":"f"}}])),
+            tool_choice: None,
+        }
+    }
+
+    fn locked(services: Option<Vec<String>>) -> (Arc<Consumer>, Sent) {
+        let (send, sent) = fake_send();
+        let consumer = Consumer::new(send);
+        consumer.handle_message(
+            "provider1",
+            &ProtocolMessage::ProviderHello {
+                models: None,
+                services,
+                voices: None,
+            },
+        );
+        sent.lock().unwrap().clear();
+        (consumer, sent)
+    }
+
+    #[tokio::test]
+    async fn tools_are_refused_before_sending_to_a_provider_without_the_capability() {
+        for services in [None, Some(vec!["chat".to_string()])] {
+            let (consumer, sent) = locked(services);
+            let err = consumer
+                .request_tools(
+                    "provider1",
+                    vec![chat("hi")],
+                    tool_opts(),
+                    None,
+                    Duration::from_millis(200),
+                    None,
+                )
+                .await
+                .expect_err("must refuse");
+            assert!(err.downcast_ref::<ToolsUnsupported>().is_some(), "{err:#}");
+            assert!(sent.lock().unwrap().is_empty(), "nothing may be sent");
+        }
+        // Tool-role / tool_calls messages alone also count as tool use.
+        let (consumer, sent) = locked(Some(vec!["chat".to_string()]));
+        let mut m = chat("r");
+        m.role = "tool".into();
+        m.tool_call_id = Some("c".into());
+        let err = consumer
+            .request_tools(
+                "provider1",
+                vec![m],
+                ToolOptions::default(),
+                None,
+                Duration::from_millis(200),
+                None,
+            )
+            .await
+            .expect_err("must refuse");
+        assert!(err.downcast_ref::<ToolsUnsupported>().is_some());
+        assert!(sent.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn plain_chat_still_works_against_a_provider_without_tools() {
+        let (consumer, sent) = locked(Some(vec!["chat".to_string()]));
+        let c2 = consumer.clone();
+        let handle = tokio::spawn(async move {
+            c2.request_tools(
+                "provider1",
+                vec![chat("hi")],
+                ToolOptions::default(),
+                None,
+                Duration::from_millis(500),
+                None,
+            )
+            .await
+        });
+        sleep(Duration::from_millis(20)).await;
+        let id = last_request_id(&sent);
+        consumer.handle_message(
+            "provider1",
+            &ProtocolMessage::LlmResponseDone {
+                id,
+                content: Some("ok".into()),
+                tool_calls: None,
+            },
+        );
+        assert_eq!(handle.await.unwrap().unwrap().content, "ok");
+    }
+
+    #[tokio::test]
+    async fn tools_are_sent_and_tool_calls_returned_with_the_capability() {
+        let (consumer, sent) = locked(Some(vec!["chat".to_string(), "tools".to_string()]));
+        let c2 = consumer.clone();
+        let handle = tokio::spawn(async move {
+            c2.request_tools(
+                "provider1",
+                vec![chat("hi")],
+                tool_opts(),
+                None,
+                Duration::from_millis(500),
+                None,
+            )
+            .await
+        });
+        sleep(Duration::from_millis(20)).await;
+        let id = last_request_id(&sent);
+        {
+            let sent = sent.lock().unwrap();
+            match &sent.last().unwrap().1 {
+                ProtocolMessage::LlmRequest { tools, .. } => assert_eq!(*tools, tool_opts().tools),
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        let calls = serde_json::json!([{"id":"c1","type":"function",
+            "function":{"name":"f","arguments":"{}"}}]);
+        consumer.handle_message(
+            "provider1",
+            &ProtocolMessage::LlmResponseDone {
+                id,
+                content: Some(String::new()),
+                tool_calls: Some(calls.clone()),
+            },
+        );
+        let out = handle.await.unwrap().unwrap();
+        assert_eq!(out.content, "");
+        assert_eq!(out.tool_calls, Some(calls));
+    }
+
+    #[tokio::test]
+    async fn oversized_tool_calls_in_done_are_rejected() {
+        let (consumer, sent) = locked(Some(vec!["chat".to_string(), "tools".to_string()]));
+        let c2 = consumer.clone();
+        let handle = tokio::spawn(async move {
+            c2.request_tools(
+                "provider1",
+                vec![chat("hi")],
+                tool_opts(),
+                None,
+                Duration::from_millis(500),
+                None,
+            )
+            .await
+        });
+        sleep(Duration::from_millis(20)).await;
+        let id = last_request_id(&sent);
+        let many: Vec<_> = (0..=protocol::MAX_TOOL_CALLS)
+            .map(|i| serde_json::json!({"id": format!("c{i}")}))
+            .collect();
+        consumer.handle_message(
+            "provider1",
+            &ProtocolMessage::LlmResponseDone {
+                id,
+                content: None,
+                tool_calls: Some(serde_json::Value::Array(many)),
+            },
+        );
+        assert!(handle.await.unwrap().is_err());
     }
 }

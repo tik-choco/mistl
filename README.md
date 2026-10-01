@@ -185,6 +185,12 @@ $ curl http://127.0.0.1:6478/v1/chat/completions \
     -d '{"messages":[{"role":"user","content":"hi"}],"stream":true}'
 ```
 
+OpenAI tool calling (`tools`, `tool_choice`, `tool_calls`, `role: "tool"`) works too:
+providers advertise a `tools` service next to `chat`, and the request is executed by the
+provider's upstream. If the selected network provider does not advertise `tools` (an
+older peer), the API answers `400` with `code: "tools_unsupported"` instead of
+sending the tool fields to it.
+
 ### Sharing a tc-chat screen into VRChat
 
 Someone shares their screen in a [tc-chat](https://github.com/tik-choco/tc-chat) room

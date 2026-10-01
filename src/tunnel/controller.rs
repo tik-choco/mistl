@@ -323,5 +323,41 @@ impl ForwardController {
     }
 }
 
+/// Bind-probes the local listener `spec` would open, so a port another
+/// program already holds is refused up front. Without this the listener only
+/// fails inside the spawned task, after the forward was reported as added and
+/// persisted. Serve forwards open no listener and always pass. Startup
+/// restores skip the probe so a busy port stays visible as an `error` row.
+pub fn check_listen_available(spec: &ForwardSpec) -> Result<()> {
+    check_listen_port(spec.proto, &spec.addr, spec.listen_port)
+}
+
+/// [`check_listen_available`] for a bare `(proto, addr, port)` triple; binds
+/// exactly the address the forward task would (`listen_host` of `addr`).
+pub fn check_listen_port(proto: Proto, addr: &str, port: i32) -> Result<()> {
+    if port <= 0 {
+        return Ok(());
+    }
+    let host = crate::tunnel::forward_args::listen_host(addr);
+    let bind = crate::tunnel::forward_args::listen_bind_addr(&host, port);
+    let probe = match proto {
+        Proto::Tcp => std::net::TcpListener::bind(&bind).map(drop),
+        Proto::Udp => std::net::UdpSocket::bind(&bind).map(drop),
+    };
+    probe.map_err(|error| match error.kind() {
+        std::io::ErrorKind::AddrInUse => {
+            anyhow!("{bind} is already in use by another program; choose a different port")
+        }
+        _ => anyhow!("cannot listen on {bind}: {error}"),
+    })
+}
+
+/// The next port above `port` (bounded scan) that [`check_listen_port`]
+/// accepts, for suggesting an alternative to a busy address.
+pub fn suggest_listen_port(proto: Proto, addr: &str, port: i32) -> Option<i32> {
+    (port.saturating_add(1)..=port.saturating_add(200).min(65535))
+        .find(|&candidate| check_listen_port(proto, addr, candidate).is_ok())
+}
+
 #[cfg(test)]
 mod tests;

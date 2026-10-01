@@ -169,10 +169,12 @@ async fn translate_one(
         ChatMessage {
             role: "system".to_string(),
             content: system_prompt,
+            ..Default::default()
         },
         ChatMessage {
             role: "user".to_string(),
             content: input.to_string(),
+            ..Default::default()
         },
     ];
     let translated = openai::stream_chat_completion(&upstream, &messages, None, None)
@@ -259,10 +261,12 @@ async fn summarize(ai: &AiConfig, preset_id: &str, article: &Article) -> Result<
         ChatMessage {
             role: "system".to_string(),
             content: SUMMARIZE_SYSTEM_PROMPT.to_string(),
+            ..Default::default()
         },
         ChatMessage {
             role: "user".to_string(),
             content: build_summarize_prompt(article),
+            ..Default::default()
         },
     ];
     let script = openai::stream_chat_completion(&upstream, &messages, None, None)

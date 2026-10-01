@@ -27,6 +27,10 @@ use crate::tunnel::auth::{
 /// pane (or pin memory) just by opening connections.
 pub const MAX_PENDING_PER_PEER: usize = 8;
 pub const MAX_PENDING_TOTAL: usize = 64;
+/// Connections waiting on one coalesced row (see [`PendingAuthorizations`]'s
+/// `enqueue`). Bounds the waiters a peer can attach by opening many
+/// connections to the same target.
+pub const MAX_WAITERS_PER_REQUEST: usize = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PendingAuthorization {
@@ -45,10 +49,21 @@ struct Inner {
     pending: BTreeMap<u64, PendingItem>,
 }
 
+/// One approval row. Identical requests (same peer, DID, target) share a row:
+/// a client such as a browser opens several connections at once, and each
+/// would otherwise park its own row. The decision answers every waiter.
 #[derive(Debug)]
 struct PendingItem {
     request: AuthRequest,
-    responder: oneshot::Sender<AuthDecision>,
+    responders: Vec<oneshot::Sender<AuthDecision>>,
+}
+
+impl PendingItem {
+    fn answer(self, decision: AuthDecision) {
+        for responder in self.responders {
+            let _ = responder.send(decision);
+        }
+    }
 }
 
 impl Default for PendingAuthorizations {
@@ -84,7 +99,7 @@ impl PendingAuthorizations {
         let item = self.inner.lock().await.pending.remove(&id);
         match item {
             Some(item) => {
-                let _ = item.responder.send(decision);
+                item.answer(decision);
                 true
             }
             None => false,
@@ -108,7 +123,7 @@ impl PendingAuthorizations {
         let count = stale.len();
         for id in stale {
             if let Some(item) = inner.pending.remove(&id) {
-                let _ = item.responder.send(AuthDecision::Deny);
+                item.answer(AuthDecision::Deny);
             }
         }
         count
@@ -120,6 +135,18 @@ impl PendingAuthorizations {
     ) -> Option<(u64, oneshot::Receiver<AuthDecision>)> {
         let (sender, receiver) = oneshot::channel();
         let mut inner = self.inner.lock().await;
+        if let Some((id, item)) = inner
+            .pending
+            .iter_mut()
+            .find(|(_, item)| item.request == request)
+        {
+            item.responders.retain(|r| !r.is_closed());
+            if item.responders.len() >= MAX_WAITERS_PER_REQUEST {
+                return None;
+            }
+            item.responders.push(sender);
+            return Some((*id, receiver));
+        }
         let from_peer = inner
             .pending
             .values()
@@ -134,17 +161,25 @@ impl PendingAuthorizations {
             id,
             PendingItem {
                 request,
-                responder: sender,
+                responders: vec![sender],
             },
         );
         Some((id, receiver))
     }
 
-    /// Removes a pending entry without resolving it -- used when
-    /// `PendingAuthorizer::decide`'s wait times out with no responder ever
-    /// having claimed it, so no ghost row lingers in `list()`.
+    /// Drops waiters whose wait ended without a decision -- used when
+    /// `PendingAuthorizer::decide`'s wait times out (its receiver is already
+    /// dropped, so its sender reads as closed) -- and removes the row once no
+    /// waiter is left, so no ghost row lingers in `list()`. Later waiters on a
+    /// coalesced row keep it until their own timeout.
     async fn remove_unresolved(&self, id: u64) {
-        self.inner.lock().await.pending.remove(&id);
+        let mut inner = self.inner.lock().await;
+        if let Some(item) = inner.pending.get_mut(&id) {
+            item.responders.retain(|r| !r.is_closed());
+            if item.responders.is_empty() {
+                inner.pending.remove(&id);
+            }
+        }
     }
 
     #[cfg(test)]
@@ -231,6 +266,8 @@ impl PendingAuthorizer {
         };
         let decision = match tokio::time::timeout(DECISION_TIMEOUT, receiver).await {
             Ok(result) => result.unwrap_or(AuthDecision::Deny),
+            // `timeout` consumed and dropped the receiver, which is what lets
+            // `remove_unresolved` recognise this waiter as gone.
             Err(_elapsed) => {
                 // No decision within the timeout: drop the ghost entry so it
                 // doesn't linger in `list()` forever, and deny.

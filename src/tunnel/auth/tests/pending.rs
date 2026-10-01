@@ -258,3 +258,89 @@ async fn pending_rows_are_capped_per_peer_and_extras_are_denied() {
     }
     let _ = other.await;
 }
+
+#[tokio::test]
+async fn identical_requests_share_one_row_and_one_decision() {
+    let store = TrustStore::load(temp_store_path("pending-coalesce"))
+        .await
+        .unwrap();
+    let pending = PendingAuthorizations::new();
+    let authorizer = PendingAuthorizer::new(store, pending.clone());
+
+    // A browser opening several connections to one service at once.
+    let tasks = (0..5)
+        .map(|_| {
+            let authorizer = authorizer.clone();
+            tokio::spawn(async move { authorizer.authorize(&request("peer-a", "tcp:80")).await })
+        })
+        .collect::<Vec<_>>();
+    let other = {
+        let authorizer = authorizer.clone();
+        tokio::spawn(async move { authorizer.authorize(&request("peer-a", "tcp:81")).await })
+    };
+    timeout(Duration::from_secs(1), async {
+        while pending.list().await.len() < 2 {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("rows should be queued");
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+
+    let rows = pending.list().await;
+    assert_eq!(
+        rows.len(),
+        2,
+        "one row per distinct target, not per connection"
+    );
+    let shared = rows
+        .iter()
+        .find(|r| r.request.forward_key == "tcp:80")
+        .unwrap();
+    assert!(pending.resolve(shared.id, AuthDecision::Allow).await);
+    for task in tasks {
+        assert_eq!(task.await.unwrap(), AuthDecision::Allow);
+    }
+
+    let rest = pending.list().await;
+    assert_eq!(rest.len(), 1);
+    assert_eq!(rest[0].request.forward_key, "tcp:81");
+    pending.resolve(rest[0].id, AuthDecision::Deny).await;
+    assert_eq!(other.await.unwrap(), AuthDecision::Deny);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_late_waiter_keeps_a_shared_row_after_the_first_times_out() {
+    let store = TrustStore::load(temp_store_path("pending-coalesce-timeout"))
+        .await
+        .unwrap();
+    let pending = PendingAuthorizations::new();
+    let authorizer = PendingAuthorizer::new(store, pending.clone());
+
+    let first = {
+        let authorizer = authorizer.clone();
+        tokio::spawn(async move { authorizer.authorize(&request("peer-a", "tcp:80")).await })
+    };
+    let _ = wait_for_pending(&pending).await;
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(DECISION_TIMEOUT / 2).await;
+    let late = {
+        let authorizer = authorizer.clone();
+        tokio::spawn(async move { authorizer.authorize(&request("peer-a", "tcp:80")).await })
+    };
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+
+    tokio::time::advance(DECISION_TIMEOUT / 2 + Duration::from_secs(1)).await;
+    assert_eq!(first.await.unwrap(), AuthDecision::Deny);
+    let rows = pending.list().await;
+    assert_eq!(rows.len(), 1, "the late waiter still needs the row");
+
+    assert!(pending.resolve(rows[0].id, AuthDecision::Allow).await);
+    assert_eq!(late.await.unwrap(), AuthDecision::Allow);
+}

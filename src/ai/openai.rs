@@ -107,15 +107,174 @@ fn truncate_500(body: &str) -> String {
     body.chars().take(500).collect()
 }
 
+/// Optional OpenAI tool-calling request fields, passed through verbatim.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ToolOptions {
+    /// OpenAI `tools` array.
+    pub tools: Option<Value>,
+    /// OpenAI `tool_choice` (string or object).
+    pub tool_choice: Option<Value>,
+}
+
+impl ToolOptions {
+    /// Whether any request-level tool field is set.
+    pub fn is_empty(&self) -> bool {
+        self.tools.is_none() && self.tool_choice.is_none()
+    }
+
+    /// Whether the request (options or any message) needs the "tools"
+    /// capability on the serving side.
+    pub fn request_uses_tools(&self, messages: &[ChatMessage]) -> bool {
+        !self.is_empty() || messages.iter().any(ChatMessage::uses_tools)
+    }
+}
+
+/// Result of one chat completion: the text plus any merged tool calls
+/// (OpenAI non-streaming shape, `None` when the model called no tools).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ChatOutput {
+    pub content: String,
+    pub tool_calls: Option<Value>,
+}
+
+impl From<String> for ChatOutput {
+    fn from(content: String) -> Self {
+        Self {
+            content,
+            tool_calls: None,
+        }
+    }
+}
+
+/// Upper bound on the total `function.arguments` bytes accumulated from one
+/// streamed answer (the upstream is not fully trusted to stay bounded).
+const MAX_TOOL_ARGS_BYTES: usize = 4 * 1024 * 1024;
+
+#[derive(Debug, Default)]
+struct PartialToolCall {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+/// Merges streamed `delta.tool_calls` fragments by `index` (arguments are
+/// concatenated; `id`/`name` arrive in the first fragment).
+#[derive(Debug, Default)]
+struct ToolCallAccumulator {
+    calls: std::collections::BTreeMap<usize, PartialToolCall>,
+    args_bytes: usize,
+}
+
+impl ToolCallAccumulator {
+    /// Apply one `delta.tool_calls` array. Errors when the upstream exceeds
+    /// the call-count or argument-size bounds.
+    fn apply(&mut self, delta: &Value) -> Result<()> {
+        let Some(items) = delta.as_array() else {
+            return Ok(());
+        };
+        for (pos, item) in items.iter().enumerate() {
+            // Some OpenAI-compatible servers omit `index`; fall back to the
+            // position inside the array.
+            let index = item
+                .get("index")
+                .and_then(Value::as_u64)
+                .map(|i| i as usize)
+                .unwrap_or(pos);
+            if index >= super::protocol::MAX_TOOL_CALLS {
+                bail!("ai: upstream returned too many tool calls");
+            }
+            let entry = self.calls.entry(index).or_default();
+            if let Some(id) = item.get("id").and_then(Value::as_str) {
+                if entry.id.is_empty() {
+                    entry.id = id.to_string();
+                }
+            }
+            if let Some(func) = item.get("function") {
+                if let Some(name) = func.get("name").and_then(Value::as_str) {
+                    if entry.name.is_empty() {
+                        entry.name = name.to_string();
+                    }
+                }
+                if let Some(args) = func.get("arguments").and_then(Value::as_str) {
+                    self.args_bytes += args.len();
+                    if self.args_bytes > MAX_TOOL_ARGS_BYTES {
+                        bail!("ai: upstream tool call arguments are too large");
+                    }
+                    entry.arguments.push_str(args);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The merged calls in OpenAI non-streaming shape; `None` when there are
+    /// none. Entries without a function name are dropped; a missing id is
+    /// synthesized.
+    fn finish(self) -> Option<Value> {
+        let calls: Vec<Value> = self
+            .calls
+            .into_iter()
+            .filter(|(_, c)| !c.name.is_empty())
+            .map(|(i, c)| {
+                let id = if c.id.is_empty() {
+                    format!("call_{i}")
+                } else {
+                    c.id
+                };
+                json!({
+                    "id": id,
+                    "type": "function",
+                    "function": {"name": c.name, "arguments": c.arguments},
+                })
+            })
+            .collect();
+        (!calls.is_empty()).then(|| Value::Array(calls))
+    }
+}
+
+/// Messages as sent upstream: an assistant turn that only calls tools
+/// (`content == ""` on the wire) goes out with `content: null`.
+fn upstream_messages(messages: &[ChatMessage]) -> Value {
+    Value::Array(
+        messages
+            .iter()
+            .map(|m| {
+                let mut v = serde_json::to_value(m).unwrap_or(Value::Null);
+                if m.role == "assistant" && m.content.is_empty() && m.tool_calls.is_some() {
+                    v["content"] = Value::Null;
+                }
+                v
+            })
+            .collect(),
+    )
+}
+
 /// Stream one chat completion from the upstream. Each delta is sent into
 /// `delta_tx` (when provided) as it arrives; the full accumulated content
-/// is returned at the end.
+/// is returned at the end. Text-only convenience wrapper over
+/// [`stream_chat_completion_tools`].
 pub async fn stream_chat_completion(
     config: &UpstreamConfig,
     messages: &[ChatMessage],
     model: Option<&str>,
     delta_tx: Option<UnboundedSender<String>>,
 ) -> Result<String> {
+    Ok(
+        stream_chat_completion_tools(config, messages, model, &ToolOptions::default(), delta_tx)
+            .await?
+            .content,
+    )
+}
+
+/// Like [`stream_chat_completion`] but forwards `tools`/`tool_choice` and
+/// returns the merged tool calls alongside the text.
+pub async fn stream_chat_completion_tools(
+    config: &UpstreamConfig,
+    messages: &[ChatMessage],
+    model: Option<&str>,
+    tools: &ToolOptions,
+    delta_tx: Option<UnboundedSender<String>>,
+) -> Result<ChatOutput> {
     let model = model
         .map(str::to_string)
         .or_else(|| config.model.clone())
@@ -130,9 +289,15 @@ pub async fn stream_chat_completion(
 
     let mut body = json!({
         "model": model,
-        "messages": messages,
+        "messages": upstream_messages(messages),
         "stream": true,
     });
+    if let Some(t) = &tools.tools {
+        body["tools"] = t.clone();
+    }
+    if let Some(tc) = &tools.tool_choice {
+        body["tool_choice"] = tc.clone();
+    }
     if let Some(temperature) = config.temperature {
         body["temperature"] = json!(temperature);
     }
@@ -177,20 +342,32 @@ pub async fn stream_chat_completion(
         .context("ai: reading LLM API response body")?;
     let value: Value = serde_json::from_str(&text)
         .map_err(|_| anyhow!("ai: LLM API returned a response with an unexpected format"))?;
-    let content = value
+    let message = value
         .get("choices")
         .and_then(|c| c.get(0))
-        .and_then(|c| c.get("message"))
-        .and_then(|m| m.get("content"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("ai: LLM API returned a response with an unexpected format"))?
-        .to_string();
+        .and_then(|c| c.get("message"));
+    let mut acc = ToolCallAccumulator::default();
+    if let Some(calls) = message.and_then(|m| m.get("tool_calls")) {
+        acc.apply(calls)?;
+    }
+    let tool_calls = acc.finish();
+    let content = match message.and_then(|m| m.get("content")) {
+        Some(Value::String(s)) => s.clone(),
+        // `content: null` is legitimate when the model only calls tools.
+        Some(Value::Null) | None if tool_calls.is_some() => String::new(),
+        _ => bail!("ai: LLM API returned a response with an unexpected format"),
+    };
 
     if let Some(tx) = &delta_tx {
-        let _ = tx.send(content.clone());
+        if tool_calls.is_none() || !content.is_empty() {
+            let _ = tx.send(content.clone());
+        }
     }
 
-    Ok(content)
+    Ok(ChatOutput {
+        content,
+        tool_calls,
+    })
 }
 
 /// Consume an SSE (`text/event-stream`) response body, forwarding content
@@ -198,9 +375,10 @@ pub async fn stream_chat_completion(
 async fn stream_sse(
     mut response: reqwest::Response,
     delta_tx: Option<UnboundedSender<String>>,
-) -> Result<String> {
+) -> Result<ChatOutput> {
     let mut buffer = String::new();
     let mut full = String::new();
+    let mut acc = ToolCallAccumulator::default();
 
     while let Some(chunk) = response
         .chunk()
@@ -227,10 +405,14 @@ async fn stream_sse(
             let Ok(parsed) = serde_json::from_str::<Value>(data) else {
                 continue; // Malformed SSE line -- skip silently.
             };
-            let delta = parsed
+            let delta_obj = parsed
                 .get("choices")
                 .and_then(|c| c.get(0))
-                .and_then(|c| c.get("delta"))
+                .and_then(|c| c.get("delta"));
+            if let Some(calls) = delta_obj.and_then(|d| d.get("tool_calls")) {
+                acc.apply(calls)?;
+            }
+            let delta = delta_obj
                 .and_then(|d| d.get("content"))
                 .and_then(Value::as_str);
             if let Some(delta) = delta {
@@ -246,7 +428,10 @@ async fn stream_sse(
         buffer = remainder;
     }
 
-    Ok(full)
+    Ok(ChatOutput {
+        content: full,
+        tool_calls: acc.finish(),
+    })
 }
 
 /// `GET {base_url}/models` -> the model id list (OpenAI shape:
@@ -528,6 +713,8 @@ mod tests {
 
     fn one_message() -> Vec<ChatMessage> {
         vec![ChatMessage {
+            tool_calls: None,
+            tool_call_id: None,
             role: "user".to_string(),
             content: "hi".to_string(),
         }]
@@ -966,5 +1153,155 @@ mod tests {
             "unexpected request line: {}",
             request_line(&raw)
         );
+    }
+
+    // ---- tool calling -------------------------------------------------
+
+    #[test]
+    fn tool_call_deltas_are_merged_by_index() {
+        let mut acc = ToolCallAccumulator::default();
+        let frames = [
+            json!([{"index":0,"id":"call_a","type":"function","function":{"name":"get_weather","arguments":""}}]),
+            json!([{"index":0,"function":{"arguments":"{\"ci"}}]),
+            json!([{"index":1,"id":"call_b","type":"function","function":{"name":"get_time","arguments":"{}"}}]),
+            json!([{"index":0,"function":{"arguments":"ty\":\"Tokyo\"}"}}]),
+        ];
+        for f in &frames {
+            acc.apply(f).unwrap();
+        }
+        assert_eq!(
+            acc.finish(),
+            Some(json!([
+                {"id":"call_a","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Tokyo\"}"}},
+                {"id":"call_b","type":"function","function":{"name":"get_time","arguments":"{}"}},
+            ]))
+        );
+    }
+
+    #[test]
+    fn tool_call_merge_handles_missing_index_id_and_empty() {
+        let mut acc = ToolCallAccumulator::default();
+        acc.apply(&json!([{"function":{"name":"f","arguments":"{}"}}]))
+            .unwrap();
+        assert_eq!(
+            acc.finish(),
+            Some(
+                json!([{"id":"call_0","type":"function","function":{"name":"f","arguments":"{}"}}])
+            )
+        );
+        assert_eq!(ToolCallAccumulator::default().finish(), None);
+        // Non-array deltas are ignored.
+        let mut acc = ToolCallAccumulator::default();
+        acc.apply(&json!(null)).unwrap();
+        assert_eq!(acc.finish(), None);
+    }
+
+    #[test]
+    fn tool_call_merge_is_bounded() {
+        let mut acc = ToolCallAccumulator::default();
+        assert!(
+            acc.apply(&json!([{"index": super::super::protocol::MAX_TOOL_CALLS,
+                "function":{"name":"f"}}]))
+                .is_err()
+        );
+        let mut acc = ToolCallAccumulator::default();
+        let big = "x".repeat(MAX_TOOL_ARGS_BYTES + 1);
+        assert!(
+            acc.apply(&json!([{"index":0,"function":{"name":"f","arguments":big}}]))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn upstream_messages_sends_null_content_for_tool_only_assistant_turns() {
+        let calls = json!([{"id":"c","type":"function","function":{"name":"f","arguments":"{}"}}]);
+        let msgs = vec![
+            ChatMessage::new("user", "hi"),
+            ChatMessage {
+                role: "assistant".into(),
+                content: String::new(),
+                tool_calls: Some(calls.clone()),
+                tool_call_id: None,
+            },
+            ChatMessage {
+                role: "tool".into(),
+                content: "r".into(),
+                tool_calls: None,
+                tool_call_id: Some("c".into()),
+            },
+        ];
+        assert_eq!(
+            upstream_messages(&msgs),
+            json!([
+                {"role":"user","content":"hi"},
+                {"role":"assistant","content":null,"tool_calls":calls},
+                {"role":"tool","content":"r","tool_call_id":"c"},
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn streamed_tool_calls_are_forwarded_and_merged() {
+        let parts = [
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Let me check. \"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"city\\\":\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"Tokyo\\\"}\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n",
+        ];
+        let (base_url, server) =
+            mock_server(chunked_sse_response(&parts), Duration::from_millis(5)).await;
+        let config = cfg(base_url, Some("m"), None);
+        let tools = ToolOptions {
+            tools: Some(json!([{"type":"function","function":{"name":"get_weather"}}])),
+            tool_choice: Some(json!("auto")),
+        };
+        let (tx, mut rx) = unbounded_channel();
+        let out = stream_chat_completion_tools(&config, &one_message(), None, &tools, Some(tx))
+            .await
+            .unwrap();
+        assert_eq!(out.content, "Let me check. ");
+        assert_eq!(
+            out.tool_calls,
+            Some(json!([{"id":"call_1","type":"function",
+                "function":{"name":"get_weather","arguments":"{\"city\":\"Tokyo\"}"}}]))
+        );
+        assert_eq!(rx.recv().await.as_deref(), Some("Let me check. "));
+
+        let raw = server.await.unwrap();
+        let (_, req_body) = split_request(&raw);
+        let value: Value = serde_json::from_str(&req_body).unwrap();
+        assert_eq!(value["tools"], tools.tools.unwrap());
+        assert_eq!(value["tool_choice"], json!("auto"));
+    }
+
+    #[tokio::test]
+    async fn non_stream_tool_calls_with_null_content_are_returned() {
+        let body = r#"{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":"{}"}}]}}]}"#;
+        let (base_url, server) = mock_server(json_response(200, "OK", body), Duration::ZERO).await;
+        let config = cfg(base_url, Some("m"), None);
+        let (tx, mut rx) = unbounded_channel();
+        let out = stream_chat_completion_tools(
+            &config,
+            &one_message(),
+            None,
+            &ToolOptions::default(),
+            Some(tx),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.content, "");
+        assert_eq!(
+            out.tool_calls,
+            Some(json!([{"id":"c1","type":"function","function":{"name":"f","arguments":"{}"}}]))
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "no empty text delta for tool-only answers"
+        );
+        let raw = server.await.unwrap();
+        let (_, req_body) = split_request(&raw);
+        let value: Value = serde_json::from_str(&req_body).unwrap();
+        assert!(value.get("tools").is_none() && value.get("tool_choice").is_none());
     }
 }

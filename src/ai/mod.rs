@@ -57,7 +57,7 @@ use crate::daemon::AppState;
 
 use api_server::ApiServer;
 use consumer::Consumer;
-use openai::UpstreamConfig;
+use openai::{ChatOutput, ToolOptions, UpstreamConfig};
 use protocol::{ChatMessage, ProtocolMessage};
 use provider::{Provider, SttCallFn, TtsCallFn};
 
@@ -67,15 +67,35 @@ use provider::{Provider, SttCallFn, TtsCallFn};
 pub type SendFn = Arc<dyn Fn(&str, ProtocolMessage) + Send + Sync>;
 
 /// Boxed future returned by [`LlmCallFn`].
-pub type LlmCallFuture = Pin<Box<dyn Future<Output = Result<String>> + Send>>;
+pub type LlmCallFuture = Pin<Box<dyn Future<Output = Result<ChatOutput>> + Send>>;
 
-/// One chat completion: `(messages, model, delta_tx)` -> full content.
-/// Deltas are streamed into `delta_tx` (when provided) as they arrive.
+/// One chat completion: `(messages, tools, model, delta_tx)` -> full content
+/// plus any merged tool calls. Deltas are streamed into `delta_tx` (when
+/// provided) as they arrive; tool calls are returned only at the end.
 pub type LlmCallFn = Arc<
-    dyn Fn(Vec<ChatMessage>, Option<String>, Option<UnboundedSender<String>>) -> LlmCallFuture
+    dyn Fn(
+            Vec<ChatMessage>,
+            ToolOptions,
+            Option<String>,
+            Option<UnboundedSender<String>>,
+        ) -> LlmCallFuture
         + Send
         + Sync,
 >;
+
+/// The request uses tool calling but the selected backend (a remote
+/// provider) does not advertise the `"tools"` service. The API server maps
+/// this to the 400 `tools_unsupported` response.
+#[derive(Debug)]
+pub struct ToolsUnsupported;
+
+impl std::fmt::Display for ToolsUnsupported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the AI provider on the network does not support tools")
+    }
+}
+
+impl std::error::Error for ToolsUnsupported {}
 
 /// Model list for `GET /v1/models`.
 pub type ModelsFn = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
@@ -260,16 +280,21 @@ impl AiService {
 
     /// Backend selection shared by `ai chat` and the API server: local
     /// provider first, else the first provider discovered on the network.
-    /// Returns `(content, via, remote_provider_id)`.
+    /// Returns `(output, via, remote_provider_id)`. A request using tools
+    /// against a remote provider without the `"tools"` service fails with
+    /// [`ToolsUnsupported`]; the local provider always supports tools.
     async fn chat(
         &self,
         messages: Vec<ChatMessage>,
+        tools: ToolOptions,
         model: Option<String>,
         delta_tx: Option<UnboundedSender<String>>,
-    ) -> Result<(String, &'static str, Option<String>)> {
+    ) -> Result<(ChatOutput, &'static str, Option<String>)> {
         if let Some(provider) = self.local_provider() {
-            let content = provider.call_upstream(messages, model, delta_tx).await?;
-            return Ok((content, "local", None));
+            let output = provider
+                .call_upstream(messages, tools, model, delta_tx)
+                .await?;
+            return Ok((output, "local", None));
         }
 
         let info = match self.consumer.provider() {
@@ -283,17 +308,18 @@ impl AiService {
                     .context("ai: no provider found on the network")?
             }
         };
-        let content = self
+        let output = self
             .consumer
-            .request(
+            .request_tools(
                 &info.node_id,
                 messages,
+                tools,
                 model,
                 self.request_timeout,
                 delta_tx,
             )
             .await?;
-        Ok((content, "p2p", Some(info.node_id)))
+        Ok((output, "p2p", Some(info.node_id)))
     }
 
     /// Synthesize speech from this node's configured TTS preset.
@@ -457,12 +483,11 @@ pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Val
                 .and_then(Value::as_str)
                 .context("ai.chat requires `prompt`")?;
             let model = args.get("model").and_then(Value::as_str).map(String::from);
-            let messages = vec![ChatMessage {
-                role: "user".into(),
-                content: prompt.to_string(),
-            }];
-            let (content, via, provider) = service.chat(messages, model, None).await?;
-            Ok(json!({ "content": content, "via": via, "provider": provider }))
+            let messages = vec![ChatMessage::new("user", prompt)];
+            let (output, via, provider) = service
+                .chat(messages, ToolOptions::default(), model, None)
+                .await?;
+            Ok(json!({ "content": output.content, "via": via, "provider": provider }))
         }
         "ai.models" => models(&service).await,
         "ai.provide.start" => provide_start(&service, state).await,
@@ -858,11 +883,17 @@ async fn build_provider(
 
     let call: LlmCallFn = {
         let upstream = upstream.clone();
-        Arc::new(move |messages, model, delta_tx| {
+        Arc::new(move |messages, tools, model, delta_tx| {
             let upstream = upstream.clone();
             Box::pin(async move {
-                openai::stream_chat_completion(&upstream, &messages, model.as_deref(), delta_tx)
-                    .await
+                openai::stream_chat_completion_tools(
+                    &upstream,
+                    &messages,
+                    model.as_deref(),
+                    &tools,
+                    delta_tx,
+                )
+                .await
             })
         })
     };
@@ -1347,13 +1378,13 @@ async fn serve_start(service: &Arc<AiService>, state: &Arc<AppState>) -> Result<
 
     let call: LlmCallFn = {
         let service = service.clone();
-        Arc::new(move |messages, model, delta_tx| {
+        Arc::new(move |messages, tools, model, delta_tx| {
             let service = service.clone();
             Box::pin(async move {
                 service
-                    .chat(messages, model, delta_tx)
+                    .chat(messages, tools, model, delta_tx)
                     .await
-                    .map(|(content, _, _)| content)
+                    .map(|(output, _, _)| output)
             })
         })
     };

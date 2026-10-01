@@ -23,12 +23,16 @@
 //!   doc `tts-voice-selection-v1.md` §2.1).
 //! - `consumer_hello`: no fields.
 //! - `llm_request`: `id` non-empty; `messages` array with >= 1 element,
-//!   each `{role: "system"|"user"|"assistant", content: string}`; `model`
-//!   optional string. Any violation -> `None`.
+//!   each `{role: "system"|"user"|"assistant"|"tool", content: string}`
+//!   plus optional `tool_calls` (array) / `tool_call_id` (string); `model`
+//!   optional string; optional `tools` (array) / `tool_choice` (string or
+//!   object). Any violation -> `None`. Size limits for the tool fields
+//!   ([`MAX_TOOLS`] etc.) are enforced by the provider, not here.
 //! - `llm_response_chunk`: `id` non-empty; `delta` string (empty ok);
 //!   `seq` optional, but if present must be an integer >= 0 (reject
 //!   negative, fractional, non-number) -> else `None`.
-//! - `llm_response_done`: `id` non-empty; `content` optional string.
+//! - `llm_response_done`: `id` non-empty; `content` optional string;
+//!   `tool_calls` optional array (non-array -> `None`).
 //! - `llm_error`: `id` non-empty; `message` string; `code` optional string
 //!   (present but non-string -> field dropped, message still valid, same
 //!   as `models`/`services`).
@@ -64,12 +68,47 @@
 //! ```
 
 /// One chat turn, OpenAI-style.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+///
+/// `tool_calls` / `tool_call_id` are the optional "tools" extension fields
+/// (see [`SERVICE_TOOLS`]); they are omitted from the wire when `None`, so a
+/// message without them is byte-identical to the pre-extension encoding.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ChatMessage {
-    /// "system" | "user" | "assistant" (enforced by [`decode`]).
+    /// "system" | "user" | "assistant" | "tool" (enforced by [`decode`]).
     pub role: String,
+    /// Always a string on the wire; an OpenAI `content: null` is `""`.
     pub content: String,
+    /// Assistant turns only: OpenAI `tool_calls` array, verbatim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<serde_json::Value>,
+    /// Tool turns only: the id of the call this message answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
+
+impl ChatMessage {
+    /// A plain message without any tool fields.
+    pub fn new(role: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            content: content.into(),
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+
+    /// Whether this message uses any tool-extension field or the `tool` role.
+    pub fn uses_tools(&self) -> bool {
+        self.role == "tool" || self.tool_calls.is_some() || self.tool_call_id.is_some()
+    }
+}
+
+/// Maximum entries in `llm_request.tools`.
+pub const MAX_TOOLS: usize = 128;
+/// Maximum serialized size of `llm_request.tools`.
+pub const MAX_TOOLS_BYTES: usize = 256 * 1024;
+/// Maximum `tool_calls` entries in one message / one response.
+pub const MAX_TOOL_CALLS: usize = 128;
 
 /// A protocol v1 message. Variant/field names map 1:1 onto the wire
 /// `type`/fields documented in the module header.
@@ -99,6 +138,10 @@ pub enum ProtocolMessage {
         id: String,
         messages: Vec<ChatMessage>,
         model: Option<String>,
+        /// OpenAI `tools` array, verbatim ("tools" extension).
+        tools: Option<serde_json::Value>,
+        /// OpenAI `tool_choice` (string or object), verbatim.
+        tool_choice: Option<serde_json::Value>,
     },
     LlmResponseChunk {
         id: String,
@@ -108,6 +151,8 @@ pub enum ProtocolMessage {
     LlmResponseDone {
         id: String,
         content: Option<String>,
+        /// Complete merged tool calls of the answer ("tools" extension).
+        tool_calls: Option<serde_json::Value>,
     },
     LlmError {
         id: String,
@@ -161,6 +206,11 @@ pub enum ProtocolMessage {
 /// a `provider_hello` means "chat only" per the wire spec (see
 /// [`advertises_service`]).
 pub const SERVICE_CHAT: &str = "chat";
+
+/// Known `services` value for tool calling (`tools` / `tool_choice` /
+/// `tool_calls` on chat). Providers advertise it alongside `"chat"`;
+/// consumers must not send any tool field to a provider that lacks it.
+pub const SERVICE_TOOLS: &str = "tools";
 
 /// Known `services` value for text-to-speech capability (mistai v0.4.0).
 pub const SERVICE_TTS: &str = "tts";
@@ -221,6 +271,8 @@ pub fn encode(msg: &ProtocolMessage) -> Vec<u8> {
             id,
             messages,
             model,
+            tools,
+            tool_choice,
         } => {
             let mut map = Map::new();
             map.insert("v".into(), json!(1));
@@ -229,6 +281,12 @@ pub fn encode(msg: &ProtocolMessage) -> Vec<u8> {
             map.insert("messages".into(), json!(messages));
             if let Some(model) = model {
                 map.insert("model".into(), json!(model));
+            }
+            if let Some(tools) = tools {
+                map.insert("tools".into(), tools.clone());
+            }
+            if let Some(tool_choice) = tool_choice {
+                map.insert("tool_choice".into(), tool_choice.clone());
             }
             Value::Object(map)
         }
@@ -243,13 +301,20 @@ pub fn encode(msg: &ProtocolMessage) -> Vec<u8> {
             }
             Value::Object(map)
         }
-        ProtocolMessage::LlmResponseDone { id, content } => {
+        ProtocolMessage::LlmResponseDone {
+            id,
+            content,
+            tool_calls,
+        } => {
             let mut map = Map::new();
             map.insert("v".into(), json!(1));
             map.insert("type".into(), json!("llm_response_done"));
             map.insert("id".into(), json!(id));
             if let Some(content) = content {
                 map.insert("content".into(), json!(content));
+            }
+            if let Some(tool_calls) = tool_calls {
+                map.insert("tool_calls".into(), tool_calls.clone());
             }
             Value::Object(map)
         }
@@ -459,20 +524,43 @@ pub fn decode(bytes: &[u8]) -> Option<ProtocolMessage> {
             for m in raw_messages {
                 let m = m.as_object()?;
                 let role = m.get("role")?.as_str()?;
-                if !matches!(role, "system" | "user" | "assistant") {
+                if !matches!(role, "system" | "user" | "assistant" | "tool") {
                     return None;
                 }
                 let content = m.get("content")?.as_str()?;
+                // Tool extension fields: a wrong type invalidates the
+                // message. Size limits are enforced by the provider so the
+                // sender gets an `llm_error` rather than silence.
+                let tool_calls = match m.get("tool_calls") {
+                    None => None,
+                    Some(v) if v.is_array() => Some(v.clone()),
+                    Some(_) => return None,
+                };
+                let tool_call_id = opt_str(m, "tool_call_id")?;
                 messages.push(ChatMessage {
                     role: role.to_string(),
                     content: content.to_string(),
+                    tool_calls,
+                    tool_call_id,
                 });
             }
             let model = opt_str(obj, "model")?;
+            let tools = match obj.get("tools") {
+                None => None,
+                Some(v) if v.is_array() => Some(v.clone()),
+                Some(_) => return None,
+            };
+            let tool_choice = match obj.get("tool_choice") {
+                None => None,
+                Some(v) if v.is_string() || v.is_object() => Some(v.clone()),
+                Some(_) => return None,
+            };
             Some(ProtocolMessage::LlmRequest {
                 id,
                 messages,
                 model,
+                tools,
+                tool_choice,
             })
         }
         "llm_response_chunk" => {
@@ -487,7 +575,16 @@ pub fn decode(bytes: &[u8]) -> Option<ProtocolMessage> {
         "llm_response_done" => {
             let id = non_empty_str(obj, "id")?;
             let content = opt_str(obj, "content")?;
-            Some(ProtocolMessage::LlmResponseDone { id, content })
+            let tool_calls = match obj.get("tool_calls") {
+                None => None,
+                Some(v) if v.is_array() => Some(v.clone()),
+                Some(_) => return None,
+            };
+            Some(ProtocolMessage::LlmResponseDone {
+                id,
+                content,
+                tool_calls,
+            })
         }
         "llm_error" => {
             let id = non_empty_str(obj, "id")?;
@@ -684,8 +781,12 @@ mod tests {
     #[test]
     fn encode_llm_request_with_model() {
         let bytes = encode(&ProtocolMessage::LlmRequest {
+            tools: None,
+            tool_choice: None,
             id: "a1".into(),
             messages: vec![ChatMessage {
+                tool_calls: None,
+                tool_call_id: None,
                 role: "user".into(),
                 content: "hi".into(),
             }],
@@ -708,8 +809,12 @@ mod tests {
     #[test]
     fn encode_llm_request_without_model_omits_field() {
         let bytes = encode(&ProtocolMessage::LlmRequest {
+            tools: None,
+            tool_choice: None,
             id: "a1".into(),
             messages: vec![ChatMessage {
+                tool_calls: None,
+                tool_call_id: None,
                 role: "system".into(),
                 content: "sys".into(),
             }],
@@ -757,6 +862,7 @@ mod tests {
     #[test]
     fn encode_llm_response_done() {
         let with_content = encode(&ProtocolMessage::LlmResponseDone {
+            tool_calls: None,
             id: "a1".into(),
             content: Some("done".into()),
         });
@@ -766,6 +872,7 @@ mod tests {
         );
 
         let without_content = encode(&ProtocolMessage::LlmResponseDone {
+            tool_calls: None,
             id: "a1".into(),
             content: None,
         });
@@ -1026,8 +1133,12 @@ mod tests {
         assert_eq!(
             decode(bytes),
             Some(ProtocolMessage::LlmRequest {
+                tools: None,
+                tool_choice: None,
                 id: "a1".into(),
                 messages: vec![ChatMessage {
+                    tool_calls: None,
+                    tool_call_id: None,
                     role: "user".into(),
                     content: "hi".into()
                 }],
@@ -1147,13 +1258,19 @@ mod tests {
         });
         assert_roundtrip(ProtocolMessage::ConsumerHello);
         assert_roundtrip(ProtocolMessage::LlmRequest {
+            tools: None,
+            tool_choice: None,
             id: "id1".into(),
             messages: vec![
                 ChatMessage {
+                    tool_calls: None,
+                    tool_call_id: None,
                     role: "system".into(),
                     content: "sys".into(),
                 },
                 ChatMessage {
+                    tool_calls: None,
+                    tool_call_id: None,
                     role: "assistant".into(),
                     content: "reply".into(),
                 },
@@ -1161,8 +1278,12 @@ mod tests {
             model: Some("gpt-4o".into()),
         });
         assert_roundtrip(ProtocolMessage::LlmRequest {
+            tools: None,
+            tool_choice: None,
             id: "id1".into(),
             messages: vec![ChatMessage {
+                tool_calls: None,
+                tool_call_id: None,
                 role: "user".into(),
                 content: "hi".into(),
             }],
@@ -1179,10 +1300,12 @@ mod tests {
             seq: None,
         });
         assert_roundtrip(ProtocolMessage::LlmResponseDone {
+            tool_calls: None,
             id: "id1".into(),
             content: Some("full text".into()),
         });
         assert_roundtrip(ProtocolMessage::LlmResponseDone {
+            tool_calls: None,
             id: "id1".into(),
             content: None,
         });
@@ -1501,6 +1624,7 @@ mod tests {
         assert_eq!(
             decode(bytes),
             Some(ProtocolMessage::LlmResponseDone {
+                tool_calls: None,
                 id: "a1".into(),
                 content: None,
             })
@@ -1532,5 +1656,152 @@ mod tests {
         let variant_nibble = parts[3].chars().next().unwrap();
         assert!(matches!(variant_nibble, '8' | '9' | 'a' | 'b'));
         assert_ne!(random_id(), random_id());
+    }
+
+    // ---- "tools" extension -------------------------------------------
+
+    fn sample_tools() -> serde_json::Value {
+        serde_json::json!([{"type": "function", "function": {
+            "name": "get_weather",
+            "description": "Weather lookup",
+            "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+        }}])
+    }
+
+    fn sample_calls() -> serde_json::Value {
+        serde_json::json!([{"id": "call_1", "type": "function",
+            "function": {"name": "get_weather", "arguments": "{\"city\":\"Tokyo\"}"}}])
+    }
+
+    #[test]
+    fn tools_roundtrip_request_and_done() {
+        assert_roundtrip(ProtocolMessage::LlmRequest {
+            id: "t1".into(),
+            messages: vec![
+                ChatMessage::new("user", "weather?"),
+                ChatMessage {
+                    role: "assistant".into(),
+                    content: String::new(),
+                    tool_calls: Some(sample_calls()),
+                    tool_call_id: None,
+                },
+                ChatMessage {
+                    role: "tool".into(),
+                    content: "sunny".into(),
+                    tool_calls: None,
+                    tool_call_id: Some("call_1".into()),
+                },
+            ],
+            model: Some("m".into()),
+            tools: Some(sample_tools()),
+            tool_choice: Some(
+                serde_json::json!({"type": "function", "function": {"name": "get_weather"}}),
+            ),
+        });
+        assert_roundtrip(ProtocolMessage::LlmRequest {
+            id: "t2".into(),
+            messages: vec![ChatMessage::new("user", "x")],
+            model: None,
+            tools: Some(sample_tools()),
+            tool_choice: Some(serde_json::json!("auto")),
+        });
+        assert_roundtrip(ProtocolMessage::LlmResponseDone {
+            id: "t1".into(),
+            content: Some(String::new()),
+            tool_calls: Some(sample_calls()),
+        });
+    }
+
+    #[test]
+    fn old_message_without_tool_fields_decodes_identically() {
+        let old = br#"{"v":1,"type":"llm_request","id":"a1","messages":[{"role":"user","content":"hi"}],"model":"gpt-4o"}"#;
+        assert_eq!(
+            decode(old),
+            Some(ProtocolMessage::LlmRequest {
+                id: "a1".into(),
+                messages: vec![ChatMessage::new("user", "hi")],
+                model: Some("gpt-4o".into()),
+                tools: None,
+                tool_choice: None,
+            })
+        );
+        let old_done = br#"{"v":1,"type":"llm_response_done","id":"a1","content":"x"}"#;
+        assert_eq!(
+            decode(old_done),
+            Some(ProtocolMessage::LlmResponseDone {
+                id: "a1".into(),
+                content: Some("x".into()),
+                tool_calls: None,
+            })
+        );
+    }
+
+    #[test]
+    fn encode_omits_absent_tool_fields_byte_for_byte() {
+        let bytes = encode(&ProtocolMessage::LlmRequest {
+            id: "a1".into(),
+            messages: vec![ChatMessage::new("user", "hi")],
+            model: Some("gpt-4o".into()),
+            tools: None,
+            tool_choice: None,
+        });
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(!text.contains("tool"), "{text}");
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"v":1,"type":"llm_request","id":"a1",
+                "messages":[{"role":"user","content":"hi"}],"model":"gpt-4o"})
+        );
+        let done = String::from_utf8(encode(&ProtocolMessage::LlmResponseDone {
+            id: "a1".into(),
+            content: Some("x".into()),
+            tool_calls: None,
+        }))
+        .unwrap();
+        assert!(!done.contains("tool"), "{done}");
+    }
+
+    #[test]
+    fn tool_field_type_errors_are_rejected() {
+        let base = |extra: &str| {
+            format!(
+                r#"{{"v":1,"type":"llm_request","id":"a","messages":[{{"role":"user","content":"x"{extra}}}]}}"#
+            )
+        };
+        assert!(decode(base("").as_bytes()).is_some());
+        assert!(decode(base(r#","tool_calls":"nope""#).as_bytes()).is_none());
+        assert!(decode(base(r#","tool_call_id":5"#).as_bytes()).is_none());
+        let req = |extra: &str| {
+            format!(
+                r#"{{"v":1,"type":"llm_request","id":"a","messages":[{{"role":"user","content":"x"}}]{extra}}}"#
+            )
+        };
+        assert!(decode(req(r#","tools":{}"#).as_bytes()).is_none());
+        assert!(decode(req(r#","tool_choice":3"#).as_bytes()).is_none());
+        assert!(decode(req(r#","tools":[],"tool_choice":"none""#).as_bytes()).is_some());
+        let done = br#"{"v":1,"type":"llm_response_done","id":"a","tool_calls":"x"}"#;
+        assert!(decode(done).is_none());
+    }
+
+    #[test]
+    fn tool_role_is_decoded_and_unknown_role_still_rejected() {
+        let tool = br#"{"v":1,"type":"llm_request","id":"a","messages":[{"role":"tool","content":"r","tool_call_id":"c"}]}"#;
+        assert!(decode(tool).is_some());
+        let bad = br#"{"v":1,"type":"llm_request","id":"a","messages":[{"role":"function","content":"r"}]}"#;
+        assert!(decode(bad).is_none());
+    }
+
+    #[test]
+    fn services_default_chat_does_not_imply_tools() {
+        assert!(!advertises_service(&None, SERVICE_TOOLS));
+        assert!(advertises_service(
+            &Some(vec!["chat".into(), "tools".into()]),
+            SERVICE_TOOLS
+        ));
+        assert!(!advertises_service(
+            &Some(vec!["chat".into()]),
+            SERVICE_TOOLS
+        ));
     }
 }

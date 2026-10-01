@@ -116,6 +116,7 @@ pub async fn execute_line_with_context(
 
     match command {
         ShellCommand::Add(spec) => {
+            super::controller::check_listen_available(&spec)?;
             let key = controller.add_forward(spec).await?;
             Ok(ShellOutcome {
                 output: format!("added {}\n", key),
