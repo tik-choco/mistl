@@ -412,6 +412,7 @@ impl SessionContext {
                             && f.spec.listen_port == spec.listen_port),
                     "local port already configured"
                 );
+                super::controller::check_listen_available(&spec)?;
                 self.controller.add_forward(spec.clone()).await?;
                 let origin = if actor == owner {
                     ForwardOrigin::Local

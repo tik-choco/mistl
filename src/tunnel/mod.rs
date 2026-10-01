@@ -490,6 +490,7 @@ async fn forward_add(args: Value) -> Result<Value> {
         listen_port,
         target,
     };
+    crate::tunnel::controller::check_listen_available(&spec)?;
     ctx.controller
         .add_forward(spec.clone())
         .await
@@ -635,6 +636,13 @@ async fn forward_propose(args: Value) -> Result<Value> {
         }
     };
 
+    // The local listener only opens once the peer accepts; refuse a busy
+    // port now rather than after the round trip.
+    crate::tunnel::controller::check_listen_port(
+        Proto::from_name(&draft.proto)?,
+        &draft.local_addr,
+        draft.listen_port,
+    )?;
     let peer_id = draft.peer_id.clone();
     let target = draft.target.clone();
     let message = ctx
@@ -653,6 +661,37 @@ async fn forward_remove(args: Value) -> Result<Value> {
         .context("tunnel.forward.remove requires `target`")?;
     ctx.remove_forward(target).await.map_err(session_err)?;
     Ok(json!({ "removed": true }))
+}
+
+/// `tunnel.port.check {"proto":"tcp|udp","addr":"127.0.0.1:8080"} ->
+/// {"available":bool,"error"?:"..","suggestion"?:"127.0.0.1:8081"}`. Lets
+/// the dashboard refuse a busy local listener address before it is
+/// submitted. Needs no running session: it only bind-probes this machine.
+async fn port_check(args: Value) -> Result<Value> {
+    let proto = Proto::from_name(args.get("proto").and_then(Value::as_str).unwrap_or("tcp"))?;
+    let addr = args
+        .get("addr")
+        .and_then(Value::as_str)
+        .context("tunnel.port.check requires `addr`")?
+        .trim()
+        .to_string();
+    let (host, _) = addr.rsplit_once(':').context("address must be host:port")?;
+    let host = host.to_string();
+    let port = crate::tunnel::session::parse_addr_port(&addr)
+        .filter(|port| (1..=65535).contains(port))
+        .context("port must be 1–65535")?;
+    tokio::task::spawn_blocking(move || {
+        match crate::tunnel::controller::check_listen_port(proto, &addr, port) {
+            Ok(()) => json!({ "available": true }),
+            Err(error) => {
+                let suggestion = crate::tunnel::controller::suggest_listen_port(proto, &addr, port)
+                    .map(|free| format!("{host}:{free}"));
+                json!({ "available": false, "error": error.to_string(), "suggestion": suggestion })
+            }
+        }
+    })
+    .await
+    .context("tunnel.port.check")
 }
 
 /// `tunnel.auth.approve {"id":"..","remember":bool} -> {"ok":true}` and its
@@ -797,6 +836,7 @@ pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Val
         "tunnel.forward.add" => forward_add(args).await,
         "tunnel.forward.propose" => forward_propose(args).await,
         "tunnel.forward.remove" => forward_remove(args).await,
+        "tunnel.port.check" => port_check(args).await,
         "tunnel.auth.approve" => auth_resolve(args, true).await,
         "tunnel.auth.deny" => auth_resolve(args, false).await,
         "tunnel.forward.accept" => forward_resolve(args, true).await,

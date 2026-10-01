@@ -664,6 +664,19 @@ impl SessionContext {
             listen_port: out.listen_port,
             target: out.target.clone(),
         };
+        // The port may have been taken since the proposal was sent. A stale
+        // entry with this key on the same port is our own listener and is
+        // replaced below, so it does not count as busy.
+        let replacing_own = self.controller.list_forwards().await.iter().any(|f| {
+            f.key == spec.target
+                && f.spec.proto == spec.proto
+                && f.spec.listen_port == spec.listen_port
+        });
+        if !replacing_own && let Err(e) = super::controller::check_listen_available(&spec) {
+            let text = format!("add failed: {}", e);
+            self.push_notice(NoticeKind::Error, text.clone()).await;
+            return Err(SessionError::Invalid(text));
+        }
         if let Err(first_err) = self.controller.add_forward(spec.clone()).await {
             // A forward restored from `forward_store` at startup (see
             // `SessionContext::build`) can occupy the same key (`target`) a
@@ -1388,11 +1401,18 @@ mod tests {
     }
 
     fn sample_outgoing_forward(target: &str) -> OutgoingForward {
+        // Accepting probes the local listener, so use a port that is free on
+        // this machine rather than a fixed one another program may hold.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
         OutgoingForward {
             peer_id: "peer-1".to_string(),
             proto: "tcp".to_string(),
-            listen_port: 8080,
-            local_addr: "127.0.0.1:8080".to_string(),
+            listen_port: i32::from(port),
+            local_addr: format!("127.0.0.1:{port}"),
             remote_addr: "127.0.0.1:80".to_string(),
             target: target.to_string(),
         }
@@ -1486,6 +1506,7 @@ mod tests {
             accepted: true,
             reason: None,
         };
+        let local_addr = outcome.outgoing.local_addr.clone();
         let msg = ctx.apply_forward_outcome(&outcome).await.unwrap();
         assert_eq!(msg, format!("forward established: {}", target));
 
@@ -1496,7 +1517,7 @@ mod tests {
             "the stale entry must be replaced, not duplicated"
         );
         assert_eq!(statuses[0].spec.direction, Direction::Connect);
-        assert_eq!(statuses[0].spec.addr, "127.0.0.1:8080");
+        assert_eq!(statuses[0].spec.addr, local_addr);
 
         let notices = ctx.notices.lock().await.clone();
         assert_eq!(notices.len(), 1);

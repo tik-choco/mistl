@@ -2,46 +2,83 @@
   'use strict';
   const words = {
     ja: {
-      title:'接続を組み立てる', help:'接続端子をドラッグ、または順にクリックしてノード同士を結びます。見出しをドラッグすると配置を変えられます。',
+      title:'接続を組み立てる', help:'端子どうしをドラッグ（または順にクリック）してノードを結びます。線をクリックすると詳細を表示します。',
       stopped:'Room ID で接続すると、ここにノードが表示されます。', self:'このノード', peer:'リモートノード', legacy:'グラフ未対応・状態待ち',
       broadcast:'Broadcast', broadcastHelp:'ON: ルーム全体から接続を受付。OFF: 線で結んだ相手だけ。各転送の承認は別途必要です。TCP のデータ複製ではありません。',
       lock:'編集ロック', lockHelp:'他ノードによる線・転送設定の変更を止めます。既存の通信は続きます。所有者は編集できます。',
-      add:'＋ ポート転送', empty:'ポート転送はまだありません', remove:'削除', permissions:'接続・編集権限', connect:'接続端子', choose:'接続先の端子を選択してください（Esc で取消）',
-      source:'サービス公開', listener:'ローカル受信 → 相手のサービス', direction:'転送の種類', proto:'プロトコル', addr:'アドレス', service:'接続先サービス',
-      select:'サービスを選択', save:'追加', cancel:'取消', direct:'直接接続', room:'ルーム公開', pending:'片側のみ設定済み', disconnect:'線を削除',
+      locked:'ロック中', settings:'ノードの設定',
+      add:'＋ ポート転送', addTitle:'ポート転送を追加', empty:'ポート転送はまだありません', remove:'削除', permissions:'接続・編集権限', connect:'接続端子', choose:'接続先の端子を選択してください（Esc で取消）',
+      save:'追加', direct:'直接接続', room:'ルーム公開', pending:'片側のみ設定済み', disconnect:'線を削除',
       permissionHelp:'このノードに対する操作を、相手ごとに許可します。通信自体には従来の転送承認も適用されます。',
       links:'このノードにつながる線を変更', addGrant:'ポート転送を追加（ローカルサービス公開を含む）', removeGrant:'ポート転送を削除',
       peerId:'相手の Node ID', grant:'権限を設定', close:'閉じる', reset:'配置を整える', owner:'所有者のみ変更できます',
       unavailable:'相手の状態を取得できていません。相手も対応版で接続してください。', denied:'編集権限がありません。相手側の「接続・編集権限」で許可してください。',
       applied:'設定を反映しました', failed:'変更できませんでした', partial:'片側の変更後に失敗しました。表示を確認して再試行してください。',
       broadcastDisconnect:'Broadcast が ON のノードがあります。線を削除してもルーム公開による通信は続きます。限定するには各ノードで Broadcast を OFF にしてください。',
-      legacyForward:'既存の転送（下の一覧で管理）', waiting:'相手の確認を待っています…', noService:'公開サービスがありません。先に接続先ノードでサービスを追加してください。',
-      forwardsHelp:'公開するサービス、または受信用ポートをノードに追加できます。受信用アドレスは 127.0.0.1:ポートです。',
-      selected:'選択中', offline:'未接続', edit:'設定', error:'エラー',
+      legacyForward:'旧形式の転送（このグラフからは削除できません）', waiting:'相手の確認を待っています…',
+      error:'エラー', conns:'接続', removeConfirm:'「{target}」への転送を削除しますか？',
+      back:'戻る', next:'次へ', step:'{n} / {total}',
+      askType:'何をしますか？',
+      typePropose:'相手側のポートを使う', typeProposeHelp:'相手側の 127.0.0.1:22 などを、このノードのポートとして使えるようにします。相手の承認が必要です。',
+      typeConnect:'相手が公開したサービスに接続', typeConnectHelp:'相手がすでに公開しているサービスを、このノードのポートで受けます。',
+      typeServe:'このノードのサービスを公開', typeServeHelp:'このノードで動いているサービスを、ルームの相手が使えるようにします。',
+      askPeer:'どのノードへ転送しますか？', noPeers:'ルームに相手のノードがいません。',
+      askRemote:'相手側のどのアドレスへ転送しますか？', remoteHint:'相手のノードから見たアドレスです（例: SSH なら 127.0.0.1:22）。',
+      askLocal:'このノードのどのアドレスで受けますか？', localHint:'ここに接続すると、通信が相手側へ転送されます。',
+      askService:'どのサービスに接続しますか？', noService:'公開されているサービスがありません。先に相手のノードでサービスを公開してください。',
+      askServe:'公開するサービスのアドレスは？', serveHint:'このノードで待ち受けているサービスです（例: Web サーバーなら 127.0.0.1:8080）。',
+      askConfirm:'この内容で追加しますか？', published:'ルームに公開', sendProposal:'提案を送る',
+      proposeNote:'相手が承認すると転送が始まります。', proposeSent:'相手に提案しました。相手が受け入れると転送が始まります。',
+      badAddr:'「ホスト:ポート」の形式で入力してください（例: 127.0.0.1:8080）。', proto:'プロトコル',
+      portBusy:'このアドレスは他のプログラムが使用中です。別のポートを指定してください。', portUnusable:'このアドレスでは待ち受けできません', useSuggestion:'{addr} を使う',
     },
     en: {
-      title:'Build your connections', help:'Drag between connection ports, or click two ports in sequence. Drag a node heading to rearrange it.',
-      stopped:'Connect with a Room ID to see your nodes here.', self:'This node', peer:'Remote node', legacy:'Waiting / graph unsupported',
+      title:'Build your connections', help:'Drag between ports (or click two ports in turn) to link nodes. Click a link for details.',
+      stopped:'Connect with a Room ID to show nodes here.', self:'This node', peer:'Remote node', legacy:'Graph unsupported or waiting for state',
       broadcast:'Broadcast', broadcastHelp:'ON accepts connections from the room. OFF limits traffic to linked peers. Forward approval still applies. TCP data is not duplicated.',
       lock:'Edit lock', lockHelp:'Stops remote changes to links and forwards. Existing traffic continues. The owner can still edit.',
-      add:'+ Port forward', empty:'No port forwards yet', remove:'Remove', permissions:'Connection permissions', connect:'Connection port', choose:'Choose the destination port (Esc to cancel)',
-      source:'Publish a service', listener:'Local listener → peer service', direction:'Forward type', proto:'Protocol', addr:'Address', service:'Destination service',
-      select:'Select a service', save:'Add', cancel:'Cancel', direct:'Direct link', room:'Room broadcast', pending:'One side configured', disconnect:'Remove link',
+      locked:'Locked', settings:'Node settings',
+      add:'+ Port forward', addTitle:'Add a port forward', empty:'No port forwards yet', remove:'Remove', permissions:'Connection permissions', connect:'Connection port', choose:'Choose the destination port (Esc to cancel)',
+      save:'Add', direct:'Direct link', room:'Room broadcast', pending:'One side configured', disconnect:'Remove link',
       permissionHelp:'Grant each peer permission to modify this node. Existing forward authorization still applies to traffic.',
       links:'Change links involving this node', addGrant:'Add forwards (including publishing local services)', removeGrant:'Remove forwards',
       peerId:'Peer Node ID', grant:'Set permissions', close:'Close', reset:'Arrange nodes', owner:'Only the owner can change this',
       unavailable:'Peer graph is unavailable. Connect the peer using a compatible version.', denied:'Permission required. Ask the peer owner to grant access in Connection permissions.',
       applied:'Changes applied', failed:'Could not apply change', partial:'One side changed before an error. Inspect the graph before retrying.',
       broadcastDisconnect:'Broadcast is enabled on a node. Removing the explicit link leaves room traffic enabled. Turn Broadcast OFF on each node to restrict it.',
-      legacyForward:'Existing forward (managed in the list below)', waiting:'Waiting for the peer to confirm…', noService:'No published services. Add a service on the destination node first.',
-      forwardsHelp:'Add published services or receiving ports to this node. Receiving addresses use 127.0.0.1:port.',
-      selected:'Selected', offline:'Offline', edit:'Settings', error:'Error',
+      legacyForward:'Legacy forward (cannot be removed from the graph)', waiting:'Waiting for the peer to confirm…',
+      error:'Error', conns:'conns', removeConfirm:'Remove the forward to "{target}"?',
+      back:'Back', next:'Next', step:'{n} / {total}',
+      askType:'What do you want to do?',
+      typePropose:'Use a port on a peer', typeProposeHelp:'Make an address on the peer, such as 127.0.0.1:22, reachable through a port on this node. The peer must accept.',
+      typeConnect:'Connect to a service a peer published', typeConnectHelp:'Receive a service the peer already published on a port of this node.',
+      typeServe:'Publish a service on this node', typeServeHelp:'Let peers in the room use a service running on this node.',
+      askPeer:'Which node should receive the traffic?', noPeers:'There are no other nodes in the room.',
+      askRemote:'Which address on the peer?', remoteHint:'As seen from the peer (for SSH, 127.0.0.1:22).',
+      askLocal:'Which address on this node should receive?', localHint:'Connections to this address are forwarded to the peer.',
+      askService:'Which service do you want to connect to?', noService:'No services are published. Publish a service on the peer first.',
+      askServe:'What is the address of the service?', serveHint:'A service listening on this node (for a web server, 127.0.0.1:8080).',
+      askConfirm:'Add this forward?', published:'Published to the room', sendProposal:'Send proposal',
+      proposeNote:'The forward starts once the peer accepts.', proposeSent:'Proposal sent. The forward starts once the peer accepts.',
+      badAddr:'Enter host:port (for example 127.0.0.1:8080).', proto:'Protocol',
+      portBusy:'Another program is using this address. Choose a different port.', portUnusable:'Cannot listen on this address', useSuggestion:'Use {addr}',
     }
   };
+  const ADDR = /^\S+:\d{1,5}$/;
+  let instances = 0;
 
   function create(options) {
     const doc = options.document, host = options.host;
     let snapshot = null, models = [], positions = {}, source = null, drag = null, busy = false, signature = '', room = '', language = '';
+    const statsEls = new Map();
+    function statKey(f) { return f.target || f.addr; }
+    function formatBytes(n) {
+      n = Number(n) || 0; const units = ['B','KB','MB','GB','TB']; let i = 0;
+      while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+      return (i === 0 ? String(n) : n.toFixed(1)) + ' ' + units[i];
+    }
+    function statsText(f) { return (f.state || '') + ' · ' + (f.active_conns || 0) + ' ' + t('conns') + ' · ↑' + formatBytes(f.bytes_out) + ' ↓' + formatBytes(f.bytes_in); }
+    function updateStats(forwards) { (forwards || []).forEach(f => { const e = statsEls.get(statKey(f)); if (e) e.textContent = statsText(f); }); }
     const t = key => (words[doc.documentElement.lang === 'ja' ? 'ja' : 'en'][key] || key);
     const el = (tag, cls, text) => { const e = doc.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
     const button = (text, cls, action) => { const e = el('button', cls, text); e.type = 'button'; e.addEventListener('click', action); return e; };
@@ -49,28 +86,59 @@
     const message = el('div', 'tg-message'); message.setAttribute('role', 'status'); message.setAttribute('aria-live', 'polite');
     const viewport = el('div', 'tg-viewport'), canvas = el('div', 'tg-canvas');
     const svg = doc.createElementNS('http://www.w3.org/2000/svg', 'svg'); svg.classList.add('tg-wires'); svg.setAttribute('aria-label', 'Connections');
-    const nodes = el('div', 'tg-nodes'), detail = el('div', 'tg-detail'); detail.hidden = true;
+    const nodes = el('div', 'tg-nodes');
     const arrange = button('', '', () => { positions = {}; savePositions(); drawNodes(); });
-    line.append(title, arrange); canvas.append(svg, nodes); viewport.append(canvas); host.append(line, hint, message, viewport, detail);
+    line.append(title, arrange); canvas.append(svg, nodes); viewport.append(canvas); host.append(line, hint, message, viewport);
+
+    // Every editor (forward wizard, node settings, link details) opens in one
+    // modal. It hangs off <body> so a transformed dashboard panel can never
+    // become the containing block of the fixed overlay.
+    const overlay = el('div', 'modal-overlay tg-modal'); overlay.hidden = true;
+    const dialog = el('div', 'modal-panel tg-dialog'); dialog.setAttribute('role', 'dialog'); dialog.setAttribute('aria-modal', 'true');
+    const dialogTitle = el('h3'); dialogTitle.id = 'tg-dialog-title-' + (++instances); dialog.setAttribute('aria-labelledby', dialogTitle.id);
+    const dialogHead = el('div', 'modal-header'), dialogClose = button('×', 'modal-close', () => closeModal());
+    const dialogBody = el('div', 'tg-dialog-body'), dialogStatus = el('p', 'tg-dialog-status'); dialogStatus.setAttribute('role', 'status');
+    dialogHead.append(dialogTitle, dialogClose); dialog.append(dialogHead, dialogBody, dialogStatus); overlay.append(dialog);
+    (doc.body || host).append(overlay);
+    let opener = null, wizard = null;
+    overlay.addEventListener('pointerdown', e => { if (e.target === overlay) closeModal(); });
+    overlay.addEventListener('keydown', e => {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeModal(); return; }
+      if (e.key !== 'Tab') return;
+      const items = focusables(); if (!items.length) return;
+      const first = items[0], last = items[items.length - 1];
+      if (e.shiftKey && doc.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && doc.activeElement === last) { e.preventDefault(); first.focus(); }
+    });
+    function focusables() { return [...dialog.querySelectorAll('button,input,select,[tabindex]')].filter(e => !e.disabled && !e.closest('[hidden]')); }
+    function modal(titleText) {
+      if (overlay.hidden) { opener = doc.activeElement; overlay.hidden = false; }
+      dialogTitle.textContent = titleText; dialogClose.setAttribute('aria-label', t('close')); dialogClose.title = t('close');
+      dialogBody.replaceChildren(); dialogStatus.textContent = ''; dialogStatus.classList.remove('tg-error');
+      return dialogBody;
+    }
+    function focusFirst(preferred) { (preferred || dialogBody.querySelector('input,.tg-chosen') || focusables().find(e => e !== dialogClose) || dialogClose).focus(); }
+    function closeModal() {
+      if (overlay.hidden) return;
+      overlay.hidden = true; wizard = null; dialogBody.replaceChildren();
+      if (opener && opener.isConnected && opener.focus) opener.focus({preventScroll:true});
+      opener = null;
+    }
 
     function savePositions() { try { root.localStorage.setItem('mistl-tunnel-layout:' + room, JSON.stringify(positions)); } catch (_) {} }
     function can(model, permission) { return model.self || !!(model.node && !model.node.locked && model.node.permissions[permission]); }
-    function notice(text, error) { message.textContent = text; message.classList.toggle('tg-error', !!error); }
+    function notice(text, error) {
+      message.textContent = text; message.classList.toggle('tg-error', !!error);
+      if (!overlay.hidden) { dialogStatus.textContent = text; dialogStatus.classList.toggle('tg-error', !!error); }
+    }
     async function perform(work) {
       if (busy) return;
-      busy = true; host.setAttribute('aria-busy', 'true'); notice(t('waiting'));
-      try { await work(); notice(t('applied')); }
+      busy = true; host.setAttribute('aria-busy', 'true'); overlay.setAttribute('aria-busy', 'true'); notice(t('waiting'));
+      try { const message = await work(); notice(message || t('applied')); }
       catch (error) { notice(t('failed') + ': ' + (error.message || error), true); }
-      finally { busy = false; host.setAttribute('aria-busy', 'false'); await options.refresh(); }
+      finally { busy = false; host.setAttribute('aria-busy', 'false'); overlay.setAttribute('aria-busy', 'false'); await options.refresh(); }
     }
     function command(model, action) { return options.api('tunnel.graph.command', {node_id:model.id, room:model.room, action}); }
-    function toggle(model, key, label, help) {
-      const wrap = el('label', 'tg-toggle'), input = el('input'); input.type = 'checkbox'; input.checked = !!model.node[key]; input.disabled = !model.self;
-      input.setAttribute('role', 'switch'); input.setAttribute('aria-label', label + ' — ' + model.id);
-      wrap.title = help + (!model.self ? ' ' + t('owner') : '');
-      input.addEventListener('change', () => { const value = input.checked; input.checked = !!model.node[key]; perform(() => command(model, key === 'broadcast' ? {type:'broadcast', enabled:value} : {type:'lock', locked:value})); });
-      wrap.append(input, el('span', '', label)); return wrap;
-    }
     function modelById(id) { return models.find(m => m.id === id); }
     async function link(a, b, connected) {
       if (!a || !b || a.id === b.id) return;
@@ -90,12 +158,12 @@
     }
     function position(model, index) {
       const saved = positions[model.id];
-      return saved && Number.isFinite(saved.x) && Number.isFinite(saved.y) ? saved : {x:30 + (index % 3)*324, y:40 + Math.floor(index/3)*520};
+      return saved && Number.isFinite(saved.x) && Number.isFinite(saved.y) ? saved : {x:30 + (index % 3)*324, y:40 + Math.floor(index/3)*360};
     }
     function drawNodes() {
       const focused=doc.activeElement, focusedCard=focused?.closest('.tg-node');
       const focusId=focusedCard?.dataset.nodeId, focusIndex=focusedCard?[...focusedCard.querySelectorAll('button,input,[tabindex]')].indexOf(focused):-1;
-      nodes.replaceChildren();
+      nodes.replaceChildren(); statsEls.clear();
       models.forEach((model,index) => {
         const card = el('article','tg-node' + (model.self ? ' tg-self' : '')); card.dataset.nodeId = model.id;
         const pos = position(model,index); card.style.left = Math.max(8,pos.x) + 'px'; card.style.top = Math.max(8,pos.y) + 'px';
@@ -103,7 +171,7 @@
         head.append(el('span','tg-node-dot'), el('strong','',model.self ? t('self') : t('peer')));
         const id = el('div','tg-node-id', model.id); id.title = model.id;
         function connector(side) {
-          const port = button('○', 'tg-port' + (side === 'left' ? ' tg-port-in' : ''), () => choose(model.id)); port.title = t('connect'); port.setAttribute('aria-label', t('connect') + ' — ' + model.id + ' (' + side + ')'); port.dataset.port = model.id;
+          const port = button('', 'tg-port' + (side === 'left' ? ' tg-port-in' : ''), () => choose(model.id)); port.title = t('connect'); port.setAttribute('aria-label', t('connect') + ' — ' + model.id + ' (' + side + ')'); port.dataset.port = model.id;
           port.addEventListener('pointerdown', e => { if (e.button !== 0) return; drag = {port:model.id,side,x:e.clientX,y:e.clientY,moved:false}; });
           return port;
         }
@@ -119,7 +187,13 @@
         });
         card.append(head,id,connector('right'),connector('left'));
         if (model.node) {
-          const switches = el('div','tg-switches'); switches.append(toggle(model,'broadcast',t('broadcast'),t('broadcastHelp')),toggle(model,'locked',t('lock'),t('lockHelp'))); card.append(switches);
+          if (model.self) {
+            const gear = button('⚙','tg-gear',()=>showSettings(model)); gear.title = t('settings'); gear.setAttribute('aria-label', t('settings')); card.append(gear);
+          }
+          const badges = el('div','tg-badges');
+          if (model.node.broadcast) badges.append(el('span','tg-badge',t('broadcast')));
+          if (model.node.locked) badges.append(el('span','tg-badge',t('locked')));
+          if (badges.childNodes.length) card.append(badges);
           const list = el('div','tg-forwards');
           if (!model.node.forwards.length) list.append(el('p','tg-empty',t('empty')));
           model.node.forwards.forEach(f => {
@@ -127,16 +201,25 @@
             text.append(el('span','tg-proto',String(f.proto || '').toUpperCase()),el('span','',f.direction === 'serve' ? ' ↑ ' : ' ↓ '),el('span','',f.addr));
             if (f.direction === 'connect') { const dest = el('small','',f.target); dest.title=f.target; text.append(dest); }
             if (f.state === 'error') text.append(el('small','tg-error', t('error') + ': ' + f.error));
+            if (model.self) { const stats = el('small','tg-stats'); stats.textContent = statsText(f); text.append(stats); statsEls.set(statKey(f), stats); }
             row.append(text);
-            if (f.graph_managed) {
-              const remove = button('×','tg-remove',()=>perform(()=>command(model,{type:'remove_forward',target:f.target})));
+            const doRemove = () => {
+              if (!(options.confirm || root.confirm)(t('removeConfirm').replace('{target}', () => f.target))) return;
+              if (f.graph_managed) perform(() => command(model,{type:'remove_forward',target:f.target}));
+              else perform(() => options.api('tunnel.forward.remove',{target:f.target}));
+            };
+            if (model.self) {
+              const remove = button('×','tg-remove',doRemove);
+              remove.title=t('remove'); remove.setAttribute('aria-label',t('remove')+' '+f.addr); row.append(remove);
+            } else if (f.graph_managed) {
+              const remove = button('×','tg-remove',doRemove);
               remove.title=t('remove'); remove.setAttribute('aria-label',t('remove')+' '+f.addr); remove.disabled=!can(model,'remove_forwards'); row.append(remove);
             } else row.title=t('legacyForward');
             list.append(row);
           });
           card.append(list);
-          const add = button(t('add'),'tg-add',()=>showForward(model)); add.disabled=!can(model,'add_forwards'); add.title=add.disabled?t('denied'):t('forwardsHelp'); card.append(add);
-          if (model.self) card.append(button(t('permissions'),'tg-permissions',()=>showPermissions(model)));
+          // Remote nodes only offer the button when their owner granted it.
+          if (can(model,'add_forwards')) card.append(button(t('add'),'tg-add',()=>showForward(model)));
         } else card.append(el('p','tg-empty',t('legacy')));
         nodes.append(card);
       });
@@ -147,7 +230,7 @@
       svg.replaceChildren();
       let width=660,height=380;
       const cards = new Map([...nodes.children].map(c=>[c.dataset.nodeId,c]));
-      cards.forEach(c=>{width=Math.max(width,parseFloat(c.style.left)+310);height=Math.max(height,parseFloat(c.style.top)+(c.offsetHeight||350)+40);c.classList.toggle('tg-connecting',c.dataset.nodeId===source);});
+      cards.forEach(c=>{width=Math.max(width,parseFloat(c.style.left)+310);height=Math.max(height,parseFloat(c.style.top)+(c.offsetHeight||250)+40);c.classList.toggle('tg-connecting',c.dataset.nodeId===source);});
       canvas.style.width=width+'px';canvas.style.height=height+'px'; svg.setAttribute('width',width);svg.setAttribute('height',height);
       models.forEach((a,i)=>models.slice(i+1).forEach(b=>{
         if (!a.node || !b.node) return;
@@ -168,42 +251,195 @@
         const open=()=>showEdge(a,b,explicit,allowed);path.addEventListener('click',open);path.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();open();}});svg.append(path);
       }));
     }
-    function openDetail(titleText) {
-      detail.replaceChildren();detail.hidden=false;
-      const header=el('div','tg-detail-head');header.append(el('h4','',titleText),button(t('close'),'',()=>{detail.hidden=true;}));detail.append(header);return detail;
-    }
     function showEdge(a,b,explicit,allowed) {
-      const pane=openDetail(t(explicit?(allowed?'direct':'pending'):'room'));
-      pane.append(el('p','tg-full-id',a.id+' ↔ '+b.id));
+      const pane=modal(t(explicit?(allowed?'direct':'pending'):'room'));
+      pane.append(flow([nodeLabel(a),''],[nodeLabel(b),''],'↔'));
       if (a.node.broadcast||b.node.broadcast) pane.append(el('p','tg-help',t('broadcastDisconnect')));
-      if (explicit) { const remove=button(t('disconnect'),'danger',()=>link(a,b,false));remove.disabled=![a,b].every(m=>can(m,'edit_links'));pane.append(remove); }
-      if (!allowed || !explicit) { const connect=button(t('direct'),'primary',()=>link(a,b,true));connect.disabled=![a,b].every(m=>can(m,'edit_links'));pane.append(connect); }
+      const foot=el('div','tg-dialog-foot');
+      // The editor closes first so the outcome lands in the panel status line.
+      if (explicit) { const remove=button(t('disconnect'),'danger',()=>{closeModal();link(a,b,false);});remove.disabled=![a,b].every(m=>can(m,'edit_links'));foot.append(remove); }
+      if (!allowed || !explicit) { const connect=button(t('direct'),'primary',()=>{closeModal();link(a,b,true);});connect.disabled=![a,b].every(m=>can(m,'edit_links'));foot.append(connect); }
+      pane.append(foot);focusFirst();
     }
-    function field(form,text,input) { const label=el('label','tg-field');label.append(el('span','',text),input);form.append(label);return input; }
-    function select(values) { const input=el('select');values.forEach(([value,text])=>{const opt=el('option','',text);opt.value=value;input.append(opt);});return input; }
+    function nodeLabel(model) { return model.self ? t('self') : model.id; }
+    // A two-box "from → to" picture used by the link editor and the wizard summary.
+    function flow(from,to,arrow) {
+      const wrap=el('div','tg-flow');
+      [from,to].forEach((side,i)=>{
+        if (i) wrap.append(el('span','tg-flow-arrow',arrow||'→'));
+        const box=el('div','tg-flow-box');box.append(el('span','tg-flow-label',side[0]));if (side[1]) box.append(el('span','tg-flow-value',side[1]));wrap.append(box);
+      });
+      return wrap;
+    }
+
+    // ---- port-forward wizard: one question per step ----
+    function wizardSteps(w) {
+      const steps=['type'];
+      if (w.type==='propose') { if (peersFor(w.model).length!==1) steps.push('peer'); steps.push('remote','local'); }
+      if (w.type==='connect') steps.push('service','local');
+      if (w.type==='serve') steps.push('serve');
+      if (w.type) steps.push('confirm');
+      return steps;
+    }
+    function peersFor(model) { return models.filter(m=>m.id!==model.id); }
+    function servicesFor(model) {
+      const out=[];
+      models.filter(m=>m.id!==model.id&&m.node).forEach(m=>m.node.forwards.filter(f=>f.direction==='serve').forEach(f=>{
+        out.push({node:m.id,proto:f.proto,addr:f.addr,target:f.target.includes('@')?f.target:f.target+'@'+m.id});
+      }));
+      return out;
+    }
     function showForward(model) {
-      const pane=openDetail(t('add')+' · '+model.id),form=el('form','tg-form');pane.append(el('p','tg-help',t('forwardsHelp')),form);
-      const direction=field(form,t('direction'),select([['serve',t('source')],['connect',t('listener')]]));
-      const proto=field(form,t('proto'),select([['tcp','TCP'],['udp','UDP']]));
-      const addr=field(form,t('addr'),el('input'));addr.value='127.0.0.1:8080';addr.required=true;
-      const service=field(form,t('service'),select([['',t('select')]]));
-      const update=()=>{
-        service.replaceChildren();const placeholder=el('option','',t('select'));placeholder.value='';service.append(placeholder);
-        models.filter(m=>m.id!==model.id&&m.node).forEach(m=>m.node.forwards.filter(f=>f.direction==='serve'&&f.proto===proto.value).forEach(f=>{
-          const opt=el('option','',m.id+' · '+f.addr);opt.value=f.target.includes('@')?f.target:f.target+'@'+m.id;service.append(opt);
-        }));
-        service.parentElement.hidden=direction.value!=='connect';service.required=direction.value==='connect';
-        service.title=service.options.length===1?t('noService'):'';
-      };direction.addEventListener('change',update);proto.addEventListener('change',update);update();
-      const save=el('button','primary',t('save'));save.type='submit';form.append(save);
-      form.addEventListener('submit',e=>{e.preventDefault();if(!form.reportValidity())return;perform(async()=>{await command(model,{type:'add_forward',direction:direction.value,proto:proto.value,addr:addr.value.trim(),target:direction.value==='connect'?service.value:''});detail.hidden=true;});});addr.focus();
+      wizard={model,type:'',peer:'',service:null,proto:'tcp',remote:'',local:'127.0.0.1:8080',addr:'127.0.0.1:8080',index:0};
+      renderStep();
+    }
+    function go(delta) { wizard.index=Math.max(0,wizard.index+delta); renderStep(); }
+    function choice(titleText,helpText,value,selected,action,mono) {
+      const b=button('','tg-choice'+(selected?' tg-chosen':''),action);b.dataset.value=value;b.setAttribute('aria-pressed',selected?'true':'false');
+      b.append(el('strong',mono?'tg-mono':'',titleText));if (helpText) b.append(el('small','',helpText));return b;
+    }
+    function addrInput(value,placeholder) {
+      const input=el('input');input.type='text';input.value=value;input.placeholder=placeholder;input.required=true;input.autocomplete='off';input.spellcheck=false;
+      return input;
+    }
+    function protoSwitch(w) {
+      const group=el('div','tg-seg');group.setAttribute('role','radiogroup');group.setAttribute('aria-label',t('proto'));
+      [['tcp','TCP'],['udp','UDP']].forEach(([value,text])=>{
+        const label=el('label'),input=el('input');input.type='radio';input.name='tg-proto-'+dialogTitle.id;input.value=value;input.checked=w.proto===value;
+        input.addEventListener('change',()=>{if(input.checked)w.proto=value;});label.append(input,el('span','',text));group.append(label);
+      });
+      return group;
+    }
+    function renderStep() {
+      const w=wizard,model=w.model,steps=wizardSteps(w),step=steps[w.index];
+      const pane=modal(t('addTitle'));pane.dataset.step=step;
+      if (!model.self) pane.append(el('p','tg-dialog-node',model.id));
+      if (w.type) pane.append(el('p','tg-step',t('step').replace('{n}',w.index+1).replace('{total}',steps.length)));
+      const form=el('form','tg-wizard');form.noValidate=true;pane.append(form);
+      const ask=key=>form.append(el('h4','tg-question',t(key)));
+      const foot=el('div','tg-dialog-foot');
+      let input=null,submitText=t('next'),onNext=null,nextButton=null;
+      if (step==='type') {
+        ask('askType');
+        const types=model.self?['propose','connect','serve']:['serve','connect'];
+        const keys={propose:'typePropose',connect:'typeConnect',serve:'typeServe'};
+        types.forEach(type=>form.append(choice(t(keys[type]),t(keys[type]+'Help'),type,w.type===type,()=>{
+          if (w.type!==type) Object.assign(w,{type,peer:'',service:null,proto:'tcp'});
+          go(1);
+        })));
+      } else if (step==='peer') {
+        ask('askPeer');
+        const peers=peersFor(model);
+        if (!peers.length) form.append(el('p','tg-empty',t('noPeers')));
+        peers.forEach(p=>form.append(choice(p.id,'',p.id,w.peer===p.id,()=>{w.peer=p.id;go(1);},true)));
+      } else if (step==='service') {
+        ask('askService');
+        const services=servicesFor(model);
+        if (!services.length) form.append(el('p','tg-empty',t('noService')));
+        services.forEach(s=>form.append(choice(String(s.proto||'').toUpperCase()+'  '+s.addr,s.node,s.target,w.service?.target===s.target,()=>{w.service=s;w.proto=s.proto;go(1);},true)));
+      } else if (step==='remote'||step==='local'||step==='serve') {
+        const key={remote:'remote',local:'local',serve:'addr'}[step];
+        ask({remote:'askRemote',local:'askLocal',serve:'askServe'}[step]);
+        input=addrInput(w[key],step==='remote'?'127.0.0.1:22':'127.0.0.1:8080');input.setAttribute('aria-label',t({remote:'askRemote',local:'askLocal',serve:'askServe'}[step]));
+        input.addEventListener('input',()=>{w[key]=input.value;});
+        form.append(input);
+        if (step!=='local') form.append(protoSwitch(w));
+        form.append(el('p','tg-help',t({remote:'remoteHint',local:'localHint',serve:'serveHint'}[step])));
+        // The local listener must be free on this machine: ask the daemon
+        // while typing and keep Next disabled for a busy address.
+        const portCheck=step==='local'?checkLocalPort(w,input,form,()=>nextButton):null;
+        onNext=async()=>{
+          const value=input.value.trim();
+          if (!ADDR.test(value)) { dialogStatus.textContent=t('badAddr');dialogStatus.classList.add('tg-error');input.setAttribute('aria-invalid','true');input.focus();return; }
+          if (portCheck&&!(await portCheck())) { input.focus();return; }
+          w[key]=value;go(1);
+        };
+      } else if (step==='confirm') {
+        ask('askConfirm');
+        const proto=String(w.proto).toUpperCase(),self=nodeLabel(model);
+        if (w.type==='propose') { const peer=w.peer||peersFor(model)[0]?.id||'';w.peer=peer;form.append(flow([self,w.local],[peer,w.remote])); }
+        else if (w.type==='connect') form.append(flow([self,w.local],[w.service.node,w.service.addr]));
+        else form.append(flow([self,w.addr],[t('published'),'']));
+        form.append(el('p','tg-summary-proto',t('proto')+': '+proto));
+        if (w.type==='propose') form.append(el('p','tg-help',t('proposeNote')));
+        submitText=t(w.type==='propose'?'sendProposal':'save');
+        onNext=()=>submitForward(w);
+      }
+      if (w.index>0) foot.append(button(t('back'),'tg-back',()=>go(-1)));
+      if (onNext) { nextButton=el('button','primary',submitText);nextButton.type='submit';foot.append(nextButton); }
+      form.append(foot);
+      form.addEventListener('submit',e=>{e.preventDefault();if(onNext&&!busy)onNext();});
+      focusFirst(input||(step==='confirm'?foot.querySelector('.primary'):null));
+    }
+    // Returns a re-check function resolving to false only when the daemon
+    // reports the address unusable; a failed check never blocks the wizard
+    // because the daemon refuses a busy port again on submit.
+    function checkLocalPort(w,input,form,getNext) {
+      const note=el('div','tg-port-note');note.setAttribute('role','status');form.append(note);
+      let seq=0,timer=null,lastOk=true;
+      const check=async()=>{
+        const value=input.value.trim(),mine=++seq;
+        if (!ADDR.test(value)) { note.replaceChildren();input.removeAttribute('aria-invalid');if(getNext())getNext().disabled=false;return true; }
+        let result;
+        try { result=await options.api('tunnel.port.check',{proto:w.proto,addr:value}); } catch (_) { return true; }
+        if (mine!==seq||wizard!==w) return lastOk;
+        lastOk=!(result&&result.available===false);
+        note.replaceChildren();input.toggleAttribute('aria-invalid',!lastOk);
+        if (getNext()) getNext().disabled=!lastOk;
+        if (!lastOk) {
+          const busy=String(result.error||'').includes('already in use');
+          note.append(el('p','tg-error',busy?t('portBusy'):t('portUnusable')+': '+(result.error||'')));
+          if (result.suggestion) note.append(button(t('useSuggestion').replace('{addr}',()=>result.suggestion),'tg-suggest',()=>{
+            input.value=result.suggestion;w.local=result.suggestion;check();input.focus();
+          }));
+        }
+        return lastOk;
+      };
+      input.addEventListener('input',()=>{clearTimeout(timer);timer=setTimeout(check,250);});
+      check();
+      return check;
+    }
+    function submitForward(w) {
+      if (w.type==='propose') {
+        perform(async()=>{
+          const result=await options.api('tunnel.forward.propose',{proto:w.proto,local:w.local,remote:w.remote,peer_id:w.peer});
+          closeModal();
+          return (result&&result.message)||t('proposeSent');
+        });
+        return;
+      }
+      const addr=w.type==='serve'?w.addr:w.local,target=w.type==='connect'?w.service.target:'';
+      perform(async()=>{await command(w.model,{type:'add_forward',direction:w.type,proto:w.proto,addr,target});closeModal();});
+    }
+
+    // ---- node settings: switches first, permissions one level deeper ----
+    function showSettings(model) {
+      const pane=modal(t('settings'));
+      pane.append(setting(model,'broadcast',t('broadcast'),t('broadcastHelp')),setting(model,'locked',t('lock'),t('lockHelp')));
+      pane.append(choice(t('permissions'),t('permissionHelp'),'permissions',false,()=>showPermissions(model)));
+      focusFirst(pane.querySelector('input'));
+    }
+    function setting(model,key,label,help) {
+      const wrap=el('label','tg-setting'),text=el('span','tg-setting-text'),input=el('input');
+      input.type='checkbox';input.checked=!!model.node[key];input.setAttribute('role','switch');
+      text.append(el('strong','',label),el('small','',help));wrap.append(text,input);
+      input.addEventListener('change',async()=>{
+        const value=input.checked;input.checked=!!model.node[key];
+        await perform(()=>command(model,key==='broadcast'?{type:'broadcast',enabled:value}:{type:'lock',locked:value}));
+        const now=modelById(model.id);if(now?.node){model=now;input.checked=!!now.node[key];}
+      });
+      return wrap;
     }
     function showPermissions(model) {
-      const pane=openDetail(t('permissions'));pane.append(el('p','tg-help',t('permissionHelp')));
+      const pane=modal(t('permissions'));pane.append(el('p','tg-help',t('permissionHelp')));
       const ids=[...new Set([...models.filter(m=>!m.self).map(m=>m.id),...Object.keys(snapshot.graph.policy.permissions)])];
-      ids.forEach(id=>permissionRow(pane,model,id));
-      const form=el('form','tg-form'),input=field(form,t('peerId'),el('input'));input.required=true;input.placeholder='Node ID';const add=el('button','',t('grant'));add.type='submit';form.append(add);pane.append(form);
-      form.addEventListener('submit',e=>{e.preventDefault();const id=input.value.trim();if(id&&id!==model.id&&!ids.includes(id)){ids.push(id);permissionRow(pane,model,id);input.value='';}});
+      const rows=el('div','tg-grant-list');pane.append(rows);
+      ids.forEach(id=>permissionRow(rows,model,id));
+      const form=el('form','tg-grant-add'),input=el('input');input.type='text';input.required=true;input.placeholder=t('peerId');input.setAttribute('aria-label',t('peerId'));
+      const add=el('button','',t('grant'));add.type='submit';form.append(input,add);pane.append(form);
+      form.addEventListener('submit',e=>{e.preventDefault();const id=input.value.trim();if(id&&id!==model.id&&!ids.includes(id)){ids.push(id);permissionRow(rows,model,id);input.value='';}});
+      const foot=el('div','tg-dialog-foot');foot.append(button(t('back'),'tg-back',()=>showSettings(modelById(model.id)||model)));pane.append(foot);
+      focusFirst(pane.querySelector('input'));
     }
     function permissionRow(pane,model,id) {
       const row=el('fieldset','tg-grants');row.append(el('legend','tg-full-id',id));
@@ -234,14 +470,15 @@
     function render(data) {
       snapshot=data;
       const nextRoom=data?.room||'';
-      if(room!==nextRoom){room=nextRoom;source=null;detail.hidden=true;positions={};try{positions=JSON.parse(root.localStorage.getItem('mistl-tunnel-layout:'+room)||'{}')||{};}catch(_){} signature='';}
+      if(room!==nextRoom){room=nextRoom;source=null;closeModal();positions={};try{positions=JSON.parse(root.localStorage.getItem('mistl-tunnel-layout:'+room)||'{}')||{};}catch(_){} signature='';}
       title.textContent=t('title');arrange.textContent=t('reset');hint.textContent=data?.running?t('help'):t('stopped');
       viewport.hidden=!data?.running;arrange.hidden=!data?.running;
-      if(!data?.running){models=[];signature='';source=null;detail.hidden=true;nodes.replaceChildren();svg.replaceChildren();return;}
-      if(!data.graph){hint.textContent=t('unavailable');models=[];signature='';detail.hidden=true;nodes.replaceChildren();svg.replaceChildren();return;}
+      if(!data?.running){models=[];signature='';source=null;closeModal();nodes.replaceChildren();svg.replaceChildren();statsEls.clear();return;}
+      if(!data.graph){hint.textContent=t('unavailable');models=[];signature='';closeModal();nodes.replaceChildren();svg.replaceChildren();statsEls.clear();return;}
       const policy=data.graph.policy;
       models=[{id:data.self_id,self:true,node:{...policy,forwards:data.forwards||[]}},...(data.graph.nodes||[]).map(m=>({...m,self:false}))].map(m=>({...m,room,node:m.node?{...m.node,forwards:(m.node.forwards||[]).filter(f=>f&&typeof f.addr==='string'&&typeof f.target==='string')}:null}));
       const next=JSON.stringify(models.map(m=>({...m,node:m.node?{...m.node,forwards:m.node.forwards.map(({active_conns,bytes_in,bytes_out,peers,...f})=>f)}:null}))),lang=doc.documentElement.lang;
+      updateStats(data.forwards);
       if(drag||(next===signature&&lang===language))return;
       signature=next;language=lang;drawNodes();
     }

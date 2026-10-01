@@ -111,3 +111,22 @@ fn proto_parses_known_names() {
     assert!(Proto::from_name("icmp").is_err());
     assert_eq!(Proto::Tcp.as_str(), "tcp");
 }
+
+#[test]
+fn listen_probe_refuses_a_port_held_by_another_socket() {
+    let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = i32::from(held.local_addr().unwrap().port());
+    let addr = format!("127.0.0.1:{port}");
+    let error = check_listen_port(Proto::Tcp, &addr, port).unwrap_err();
+    assert!(error.to_string().contains("already in use"), "{error}");
+    let free = suggest_listen_port(Proto::Tcp, &addr, port).unwrap();
+    assert!(free > port);
+    drop(held);
+    check_listen_port(Proto::Tcp, &addr, port).unwrap();
+}
+
+#[test]
+fn listen_probe_skips_serve_forwards() {
+    // Serve forwards dial their address; they never open a local listener.
+    check_listen_available(&serve_spec("tcp:80")).unwrap();
+}
