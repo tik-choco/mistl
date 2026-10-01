@@ -19,6 +19,7 @@
 //! itself has no concept of "room" (mistlib's original single-room raw
 //! handler didn't either), so it is ported unchanged below.
 
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 
 use tokio::sync::RwLock;
@@ -37,8 +38,105 @@ pub(super) enum RawEvent {
     Payload { from: String, data: Vec<u8> },
 }
 
-pub(super) type RawEventSender = UnboundedSender<RawEvent>;
-pub(super) type RawEventReceiver = UnboundedReceiver<RawEvent>;
+/// Payload backlog caps. Payload events are the only peer-controlled
+/// volume on this queue; Join/Leave are never counted or dropped (their rate
+/// is bounded by room membership and losing one would desync peer state).
+const MAX_PENDING_PAYLOADS: usize = 4096;
+const MAX_PENDING_PAYLOAD_BYTES: usize = 32 * 1024 * 1024;
+
+/// Backlog accounting shared by both ends of the queue.
+#[derive(Default)]
+struct Backlog {
+    payloads: AtomicUsize,
+    bytes: AtomicUsize,
+    dropped: AtomicU64,
+}
+
+/// Producer half. Still a single FIFO channel so Join/Leave/Payload keep
+/// mistlib's delivery order end to end, but payloads are admitted only while
+/// the not-yet-processed backlog is under [`MAX_PENDING_PAYLOADS`] /
+/// [`MAX_PENDING_PAYLOAD_BYTES`]; beyond that they are dropped (and counted)
+/// so this never blocks mistlib's dispatch thread nor grows without bound.
+#[derive(Clone)]
+pub(super) struct RawEventSender {
+    tx: UnboundedSender<RawEvent>,
+    backlog: Arc<Backlog>,
+}
+
+pub(super) struct RawEventReceiver {
+    rx: UnboundedReceiver<RawEvent>,
+    backlog: Arc<Backlog>,
+}
+
+pub(super) fn raw_event_channel() -> (RawEventSender, RawEventReceiver) {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let backlog = Arc::new(Backlog::default());
+    (
+        RawEventSender {
+            tx,
+            backlog: backlog.clone(),
+        },
+        RawEventReceiver { rx, backlog },
+    )
+}
+
+impl RawEventSender {
+    /// Never blocks. Join/Leave always enqueue; a payload is dropped when the
+    /// backlog is full. Returns whether the event was queued.
+    fn send(&self, event: RawEvent) -> bool {
+        self.send_bounded(event, MAX_PENDING_PAYLOADS, MAX_PENDING_PAYLOAD_BYTES)
+    }
+
+    fn send_bounded(&self, event: RawEvent, max_payloads: usize, max_bytes: usize) -> bool {
+        let len = match &event {
+            RawEvent::Payload { data, .. } => {
+                let len = data.len();
+                let payloads = self.backlog.payloads.load(Ordering::Acquire);
+                let bytes = self.backlog.bytes.load(Ordering::Acquire);
+                if payloads >= max_payloads || bytes.saturating_add(len) > max_bytes {
+                    let dropped = self.backlog.dropped.fetch_add(1, Ordering::Relaxed) + 1;
+                    if dropped == 1 || dropped.is_multiple_of(1000) {
+                        tracing::warn!(
+                            dropped,
+                            payloads,
+                            bytes,
+                            "tunnel event backlog full; dropping payload"
+                        );
+                    }
+                    return false;
+                }
+                self.backlog.payloads.fetch_add(1, Ordering::AcqRel);
+                self.backlog.bytes.fetch_add(len, Ordering::AcqRel);
+                Some(len)
+            }
+            _ => None,
+        };
+        if self.tx.send(event).is_err() {
+            if let Some(len) = len {
+                self.backlog.payloads.fetch_sub(1, Ordering::AcqRel);
+                self.backlog.bytes.fetch_sub(len, Ordering::AcqRel);
+            }
+            return false;
+        }
+        true
+    }
+
+    #[cfg(test)]
+    pub(super) fn dropped(&self) -> u64 {
+        self.backlog.dropped.load(Ordering::Relaxed)
+    }
+}
+
+impl RawEventReceiver {
+    pub(super) async fn recv(&mut self) -> Option<RawEvent> {
+        let event = self.rx.recv().await?;
+        if let RawEvent::Payload { data, .. } = &event {
+            self.backlog.payloads.fetch_sub(1, Ordering::AcqRel);
+            self.backlog.bytes.fetch_sub(data.len(), Ordering::AcqRel);
+        }
+        Some(event)
+    }
+}
 
 /// The event-ingestion entry point: invoked synchronously, in strict FIFO
 /// order, from mistlib's single dispatch thread, via the room-filtering
@@ -46,7 +144,8 @@ pub(super) type RawEventReceiver = UnboundedReceiver<RawEvent>;
 /// `crate::net::register_room_handler`.
 ///
 /// `EVENT_JOIN`, `EVENT_LEAVE`, and `EVENT_RAW`/`EVENT_OVERLAY` (tunnel/stdio
-/// payloads) all go through `tx`, an unbounded channel drained by a single
+/// payloads) all go through `tx`, a FIFO channel (payloads bounded, see
+/// [`RawEventSender`]; Join/Leave never dropped) drained by a single
 /// FIFO worker (`run_payload_worker`) that awaits each event to completion
 /// before starting the next. `UnboundedSender::send` is synchronous and
 /// order-preserving, so the enqueue order here matches mistlib's delivery
@@ -81,7 +180,7 @@ pub(super) fn dispatch_event(
         mistlib::EVENT_RAW | mistlib::EVENT_OVERLAY => RawEvent::Payload { from, data },
         _ => return,
     };
-    let _ = tx.send(event);
+    tx.send(event);
 }
 
 /// Drains `rx` and processes one event to completion (`.await`) before
@@ -357,5 +456,57 @@ async fn notify_epoch(
     let handlers = handlers.read().await;
     for h in handlers.iter() {
         h(peer_id.clone(), epoch);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn payload(len: usize) -> RawEvent {
+        RawEvent::Payload {
+            from: "p".into(),
+            data: vec![0; len],
+        }
+    }
+
+    #[tokio::test]
+    async fn payloads_are_dropped_past_the_cap_but_join_leave_never_are() {
+        let (tx, mut rx) = raw_event_channel();
+        assert!(tx.send_bounded(payload(1), 2, 1024));
+        assert!(tx.send_bounded(payload(1), 2, 1024));
+        assert!(!tx.send_bounded(payload(1), 2, 1024));
+        assert_eq!(tx.dropped(), 1);
+        // Control events pass even while the payload backlog is full.
+        assert!(tx.send_bounded(
+            RawEvent::Join {
+                peer_id: "a".into()
+            },
+            2,
+            1024
+        ));
+        assert!(tx.send_bounded(
+            RawEvent::Leave {
+                peer_id: "a".into()
+            },
+            2,
+            1024
+        ));
+        // FIFO order is preserved across kinds.
+        assert!(matches!(rx.recv().await, Some(RawEvent::Payload { .. })));
+        assert!(matches!(rx.recv().await, Some(RawEvent::Payload { .. })));
+        assert!(matches!(rx.recv().await, Some(RawEvent::Join { .. })));
+        assert!(matches!(rx.recv().await, Some(RawEvent::Leave { .. })));
+        // Draining frees the budget again.
+        assert!(tx.send_bounded(payload(1), 2, 1024));
+    }
+
+    #[tokio::test]
+    async fn payload_bytes_are_capped() {
+        let (tx, mut rx) = raw_event_channel();
+        assert!(tx.send_bounded(payload(600), 100, 1000));
+        assert!(!tx.send_bounded(payload(600), 100, 1000));
+        assert!(rx.recv().await.is_some());
+        assert!(tx.send_bounded(payload(600), 100, 1000));
     }
 }

@@ -137,14 +137,61 @@ pub fn is_link_local_host(addr: &str) -> bool {
     let parsed = host
         .parse::<std::net::IpAddr>()
         .or_else(|_| addr.trim().parse::<std::net::IpAddr>());
-    match parsed {
-        Ok(std::net::IpAddr::V4(ip)) => ip.is_link_local(),
-        Ok(std::net::IpAddr::V6(ip)) => {
+    parsed.is_ok_and(is_link_local_ip)
+}
+
+/// [`is_link_local_host`] for an already-parsed address.
+pub fn is_link_local_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(ip) => ip.is_link_local(),
+        std::net::IpAddr::V6(ip) => {
             ip.to_ipv4_mapped().is_some_and(|v4| v4.is_link_local())
                 || (ip.segments()[0] & 0xffc0) == 0xfe80
         }
-        Err(_) => false,
     }
+}
+
+/// Resolves `addr` (`host:port`) and returns the first socket address,
+/// failing if *any* resolved address is link-local. The string check in
+/// [`is_link_local_host`] cannot see non-canonical literals (`2852039166`,
+/// `169.254.43518`) or DNS names that resolve to `169.254.169.254`, so the
+/// serve side runs this immediately before connecting and then connects to the
+/// returned (vetted) address rather than re-resolving.
+pub async fn resolve_non_link_local(addr: &str) -> std::io::Result<std::net::SocketAddr> {
+    let resolved: Vec<std::net::SocketAddr> = tokio::net::lookup_host(addr).await?.collect();
+    if resolved.iter().any(|sa| is_link_local_ip(sa.ip())) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "target resolves to a link-local address",
+        ));
+    }
+    resolved
+        .into_iter()
+        .next()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "target did not resolve"))
+}
+
+/// Whether `target` is an acceptable forward key for a *remote-proposed*
+/// forward: `tcp:<port>` or `udp:<port>` (1-65535), optionally scoped
+/// `@node` (see [`split_node_scope`]). Anything else -- notably reserved
+/// keys such as the stdio trust key -- is refused, so a remote peer cannot
+/// choose a trust-store key that collides with a different feature.
+pub fn is_valid_remote_target(target: &str) -> bool {
+    if target.len() > 300 {
+        return false;
+    }
+    let (base, scope) = split_node_scope(target);
+    if scope.is_some_and(|s| s.len() > 256 || s.chars().any(char::is_whitespace)) {
+        return false;
+    }
+    let Some((proto, port)) = base.split_once(':') else {
+        return false;
+    };
+    matches!(proto, "tcp" | "udp")
+        && !port.is_empty()
+        && port.len() <= 5
+        && port.bytes().all(|b| b.is_ascii_digit())
+        && port.parse::<u32>().is_ok_and(|p| (1..=65535).contains(&p))
 }
 
 #[cfg(test)]

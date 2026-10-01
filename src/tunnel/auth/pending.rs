@@ -19,7 +19,7 @@ use tokio::sync::{Mutex, oneshot};
 
 use crate::tunnel::auth::{
     AuthAuditLog, AuthDecision, AuthEventSource, AuthFuture, AuthRequest, ConnectionAuthorizer,
-    SharedAuthorizer, TrustDecision, TrustKey, TrustStore,
+    SharedAuthorizer, TrustDecision, TrustStore, downgrade_unremembered,
 };
 
 /// Caps on parked approval rows: per peer and in total. Beyond them a request
@@ -211,11 +211,8 @@ impl PendingAuthorizer {
     }
 
     async fn decide(&self, req: &AuthRequest) -> AuthDecision {
-        let key = TrustKey {
-            peer_id: req.peer_id.clone(),
-            forward_key: req.forward_key.clone(),
-        };
-        if let Some(decision) = self.store.get(&key).await {
+        let did = req.verified_did();
+        if let Some(decision) = self.store.lookup(&req.peer_id, did, &req.forward_key).await {
             let decision = match decision {
                 TrustDecision::Allow => AuthDecision::Allow,
                 TrustDecision::Deny => AuthDecision::Deny,
@@ -241,8 +238,18 @@ impl PendingAuthorizer {
                 AuthDecision::Deny
             }
         };
+        // "Always" is only honored for a DID-verified peer; an unverified
+        // peer gets a one-off decision and nothing is stored.
+        let mut decision = decision;
         if let Some(trust) = trust_decision(decision) {
-            let _ = self.store.remember(key, trust).await;
+            let remembered = self
+                .store
+                .remember_for(&req.peer_id, did, &req.forward_key, trust)
+                .await
+                .unwrap_or(false);
+            if !remembered {
+                decision = downgrade_unremembered(decision);
+            }
         }
         self.record(req, decision, AuthEventSource::Pending).await;
         decision

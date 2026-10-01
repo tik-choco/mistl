@@ -52,6 +52,7 @@ async fn connect_side_with_session(
             peer_id: owner.to_string(),
             metrics: mgr.runtime.peer(owner),
             client_addr: Some(client),
+            did: None,
         },
     );
     mgr
@@ -112,6 +113,7 @@ async fn serve_side_sessions_are_capped_per_peer() {
                 peer_id: "peer-a".to_string(),
                 metrics: mgr.runtime.peer("peer-a"),
                 client_addr: None,
+                did: None,
             },
         );
     }

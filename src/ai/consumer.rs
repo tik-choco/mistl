@@ -58,7 +58,7 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{mpsc, watch};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use super::SendFn;
 use super::protocol::{self, ChatMessage, ProtocolMessage};
@@ -84,6 +84,24 @@ pub struct ProviderInfo {
     /// callers inspecting `ProviderInfo` (e.g. a status/dashboard surface)
     /// can see what the locked-in provider advertises, same as `services`.
     pub voices: Option<Vec<String>>,
+    /// DID verified for this provider's node (peer-auth hello), if any.
+    pub did: Option<String>,
+    /// Whether the provider matched `ai.trusted_providers`. `false` when the
+    /// allowlist is empty (legacy first-provider-wins pinning).
+    pub trusted: bool,
+}
+
+/// DID lookup for a transport sender (`net::peer_auth` registry by default).
+type DidLookup = fn(&str) -> Option<String>;
+
+/// Whether the verified `did` matches one `trusted` entry: a full did:key, or
+/// a 16-hex node id that the verified DID hashes to. An unverified peer
+/// (`did == None`) never matches.
+fn provider_matches(trusted: &[String], did: Option<&str>) -> bool {
+    let Some(did) = did else { return false };
+    trusted
+        .iter()
+        .any(|t| t == did || t.eq_ignore_ascii_case(&crate::identity::node_id_for_did(did)))
 }
 
 /// Internal events routed to an in-flight [`Consumer::request`] call.
@@ -127,6 +145,9 @@ pub struct Consumer {
     /// A `watch` channel lets `wait_for_provider` await lock-in without
     /// polling.
     provider: watch::Sender<Option<ProviderInfo>>,
+    /// `ai.trusted_providers`; empty = legacy first-wins (with a warning).
+    trusted: Mutex<Vec<String>>,
+    did_lookup: Mutex<DidLookup>,
 }
 
 impl Consumer {
@@ -136,7 +157,33 @@ impl Consumer {
             send,
             pending: Mutex::new(HashMap::new()),
             provider,
+            trusted: Mutex::new(Vec::new()),
+            did_lookup: Mutex::new(crate::net::peer_auth::verified_did_any_room),
         })
+    }
+
+    pub fn trusted_providers(&self) -> Vec<String> {
+        self.trusted.lock().expect("trusted lock").clone()
+    }
+
+    /// Installs `ai.trusted_providers`. A currently pinned provider that no
+    /// longer qualifies is dropped so a trusted one can take over.
+    pub fn set_trusted_providers(&self, list: Vec<String>) {
+        *self.trusted.lock().expect("trusted lock") = list.clone();
+        if list.is_empty() {
+            return;
+        }
+        self.provider.send_if_modified(|current| {
+            if current
+                .as_ref()
+                .is_some_and(|p| !provider_matches(&list, p.did.as_deref()))
+            {
+                *current = None;
+                true
+            } else {
+                false
+            }
+        });
     }
 
     /// Feed one decoded inbound message. Only `provider_hello`,
@@ -162,10 +209,22 @@ impl Consumer {
                     );
                     return;
                 }
+                let trusted_list = self.trusted.lock().expect("trusted lock").clone();
+                let did = (*self.did_lookup.lock().expect("did lookup lock"))(from);
+                let trusted = provider_matches(&trusted_list, did.as_deref());
+                if !trusted_list.is_empty() && !trusted {
+                    debug!(
+                        %from,
+                        "ai: ignoring provider_hello from a peer not in ai.trusted_providers"
+                    );
+                    return;
+                }
                 let mut locked_in = false;
                 self.provider.send_if_modified(|current| match current {
                     None => {
                         *current = Some(ProviderInfo {
+                            did: did.clone(),
+                            trusted,
                             node_id: from.to_string(),
                             models: models.clone().unwrap_or_default(),
                             services: services.clone(),
@@ -178,11 +237,20 @@ impl Consumer {
                         info.models = models.clone().unwrap_or_default();
                         info.services = services.clone();
                         info.voices = voices.clone();
+                        info.did = did.clone();
+                        info.trusted = trusted;
                         true
                     }
                     Some(_) => false,
                 });
                 if locked_in {
+                    if !trusted {
+                        warn!(
+                            %from,
+                            did = ?did,
+                            "ai: pinned an UNVERIFIED remote provider (first provider_hello wins); set ai.trusted_providers so strangers in the room cannot read prompts"
+                        );
+                    }
                     (self.send)(from, ProtocolMessage::ConsumerHello);
                 }
             }
@@ -387,7 +455,13 @@ impl Consumer {
                 Event::Done {
                     content: final_content,
                 } => {
-                    return Ok(final_content.unwrap_or(content));
+                    if let Some(final_content) = final_content {
+                        if final_content.len() > MAX_RESPONSE_BYTES {
+                            bail!("provider response exceeded the maximum size");
+                        }
+                        return Ok(final_content);
+                    }
+                    return Ok(content);
                 }
                 Event::Error { message, code } => {
                     // `code` (e.g. "unsupported_service") is appended for
@@ -1220,5 +1294,105 @@ mod tests {
             },
         );
         assert_eq!(handle.await.unwrap().unwrap(), "real");
+    }
+
+    fn hello() -> ProtocolMessage {
+        ProtocolMessage::ProviderHello {
+            models: None,
+            services: Some(vec!["chat".into()]),
+            voices: None,
+        }
+    }
+
+    fn did_a() -> String {
+        crate::identity::did_for_seed(1)
+    }
+
+    fn lookup(from: &str) -> Option<String> {
+        (from == crate::identity::node_id_for_did(&did_a())).then(did_a)
+    }
+
+    #[test]
+    fn empty_allowlist_pins_first_provider_but_flags_untrusted() {
+        let (send, _sent) = fake_send();
+        let consumer = Consumer::new(send);
+        consumer.handle_message("stranger", &hello());
+        let info = consumer.provider().unwrap();
+        assert_eq!(info.node_id, "stranger");
+        assert!(!info.trusted);
+        assert!(info.did.is_none());
+    }
+
+    #[test]
+    fn allowlist_ignores_unverified_provider() {
+        let (send, sent) = fake_send();
+        let consumer = Consumer::new(send);
+        *consumer.did_lookup.lock().unwrap() = lookup;
+        consumer.set_trusted_providers(vec![did_a()]);
+        consumer.handle_message("stranger", &hello());
+        assert!(consumer.provider().is_none());
+        assert!(sent.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn allowlist_accepts_verified_did_and_node_id_entries() {
+        for entry in [did_a(), crate::identity::node_id_for_did(&did_a())] {
+            let (send, _sent) = fake_send();
+            let consumer = Consumer::new(send);
+            *consumer.did_lookup.lock().unwrap() = lookup;
+            consumer.set_trusted_providers(vec![entry]);
+            let node = crate::identity::node_id_for_did(&did_a());
+            // A stranger first must not take the slot.
+            consumer.handle_message("stranger", &hello());
+            consumer.handle_message(&node, &hello());
+            let info = consumer.provider().unwrap();
+            assert_eq!(info.node_id, node);
+            assert!(info.trusted);
+            assert_eq!(info.did.as_deref(), Some(did_a().as_str()));
+        }
+    }
+
+    #[test]
+    fn node_id_entry_does_not_match_unverified_claim() {
+        // A node id entry matches only through a verified DID.
+        assert!(!provider_matches(&["d1a9220e96a8afd0".into()], None));
+    }
+
+    #[test]
+    fn tightening_allowlist_drops_untrusted_pinned_provider() {
+        let (send, _sent) = fake_send();
+        let consumer = Consumer::new(send);
+        consumer.handle_message("stranger", &hello());
+        assert!(consumer.provider().is_some());
+        consumer.set_trusted_providers(vec![did_a()]);
+        assert!(consumer.provider().is_none());
+    }
+
+    #[tokio::test]
+    async fn oversized_done_content_is_rejected() {
+        let (send, sent) = fake_send();
+        let consumer = Consumer::new(send);
+        let c2 = consumer.clone();
+        let handle = tokio::spawn(async move {
+            c2.request(
+                "provider1",
+                vec![chat("hi")],
+                None,
+                Duration::from_secs(5),
+                None,
+            )
+            .await
+        });
+        sleep(Duration::from_millis(20)).await;
+        let id = last_request_id(&sent);
+        consumer.handle_message(
+            "provider1",
+            &ProtocolMessage::LlmResponseDone {
+                id,
+                content: Some("x".repeat(MAX_RESPONSE_BYTES + 1)),
+            },
+        );
+        let err = handle.await.unwrap().unwrap_err();
+        assert!(err.to_string().contains("maximum size"), "{err}");
     }
 }

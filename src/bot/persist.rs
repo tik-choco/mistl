@@ -1,7 +1,7 @@
 //! On-disk persistence for the bot pipeline engine: capped run/item logs and
 //! per-pipeline idempotent "already handled" state. Mirrors
 //! `crate::scheduler`'s persistence idioms closely (see its module doc) --
-//! capped JSONL append-logs written via temp-file-then-rename, and a
+//! capped JSONL append-logs written atomically via `statefile::write_private`, and a
 //! `tokio::sync::Mutex` guarding each on-disk resource so concurrent tick
 //! iterations (and the manual `bot.run`/`bot.logs`/`bot.items` IPC paths)
 //! never race on the same file.
@@ -105,22 +105,16 @@ fn read_lines(path: &Path) -> Result<Vec<String>> {
         .collect())
 }
 
-/// Overwrites `path` with `lines`, one per line: temp file in the same
-/// directory then rename over the target, mirroring
-/// `scheduler`/`chat_relay`'s capped-log write idiom.
+/// Overwrites `path` with `lines`, one per line, atomically (temp file +
+/// replace; 0600 on Unix) via `statefile::write_private`.
 fn write_lines(path: &Path, lines: &[String]) -> Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    }
     let mut body = String::new();
     for line in lines {
         body.push_str(line);
         body.push('\n');
     }
-    let tmp = path.with_extension("jsonl.tmp");
-    std::fs::write(&tmp, &body).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("renaming {} into {}", tmp.display(), path.display()))
+    crate::statefile::write_private(path, body.as_bytes())
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 /// Appends `record`, keeping only the [`RUN_LOG_CAP`] most-recent entries.
@@ -214,14 +208,8 @@ pub async fn mark_processed(data_dir: &Path, pipeline_id: &str, new_ids: &[Strin
         let excess = ids.len() - PROCESSED_IDS_CAP;
         ids.drain(0..excess);
     }
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    }
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_string(&ids)?)
-        .with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, &path)
-        .with_context(|| format!("renaming {} into {}", tmp.display(), path.display()))
+    crate::statefile::write_private(&path, serde_json::to_string(&ids)?.as_bytes())
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 #[cfg(test)]

@@ -36,6 +36,8 @@ use tracing::warn;
 
 use crate::daemon::AppState;
 
+pub mod peer_auth;
+
 /// Default rendezvous room used when `[ai] room_id` is unset. Kept at its
 /// historical value for wire compatibility with existing deployments.
 pub const DEFAULT_ROOM: &str = "mistl-mailbox-v1";
@@ -175,6 +177,9 @@ pub async fn leave_room(room: &str) -> Result<()> {
         .await
         .context("net: leaving room")?;
     rooms.remove(room);
+    // Verifications and activity are per room; drop both once we've left.
+    peer_auth::forget_room(room);
+    forget_room_activity(room);
     Ok(())
 }
 
@@ -215,22 +220,65 @@ struct ActivityRecord {
 }
 
 /// Process-wide send/receive activity, keyed by `(room, peer)` with an empty
-/// peer id meaning a room-wide broadcast (see [`send_broadcast`]). Entries
-/// are only ever added, never evicted -- but the key space is naturally
-/// small (one entry per peer actually seen in a room this process has
-/// joined, plus one broadcast entry per room actually broadcast to), so
-/// unbounded growth isn't a practical concern the way it would be for e.g. a
-/// per-message log.
+/// peer id meaning a room-wide broadcast (see [`send_broadcast`]). Peer ids
+/// come from remote peers, so the table is bounded: entries are dropped when the peer leaves
+/// (`EVENT_LEAVE`) or we leave the room, and the table is capped at
+/// [`MAX_ACTIVITY_ENTRIES`], evicting the least recently active entry.
 static ACTIVITY: LazyLock<RwLock<HashMap<(String, String), ActivityRecord>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// Cap on [`ACTIVITY`] entries (see its doc comment).
+const MAX_ACTIVITY_ENTRIES: usize = 4096;
+
+impl ActivityRecord {
+    fn last_active(&self) -> Option<Instant> {
+        self.tx.last.max(self.rx.last)
+    }
+}
+
+/// The activity entry for `(room, peer)`, created on first use. Inserting a
+/// new key into a full table first evicts the least recently active entry,
+/// so a flood of forged sender ids can't grow the table without bound.
+/// O(n) only on that eviction path.
+fn activity_entry<'a>(
+    activity: &'a mut HashMap<(String, String), ActivityRecord>,
+    room: &str,
+    peer: &str,
+) -> &'a mut ActivityRecord {
+    let key = (room.to_string(), peer.to_string());
+    if !activity.contains_key(&key)
+        && activity.len() >= MAX_ACTIVITY_ENTRIES
+        && let Some(oldest) = activity
+            .iter()
+            .min_by_key(|(_, record)| record.last_active())
+            .map(|(key, _)| key.clone())
+    {
+        activity.remove(&oldest);
+    }
+    activity.entry(key).or_default()
+}
+
+/// Drop `peer`'s activity entry in `room` (it left).
+fn forget_peer_activity(room: &str, peer: &str) {
+    ACTIVITY
+        .write()
+        .expect("net activity lock poisoned")
+        .remove(&(room.to_string(), peer.to_string()));
+}
+
+/// Drop every activity entry for `room` (we left it).
+fn forget_room_activity(room: &str) {
+    ACTIVITY
+        .write()
+        .expect("net activity lock poisoned")
+        .retain(|(r, _), _| r != room);
+}
 
 /// Record a successful send. Called from [`send_direct`] (peer = the target
 /// node) and [`send_broadcast`] (peer = `""`).
 fn record_tx(room: &str, peer: &str, bytes: usize) {
     let mut activity = ACTIVITY.write().expect("net activity lock poisoned");
-    let entry = activity
-        .entry((room.to_string(), peer.to_string()))
-        .or_default();
+    let entry = activity_entry(&mut activity, room, peer);
     entry.tx.count += 1;
     entry.tx.bytes += bytes as u64;
     entry.tx.last = Some(Instant::now());
@@ -242,9 +290,7 @@ fn record_tx(room: &str, peer: &str, bytes: usize) {
 /// acquisition and one hash map entry lookup/insert, no other allocation.
 fn record_rx(room: &str, peer: &str, bytes: usize) {
     let mut activity = ACTIVITY.write().expect("net activity lock poisoned");
-    let entry = activity
-        .entry((room.to_string(), peer.to_string()))
-        .or_default();
+    let entry = activity_entry(&mut activity, room, peer);
     entry.rx.count += 1;
     entry.rx.bytes += bytes as u64;
     entry.rx.last = Some(Instant::now());
@@ -338,6 +384,8 @@ unsafe extern "C" fn dispatch_room_event(
     let data = unsafe { std::slice::from_raw_parts(data_ptr, data_len) };
     if event_type == EVENT_RAW {
         record_rx(&room, &from, data.len());
+    } else if event_type == EVENT_LEAVE {
+        forget_peer_activity(&room, &from);
     }
     let handlers = ROOM_HANDLERS
         .read()
@@ -426,6 +474,11 @@ async fn start_engine(state: &Arc<AppState>) -> Result<Arc<Engine>> {
     // handler fire for every event; registering this one doesn't change the
     // other's behavior.
     mistlib::app::register_event_callback_v2(dispatch_room_event);
+
+    // DID hello: prove our node id belongs to our DID, and verify peers'
+    // (see `peer_auth`'s module doc for why the transport `from` can't be
+    // trusted on its own).
+    peer_auth::start(identity.clone(), tokio::runtime::Handle::current());
 
     Ok(Arc::new(Engine { node_id }))
 }
@@ -533,4 +586,29 @@ pub async fn send_broadcast(room: &str, bytes: Vec<u8>) -> Result<()> {
     .map_err(|err| anyhow::anyhow!("net: broadcast in room {room:?} failed: {err}"))?;
     record_tx(room, "", len);
     Ok(())
+}
+
+#[cfg(test)]
+mod activity_tests {
+    use super::*;
+
+    #[test]
+    fn activity_table_is_capped_and_evicts_the_least_recent_entry() {
+        let mut table: HashMap<(String, String), ActivityRecord> = HashMap::new();
+        let t0 = Instant::now();
+        for i in 0..MAX_ACTIVITY_ENTRIES {
+            let entry = activity_entry(&mut table, "room", &format!("p{i}"));
+            entry.rx.last = Some(t0 + Duration::from_millis(i as u64 + 1));
+        }
+        assert_eq!(table.len(), MAX_ACTIVITY_ENTRIES);
+        // p0 is the least recently active; a new key evicts exactly it.
+        activity_entry(&mut table, "room", "newcomer");
+        assert_eq!(table.len(), MAX_ACTIVITY_ENTRIES);
+        assert!(!table.contains_key(&("room".to_string(), "p0".to_string())));
+        assert!(table.contains_key(&("room".to_string(), "newcomer".to_string())));
+        // An existing key never evicts anything.
+        activity_entry(&mut table, "room", "p1");
+        assert_eq!(table.len(), MAX_ACTIVITY_ENTRIES);
+        assert!(table.contains_key(&("room".to_string(), "p1".to_string())));
+    }
 }

@@ -334,6 +334,11 @@ pub(super) fn is_ed25519_did_key(did: &str) -> bool {
     let Some(encoded) = multibase.strip_prefix('z') else {
         return false;
     };
+    // 34 bytes encode to <= 48 base58 chars; bs58 decoding is quadratic, so
+    // bound the length before decoding attacker-controlled input.
+    if encoded.len() > 64 {
+        return false;
+    }
     let Ok(bytes) = bs58::decode(encoded).into_vec() else {
         return false;
     };
@@ -540,7 +545,7 @@ pub(super) async fn request_and_await_grant(
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(broadcast::error::RecvError::Closed) => bail!("envelope channel closed unexpectedly"),
                 };
-                if envelope.type_ == "folder-access-denied" && envelope.request_id.as_deref() == Some(request_id) {
+                if envelope.type_ == "folder-access-denied" && envelope.request_id.as_deref() == Some(request_id) && envelope.from == owner {
                     bail!("owner denied the access request");
                 }
                 if envelope.type_ != "folder-access-grant" || envelope.request_id.as_deref() != Some(request_id) {

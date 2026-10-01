@@ -33,6 +33,11 @@ use crate::daemon::AppState;
 /// did:key spec and tc-storage's `ed25519PublicKeyMulticodec`.
 const MULTICODEC_ED25519_PUB: [u8; 2] = [0xed, 0x01];
 
+/// Length of every Ed25519 `did:key` string: `did:key:` (8) + `z` (1) +
+/// base58btc of the 34-byte `0xed01 || pubkey` (always 47 characters, since
+/// the `0xed01` prefix pins the value's magnitude).
+pub(crate) const ED25519_DID_KEY_LEN: usize = 56;
+
 /// Lazily-loaded singleton identity for this daemon process.
 static IDENTITY: OnceCell<Arc<Identity>> = OnceCell::const_new();
 
@@ -75,7 +80,11 @@ impl Identity {
 }
 
 /// Derive the mistlib node id from a DID: first 16 hex chars of `sha256(did)`.
-fn node_id_for_did(did: &str) -> String {
+///
+/// Public so peer-authentication code (`crate::net::peer_auth`,
+/// `crate::consensus`) can check that a DID-signed message's `fromId`
+/// really is the transport-level sender's DID.
+pub fn node_id_for_did(did: &str) -> String {
     let digest = Sha256::digest(did.as_bytes());
     digest.iter().take(8).map(|b| format!("{b:02x}")).collect()
 }
@@ -97,6 +106,12 @@ pub fn verify(did: &str, data: &[u8], signature: &[u8]) -> Result<bool> {
 /// did:key decoding -- there must be exactly one did:key implementation in
 /// this crate.
 pub(crate) fn pubkey_from_did(did: &str) -> Result<[u8; 32]> {
+    // Untrusted peer input reaches this (wiresign::verify_wire on mistlib's
+    // dispatch thread) and bs58 decoding is quadratic in the input length,
+    // so reject anything that can't be an Ed25519 did:key before decoding.
+    if did.len() != ED25519_DID_KEY_LEN {
+        bail!("DID is not an Ed25519 did:key (unexpected length)");
+    }
     let multibase = did.strip_prefix("did:key:").context("not a did:key DID")?;
     let encoded = multibase
         .strip_prefix('z')
@@ -463,6 +478,17 @@ pub(crate) fn for_test() -> Identity {
     }
 }
 
+/// A deterministic, well-formed Ed25519 `did:key` for tests, derived from
+/// `[seed; 32]` so fixtures need no literal key strings.
+#[cfg(test)]
+pub(crate) fn did_for_seed(seed: u8) -> String {
+    did_from_pubkey(
+        &SigningKey::from_bytes(&[seed; 32])
+            .verifying_key()
+            .to_bytes(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -526,6 +552,31 @@ mod tests {
         let signature = identity.sign(b"data");
         assert!(verify("did:key:znotbase58!!", b"data", &signature).is_err());
         assert!(verify("not-a-did", b"data", &signature).is_err());
+    }
+
+    #[test]
+    fn every_ed25519_did_key_has_the_fixed_length() {
+        // The pre-decode length gate in `pubkey_from_did` relies on this.
+        for _ in 0..256 {
+            let identity = fresh_identity();
+            assert_eq!(identity.did().len(), ED25519_DID_KEY_LEN);
+            assert!(pubkey_from_did(identity.did()).is_ok());
+        }
+        // Boundary pubkeys (all-zero / all-0xff) pin both ends of the range.
+        assert_eq!(did_from_pubkey(&[0u8; 32]).len(), ED25519_DID_KEY_LEN);
+        assert_eq!(did_from_pubkey(&[0xffu8; 32]).len(), ED25519_DID_KEY_LEN);
+    }
+
+    #[test]
+    fn pubkey_from_did_rejects_oversized_input_before_decoding() {
+        // A huge base58 string would be quadratic to decode; it must be
+        // rejected up front (and quickly) by the length gate.
+        let huge = format!("did:key:z{}", "2".repeat(1_000_000));
+        let started = std::time::Instant::now();
+        assert!(pubkey_from_did(&huge).is_err());
+        assert!(started.elapsed() < std::time::Duration::from_millis(100));
+        let signature = fresh_identity().sign(b"data");
+        assert!(verify(&huge, b"data", &signature).is_err());
     }
 
     #[test]

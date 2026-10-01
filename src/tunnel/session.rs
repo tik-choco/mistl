@@ -85,6 +85,7 @@ use crate::tunnel::auth::{
     AuthAuditLog, AuthDecision, AuthEvent, AuthEventSource, AuthFuture, AuthRequest,
     ConnectionAuthorizer, PendingAuthorization, PendingAuthorizations, PendingAuthorizer,
     SharedAuthorizer, TrustDecision, TrustEntry, TrustKey, TrustStore, default_trust_store_path,
+    policy_allows, verified_did_for_peer,
 };
 use crate::tunnel::controller::{Direction, ForwardController, ForwardSpec, ForwardStatus, Proto};
 use crate::tunnel::forward_store::{ForwardStore, default_forward_store_path};
@@ -238,11 +239,12 @@ pub fn generate_room_id() -> String {
 /// always asks). A long-running daemon plausibly wants both at once --
 /// most peers auto-approved by policy, occasional unknown ones still
 /// surfaced for a human -- so this layers them instead of picking one.
-fn build_authorizer(
+pub(super) fn build_authorizer(
     config: &TunnelConfig,
     trust_store: TrustStore,
     pending_auth: PendingAuthorizations,
     audit_log: AuthAuditLog,
+    graph: Arc<super::graph::GraphState>,
 ) -> SharedAuthorizer {
     let trust_store_for_policy = trust_store.clone();
     let pending =
@@ -253,6 +255,7 @@ fn build_authorizer(
             allow_peers: config.allow_peers.iter().cloned().collect(),
             trust_store: trust_store_for_policy,
             audit_log,
+            graph,
             inner: pending,
         })
     } else {
@@ -270,6 +273,9 @@ struct ConfiguredAuthorizer {
     /// remembered decision always wins -- see [`ConfiguredAuthorizer::authorize`].
     trust_store: TrustStore,
     audit_log: AuthAuditLog,
+    /// Used to tell owner-created forwards from ones a remote peer created
+    /// through a graph grant; the latter are never auto-approved.
+    graph: Arc<super::graph::GraphState>,
     /// Always a `PendingAuthorizer` in practice (constructed by
     /// `build_authorizer`), but kept as the trait object so this struct
     /// doesn't need to know that concretely.
@@ -290,13 +296,17 @@ impl ConnectionAuthorizer for ConfiguredAuthorizer {
         Box::pin(async move {
             let remembered = self
                 .trust_store
-                .get(&TrustKey {
-                    peer_id: req.peer_id.clone(),
-                    forward_key: req.forward_key.clone(),
-                })
+                .lookup(&req.peer_id, req.verified_did(), &req.forward_key)
                 .await
                 .is_some();
-            if !remembered && (self.auto_accept || self.allow_peers.contains(&req.peer_id)) {
+            // A forward a remote peer planted through a graph grant always goes
+            // to the human queue: `auto_accept`/`allow_peers` express trust in
+            // the *connecting* peer, not in whoever chose the target address.
+            // An unverified peer (no DID hello) never matches policy either:
+            // it falls through to the queue, shown as unverified.
+            let policy_match = policy_allows(self.auto_accept, &self.allow_peers, req);
+            if !remembered && policy_match && !self.graph.is_remote_forward(&req.forward_key).await
+            {
                 self.audit_log
                     .record(req, AuthDecision::Allow, AuthEventSource::Policy)
                     .await;
@@ -321,6 +331,11 @@ impl SessionContext {
             return Err(error);
         }
         let trust_store = TrustStore::load(default_trust_store_path()).await?;
+        for entry in trust_store.list().await {
+            if entry.key.forward_key == LEGACY_STDIO_FORWARD_KEY {
+                let _ = trust_store.remove(&entry.key).await;
+            }
+        }
         let audit_log = AuthAuditLog::default();
         let pending_auth = PendingAuthorizations::new();
         let negotiator = ForwardNegotiator::new();
@@ -332,6 +347,7 @@ impl SessionContext {
             trust_store.clone(),
             pending_auth.clone(),
             audit_log.clone(),
+            manager.graph(),
         );
         let authorizer = super::graph::authorizer(manager.graph(), authorizer);
         let controller = ForwardController::with_authorizer(manager.clone(), authorizer);
@@ -357,6 +373,16 @@ impl SessionContext {
                         warn!(
                             "ignoring forward request from {} targeting link-local address {}",
                             peer_id, ev.remote_addr
+                        );
+                        return;
+                    }
+                    // The target becomes a trust-store key on approval; only
+                    // the real forward-key grammar is accepted so a peer
+                    // cannot pick a key that collides with another feature.
+                    if !super::forward_args::is_valid_remote_target(&ev.target) {
+                        warn!(
+                            "ignoring forward request from {} with invalid target",
+                            peer_id
                         );
                         return;
                     }
@@ -503,6 +529,9 @@ impl SessionContext {
                 "refusing forward to a link-local address".into(),
             ));
         }
+        if !super::forward_args::is_valid_remote_target(&req.target) {
+            return Err(SessionError::Invalid("invalid forward target".into()));
+        }
         let proto = Proto::from_name(&req.proto)
             .map_err(|e| SessionError::Invalid(format!("invalid proto: {}", e)))?;
         let spec = ForwardSpec {
@@ -517,14 +546,18 @@ impl SessionContext {
             .await
             .map_err(|e| SessionError::Invalid(format!("add failed: {}", e)))?;
         let _ = self.forward_store.add(&spec).await;
-        // Approving the forward also trusts subsequent connections for it.
+        // Approving the forward also trusts subsequent connections for it --
+        // but only for a DID-verified peer, keyed on its DID. An unverified
+        // peer's approval stays one-off (the forward exists; later
+        // connections from it are prompted individually).
+        let room = self.manager.current_room().await;
+        let did = verified_did_for_peer(Some(&room), &req.peer_id);
         let _ = self
             .trust_store
-            .remember(
-                TrustKey {
-                    peer_id: req.peer_id.clone(),
-                    forward_key: req.target.clone(),
-                },
+            .remember_for(
+                &req.peer_id,
+                did.as_deref(),
+                &req.target,
                 TrustDecision::Allow,
             )
             .await;
@@ -830,23 +863,38 @@ impl SessionContext {
     /// `crate::daemon::AppState::config`'s doc comment).
     pub async fn authorize_stdio_peer(&self, state: &Arc<AppState>, peer_id: &str) -> bool {
         let tunnel_config = state.config().tunnel;
+        // Running a local command is a bigger grant than a port forward:
+        // `auto_accept` never covers it. Only an explicit trust decision or
+        // an `allow_peers` entry does.
         let authorizer = build_authorizer(
-            &tunnel_config,
+            &stdio_gate_config(&tunnel_config),
             self.trust_store.clone(),
             self.pending_auth.clone(),
             self.audit_log.clone(),
+            self.manager.graph(),
         );
+        let room = self.manager.current_room().await;
         let req = AuthRequest {
             peer_id: peer_id.to_string(),
             forward_key: STDIO_FORWARD_KEY.to_string(),
             target_addr: tunnel_config.stdio_command.join(" "),
             proto: "stdio".to_string(),
+            did: verified_did_for_peer(Some(&room), peer_id),
         };
         super::graph::authorizer(self.manager.graph(), authorizer)
             .authorize(&req)
             .await
             .is_allowed()
     }
+}
+
+/// The config stdio gate 2 authorizes against: `auto_accept` is forced off
+/// (a blanket "accept every port-forward" switch must not also mean "give
+/// every room peer a shell"); `allow_peers` and trust-store decisions stay.
+fn stdio_gate_config(config: &TunnelConfig) -> TunnelConfig {
+    let mut gate = config.clone();
+    gate.auto_accept = false;
+    gate
 }
 
 /// Reserved forward-key namespace used for gate 2 of the stdio two-gate
@@ -856,7 +904,19 @@ impl SessionContext {
 /// "may this peer make me run `stdio_command`?" decision shows up in the
 /// same trust list / audit log / pending-approval queue instead of a
 /// bespoke mechanism.
-pub const STDIO_FORWARD_KEY: &str = "stdio";
+///
+/// The leading `@` makes it impossible for a forward target to collide with
+/// it: remote-proposed targets must match `(tcp|udp):<port>[@node]` (see
+/// `forward_args::is_valid_remote_target`), and `split_node_scope` never
+/// treats a leading `@` as a scope. (It used to be the plain string
+/// `"stdio"`, so approving a remote forward whose target was `"stdio"`
+/// silently granted stdio.)
+pub const STDIO_FORWARD_KEY: &str = "@stdio";
+
+/// The pre-namespace stdio key. Trust entries under it are dropped at
+/// session build: they may have been planted through a forward approval, so
+/// they must not grant stdio; stdio simply re-prompts once.
+const LEGACY_STDIO_FORWARD_KEY: &str = "stdio";
 
 /// Combines a `TrustKey`'s two fields back out of
 /// [`SessionContext::trust_key_id`]'s opaque string.
@@ -1126,6 +1186,10 @@ fn pending_auth_json(item: &PendingAuthorization) -> Value {
         "forward_key": item.request.forward_key,
         "target_addr": item.request.target_addr,
         "proto": item.request.proto,
+        // `verified: false` = no DID hello seen for this node id (older
+        // mistl, or not yet): approving it is one-off and never remembered.
+        "verified": item.request.verified_did().is_some(),
+        "did": item.request.verified_did(),
     })
 }
 
@@ -1156,6 +1220,10 @@ fn trust_entry_json(entry: &TrustEntry) -> Value {
         "key": SessionContext::trust_key_id(&entry.key.peer_id, &entry.key.forward_key),
         "peer_id": entry.key.peer_id,
         "forward_key": entry.key.forward_key,
+        // `did` rows are keyed on a DID; `node` rows are pre-DID legacy
+        // entries (deny-only until migrated on the peer's next verified
+        // connection).
+        "key_kind": if entry.key.peer_id.starts_with("did:") { "did" } else { "node" },
         "decision": match entry.decision {
             TrustDecision::Allow => "allow",
             TrustDecision::Deny => "deny",
@@ -1240,13 +1308,58 @@ mod tests {
         assert_eq!(split_trust_key_id(&key), Some(("peer-1", "tcp:80")));
     }
 
+    #[test]
+    fn stdio_key_cannot_be_produced_by_a_remote_forward_target() {
+        assert!(!super::super::forward_args::is_valid_remote_target(
+            STDIO_FORWARD_KEY
+        ));
+        assert!(!super::super::forward_args::is_valid_remote_target(
+            LEGACY_STDIO_FORWARD_KEY
+        ));
+        assert_ne!(STDIO_FORWARD_KEY, LEGACY_STDIO_FORWARD_KEY);
+    }
+
+    #[test]
+    fn stdio_gate_ignores_auto_accept_but_keeps_allow_peers() {
+        let config = TunnelConfig {
+            auto_accept: true,
+            allow_peers: vec!["p".into()],
+            ..Default::default()
+        };
+        let gate = stdio_gate_config(&config);
+        assert!(!gate.auto_accept);
+        assert_eq!(gate.allow_peers, vec!["p".to_string()]);
+    }
+
     fn sample_request(peer_id: &str) -> AuthRequest {
         AuthRequest {
             peer_id: peer_id.to_string(),
             forward_key: "tcp:80".to_string(),
             target_addr: "127.0.0.1:80".to_string(),
             proto: "tcp".to_string(),
+            did: None,
         }
+    }
+
+    #[test]
+    fn pending_auth_json_flags_unverified_peers() {
+        let unverified = PendingAuthorization {
+            id: 1,
+            request: sample_request("peer-1"),
+        };
+        let json = pending_auth_json(&unverified);
+        assert_eq!(json["verified"], json!(false));
+        assert!(json["did"].is_null());
+
+        let identity = crate::identity::for_test();
+        let mut req = sample_request(&identity.node_id());
+        req.did = Some(identity.did().to_string());
+        let json = pending_auth_json(&PendingAuthorization {
+            id: 2,
+            request: req,
+        });
+        assert_eq!(json["verified"], json!(true));
+        assert_eq!(json["did"], json!(identity.did()));
     }
 
     /// Builds a `SessionContext` backed by inert/for-test components (no

@@ -23,14 +23,14 @@ async fn pending_authorizer_queues_unknown_until_resolved() {
 }
 
 #[tokio::test]
-async fn pending_authorizer_remembers_allow_always() {
+async fn pending_authorizer_remembers_allow_always_under_the_did() {
     let path = temp_store_path("pending-remember");
     let store = TrustStore::load(&path).await.unwrap();
     let pending = PendingAuthorizations::new();
     let authorizer = PendingAuthorizer::new(store.clone(), pending.clone());
+    let (req, _, did) = super::verified_request("tcp:80");
 
-    let task =
-        tokio::spawn(async move { authorizer.authorize(&request("peer-a", "tcp:80")).await });
+    let task = tokio::spawn(async move { authorizer.authorize(&req).await });
     let id = wait_for_pending(&pending).await[0].id;
     assert!(pending.resolve(id, AuthDecision::AllowAlways).await);
 
@@ -38,7 +38,7 @@ async fn pending_authorizer_remembers_allow_always() {
     assert_eq!(
         store
             .get(&TrustKey {
-                peer_id: "peer-a".to_string(),
+                peer_id: did,
                 forward_key: "tcp:80".to_string(),
             })
             .await,

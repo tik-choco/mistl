@@ -124,3 +124,10 @@
   .store-file-icon { width: 26px; height: 32px; }
   #panel-store .store-file-open { gap: 7px; }
 }
+
+/* Folder-key approval requests (#store-folder-access) */
+.store-access-title { margin: 0 0 8px; font-size: 13px; font-weight: 650; color: var(--text); }
+.store-access-row { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; padding: 9px 0; border-top: 1px solid var(--panel-border); }
+.store-access-info { display: flex; flex-direction: column; gap: 2px; min-width: 0; font-size: 12px; }
+.store-access-who, .store-access-meta { color: var(--text-dim); font-size: 11px; overflow-wrap: anywhere; }
+.store-access-actions { display: flex; gap: 6px; flex-wrap: wrap; }

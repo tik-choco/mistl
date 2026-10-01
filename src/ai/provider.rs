@@ -410,7 +410,15 @@ pub struct Provider {
     stt_buffers: Mutex<SttBuffers>,
     limiter: JobLimiter,
     logs: Mutex<Vec<RequestLog>>,
+    /// Last `consumer_hello` reply per peer, so a peer spamming hellos
+    /// cannot fill the shared send queue and starve other consumers' chunks.
+    hello_replied: Mutex<HashMap<String, Instant>>,
 }
+
+/// Minimum spacing between `provider_hello` replies to the same peer.
+const HELLO_REPLY_INTERVAL: Duration = Duration::from_secs(5);
+/// Bound on tracked peers in `hello_replied` (stale entries pruned first).
+const MAX_HELLO_TRACKED: usize = 1024;
 
 impl Provider {
     /// Constructs a provider, optionally wiring TTS/STT upstream calls (see
@@ -456,7 +464,27 @@ impl Provider {
             stt_buffers: Mutex::new(SttBuffers::default()),
             limiter: JobLimiter::new(MAX_CONCURRENT_REMOTE_JOBS),
             logs: Mutex::new(Vec::new()),
+            hello_replied: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Whether a hello reply to `peer` is allowed now (and records it).
+    fn hello_reply_allowed(&self, peer: &str) -> bool {
+        let now = Instant::now();
+        let mut seen = self.hello_replied.lock().expect("hello throttle lock");
+        if let Some(last) = seen.get(peer)
+            && now.duration_since(*last) < HELLO_REPLY_INTERVAL
+        {
+            return false;
+        }
+        if seen.len() >= MAX_HELLO_TRACKED {
+            seen.retain(|_, t| now.duration_since(*t) < HELLO_REPLY_INTERVAL);
+            if seen.len() >= MAX_HELLO_TRACKED {
+                return false;
+            }
+        }
+        seen.insert(peer.to_string(), now);
+        true
     }
 
     /// Models advertised in `provider_hello`.
@@ -521,7 +549,9 @@ impl Provider {
     pub async fn handle_message(self: Arc<Self>, from: String, msg: ProtocolMessage) {
         match msg {
             ProtocolMessage::ConsumerHello => {
-                (self.send)(&from, self.hello());
+                if self.hello_reply_allowed(&from) {
+                    (self.send)(&from, self.hello());
+                }
             }
             ProtocolMessage::LlmRequest {
                 id,
@@ -1290,6 +1320,26 @@ mod tests {
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].0, "consumer1");
         assert_eq!(sent[0].1, provider.hello());
+    }
+
+    #[tokio::test]
+    async fn consumer_hello_replies_are_throttled_per_peer() {
+        let (send, sent) = fake_send();
+        let call = fake_call_success(vec![], "");
+        let provider = Provider::new_with_voice(send, call, vec![], None, None, vec![]);
+        for _ in 0..5 {
+            provider
+                .clone()
+                .handle_message("spammer".into(), ProtocolMessage::ConsumerHello)
+                .await;
+        }
+        provider
+            .clone()
+            .handle_message("other".into(), ProtocolMessage::ConsumerHello)
+            .await;
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.iter().filter(|(to, _)| to == "spammer").count(), 1);
+        assert_eq!(sent.iter().filter(|(to, _)| to == "other").count(), 1);
     }
 
     #[tokio::test]

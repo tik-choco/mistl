@@ -38,7 +38,8 @@ pub(super) fn load(data_dir: &Path) -> Result<Vec<IndexEntry>> {
 fn save(data_dir: &Path, entries: &[IndexEntry]) -> Result<()> {
     let path = index_path(data_dir);
     let text = serde_json::to_string_pretty(entries)?;
-    std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))
+    crate::statefile::write_private(&path, text.as_bytes())
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 /// Insert `entry`, or replace the existing row with the same `cid` (so

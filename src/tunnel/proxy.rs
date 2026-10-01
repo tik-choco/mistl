@@ -62,6 +62,18 @@ pub type StdioAuthorizer = Arc<
         + Sync,
 >;
 
+/// Sender half of the bounded queue feeding the child's stdin writer task.
+/// Writes go through `try_send` so a child that stops reading stdin can never
+/// stall the single event worker (Close/Authorized must keep flowing).
+type StdinHolder = Arc<Mutex<Option<mpsc::Sender<Vec<u8>>>>>;
+
+/// How long a denied peer's stdio packets are ignored before they may raise a
+/// new approval prompt.
+const DENIED_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Queue depth (chunks) between the worker and the stdin writer task.
+const STDIN_QUEUE_CHUNKS: usize = 64;
+
 /// A peer's stdio open that is still waiting on authorization, with the stdin
 /// it sent in the meantime (bounded by `MAX_PENDING_STDIN_BYTES`).
 #[derive(Default)]
@@ -78,7 +90,7 @@ pub struct Executor {
     /// closes or the child exits -- never assigned from an inbound message,
     /// so an unauthorized room peer cannot hijack an authorized shell.
     active_peer: Arc<Mutex<Option<String>>>,
-    stdin_tx: Arc<Mutex<Option<tokio::process::ChildStdin>>>,
+    stdin_tx: StdinHolder,
     /// Fires the running child's kill switch (see `start_command`).
     kill_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
     /// Bumped per spawned child so a late exit-cleanup from an old child
@@ -86,6 +98,9 @@ pub struct Executor {
     generation: Arc<AtomicU64>,
     /// Opens whose authorization is in flight, keyed by peer.
     pending_opens: Arc<Mutex<HashMap<String, PendingOpen>>>,
+    /// Peers whose open was just denied, so their next stdio packets don't
+    /// immediately re-raise an approval prompt.
+    denied_at: Mutex<HashMap<String, std::time::Instant>>,
     events_tx: mpsc::UnboundedSender<StdioEvent>,
     events_rx: Mutex<Option<mpsc::UnboundedReceiver<StdioEvent>>>,
     done: Arc<Notify>,
@@ -109,6 +124,7 @@ impl Executor {
             kill_tx: Arc::new(Mutex::new(None)),
             generation: Arc::new(AtomicU64::new(0)),
             pending_opens: Arc::new(Mutex::new(HashMap::new())),
+            denied_at: Mutex::new(HashMap::new()),
             events_tx,
             events_rx: Mutex::new(Some(events_rx)),
             done: Arc::new(Notify::new()),
@@ -185,7 +201,11 @@ impl Executor {
     async fn dispatch(&self, event: StdioEvent) {
         match event {
             StdioEvent::Message(peer_id, data) => self.handle_message(peer_id, data).await,
-            StdioEvent::Open(peer_id) => self.handle_open(peer_id).await,
+            // Join-time opens are ignored: every JOIN would otherwise queue
+            // an approval prompt (and 8 peers exhaust MAX_PENDING_OPENS). A
+            // session starts only from an explicit stdio packet, see
+            // `handle_message`.
+            StdioEvent::Open(peer_id) => debug!("ignoring join-time stdio open for {}", peer_id),
             StdioEvent::Close(peer_id) => self.handle_close(peer_id).await,
             StdioEvent::Authorized(peer_id, allowed) => {
                 self.handle_authorized(peer_id, allowed).await
@@ -200,6 +220,14 @@ impl Executor {
         let is_session_peer = self.active_peer.lock().await.as_deref() == Some(peer_id.as_str());
         let (stream_type, payload) = unwrap_packet(&data);
         if !is_session_peer {
+            // First explicit stdio packet from a peer with no open in flight
+            // is what starts the (authorized) session.
+            if self.authorizer.is_some()
+                && !self.pending_opens.lock().await.contains_key(&peer_id)
+                && !self.recently_denied(&peer_id).await
+            {
+                self.handle_open(peer_id.clone()).await;
+            }
             let mut pending = self.pending_opens.lock().await;
             if let Some(entry) = pending.get_mut(&peer_id) {
                 if stream_type == StreamType::Stdin
@@ -214,10 +242,7 @@ impl Executor {
             return;
         }
         if stream_type == StreamType::Stdin {
-            let mut tx = self.stdin_tx.lock().await;
-            if let Some(ref mut stdin) = *tx {
-                let _ = stdin.write_all(payload).await;
-            }
+            self.write_stdin(payload.to_vec()).await;
         }
     }
 
@@ -263,17 +288,38 @@ impl Executor {
         };
         if !allowed {
             debug!("Stdio session denied for peer: {}", peer_id);
+            let mut denied = self.denied_at.lock().await;
+            let now = std::time::Instant::now();
+            denied.retain(|_, at| now.duration_since(*at) < DENIED_COOLDOWN);
+            if denied.len() < 256 {
+                denied.insert(peer_id, now);
+            }
             return;
         }
         if self.active_peer.lock().await.is_some() || self.stdin_tx.lock().await.is_some() {
             return;
         }
         self.activate(peer_id).await;
-        let mut tx = self.stdin_tx.lock().await;
-        if let Some(ref mut stdin) = *tx {
-            for chunk in entry.queued {
-                let _ = stdin.write_all(&chunk).await;
-            }
+        for chunk in entry.queued {
+            self.write_stdin(chunk).await;
+        }
+    }
+
+    async fn recently_denied(&self, peer_id: &str) -> bool {
+        self.denied_at
+            .lock()
+            .await
+            .get(peer_id)
+            .is_some_and(|at| at.elapsed() < DENIED_COOLDOWN)
+    }
+
+    /// Non-blocking hand-off to the stdin writer task; drops the chunk when
+    /// the queue is full rather than stalling the worker.
+    async fn write_stdin(&self, chunk: Vec<u8>) {
+        if let Some(tx) = self.stdin_tx.lock().await.as_ref()
+            && tx.try_send(chunk).is_err()
+        {
+            debug!("stdin queue full or closed; dropping chunk");
         }
     }
 
@@ -320,7 +366,7 @@ impl Executor {
         manager: RTCManager,
         peer_id: String,
         active_peer: Arc<Mutex<Option<String>>>,
-        stdin_holder: Arc<Mutex<Option<tokio::process::ChildStdin>>>,
+        stdin_holder: StdinHolder,
         kill_holder: Arc<Mutex<Option<oneshot::Sender<()>>>>,
         generation: Arc<AtomicU64>,
     ) -> Result<()> {
@@ -338,8 +384,18 @@ impl Executor {
         let mut child = command.spawn()?;
         let process_tree = crate::child_process::ProcessTree::attach(&mut child)?;
 
-        let stdin = child.stdin.take().unwrap();
-        *stdin_holder.lock().await = Some(stdin);
+        let mut stdin = child.stdin.take().unwrap();
+        let (stdin_tx, mut stdin_rx) = mpsc::channel::<Vec<u8>>(STDIN_QUEUE_CHUNKS);
+        // Owns the ChildStdin; ends (closing the pipe) when the holder's
+        // sender is dropped or a write fails.
+        tokio::spawn(async move {
+            while let Some(chunk) = stdin_rx.recv().await {
+                if stdin.write_all(&chunk).await.is_err() {
+                    break;
+                }
+            }
+        });
+        *stdin_holder.lock().await = Some(stdin_tx);
         let (kill_tx, kill_rx) = oneshot::channel();
         *kill_holder.lock().await = Some(kill_tx);
         let gen_id = generation.fetch_add(1, Ordering::SeqCst) + 1;
@@ -515,6 +571,37 @@ mod tests {
 
         pump_one(&executor).await;
         assert_eq!(executor.active_peer.lock().await.as_deref(), Some("peer-a"));
+    }
+
+    #[tokio::test]
+    async fn join_time_open_is_ignored_but_first_stdio_packet_starts_an_open() {
+        let mut executor = test_executor();
+        executor.authorizer = Some(fixed_authorizer(true));
+        executor
+            .dispatch(StdioEvent::Open("peer-a".to_string()))
+            .await;
+        assert!(executor.pending_opens.lock().await.is_empty());
+
+        executor
+            .handle_message("peer-a".to_string(), wrap_packet(StreamType::Stdin, b"x"))
+            .await;
+        assert!(executor.pending_opens.lock().await.contains_key("peer-a"));
+        pump_one(&executor).await;
+        assert_eq!(executor.active_peer.lock().await.as_deref(), Some("peer-a"));
+    }
+
+    #[tokio::test]
+    async fn full_stdin_queue_never_blocks_the_worker() {
+        let executor = test_executor();
+        let (tx, _rx) = mpsc::channel(1);
+        *executor.stdin_tx.lock().await = Some(tx);
+        // Nobody drains `_rx`: the second write must return, not park.
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            executor.write_stdin(vec![1]).await;
+            executor.write_stdin(vec![2]).await;
+        })
+        .await
+        .unwrap();
     }
 
     /// T-01: a close from the session peer terminates the child and clears

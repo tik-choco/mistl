@@ -109,6 +109,10 @@ struct TunnelConn {
     /// for this conn, to detect the gaps/duplicates described on
     /// [`TunnelMessage::seq`]. See [`tunnel::SeqState`].
     recv_seq: tunnel::SeqState,
+    /// DID this (serve-side) conn was approved for; `None` for locally
+    /// initiated conns and for unverified peers. Payloads whose sender no
+    /// longer maps to it are dropped; see `auth::binding_holds`.
+    did: Option<String>,
 }
 
 /// A conn's lifecycle state, in between being tracked (on receiving a
@@ -334,6 +338,7 @@ impl TcpManager {
             metrics: metrics.clone(),
             notify_remote,
             recv_seq: tunnel::SeqState::new(),
+            did: None,
         };
         let old = self
             .conns
@@ -357,7 +362,7 @@ impl TcpManager {
     /// Returns `false` (tracking nothing) if `peer_id` is already at
     /// `MAX_PENDING_CONNS_PER_PEER` pending or `MAX_CONNS_PER_PEER` total conns;
     /// the caller rejects the `connect` via the normal close path.
-    async fn track_pending_conn(&self, conn_id: &str, peer_id: &str) -> bool {
+    async fn track_pending_conn(&self, conn_id: &str, peer_id: &str, did: Option<String>) -> bool {
         let metrics = self.runtime.peer(peer_id);
         let tc = TunnelConn {
             state: ConnState::Pending {
@@ -368,6 +373,7 @@ impl TcpManager {
             metrics,
             notify_remote: true,
             recv_seq: tunnel::SeqState::new(),
+            did,
         };
         let mut conns = self.conns.write().await;
         let (mut total, mut pending) = (0usize, 0usize);

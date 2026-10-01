@@ -155,6 +155,16 @@ const GLOBAL_STORE_BURST: f64 = 600.0;
 const GLOBAL_STORE_PER_MIN: f64 = 300.0;
 /// Bucket-map size beyond which idle (full) buckets are pruned.
 const MAX_TRACKED_KEYS: usize = 4096;
+/// Most bytes of stored wires sent in reply to one history request (newest
+/// entries win); the log itself can hold 600 x 64 KiB.
+const REPLAY_BYTE_BUDGET: usize = 4 * 1024 * 1024;
+/// Replay-throttle entries older than this are pruned once the map grows.
+const REPLAY_THROTTLE_PRUNE_AFTER: Duration = Duration::from_secs(60);
+/// `chat.log` resolves at most this many (newest) post bodies per call.
+const MAX_BODY_RESOLVES: usize = 50;
+/// Per-CID timeout and size cap for resolving a post body.
+const BODY_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_BODY_BYTES: usize = 256 * 1024;
 const SEND_RETRY_ATTEMPTS: u32 = 3;
 const SEND_RETRY_DELAY: Duration = Duration::from_secs(1);
 
@@ -523,14 +533,35 @@ async fn handle_history_request(
         }
         limits.last_replay = Some(now);
         throttle.insert(key, now);
+        // Never pruned before: drop stale entries so it stays bounded.
+        if throttle.len() > 256 {
+            throttle.retain(|_, last| now.duration_since(*last) < REPLAY_THROTTLE_PRUNE_AFTER);
+        }
     }
 
-    let lines = {
-        let _guard = service.wirelog_lock.lock().await;
-        read_wirelog_lines(&wirelog_path(&service.data_dir, room))?
-    };
+    // Read off the async runtime and without the log lock: rewrites are
+    // atomic renames and appends are single writes, so at worst the final
+    // line is torn -- which the JSON check below drops.
+    let path = wirelog_path(&service.data_dir, room);
+    let lines = tokio::task::spawn_blocking(move || read_wirelog_lines(&path))
+        .await
+        .context("wirelog read task failed")??;
     let skip = lines.len().saturating_sub(WIRELOG_CAP);
-    for line in lines.into_iter().skip(skip) {
+    // Newest-first within a byte budget, then replayed oldest-first.
+    let mut budget = REPLAY_BYTE_BUDGET;
+    let mut selected: Vec<Vec<u8>> = Vec::new();
+    for line in lines.into_iter().skip(skip).rev() {
+        if line_id(&line).is_none() {
+            continue;
+        }
+        if line.len() > budget {
+            break;
+        }
+        budget -= line.len();
+        selected.push(line);
+    }
+    selected.reverse();
+    for line in selected {
         // Best-effort, matching tc-chat's own fire-and-forget replay: one
         // failed unicast shouldn't abort the rest of the log.
         if let Err(err) = crate::net::send_direct(room, from_node, line).await {
@@ -598,21 +629,13 @@ fn read_wirelog_lines(path: &Path) -> Result<Vec<Vec<u8>>> {
 /// same directory then rename over the target, so a crash mid-write can never
 /// leave a truncated log.
 fn write_wirelog_lines(path: &Path, lines: &[Vec<u8>]) -> Result<()> {
-    let dir = path
-        .parent()
-        .context("wirelog path has no parent directory")?;
-    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-
     let mut body = Vec::new();
     for line in lines {
         body.extend_from_slice(line);
         body.push(b'\n');
     }
-    let tmp = path.with_extension("jsonl.tmp");
-    std::fs::write(&tmp, &body).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("renaming {} into {}", tmp.display(), path.display()))?;
-    Ok(())
+    crate::statefile::write_private(path, &body)
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 fn line_id(line: &[u8]) -> Option<String> {
@@ -655,14 +678,22 @@ async fn persist_wire(
     let dir = path
         .parent()
         .context("wirelog path has no parent directory")?;
-    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    crate::statefile::create_private_dir(dir)
+        .with_context(|| format!("creating {}", dir.display()))?;
     let mut line = raw.to_vec();
     line.push(b'\n');
     {
         use std::io::Write;
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).append(true);
+        // Append-style log: created 0600 up front (never briefly
+        // world-readable) instead of rewritten atomically per message.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
             .open(&path)
             .with_context(|| format!("opening {}", path.display()))?;
         file.write_all(&line)
@@ -736,16 +767,19 @@ async fn chat_log(state: &Arc<AppState>, room: &str, limit: usize) -> Result<Val
     let tail: Vec<&Vec<u8>> = lines.iter().rev().take(limit).collect();
 
     let mut items = Vec::with_capacity(tail.len());
-    for line in tail.into_iter().rev() {
+    let total = tail.len();
+    for (index, line) in tail.into_iter().rev().enumerate() {
         if let Ok(value) = serde_json::from_slice::<Value>(line) {
-            items.push(describe_entry(value).await);
+            // Only the newest MAX_BODY_RESOLVES entries get a network fetch.
+            let resolve = index + MAX_BODY_RESOLVES >= total;
+            items.push(describe_entry(value, resolve).await);
         }
     }
     Ok(json!(items))
 }
 
 /// Builds one `chat.log` display item from a stored wire.
-async fn describe_entry(value: Value) -> Value {
+async fn describe_entry(value: Value, resolve: bool) -> Value {
     let Value::Object(obj) = value else {
         return json!({});
     };
@@ -771,10 +805,12 @@ async fn describe_entry(value: Value) -> Value {
             item["mimeType"] = json!(str_field("mimeType"));
             item["fileName"] = json!(str_field("fileName"));
             item["fileSize"] = obj.get("fileSize").cloned().unwrap_or(Value::Null);
-            if matches!(
-                str_field("kind").as_deref(),
-                Some("text") | Some("project") | Some("event")
-            ) && let Some(cid) = str_field("cid")
+            if resolve
+                && matches!(
+                    str_field("kind").as_deref(),
+                    Some("text") | Some("project") | Some("event")
+                )
+                && let Some(cid) = str_field("cid")
             {
                 item["text"] = resolve_body_text(&cid).await;
             }
@@ -806,8 +842,9 @@ async fn resolve_body_text(cid: &str) -> Value {
     // mistlib's sync storage_get block_ons its internal runtime, which
     // panics on a tokio worker thread -- run it on a blocking thread, the
     // same pattern `crate::net::start_engine` uses for other mistlib calls.
-    let bytes = match tokio::task::spawn_blocking(move || mistlib::app::storage_get(&cid)).await {
-        Ok(Ok(bytes)) => bytes,
+    let fetch = tokio::task::spawn_blocking(move || mistlib::app::storage_get(&cid));
+    let bytes = match tokio::time::timeout(BODY_FETCH_TIMEOUT, fetch).await {
+        Ok(Ok(Ok(bytes))) if bytes.len() <= MAX_BODY_BYTES => bytes,
         _ => return Value::Null,
     };
     let Ok(body) = serde_json::from_slice::<Value>(&bytes) else {

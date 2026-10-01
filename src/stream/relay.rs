@@ -106,6 +106,16 @@
 //! for v1 since it's the same order of magnitude as the pre-cascade
 //! single-relay keyframe wait.
 //!
+//! ## Peer authentication
+//!
+//! A follower only relays media from a *verified* leader: the consensus
+//! control plane admits only DID-verified relays (see `crate::consensus`),
+//! and [`build_policy`] re-checks the leader through
+//! [`RelayConsensus::is_verified_leader`] (which also applies the membership
+//! allowlist) before following it. Media track events carry no room id, so
+//! [`room_filter_task`] drops any live track whose sender isn't a connected
+//! peer of this relay's room (`net::room_connections`).
+//!
 //! ## Audio observability
 //!
 //! "No sound in VRChat" is otherwise invisible from the outside: the server
@@ -184,6 +194,21 @@ const IMMEDIATE_PLI_DEBOUNCE: Duration = Duration::from_secs(1);
 /// enough that a viewer watching the log can tell within a few seconds that
 /// the pipeline is alive, without approaching debug-level chatter.
 const SUMMARY_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Cap on distinct peers kept in `control_loop`'s per-peer track caches
+/// (`last_video`/`last_audio`/`pending_audio`), so a flood of tracks from
+/// many sender ids can't grow them without bound.
+const MAX_CACHED_PEERS: usize = 32;
+
+/// How often `control_loop` drops cached tracks of peers no longer connected
+/// in the relay room.
+const CACHE_PRUNE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// How long [`room_filter_task`] waits for a track's sender to show up as a
+/// connected peer of the relay room before dropping the track (a track can
+/// fire slightly before mistlib marks its connection `connected`).
+const ROOM_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
+const ROOM_CHECK_RETRY: Duration = Duration::from_millis(250);
 
 /// Samples per channel in one AAC-LC frame (fixed by the codec), and the
 /// interleaved-sample chunk size (stereo) that implies.
@@ -351,7 +376,13 @@ impl RelayCapture {
             Cascade::Disabled
         };
 
-        let (tx, rx) = mpsc::unbounded_channel();
+        // Media events carry no room: filter them down to senders
+        // actually connected in this relay's room before the control loop
+        // sees them. The filter task ends on its own once `stop()` (or a
+        // later relay) replaces the media consumer and drops `tx`.
+        let (tx, raw_rx) = mpsc::unbounded_channel();
+        let (verified_tx, rx) = mpsc::unbounded_channel();
+        tokio::spawn(room_filter_task(raw_rx, verified_tx, room.clone()));
         crate::net::set_media_consumer(Some(tx));
 
         let publisher = Arc::new(StdMutex::new(None));
@@ -688,10 +719,15 @@ fn leader_display(leader: &Option<String>) -> &str {
 fn build_policy(cascade: &Cascade, view: Option<&ConsensusView>) -> CascadePolicy {
     match cascade {
         Cascade::Disabled => CascadePolicy::Disabled,
-        Cascade::Active(_) => match view {
+        Cascade::Active(consensus) => match view {
             Some(view) => CascadePolicy::Active {
                 role: view.role,
-                leader: view.leader.clone(),
+                // Follow only a DID-verified (and allowlisted) leader; an
+                // unverified hint means "no leader yet" -- accept no one.
+                leader: view
+                    .leader
+                    .clone()
+                    .filter(|leader| consensus.is_verified_leader(leader)),
                 relay_peers: view.peers.clone(),
             },
             None => CascadePolicy::Active {
@@ -713,6 +749,68 @@ async fn watch_changed(
         Some(rx) => rx.changed().await,
         None => std::future::pending().await,
     }
+}
+
+/// Whether `peer` is a connected peer of `room` in a
+/// `net::room_connections()` snapshot.
+fn peer_in_room(connections: &[(String, Vec<(String, String)>)], room: &str, peer: &str) -> bool {
+    connections
+        .iter()
+        .any(|(r, peers)| r == room && peers.iter().any(|(p, _)| p == peer))
+}
+
+/// Forwards media events whose sender is connected in `room` (retrying
+/// briefly, see [`ROOM_CHECK_TIMEOUT`]) and drops the rest. Sequential, so
+/// per-peer track order is preserved.
+async fn room_filter_task(
+    mut raw_rx: mpsc::UnboundedReceiver<MediaTrackEvent>,
+    verified_tx: mpsc::UnboundedSender<MediaTrackEvent>,
+    room: String,
+) {
+    while let Some(event) = raw_rx.recv().await {
+        let remote_id = event.remote_id.0.clone();
+        let deadline = tokio::time::Instant::now() + ROOM_CHECK_TIMEOUT;
+        let in_room = loop {
+            if peer_in_room(&crate::net::room_connections().await, &room, &remote_id) {
+                break true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break false;
+            }
+            tokio::time::sleep(ROOM_CHECK_RETRY).await;
+        };
+        if !in_room {
+            debug!(%remote_id, %room, "relay: dropping media track from a peer not connected in the relay room");
+            continue;
+        }
+        if verified_tx.send(event).is_err() {
+            return; // control loop gone
+        }
+    }
+}
+
+/// Inserts into a per-peer track cache, first evicting some other entry
+/// (never `keep`, the locked publisher) when a new peer would exceed
+/// [`MAX_CACHED_PEERS`].
+fn bounded_insert<V>(map: &mut HashMap<String, V>, key: String, value: V, keep: Option<&str>) {
+    if !map.contains_key(&key)
+        && map.len() >= MAX_CACHED_PEERS
+        && let Some(victim) = map.keys().find(|k| Some(k.as_str()) != keep).cloned()
+    {
+        map.remove(&victim);
+    }
+    map.insert(key, value);
+}
+
+/// Drops cache entries for peers not connected in `room` any more (never
+/// `keep`, the locked publisher).
+fn prune_to_room<V>(
+    map: &mut HashMap<String, V>,
+    connections: &[(String, Vec<(String, String)>)],
+    room: &str,
+    keep: Option<&str>,
+) {
+    map.retain(|peer, _| Some(peer.as_str()) == keep || peer_in_room(connections, room, peer));
 }
 
 /// Creates this leader's video (H264) + audio (Opus) re-broadcast tracks and
@@ -850,6 +948,8 @@ async fn control_loop(
     // view change makes a previously-ignored cached track relevant again
     // (see the `watch_changed` arm below).
     let mut replay: VecDeque<MediaTrackEvent> = VecDeque::new();
+    let mut prune_tick = tokio::time::interval(CACHE_PRUNE_INTERVAL);
+    prune_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     let mut view_rx = match &cascade {
         Cascade::Active(consensus) => Some(consensus.subscribe()),
@@ -882,6 +982,16 @@ async fn control_loop(
                 event = media_rx.recv() => {
                     let Some(event) = event else { break };
                     event
+                }
+                _ = prune_tick.tick() => {
+                    // Peers that left the room never send an "ended" for
+                    // tracks we only cached (never locked); drop them here.
+                    let connections = crate::net::room_connections().await;
+                    let keep = locked.as_deref();
+                    prune_to_room(&mut last_video, &connections, &room, keep);
+                    prune_to_room(&mut last_audio, &connections, &room, keep);
+                    prune_to_room(&mut pending_audio, &connections, &room, keep);
+                    continue;
                 }
                 Some((ended_id, ended_ssrc)) = ended_rx.recv() => {
                     // A dead track must never be replayed: if the ended
@@ -1018,10 +1128,20 @@ async fn control_loop(
         // track again.
         match kind {
             RTPCodecType::Video => {
-                last_video.insert(remote_id.clone(), clone_event(&event));
+                bounded_insert(
+                    &mut last_video,
+                    remote_id.clone(),
+                    clone_event(&event),
+                    locked.as_deref(),
+                );
             }
             RTPCodecType::Audio => {
-                last_audio.insert(remote_id.clone(), clone_event(&event));
+                bounded_insert(
+                    &mut last_audio,
+                    remote_id.clone(),
+                    clone_event(&event),
+                    locked.as_deref(),
+                );
             }
             RTPCodecType::Unspecified => {}
         }
@@ -1180,7 +1300,7 @@ async fn control_loop(
                         replace_task(&active_tasks, TaskRole::Audio, audio_handle);
                     }
                     AudioDecision::Buffer => {
-                        pending_audio.insert(remote_id, event);
+                        bounded_insert(&mut pending_audio, remote_id, event, locked.as_deref());
                     }
                     AudioDecision::Ignore => {}
                 }
@@ -1979,6 +2099,54 @@ mod tests {
             leader: leader.map(str::to_string),
             relay_peers: relay_peers.iter().map(|s| s.to_string()).collect(),
         }
+    }
+
+    #[test]
+    fn peer_in_room_only_matches_the_given_room() {
+        let connections = vec![
+            (
+                "relay-room".to_string(),
+                vec![("leader".to_string(), "connected".to_string())],
+            ),
+            (
+                "other-room".to_string(),
+                vec![("intruder".to_string(), "connected".to_string())],
+            ),
+        ];
+        assert!(peer_in_room(&connections, "relay-room", "leader"));
+        assert!(!peer_in_room(&connections, "relay-room", "intruder"));
+        assert!(!peer_in_room(&connections, "missing-room", "leader"));
+    }
+
+    #[test]
+    fn track_caches_are_bounded_and_keep_the_locked_publisher() {
+        let mut cache: HashMap<String, u32> = HashMap::new();
+        bounded_insert(&mut cache, "locked".to_string(), 0, Some("locked"));
+        for i in 0..(MAX_CACHED_PEERS * 3) {
+            bounded_insert(&mut cache, format!("p{i}"), 1, Some("locked"));
+            assert!(cache.len() <= MAX_CACHED_PEERS);
+            assert!(cache.contains_key("locked"));
+        }
+        // Refreshing a known key never evicts.
+        let before = cache.len();
+        bounded_insert(&mut cache, "locked".to_string(), 2, Some("locked"));
+        assert_eq!(cache.len(), before);
+    }
+
+    #[test]
+    fn prune_to_room_drops_departed_peers_but_not_the_lock() {
+        let mut cache: HashMap<String, u32> = HashMap::new();
+        for id in ["here", "gone", "locked"] {
+            cache.insert(id.to_string(), 0);
+        }
+        let connections = vec![(
+            "room".to_string(),
+            vec![("here".to_string(), "connected".to_string())],
+        )];
+        prune_to_room(&mut cache, &connections, "room", Some("locked"));
+        let mut left: Vec<_> = cache.keys().cloned().collect();
+        left.sort();
+        assert_eq!(left, vec!["here".to_string(), "locked".to_string()]);
     }
 
     #[test]

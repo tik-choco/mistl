@@ -152,6 +152,12 @@ async fn daemon_main(host_override: Option<String>) -> Result<()> {
         dashboard_url: Mutex::new(None),
     });
 
+    // Membership allowlist must be in place before any room joins.
+    // An invalid list refuses startup rather than silently falling open.
+    state.config().validate_network()?;
+    state.config().network.apply();
+
+    let _ = NETWORK_STATE.set(state.clone());
     let server = ipc::serve(state.clone()).await?;
     info!(port = server.port(), "mistl daemon ready");
 
@@ -399,8 +405,157 @@ fn has_dashboard_url(status: &Value) -> bool {
     status.get("dashboard").is_some_and(|url| !url.is_null())
 }
 
-/// Route an IPC request to the owning module.
+/// The running daemon's state, for services (the local AI API server) that
+/// have no `AppState` handle but must honour the network switch.
+static NETWORK_STATE: std::sync::OnceLock<Arc<AppState>> = std::sync::OnceLock::new();
+
+/// True while external connections are OFF/switching. False when no daemon
+/// state is registered (unit tests), so nothing is gated there.
+pub fn external_connections_blocked() -> bool {
+    NETWORK_STATE
+        .get()
+        .is_some_and(|state| !state.network.permitted())
+}
+
+/// Who is issuing a command. A dashboard session from this machine (loopback
+/// peer) is as trusted as the CLI; the restriction exists for a dashboard
+/// exposed on the LAN (`--host 0.0.0.0`), where a remote browser must not be
+/// able to run processes, touch arbitrary local paths, or rewire trust.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Caller {
+    /// CLI over the token-gated loopback IPC socket.
+    Ipc,
+    /// Dashboard `POST /api/call`; `remote` is true when the TCP peer is not
+    /// a loopback address (see [`is_local_peer`]).
+    Http { remote: bool },
+    /// Daemon-internal (tray, the dashboard's own upload/download handlers).
+    Internal,
+}
+
+impl Caller {
+    /// The caller for a dashboard HTTP request from `peer`.
+    pub fn http_from(peer: std::net::IpAddr) -> Self {
+        Caller::Http {
+            remote: !is_local_peer(peer),
+        }
+    }
+}
+
+/// Loopback check that also treats IPv4-mapped IPv6 (`::ffff:127.0.0.1`,
+/// what a dual-stack listener reports for a local IPv4 client) as local.
+pub fn is_local_peer(ip: std::net::IpAddr) -> bool {
+    ip.to_canonical().is_loopback()
+}
+
+/// `config.set` paths a remote dashboard may not change: they grant code
+/// execution, or redirect where the daemon fetches/pushes/stores data or
+/// which peers it trusts. (`set_by_path` only accepts `section.field`, so
+/// there is no whole-section form to worry about.)
+fn remote_config_denied(path: &str) -> bool {
+    const DENIED_EXACT: &[&str] = &[
+        // stdio sessions run `stdio_command` for remote peers.
+        "tunnel.stdio_enabled",
+        "tunnel.stdio_command",
+        // Auto-approve peers / forwards.
+        "tunnel.auto_accept",
+        "tunnel.allow_peers",
+        // Decide which peers are trusted as providers / relay members.
+        "ai.trusted_providers",
+        "network.membership_allowlist",
+        // Local paths.
+        "storage.blocks_dir",
+        "storage.export_dir",
+        // Redirect where credentials or media are sent.
+        "ai.providers",
+        "ai.upstream_url",
+        "ai.upstream_api_key",
+        "ai.api_listen",
+        "stream.rtsp_url",
+    ];
+    // Whole sections: update source/cadence, dashboard bind address, and the
+    // scheduler (its jobs are shell commands).
+    const DENIED_SECTIONS: &[&str] = &["update.", "ui.", "scheduler."];
+    // Catch-all for future path / listen-address fields.
+    let field = path.rsplit('.').next().unwrap_or(path);
+    let pathlike = field.ends_with("_dir")
+        || field.ends_with("_path")
+        || field.ends_with("_listen")
+        || field == "listen";
+    pathlike || DENIED_EXACT.contains(&path) || DENIED_SECTIONS.iter().any(|p| path.starts_with(p))
+}
+
+/// Rejects commands (or argument shapes) a remote HTTP caller may not use.
+/// Only `Caller::Http { remote: true }` is restricted; the message names the
+/// CLI / a local browser as the way out.
+fn authorize(caller: Caller, cmd: &str, args: &Value) -> Result<()> {
+    if caller != (Caller::Http { remote: true }) {
+        return Ok(());
+    }
+    // A key counts as "present" unless absent or JSON null (the UI sends
+    // `output` only when the user typed one).
+    let has = |key: &str| args.get(key).is_some_and(|v| !v.is_null());
+    let denied = match cmd {
+        // Scheduler jobs are shell command lines.
+        "sched.add" => Some("defines a shell command"),
+        "sched.set" if has("command") => Some("defines a shell command"),
+        // Reads an arbitrary local file into the store / sandbox.
+        "store.put" | "store.put-file" if has("path") => Some("reads an arbitrary local path"),
+        "store.sandbox.import" => Some("reads an arbitrary local path"),
+        "store.folder-share" => Some("publishes an arbitrary local directory"),
+        // Writes to a caller-chosen local path.
+        "store.get" | "store.get-file" | "store.fetch-share" | "store.sandbox.export"
+            if has("output") =>
+        {
+            Some("writes to an arbitrary local path")
+        }
+        // Directory listing of the daemon host's filesystem.
+        "store.browse-dirs" if has("path") => Some("lists an arbitrary local directory"),
+        "store.folder-sync" if has("dir") => Some("writes to an arbitrary local directory"),
+        "config.set"
+            if args
+                .get("path")
+                .and_then(Value::as_str)
+                .is_some_and(remote_config_denied) =>
+        {
+            Some("changes a setting that grants code execution or redirects trust or paths")
+        }
+        _ => None,
+    };
+    match denied {
+        Some(why) => bail!(
+            "`{cmd}` is not available from a remote dashboard session ({why}); \
+             use the mistl CLI or open the dashboard on this machine"
+        ),
+        None => Ok(()),
+    }
+}
+
+/// Route a request from daemon-internal code (tray, the dashboard's own
+/// upload/download handlers); unrestricted. IPC and HTTP use [`dispatch_as`].
 pub async fn dispatch(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Value> {
+    dispatch_as(Caller::Internal, cmd, args, state).await
+}
+
+/// Route a request, enforcing the per-caller restrictions of [`authorize`].
+pub async fn dispatch_as(
+    caller: Caller,
+    cmd: &str,
+    args: Value,
+    state: &Arc<AppState>,
+) -> Result<Value> {
+    authorize(caller, cmd, &args)?;
+    // An explicit `update.apply` skips the default-repo check inside the
+    // updater, so a remote session must not be able to apply from a
+    // non-default `update.repo`.
+    if caller == (Caller::Http { remote: true }) && cmd == "update.apply" {
+        let repo = state.config().update.repo;
+        let repo = repo.trim();
+        if !repo.is_empty() && !repo.eq_ignore_ascii_case(crate::update::REPO_DEFAULT) {
+            bail!(
+                "`update.apply` is not available from a remote dashboard session (update.repo is not the default); use the mistl CLI"
+            );
+        }
+    }
     if !state.network.permitted() && !crate::network::offline_command_allowed(cmd) {
         state.network.require_online()?;
     }
@@ -493,6 +648,12 @@ pub async fn dispatch(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<V
             let updated = config::set_by_path(&state.config(), path, value)?;
             updated.save()?;
             state.set_config(updated);
+            if path == "network.membership_allowlist" {
+                state.config().network.apply();
+            }
+            if path == "ai.trusted_providers" {
+                crate::ai::apply_trusted_providers(state);
+            }
             // These paths feed the running AI provider (see
             // `ai::build_provider`); reloading it live -- instead of making
             // the user stop/start providing, let alone restart the daemon
@@ -530,5 +691,146 @@ pub async fn dispatch(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<V
             Some("install") | Some("autostart") => crate::install::handle(cmd, args, state).await,
             _ => bail!("unknown command: {cmd}"),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const REMOTE: Caller = Caller::Http { remote: true };
+    const LOCAL: Caller = Caller::Http { remote: false };
+    const MSG: &str = "not available from a remote dashboard session";
+
+    #[test]
+    fn remote_http_denies_dangerous_config_keys() {
+        for path in [
+            "tunnel.stdio_enabled",
+            "tunnel.stdio_command",
+            "tunnel.auto_accept",
+            "tunnel.allow_peers",
+            "update.repo",
+            "update.auto_check",
+            "storage.blocks_dir",
+            "storage.export_dir",
+            "scheduler.enabled",
+            "ui.listen",
+            "ai.providers",
+            "ai.upstream_url",
+            "stream.rtsp_url",
+            "foo.some_dir",
+            "foo.bind_listen",
+        ] {
+            let args = json!({"path": path, "value": null});
+            let err = authorize(REMOTE, "config.set", &args)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(MSG), "{path}: {err}");
+        }
+        for path in [
+            "ai.default_preset_id",
+            "bot.pipelines",
+            "tunnel.room_id",
+            "identity.display_name",
+        ] {
+            authorize(REMOTE, "config.set", &json!({"path": path, "value": 1}))
+                .unwrap_or_else(|e| panic!("{path}: {e}"));
+        }
+    }
+
+    #[test]
+    fn whole_section_config_set_is_rejected_by_set_by_path() {
+        // No `section.field` dot -> invalid, so a whole-section set cannot
+        // smuggle stdio keys past the per-key denylist.
+        let cfg = Config::default();
+        assert!(config::set_by_path(&cfg, "tunnel", json!({"stdio_enabled": true})).is_err());
+    }
+
+    #[test]
+    fn peer_locality() {
+        let ip = |s: &str| s.parse::<std::net::IpAddr>().unwrap();
+        for local in ["127.0.0.1", "127.9.9.9", "::1", "::ffff:127.0.0.1"] {
+            assert!(is_local_peer(ip(local)), "{local}");
+            assert_eq!(Caller::http_from(ip(local)), LOCAL);
+        }
+        for remote in ["192.168.1.5", "10.0.0.2", "::ffff:192.168.1.5", "fe80::1"] {
+            assert!(!is_local_peer(ip(remote)), "{remote}");
+            assert_eq!(Caller::http_from(ip(remote)), REMOTE);
+        }
+    }
+
+    #[test]
+    fn remote_http_denies_command_and_path_shapes() {
+        let denied = [
+            (
+                "sched.add",
+                json!({"name":"x","schedule":"@daily","command":"id"}),
+            ),
+            ("sched.set", json!({"id":"a","command":"id"})),
+            ("store.put", json!({"path":"/etc/passwd"})),
+            ("store.put-file", json!({"path":"/x","passphrase":"p"})),
+            ("store.get", json!({"id":"c","output":"/tmp/x"})),
+            (
+                "store.get-file",
+                json!({"cid":"c","passphrase":"p","output":"/x"}),
+            ),
+            ("store.fetch-share", json!({"url":"u","output":"/x"})),
+            ("store.sandbox.export", json!({"path":"a","output":"/x"})),
+            ("store.sandbox.import", json!({"path":"/x"})),
+            ("store.folder-share", json!({"path":"/","passphrase":"p"})),
+            ("store.folder-sync", json!({"url":"u","dir":"/x"})),
+            ("store.browse-dirs", json!({"path":"/"})),
+        ];
+        for (cmd, args) in denied {
+            let err = authorize(REMOTE, cmd, &args).unwrap_err().to_string();
+            assert!(err.contains(MSG), "{cmd}: {err}");
+        }
+    }
+
+    #[test]
+    fn remote_http_allows_dashboard_shapes() {
+        let allowed = [
+            ("sched.set", json!({"id":"a","enabled":false})),
+            ("sched.run", json!({"id":"a"})),
+            ("store.get", json!({"id":"c"})),
+            ("store.get", json!({"id":"c","output":null})),
+            ("store.put-file", json!({"sandbox":"a","passphrase":"p"})),
+            (
+                "store.get-file",
+                json!({"cid":"c","passphrase":"p","to_sandbox":true}),
+            ),
+            ("store.sandbox.export", json!({"path":"a"})),
+            ("store.folder-sync", json!({"url":"u"})),
+            ("config.show", json!({})),
+        ];
+        for (cmd, args) in allowed {
+            authorize(REMOTE, cmd, &args).unwrap_or_else(|e| panic!("{cmd}: {e}"));
+        }
+    }
+
+    #[test]
+    fn loopback_http_ipc_and_internal_are_unrestricted() {
+        for caller in [LOCAL, Caller::Ipc, Caller::Internal] {
+            let stdio = json!({"path":"tunnel.stdio_command","value":["sh"]});
+            authorize(caller, "config.set", &stdio).unwrap();
+            authorize(caller, "sched.add", &json!({"command":"id"})).unwrap();
+            authorize(caller, "store.put", &json!({"path":"/x"})).unwrap();
+            authorize(caller, "store.get", &json!({"id":"c","output":"/x"})).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_as_remote_http_rejects_before_running() {
+        let state = AppState::for_test();
+        let err = dispatch_as(
+            REMOTE,
+            "sched.add",
+            json!({"name":"x","schedule":"@daily","command":"id"}),
+            &state,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains(MSG), "{err}");
     }
 }

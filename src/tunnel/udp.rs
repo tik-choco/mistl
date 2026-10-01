@@ -47,11 +47,16 @@ struct UdpConn {
     peer_id: String,
     metrics: ForwardPeerRuntime,
     client_addr: Option<std::net::SocketAddr>,
+    /// DID this session was approved for (serve side, DID-verified peers
+    /// only). Payloads whose sender no longer maps to it are dropped; see
+    /// `auth::binding_holds`.
+    did: Option<String>,
 }
 
 /// A serve-side session whose authorization is still in flight.
 struct PendingUdp {
     peer_id: String,
+    did: Option<String>,
     queued: Vec<Vec<u8>>,
 }
 

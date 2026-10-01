@@ -96,11 +96,10 @@ fn load_jobs_unlocked(data_dir: &Path) -> Result<Vec<Job>> {
 
 fn save_jobs_unlocked(data_dir: &Path, jobs: &[Job]) -> Result<()> {
     let path = jobs_table_path(data_dir);
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    }
     let text = serde_json::to_string_pretty(jobs)?;
-    std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))
+    // The table holds shell command lines: keep it private (0600, atomic).
+    crate::statefile::write_private(&path, text.as_bytes())
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 /// Read-modify-write under [`jobs_lock`]: `f` sees the current table and may
@@ -149,18 +148,14 @@ fn read_run_lines(path: &Path) -> Result<Vec<String>> {
 /// Overwrites `path` with `lines`, one per line: temp file in the same
 /// directory then rename over the target (atomic-ish on the same volume).
 fn write_run_lines(path: &Path, lines: &[String]) -> Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    }
     let mut body = String::new();
     for line in lines {
         body.push_str(line);
         body.push('\n');
     }
-    let tmp = path.with_extension("jsonl.tmp");
-    std::fs::write(&tmp, &body).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("renaming {} into {}", tmp.display(), path.display()))
+    // Run records include command output: private, atomic replacement.
+    crate::statefile::write_private(path, body.as_bytes())
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 /// Appends `record`, keeping only the [`RUN_LOG_CAP`] most-recent entries

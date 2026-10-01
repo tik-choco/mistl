@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, RwLock, oneshot};
 
 use super::controller::{Direction, ForwardSpec, Proto};
-use super::forward_store::PersistedForward;
+use super::forward_store::{ForwardOrigin, PersistedForward};
 use super::session::SessionContext;
 
 struct GraphAuthorizer {
@@ -232,6 +232,19 @@ impl GraphState {
         self.waiters.lock().await.clear();
     }
 
+    /// True when `target` names a graph-managed forward that was not
+    /// created by the local owner (or whose provenance is unknown, i.e. a
+    /// legacy entry -- see [`ForwardOrigin`]). Config-driven auto-approval
+    /// must not apply to these.
+    pub(crate) async fn is_remote_forward(&self, target: &str) -> bool {
+        self.saved
+            .read()
+            .await
+            .forwards
+            .iter()
+            .any(|f| f.target == target && f.origin != ForwardOrigin::Local)
+    }
+
     pub async fn forget_peer(&self, peer: &str) {
         self.remote.write().await.remove(peer);
         self.waiters.lock().await.retain(|_, (id, _)| id != peer);
@@ -239,10 +252,7 @@ impl GraphState {
 
     async fn persist(&self, next: &Saved) -> Result<()> {
         if let Some(path) = self.path.read().await.as_ref() {
-            tokio::fs::create_dir_all(path.parent().unwrap()).await?;
-            let temporary = path.with_extension("json.tmp");
-            tokio::fs::write(&temporary, serde_json::to_vec_pretty(next)?).await?;
-            tokio::fs::rename(&temporary, path).await?;
+            crate::statefile::write_private(path, &serde_json::to_vec_pretty(next)?)?;
         }
         *self.saved.write().await = next.clone();
         Ok(())
@@ -403,7 +413,13 @@ impl SessionContext {
                     "local port already configured"
                 );
                 self.controller.add_forward(spec.clone()).await?;
-                next.forwards.push(PersistedForward::from_spec(&spec));
+                let origin = if actor == owner {
+                    ForwardOrigin::Local
+                } else {
+                    ForwardOrigin::Remote
+                };
+                next.forwards
+                    .push(PersistedForward::from_spec(&spec).with_origin(origin));
                 if let Err(error) = graph.persist(&next).await {
                     let _ = self.controller.remove_forward(&spec.target).await;
                     return Err(error);
@@ -678,6 +694,119 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn forward_origin_tracks_who_created_it_and_legacy_entries_are_remote() {
+        let (ctx, dir) = context().await;
+        let graph = ctx.manager.graph();
+        graph.saved.write().await.policy.permissions.insert(
+            "editor".into(),
+            Permissions {
+                add_forwards: true,
+                ..Default::default()
+            },
+        );
+        let add = || Action::AddForward {
+            direction: "serve".into(),
+            proto: "tcp".into(),
+            addr: "127.0.0.1:8080".into(),
+            target: String::new(),
+        };
+        ctx.graph_apply("self", add()).await.unwrap();
+        ctx.graph_apply("editor", add()).await.unwrap();
+        let saved = graph.saved.read().await.forwards.clone();
+        assert_eq!(saved.len(), 2);
+        assert_eq!(saved[0].origin, ForwardOrigin::Local);
+        assert_eq!(saved[1].origin, ForwardOrigin::Remote);
+        assert!(!graph.is_remote_forward(&saved[0].target).await);
+        assert!(graph.is_remote_forward(&saved[1].target).await);
+        assert!(!graph.is_remote_forward("unknown").await);
+        // The marker survives the on-disk round trip.
+        let disk: Saved =
+            serde_json::from_slice(&tokio::fs::read(dir.join("graph.json")).await.unwrap())
+                .unwrap();
+        assert_eq!(disk.forwards[1].origin, ForwardOrigin::Remote);
+        // A pre-existing file without the field loads as remote (fail closed).
+        let legacy: Saved = serde_json::from_str(
+            r#"{"policy":{},"forwards":[{"direction":"serve","proto":"tcp","addr":"127.0.0.1:1","listen_port":-1,"target":"graph:x@o"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.forwards[0].origin, ForwardOrigin::Remote);
+        tokio::fs::remove_dir_all(dir).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn auto_accept_skips_remote_origin_forwards_but_not_local_ones() {
+        use super::super::auth::*;
+        use std::time::Duration;
+        let (ctx, dir) = context().await;
+        let graph = ctx.manager.graph();
+        graph.saved.write().await.forwards = vec![
+            PersistedForward::from_spec(&ForwardSpec {
+                direction: Direction::Serve,
+                proto: Proto::Tcp,
+                addr: "127.0.0.1:1".into(),
+                listen_port: -1,
+                target: "graph:local@self".into(),
+            }),
+            PersistedForward::from_spec(&ForwardSpec {
+                direction: Direction::Serve,
+                proto: Proto::Tcp,
+                addr: "127.0.0.1:2".into(),
+                listen_port: -1,
+                target: "graph:remote@self".into(),
+            })
+            .with_origin(ForwardOrigin::Remote),
+        ];
+        let config = crate::config::TunnelConfig {
+            auto_accept: true,
+            ..Default::default()
+        };
+        let authorizer = super::super::session::build_authorizer(
+            &config,
+            ctx.trust_store.clone(),
+            ctx.pending_auth.clone(),
+            ctx.audit_log.clone(),
+            graph.clone(),
+        );
+        // A DID-verified peer: unverified peers are never auto-approved.
+        let identity = crate::identity::for_test();
+        let (peer_node, peer_did) = (identity.node_id(), identity.did().to_string());
+        let request = |key: &str| AuthRequest {
+            peer_id: peer_node.clone(),
+            forward_key: key.into(),
+            target_addr: "127.0.0.1:1".into(),
+            proto: "tcp".into(),
+            did: Some(peer_did.clone()),
+        };
+        assert!(
+            authorizer
+                .authorize(&request("graph:local@self"))
+                .await
+                .is_allowed()
+        );
+        // Falls through to the human queue: never resolves on its own.
+        let remote = request("graph:remote@self");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), authorizer.authorize(&remote))
+                .await
+                .is_err()
+        );
+        assert!(!ctx.pending_auth.list().await.is_empty());
+        // A remembered decision still wins over everything.
+        ctx.trust_store
+            .remember(
+                TrustKey {
+                    peer_id: peer_did.clone(),
+                    forward_key: "graph:remote@self".into(),
+                },
+                TrustDecision::Allow,
+            )
+            .await
+            .unwrap();
+        assert!(authorizer.authorize(&remote).await.is_allowed());
+        tokio::fs::remove_dir_all(dir).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn write_failure_does_not_apply_policy_or_leave_forward_running() {
         let (ctx, dir) = context().await;
         tokio::fs::create_dir_all(&dir).await.unwrap();
@@ -751,6 +880,7 @@ pub(crate) mod tests {
                     forward_key: "service".into(),
                     target_addr: "localhost:80".into(),
                     proto: "tcp".into(),
+                    did: None,
                 })
                 .await
         });

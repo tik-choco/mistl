@@ -135,6 +135,144 @@ pub struct SharedFolder {
     /// rather than kept in a separate table.
     #[serde(default)]
     path_index: PathIndex,
+    /// Requesters (DIDs, or 16-hex node ids derived from a DID) that receive
+    /// the folder key automatically. Everyone else waits for owner approval
+    /// (see [`PendingQueue`]). Absent in tables written by older builds, in
+    /// which case nobody is pre-approved.
+    #[serde(default)]
+    pub allowed_requesters: Vec<String>,
+}
+
+/// Upper bound on a folder's allowlist (keeps the table small even if the
+/// owner approves-and-remembers indefinitely).
+const MAX_ALLOWED_REQUESTERS: usize = 256;
+
+/// Node id (first 16 hex of `sha256(did)`) -- same derivation as
+/// `identity::Identity::node_id`.
+fn node_id_of_did(did: &str) -> String {
+    use sha2::Digest;
+    Sha256::digest(did.as_bytes())
+        .iter()
+        .take(8)
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+impl SharedFolder {
+    /// True if `did` (a signature-verified requester DID) is allowlisted,
+    /// either directly or through its derived node id.
+    fn is_allowed(&self, did: &str) -> bool {
+        let node_id = node_id_of_did(did);
+        self.allowed_requesters
+            .iter()
+            .any(|a| a == did || *a == node_id)
+    }
+}
+
+// -- pending access requests ---------------------------------------------
+
+/// Total pending requests kept across all folders.
+const PENDING_MAX_TOTAL: usize = 64;
+/// Pending requests (distinct folders) per requester DID.
+const PENDING_MAX_PER_PEER: usize = 4;
+/// A pending request expires this long after the requester's last resend.
+/// tc-storage requesters resend the same request every 5s for up to 5
+/// minutes, so silence for this long means the requester gave up.
+const PENDING_TTL: Duration = Duration::from_secs(120);
+
+/// One access request waiting for owner approval. Keyed by
+/// (requester DID, folder id): resends and retries refresh the same entry.
+/// `requester_did` is the envelope's `from`, which `verify_envelope` has
+/// proven the sender holds the private key for (Ed25519 signature over the
+/// whole envelope, checked before it reaches this module) -- never an id
+/// claimed inside the body.
+#[derive(Debug, Clone)]
+struct PendingAccess {
+    id: String,
+    folder_id: String,
+    folder_name: String,
+    requester_did: String,
+    request_id: String,
+    access_public_key: String,
+    first_seen: String,
+    last_seen: std::time::Instant,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Offer {
+    New,
+    Refreshed,
+    Rejected,
+}
+
+#[derive(Default)]
+struct PendingQueue {
+    entries: Vec<PendingAccess>,
+}
+
+/// Stable short id for a (requester, folder) pair, used by approve/deny.
+fn pending_id(requester_did: &str, folder_id: &str) -> String {
+    use sha2::Digest;
+    let mut hasher = Sha256::new();
+    hasher.update(requester_did.as_bytes());
+    hasher.update([0]);
+    hasher.update(folder_id.as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .take(6)
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+impl PendingQueue {
+    fn prune(&mut self, now: std::time::Instant) {
+        self.entries
+            .retain(|e| now.saturating_duration_since(e.last_seen) < PENDING_TTL);
+    }
+
+    /// Insert or refresh a request. A resend/retry from the same requester for
+    /// the same folder replaces request id + key (the requester waits on its
+    /// latest request) and never grows the queue. New entries are rejected
+    /// (nothing is evicted) when a cap is hit.
+    fn offer(&mut self, req: PendingAccess, now: std::time::Instant) -> Offer {
+        self.prune(now);
+        if let Some(existing) = self.entries.iter_mut().find(|e| e.id == req.id) {
+            existing.request_id = req.request_id;
+            existing.access_public_key = req.access_public_key;
+            existing.folder_name = req.folder_name;
+            existing.last_seen = now;
+            return Offer::Refreshed;
+        }
+        if self.entries.len() >= PENDING_MAX_TOTAL {
+            return Offer::Rejected;
+        }
+        let from_peer = self
+            .entries
+            .iter()
+            .filter(|e| e.requester_did == req.requester_did)
+            .count();
+        if from_peer >= PENDING_MAX_PER_PEER {
+            return Offer::Rejected;
+        }
+        self.entries.push(req);
+        Offer::New
+    }
+
+    fn get(&self, id: &str) -> Option<PendingAccess> {
+        self.entries.iter().find(|e| e.id == id).cloned()
+    }
+
+    fn remove(&mut self, id: &str) {
+        self.entries.retain(|e| e.id != id);
+    }
+}
+
+static PENDING: std::sync::LazyLock<std::sync::Mutex<PendingQueue>> =
+    std::sync::LazyLock::new(Default::default);
+
+fn pending_lock() -> std::sync::MutexGuard<'static, PendingQueue> {
+    PENDING.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// See [`SharedFolder::path_index`].
@@ -278,6 +416,7 @@ pub async fn share_folder(
         )],
         files: Vec::new(),
         path_index,
+        allowed_requesters: Vec::new(),
     };
 
     progress(&format!("scanning {}…", root_path.display()));
@@ -362,6 +501,7 @@ pub async fn unshare(folder_id: &str, store: &Store, _state: &Arc<AppState>) -> 
         write_table_file(store, &table).await?;
         removed.room_id
     };
+    pending_lock().entries.retain(|e| e.folder_id != folder_id);
     let _ = crate::net::leave_room(&room_id).await;
     Ok(true)
 }
@@ -423,7 +563,8 @@ async fn run_background(state: Arc<AppState>) -> Result<()> {
             received = rx.recv() => {
                 match received {
                     Ok(envelope) => {
-                        if let Err(err) = dispatch_envelope(&store, &identity, &mut last_announced, envelope).await {
+                        let auto_grant = state.config().storage.folder_auto_grant;
+                        if let Err(err) = dispatch_envelope(&store, &identity, &mut last_announced, envelope, auto_grant).await {
                             warn!(%err, "folder-share (owner): error handling envelope");
                         }
                     }
@@ -486,6 +627,38 @@ fn hello_throttle_allows(peer: &str) -> bool {
         .unwrap_or(true)
 }
 
+/// Minimum gap between two processed access requests from one requester.
+const ACCESS_PEER_INTERVAL: Duration = Duration::from_secs(2);
+/// Concurrent in-flight access-request handlers (grant sends).
+const ACCESS_MAX_INFLIGHT: usize = 8;
+
+static ACCESS_SLOTS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(ACCESS_MAX_INFLIGHT)));
+
+static ACCESS_THROTTLE: std::sync::LazyLock<std::sync::Mutex<HashMap<String, std::time::Instant>>> =
+    std::sync::LazyLock::new(Default::default);
+
+fn access_throttle_allows(peer: &str) -> bool {
+    let Ok(mut map) = ACCESS_THROTTLE.lock() else {
+        return true;
+    };
+    let now = std::time::Instant::now();
+    if map.len() >= HELLO_MAX_TRACKED {
+        map.retain(|_, t| now.saturating_duration_since(*t) < ACCESS_PEER_INTERVAL);
+    }
+    if map
+        .get(peer)
+        .is_some_and(|t| now.saturating_duration_since(*t) < ACCESS_PEER_INTERVAL)
+    {
+        return false;
+    }
+    if map.len() >= HELLO_MAX_TRACKED {
+        return false;
+    }
+    map.insert(peer.to_string(), now);
+    true
+}
+
 /// Handles one envelope relevant to the owner role: `folder-access-request`
 /// (serve a grant) and `hello` (announce every share in that peer's room
 /// immediately, matching a fresh peer's expectation of prompt state without
@@ -496,17 +669,37 @@ fn hello_throttle_allows(peer: &str) -> bool {
 /// tick.
 async fn dispatch_envelope(
     store: &Store,
-    identity: &crate::identity::Identity,
+    identity: &Arc<crate::identity::Identity>,
     last_announced: &mut HashMap<String, (String, std::time::Instant)>,
     envelope: super::folder_share::ShareEnvelope,
+    auto_grant: bool,
 ) -> Result<()> {
     match envelope.type_.as_str() {
         "folder-access-request" => {
+            // Cheap per-requester gate before touching the disk; requesters
+            // resend every 5s, so this never starves a legitimate one.
+            if !access_throttle_allows(&envelope.from) {
+                return Ok(());
+            }
             let entries = {
                 let _guard = TABLE_LOCK.lock().await;
                 read_table_file(store).await?
             };
-            handle_access_request(identity, &entries, &envelope).await
+            // The grant broadcast can retry for ~10s; run it off the loop so
+            // it can't make the envelope bus lag, with bounded concurrency.
+            let Ok(permit) = ACCESS_SLOTS.clone().try_acquire_owned() else {
+                return Ok(());
+            };
+            let identity = identity.clone();
+            tokio::spawn(async move {
+                let _permit = permit;
+                if let Err(err) =
+                    handle_access_request(&identity, &entries, &envelope, auto_grant).await
+                {
+                    warn!(%err, "folder-share (owner): error answering access request");
+                }
+            });
+            Ok(())
         }
         "hello" => {
             if !hello_throttle_allows(&envelope.from) {
@@ -525,44 +718,114 @@ async fn dispatch_envelope(
     }
 }
 
-/// Mirrors `appAccessActions.ts`'s `handleFolderAccessRequest` +
-/// `approveFolderAccess`: validate the request, then auto-approve (mistl's
-/// shares are always `access_grant_mode: "shared"`, so no human approval
-/// step exists -- the `folderKeyHash` match already proves the requester
-/// derived the same key material some other way, e.g. from the share link).
+/// Mirrors `appAccessActions.ts`'s `handleFolderAccessRequest`: validate the
+/// request, then either answer it (requester allowlisted, or the legacy
+/// `storage.folder_auto_grant` opt-out is on) or park it in [`PENDING`] until
+/// the owner approves it (`store.folder-access.approve`).
+///
+/// `folderKeyHash` only proves the requester holds the share link (the hash is
+/// in the link), which is why it is not sufficient authorization by itself.
+/// The requester identity is `envelope.from`: the envelope arrives through
+/// `folder_share::envelope_bus`, which drops anything whose Ed25519 signature
+/// does not verify against the `did:key` in `from`, so it is a
+/// cryptographically proven DID, not a JSON-claimed id.
 async fn handle_access_request(
     identity: &crate::identity::Identity,
     entries: &[SharedFolder],
     envelope: &super::folder_share::ShareEnvelope,
+    auto_grant: bool,
 ) -> Result<()> {
-    if let Some(target) = envelope.target_node_id.as_deref()
-        && target != identity.did()
-    {
+    let Some((entry, request_id, access_public_key)) =
+        validate_access_request(identity.did(), entries, envelope)
+    else {
         return Ok(());
+    };
+
+    if auto_grant || entry.is_allowed(&envelope.from) {
+        return send_grant(
+            identity,
+            entry,
+            request_id,
+            &envelope.from,
+            access_public_key,
+        )
+        .await;
+    }
+
+    let offer = pending_lock().offer(
+        PendingAccess {
+            id: pending_id(&envelope.from, &entry.folder_id),
+            folder_id: entry.folder_id.clone(),
+            folder_name: entry.folder_name.clone(),
+            requester_did: envelope.from.clone(),
+            request_id: request_id.to_string(),
+            access_public_key: access_public_key.to_string(),
+            first_seen: now_rfc3339(),
+            last_seen: std::time::Instant::now(),
+        },
+        std::time::Instant::now(),
+    );
+    match offer {
+        Offer::New => tracing::info!(
+            folder_id = %entry.folder_id,
+            requester = %envelope.from,
+            "folder-share (owner): access request awaiting approval"
+        ),
+        Offer::Refreshed => {}
+        Offer::Rejected => tracing::debug!(
+            requester = %envelope.from,
+            "folder-share (owner): pending access queue full, request dropped"
+        ),
+    }
+    Ok(())
+}
+
+/// Structural checks shared by every access request: addressed to us (or
+/// broadcast), well-formed sender, all required fields, a folder we share, and
+/// a matching `folderKeyHash`. Returns the folder plus request id and
+/// requester ephemeral key.
+fn validate_access_request<'a>(
+    own_did: &str,
+    entries: &'a [SharedFolder],
+    envelope: &'a super::folder_share::ShareEnvelope,
+) -> Option<(&'a SharedFolder, &'a str, &'a str)> {
+    if let Some(target) = envelope.target_node_id.as_deref()
+        && target != own_did
+    {
+        return None;
     }
     if !super::folder_share::is_ed25519_did_key(&envelope.from) {
-        return Ok(());
+        return None;
     }
     let (Some(folder_id), Some(request_id), Some(access_public_key)) = (
         envelope.folder_id.as_deref(),
         envelope.request_id.as_deref(),
         envelope.access_public_key.as_deref(),
     ) else {
-        return Ok(());
+        return None;
     };
-    let Some(entry) = entries.iter().find(|e| e.folder_id == folder_id) else {
-        return Ok(());
-    };
+    let entry = entries.iter().find(|e| e.folder_id == folder_id)?;
     let hash = envelope.folder_key_hash.as_deref().unwrap_or("");
     if !super::folder_share::matches_folder_key_hash(folder_id, &entry.passphrase, hash) {
-        return Ok(());
+        return None;
     }
+    Some((entry, request_id, access_public_key))
+}
 
+/// Build the signed `folder-access-grant` reply (wire format unchanged from
+/// the pre-approval behaviour).
+fn build_grant_envelope(
+    identity: &crate::identity::Identity,
+    entry: &SharedFolder,
+    request_id: &str,
+    requester_did: &str,
+    access_public_key: &str,
+) -> Result<super::folder_share::ShareEnvelope> {
     let grant = build_access_grant(
         &entry.passphrase,
-        folder_id,
+        &entry.folder_id,
         request_id,
-        &envelope.from,
+        requester_did,
         access_public_key,
     )?;
     let response = super::folder_share::ShareEnvelope {
@@ -574,7 +837,7 @@ async fn handle_access_request(
         folder_id: Some(entry.folder_id.clone()),
         folder_name: Some(entry.folder_name.clone()),
         cid: entry.last_cid.clone(),
-        target_node_id: Some(envelope.from.clone()),
+        target_node_id: Some(requester_did.to_string()),
         request_id: Some(request_id.to_string()),
         access_grant_proof: Some(grant.proof),
         access_grant_public_key: Some(grant.public_key),
@@ -582,9 +845,203 @@ async fn handle_access_request(
         access_grant_cipher_text: Some(grant.cipher_text),
         ..super::folder_share::ShareEnvelope::default()
     };
-    let signed = super::folder_share::sign_envelope(response, identity)?;
+    super::folder_share::sign_envelope(response, identity)
+}
+
+async fn send_grant(
+    identity: &crate::identity::Identity,
+    entry: &SharedFolder,
+    request_id: &str,
+    requester_did: &str,
+    access_public_key: &str,
+) -> Result<()> {
+    let signed = build_grant_envelope(
+        identity,
+        entry,
+        request_id,
+        requester_did,
+        access_public_key,
+    )?;
     let bytes = serde_json::to_vec(&signed).context("serializing folder-access-grant envelope")?;
     broadcast_retrying(&entry.room_id, bytes, Duration::from_secs(10)).await
+}
+
+// -- owner approval commands ---------------------------------------------
+
+/// `store.folder-access.*` commands: `ls`, `approve {id, remember?}`,
+/// `deny {id}`, `allow {folder_id, requester}`, `revoke {folder_id,
+/// requester}`.
+pub async fn handle_access_command(
+    cmd: &str,
+    args: &serde_json::Value,
+    store: &Store,
+    state: &Arc<AppState>,
+) -> Result<serde_json::Value> {
+    use serde_json::json;
+    let str_arg = |name: &str| -> Result<&str> {
+        args.get(name)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .with_context(|| format!("missing `{name}`"))
+    };
+    match cmd {
+        "store.folder-access.ls" => {
+            let pending: Vec<serde_json::Value> = {
+                let mut queue = pending_lock();
+                queue.prune(std::time::Instant::now());
+                queue
+                    .entries
+                    .iter()
+                    .map(|e| {
+                        json!({
+                            "id": e.id,
+                            "folder_id": e.folder_id,
+                            "folder_name": e.folder_name,
+                            "requester_did": e.requester_did,
+                            "requester_node_id": node_id_of_did(&e.requester_did),
+                            "first_seen": e.first_seen,
+                            "last_seen_secs": e.last_seen.elapsed().as_secs(),
+                        })
+                    })
+                    .collect()
+            };
+            let allowed: Vec<serde_json::Value> = {
+                let _guard = TABLE_LOCK.lock().await;
+                read_table_file(store)
+                    .await?
+                    .into_iter()
+                    .map(|e| {
+                        json!({
+                            "folder_id": e.folder_id,
+                            "folder_name": e.folder_name,
+                            "allowed_requesters": e.allowed_requesters,
+                        })
+                    })
+                    .collect()
+            };
+            Ok(json!({
+                "pending": pending,
+                "allowlists": allowed,
+                "auto_grant": state.config().storage.folder_auto_grant,
+            }))
+        }
+        "store.folder-access.approve" => {
+            let id = str_arg("id")?;
+            let remember = args
+                .get("remember")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let req = pending_lock()
+                .get(id)
+                .context("no such pending request (expired or already handled)")?;
+            let identity = crate::identity::current(state).await?;
+            let entry = {
+                let _guard = TABLE_LOCK.lock().await;
+                let mut table = read_table_file(store).await?;
+                let Some(entry) = table.iter_mut().find(|e| e.folder_id == req.folder_id) else {
+                    pending_lock().remove(id);
+                    bail!("folder is no longer shared");
+                };
+                if remember
+                    && !entry.is_allowed(&req.requester_did)
+                    && entry.allowed_requesters.len() < MAX_ALLOWED_REQUESTERS
+                {
+                    entry.allowed_requesters.push(req.requester_did.clone());
+                    let snapshot = entry.clone();
+                    write_table_file(store, &table).await?;
+                    snapshot
+                } else {
+                    entry.clone()
+                }
+            };
+            send_grant(
+                &identity,
+                &entry,
+                &req.request_id,
+                &req.requester_did,
+                &req.access_public_key,
+            )
+            .await?;
+            pending_lock().remove(id);
+            Ok(json!({ "approved": true, "remembered": remember }))
+        }
+        "store.folder-access.deny" => {
+            let id = str_arg("id")?;
+            let Some(req) = pending_lock().get(id) else {
+                return Ok(json!({ "denied": false }));
+            };
+            pending_lock().remove(id);
+            // Best effort: lets a waiting tc-storage requester fail fast
+            // (it handles `folder-access-denied` by request id).
+            let room = {
+                let _guard = TABLE_LOCK.lock().await;
+                read_table_file(store)
+                    .await?
+                    .into_iter()
+                    .find(|e| e.folder_id == req.folder_id)
+                    .map(|e| e.room_id)
+            };
+            if let Some(room) = room {
+                let identity = crate::identity::current(state).await?;
+                let envelope = super::folder_share::ShareEnvelope {
+                    type_: "folder-access-denied".to_string(),
+                    from: identity.did().to_string(),
+                    room_id: room.clone(),
+                    sent_at: now_rfc3339_nanos(),
+                    clock: chrono::Utc::now().timestamp_millis(),
+                    folder_id: Some(req.folder_id.clone()),
+                    target_node_id: Some(req.requester_did.clone()),
+                    request_id: Some(req.request_id.clone()),
+                    ..super::folder_share::ShareEnvelope::default()
+                };
+                if let Ok(signed) = super::folder_share::sign_envelope(envelope, &identity)
+                    && let Ok(bytes) = serde_json::to_vec(&signed)
+                {
+                    let _ = broadcast_retrying(&room, bytes, Duration::from_secs(5)).await;
+                }
+            }
+            Ok(json!({ "denied": true }))
+        }
+        "store.folder-access.allow" | "store.folder-access.revoke" => {
+            let folder_id = str_arg("folder_id")?;
+            let requester = str_arg("requester")?;
+            let adding = cmd == "store.folder-access.allow";
+            let is_node_id =
+                requester.len() == 16 && requester.chars().all(|c| c.is_ascii_hexdigit());
+            if adding && !is_node_id && !super::folder_share::is_ed25519_did_key(requester) {
+                bail!("`requester` must be an Ed25519 did:key or a 16-hex node id");
+            }
+            let _guard = TABLE_LOCK.lock().await;
+            let mut table = read_table_file(store).await?;
+            let entry = table
+                .iter_mut()
+                .find(|e| e.folder_id == folder_id)
+                .context("no such shared folder")?;
+            if adding {
+                if !entry.allowed_requesters.iter().any(|a| a == requester) {
+                    if entry.allowed_requesters.len() >= MAX_ALLOWED_REQUESTERS {
+                        bail!("allowlist is full");
+                    }
+                    entry.allowed_requesters.push(requester.to_string());
+                }
+            } else {
+                // Revoke by DID or node id: drop every entry naming the same
+                // identity.
+                let target_node = if is_node_id {
+                    requester.to_string()
+                } else {
+                    node_id_of_did(requester)
+                };
+                entry.allowed_requesters.retain(|a| {
+                    a != requester && *a != target_node && node_id_of_did(a) != target_node
+                });
+            }
+            write_table_file(store, &table).await?;
+            Ok(json!({ "ok": true }))
+        }
+        _ => bail!("unknown store command: {cmd}"),
+    }
 }
 
 /// The pieces of a `folder-access-grant` envelope this module computes,
@@ -1314,6 +1771,7 @@ mod tests {
             capacity_bytes: 10 * 1024 * 1024 * 1024,
             room_ids: Vec::new(),
             export_dir: None,
+            folder_auto_grant: false,
         };
         Store::open(&cfg, dir.to_path_buf())
             .await
@@ -1347,6 +1805,7 @@ mod tests {
             )],
             files: Vec::new(),
             path_index,
+            allowed_requesters: Vec::new(),
         }
     }
 
@@ -1595,5 +2054,211 @@ mod tests {
             ),
         );
         assert!(!should_skip_folder_state(&last_announced, &folder_id, &sig));
+    }
+
+    // -- owner approval ---------------------------------------------------
+
+    fn pending(did: &str, folder: &str, request_id: &str) -> PendingAccess {
+        PendingAccess {
+            id: pending_id(did, folder),
+            folder_id: folder.to_string(),
+            folder_name: "F".to_string(),
+            requester_did: did.to_string(),
+            request_id: request_id.to_string(),
+            access_public_key: "k".to_string(),
+            first_seen: now_rfc3339(),
+            last_seen: std::time::Instant::now(),
+        }
+    }
+
+    fn request_envelope(
+        requester: &crate::identity::Identity,
+        owner_did: &str,
+        entry: &SharedFolder,
+        request_id: &str,
+        key: &super::super::folder_share::AccessRequestKey,
+    ) -> super::super::folder_share::ShareEnvelope {
+        let env = super::super::folder_share::ShareEnvelope {
+            type_: "folder-access-request".to_string(),
+            from: requester.did().to_string(),
+            room_id: entry.room_id.clone(),
+            sent_at: now_rfc3339_nanos(),
+            folder_id: Some(entry.folder_id.clone()),
+            folder_key_hash: Some(entry.folder_key_hash.clone()),
+            target_node_id: Some(owner_did.to_string()),
+            request_id: Some(request_id.to_string()),
+            access_public_key: Some(key.public_b64url.clone()),
+            ..Default::default()
+        };
+        super::super::folder_share::sign_envelope(env, requester).unwrap()
+    }
+
+    #[test]
+    fn pending_queue_dedupes_per_requester_and_folder() {
+        let mut q = PendingQueue::default();
+        let now = std::time::Instant::now();
+        assert_eq!(q.offer(pending("did-a", "f1", "r1"), now), Offer::New);
+        assert_eq!(q.offer(pending("did-a", "f1", "r2"), now), Offer::Refreshed);
+        assert_eq!(q.entries.len(), 1);
+        assert_eq!(q.entries[0].request_id, "r2", "retry replaces request id");
+        assert_eq!(q.offer(pending("did-a", "f2", "r3"), now), Offer::New);
+        assert_eq!(q.entries.len(), 2);
+    }
+
+    #[test]
+    fn pending_queue_caps_per_peer_and_total() {
+        let mut q = PendingQueue::default();
+        let now = std::time::Instant::now();
+        for i in 0..PENDING_MAX_PER_PEER {
+            assert_eq!(
+                q.offer(pending("did-a", &format!("f{i}"), "r"), now),
+                Offer::New
+            );
+        }
+        assert_eq!(q.offer(pending("did-a", "fx", "r"), now), Offer::Rejected);
+        // Refreshing an existing entry is still allowed at the cap.
+        assert_eq!(q.offer(pending("did-a", "f0", "r9"), now), Offer::Refreshed);
+
+        let mut q = PendingQueue::default();
+        for i in 0..PENDING_MAX_TOTAL {
+            assert_eq!(
+                q.offer(pending(&format!("did-{i}"), "f", "r"), now),
+                Offer::New
+            );
+        }
+        assert_eq!(q.offer(pending("did-new", "f", "r"), now), Offer::Rejected);
+        assert_eq!(q.entries.len(), PENDING_MAX_TOTAL);
+    }
+
+    #[test]
+    fn pending_queue_expires_after_ttl() {
+        let mut q = PendingQueue::default();
+        let t0 = std::time::Instant::now();
+        q.offer(pending("did-a", "f", "r"), t0);
+        // A resend inside the TTL keeps it alive.
+        let t1 = t0 + PENDING_TTL - Duration::from_secs(1);
+        assert_eq!(q.offer(pending("did-a", "f", "r"), t1), Offer::Refreshed);
+        // Silence past the TTL drops it (and frees the slot).
+        q.prune(t1 + PENDING_TTL + Duration::from_secs(1));
+        assert!(q.entries.is_empty());
+    }
+
+    #[test]
+    fn allowlist_matches_did_or_node_id_only() {
+        let dir = TempDir::new("allow");
+        let mut entry = test_entry(dir.path().to_path_buf(), "pw");
+        let requester = crate::identity::for_test();
+        let other = crate::identity::for_test();
+        assert!(!entry.is_allowed(requester.did()), "default deny");
+        entry.allowed_requesters.push(requester.did().to_string());
+        assert!(entry.is_allowed(requester.did()));
+        assert!(!entry.is_allowed(other.did()));
+        entry.allowed_requesters = vec![node_id_of_did(requester.did())];
+        assert!(entry.is_allowed(requester.did()));
+        assert!(!entry.is_allowed(other.did()));
+    }
+
+    #[test]
+    fn did_key_check_accepts_real_and_rejects_oversized() {
+        use super::super::folder_share::is_ed25519_did_key;
+        let id = crate::identity::for_test();
+        assert!(is_ed25519_did_key(id.did()));
+        assert_eq!(id.did().len(), 56);
+        let huge = format!("did:key:z{}", "1".repeat(60_000));
+        assert!(!is_ed25519_did_key(&huge));
+    }
+
+    #[test]
+    fn access_throttle_gates_repeat_requests_per_peer() {
+        assert!(access_throttle_allows("throttle-peer-x"));
+        assert!(!access_throttle_allows("throttle-peer-x"));
+        assert!(access_throttle_allows("throttle-peer-y"));
+    }
+
+    #[test]
+    fn old_table_rows_without_allowlist_still_load() {
+        let dir = TempDir::new("legacy");
+        let entry = test_entry(dir.path().to_path_buf(), "pw");
+        let mut value = serde_json::to_value(&entry).unwrap();
+        value.as_object_mut().unwrap().remove("allowed_requesters");
+        let parsed: SharedFolder = serde_json::from_value(value).unwrap();
+        assert!(parsed.allowed_requesters.is_empty());
+    }
+
+    #[tokio::test]
+    async fn non_allowlisted_request_is_queued_not_granted() {
+        let dir = TempDir::new("queue");
+        let entry = test_entry(dir.path().to_path_buf(), "pw");
+        let owner = crate::identity::for_test();
+        let requester = crate::identity::for_test();
+        let key = super::super::folder_share::create_access_request_key();
+        let env = request_envelope(&requester, owner.did(), &entry, "access-1", &key);
+        assert!(super::super::folder_share::verify_envelope(&env));
+
+        // Returns immediately (no network send) because it only queues.
+        handle_access_request(&owner, std::slice::from_ref(&entry), &env, false)
+            .await
+            .unwrap();
+        let id = pending_id(requester.did(), &entry.folder_id);
+        let got = pending_lock().get(&id).expect("queued");
+        assert_eq!(got.requester_did, requester.did());
+        assert_eq!(got.request_id, "access-1");
+
+        // A resend (same or new request id) does not duplicate.
+        let env2 = request_envelope(&requester, owner.did(), &entry, "access-2", &key);
+        handle_access_request(&owner, std::slice::from_ref(&entry), &env2, false)
+            .await
+            .unwrap();
+        let count = pending_lock().entries.iter().filter(|e| e.id == id).count();
+        assert_eq!(count, 1);
+        assert_eq!(pending_lock().get(&id).unwrap().request_id, "access-2");
+        pending_lock().remove(&id);
+    }
+
+    #[test]
+    fn wrong_key_hash_or_target_is_not_queued_or_granted() {
+        let dir = TempDir::new("invalid");
+        let entry = test_entry(dir.path().to_path_buf(), "pw");
+        let owner = crate::identity::for_test();
+        let requester = crate::identity::for_test();
+        let key = super::super::folder_share::create_access_request_key();
+        let mut env = request_envelope(&requester, owner.did(), &entry, "a", &key);
+        assert!(validate_access_request(owner.did(), std::slice::from_ref(&entry), &env).is_some());
+        env.folder_key_hash = Some("nope".to_string());
+        assert!(validate_access_request(owner.did(), std::slice::from_ref(&entry), &env).is_none());
+        env.folder_key_hash = Some(entry.folder_key_hash.clone());
+        env.target_node_id = Some("did:key:zSomeoneElse".to_string());
+        assert!(validate_access_request(owner.did(), std::slice::from_ref(&entry), &env).is_none());
+    }
+
+    #[test]
+    fn approved_grant_is_the_unchanged_wire_response() {
+        let dir = TempDir::new("grant");
+        let entry = test_entry(dir.path().to_path_buf(), "test folder passphrase");
+        let owner = crate::identity::for_test();
+        let requester = crate::identity::for_test();
+        let key = super::super::folder_share::create_access_request_key();
+
+        let env = build_grant_envelope(
+            &owner,
+            &entry,
+            "access-9",
+            requester.did(),
+            &key.public_b64url,
+        )
+        .unwrap();
+        assert_eq!(env.type_, "folder-access-grant");
+        assert_eq!(env.from, owner.did());
+        assert_eq!(env.target_node_id.as_deref(), Some(requester.did()));
+        assert_eq!(env.request_id.as_deref(), Some("access-9"));
+        assert!(super::super::folder_share::verify_envelope(&env));
+        let plain = super::super::folder_share::decrypt_folder_key_grant(
+            env.access_grant_cipher_text.as_deref().unwrap(),
+            env.access_grant_iv.as_deref().unwrap(),
+            &key.secret,
+            env.access_grant_public_key.as_deref().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(plain, "test folder passphrase");
     }
 }

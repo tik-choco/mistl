@@ -88,9 +88,12 @@ pub(super) struct RTCManagerInner {
     pub(super) peer_epochs: RwLock<HashMap<String, u64>>,
     pub(super) self_forward_keys: RwLock<HashSet<String>>,
     pub(super) default_tunnel_target: RwLock<Option<String>>,
-    /// Round-robin cursor per target key, used to load-balance connect-side
-    /// peer selection across all peers advertising the same forward key.
-    pub(super) peer_rr_cursor: RwLock<HashMap<String, usize>>,
+    /// Serve peer pinned per (unscoped) connect-side target: the first peer
+    /// `select_server_peer_for` picks for a target keeps receiving that
+    /// target's traffic, so a peer that joins later and advertises the same
+    /// target (or `role=server`) cannot take it over. In-memory only; cleared
+    /// per target by `clear_route_pin` when the forward is removed.
+    pub(super) route_pins: RwLock<HashMap<String, String>>,
     pub(super) next_tunnel_handler_id: AtomicU64,
 
     pub(super) chat_handlers: RwLock<Vec<ChatHandler>>,
@@ -121,7 +124,7 @@ impl RTCManagerInner {
             peer_epochs: RwLock::new(HashMap::new()),
             self_forward_keys: RwLock::new(HashSet::new()),
             default_tunnel_target: RwLock::new(None),
-            peer_rr_cursor: RwLock::new(HashMap::new()),
+            route_pins: RwLock::new(HashMap::new()),
             next_tunnel_handler_id: AtomicU64::new(1),
             chat_handlers: RwLock::new(Vec::new()),
             tunnel_msg_handlers: RwLock::new(Vec::new()),

@@ -182,7 +182,7 @@ impl RTCManagerHandle {
         // that order end to end (see `event::dispatch_event` and
         // `event::run_payload_worker`, and the ordering/routing/membership
         // tests under `tests/`).
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = event::raw_event_channel();
         tokio::spawn(event::run_payload_worker(weak.clone(), rx));
 
         // `crate::net::register_room_handler` fans every event out to every
@@ -306,10 +306,12 @@ impl RTCManagerHandle {
             .collect()
     }
 
-    /// Selects a single server peer for the given target, load-balancing across
-    /// all peers that advertise the target key using a per-target round-robin
-    /// cursor. Peers that disconnect drop out of the advertised key set, so this
-    /// also provides failover. Returns `None` when no peer is available yet.
+    /// Selects a single server peer for the given target and pins it: the
+    /// first eligible peer (sorted by id) is remembered per target and keeps
+    /// being returned while it is live and advertising, so a peer that shows
+    /// up later cannot capture the traffic (this replaces upstream's
+    /// round-robin load balancing/failover on purpose). Returns `None` when no
+    /// peer is available yet, or when the pinned peer is currently gone.
     ///
     /// A node-scoped target (see [`get_server_peers_for`](Self::get_server_peers_for))
     /// always resolves to the same single pinned peer (or `None`) -- the
@@ -327,14 +329,31 @@ impl RTCManagerHandle {
         if peers.is_empty() {
             return None;
         }
-        // Deterministic ordering so the round-robin cursor is stable regardless
-        // of the underlying map iteration order.
+        if split_node_scope(target).1.is_some() {
+            // Already pinned to one peer by the target itself.
+            return peers.into_iter().next();
+        }
+        // Route pinning: the first peer chosen for a target keeps it. A
+        // later peer advertising the same target (or `role=server`) never
+        // takes over; if the pinned peer is currently unavailable we return
+        // `None` (callers retry) instead of silently re-pinning elsewhere.
+        // The pin is dropped by `clear_route_pin` when the forward is removed
+        // -- the user's explicit re-target.
+        let mut pins = self.inner.route_pins.write().await;
+        if let Some(pinned) = pins.get(target) {
+            return peers.contains(pinned).then(|| pinned.clone());
+        }
+        // Deterministic first pick regardless of map iteration order.
         peers.sort();
-        let mut cursors = self.inner.peer_rr_cursor.write().await;
-        let cursor = cursors.entry(target.to_string()).or_insert(0);
-        let idx = *cursor % peers.len();
-        *cursor = cursor.wrapping_add(1);
-        Some(peers[idx].clone())
+        let chosen = peers.swap_remove(0);
+        pins.insert(target.to_string(), chosen.clone());
+        Some(chosen)
+    }
+
+    /// Forgets the pinned serve peer for `target` so the next selection
+    /// picks afresh. Called when the user removes (or re-targets) a forward.
+    pub async fn clear_route_pin(&self, target: &str) {
+        self.inner.route_pins.write().await.remove(target);
     }
 
     /// The peer's current session epoch: incremented on each `EVENT_JOIN`

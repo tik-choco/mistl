@@ -38,6 +38,24 @@ pub const TARGET: &str = env!("MISTL_TARGET");
 /// equals the tag minus the leading `v`.
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Minisign public key (the base64 line of `minisign.pub`, `RW...`) that
+/// release checksums must be signed with. Baked in at build time from the
+/// `MISTL_RELEASE_PUBKEY` env var (see docs/release-signing.md); `None` in
+/// dev builds and until a release key exists, in which case the updater
+/// keeps its unsigned behaviour and logs a warning.
+pub const RELEASE_PUBKEY: Option<&str> = option_env!("MISTL_RELEASE_PUBKEY");
+
+/// [`RELEASE_PUBKEY`], treating an empty value (CI exports the variable even
+/// when the repo variable is unset) as "no key".
+fn release_pubkey() -> Option<&'static str> {
+    RELEASE_PUBKEY.filter(|key| !key.trim().is_empty())
+}
+
+/// Release asset holding the detached minisign signature of `SHA256SUMS.txt`.
+const SUMS_SIG_ASSET: &str = "SHA256SUMS.txt.minisig";
+/// A minisig file is ~350 bytes; anything bigger is not one.
+const MAX_SIG_BYTES: u64 = 4 * 1024;
+
 /// Delay before the background task's first check after daemon startup,
 /// so updates never compete with startup work.
 const FIRST_CHECK_DELAY: Duration = Duration::from_secs(30);
@@ -435,7 +453,7 @@ async fn fetch_latest_release_recorded(
 
 /// Download a release asset. GitHub redirects `browser_download_url` to a
 /// signed URL; reqwest follows redirects by default.
-async fn download(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
+async fn download(client: &reqwest::Client, url: &str, max_bytes: u64) -> Result<Vec<u8>> {
     if !is_allowed_download_url(url) {
         bail!("update: refusing to download from {url} (only https on GitHub hosts is allowed)");
     }
@@ -447,11 +465,8 @@ async fn download(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
     if !response.status().is_success() {
         bail!("update: download returned {} for {url}", response.status());
     }
-    if response
-        .content_length()
-        .is_some_and(|len| len > MAX_DOWNLOAD_BYTES)
-    {
-        bail!("update: {url} is larger than {MAX_DOWNLOAD_BYTES} bytes; refusing");
+    if response.content_length().is_some_and(|len| len > max_bytes) {
+        bail!("update: {url} is larger than {max_bytes} bytes; refusing");
     }
     let mut body = Vec::new();
     while let Some(chunk) = response
@@ -459,12 +474,51 @@ async fn download(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
         .await
         .with_context(|| format!("update: reading {url}"))?
     {
-        if body.len() as u64 + chunk.len() as u64 > MAX_DOWNLOAD_BYTES {
-            bail!("update: {url} exceeded {MAX_DOWNLOAD_BYTES} bytes; refusing");
+        if body.len() as u64 + chunk.len() as u64 > max_bytes {
+            bail!("update: {url} exceeded {max_bytes} bytes; refusing");
         }
         body.extend_from_slice(&chunk);
     }
     Ok(body)
+}
+
+/// Check the detached minisign signature over `SHA256SUMS.txt`.
+///
+/// With a pinned key a missing or invalid signature is a hard error (no
+/// fallback). Without one (dev builds) only the checksums are checked, as
+/// before, with a warning. Only prehashed ("ED", the minisign default)
+/// signatures are accepted; the trusted comment signature is verified too.
+fn verify_sums_signature(pubkey: Option<&str>, sums: &[u8], sig: Option<&[u8]>) -> Result<()> {
+    let Some(pubkey) = pubkey else {
+        warn!(
+            "update: this build has no release public key (MISTL_RELEASE_PUBKEY); \
+             SHA256SUMS.txt is NOT authenticated"
+        );
+        return Ok(());
+    };
+    // Accept either the bare base64 line or a whole `minisign.pub` file.
+    let key_line = pubkey
+        .lines()
+        .map(str::trim)
+        .rfind(|line| !line.is_empty() && !line.starts_with("untrusted comment:"))
+        .context("update: embedded release public key is empty")?;
+    let key = minisign_verify::PublicKey::from_base64(key_line).map_err(|error| {
+        anyhow::anyhow!("update: embedded release public key is invalid: {error}")
+    })?;
+    let sig = sig.with_context(|| {
+        format!("update: release has no {SUMS_SIG_ASSET}; refusing an unsigned release")
+    })?;
+    let sig = std::str::from_utf8(sig).context("update: signature is not UTF-8")?;
+    let sig = minisign_verify::Signature::decode(sig)
+        .map_err(|error| anyhow::anyhow!("update: malformed {SUMS_SIG_ASSET}: {error}"))?;
+    key.verify(sums, &sig, false).map_err(|error| {
+        anyhow::anyhow!("update: SHA256SUMS.txt signature check failed: {error}; refusing")
+    })?;
+    debug!(
+        trusted_comment = sig.trusted_comment(),
+        "update: checksums signature verified"
+    );
+    Ok(())
 }
 
 /// Download + verify + self-replace. The SHA-256 is checked against the
@@ -489,12 +543,28 @@ async fn stage(
                 release.version, release.notes_url
             )
         })?;
-    let sums = download(client, &sums_asset.download_url).await?;
+    let sums = download(client, &sums_asset.download_url, MAX_DOWNLOAD_BYTES).await?;
+    // Authenticate SHA256SUMS.txt BEFORE trusting any checksum in it.
+    let sig = match release.asset(SUMS_SIG_ASSET) {
+        Some(sig_asset) => {
+            match download(client, &sig_asset.download_url, MAX_SIG_BYTES).await {
+                Ok(bytes) => Some(bytes),
+                // A failed signature download is fatal only when a key is pinned.
+                Err(error) if release_pubkey().is_some() => return Err(error),
+                Err(error) => {
+                    warn!("update: could not download {SUMS_SIG_ASSET}: {error:#}");
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+    verify_sums_signature(release_pubkey(), &sums, sig.as_deref())?;
     let expected = parse_sha256sums(&String::from_utf8_lossy(&sums), &asset.name)
         .with_context(|| format!("update: SHA256SUMS.txt has no entry for {}", asset.name))?;
 
     info!(asset = %asset.name, url = %asset.download_url, "update: downloading");
-    let binary = download(client, &asset.download_url).await?;
+    let binary = download(client, &asset.download_url, MAX_DOWNLOAD_BYTES).await?;
     let actual = sha256_hex(&binary);
     if actual != expected {
         bail!(
@@ -651,6 +721,76 @@ fn last_check() -> (Option<String>, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Vector from minisign-verify's own tests: prehashed ("ED") signature over
+    // the bytes `test`.
+    const TEST_KEY: &str = "RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3";
+    const TEST_SIG: &str = "untrusted comment: signature from minisign secret key
+RUQf6LRCGA9i559r3g7V1qNyJDApGip8MfqcadIgT9CuhV3EMhHoN1mGTkUidF/z7SrlQgXdy8ofjb7bNJJylDOocrCo8KLzZwo=
+trusted comment: timestamp:1556193335\tfile:test
+y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+bHwhEBg==";
+
+    #[test]
+    fn valid_signature_is_accepted() {
+        verify_sums_signature(Some(TEST_KEY), b"test", Some(TEST_SIG.as_bytes())).unwrap();
+        // A whole minisign.pub file is accepted as the pinned key too.
+        let pub_file =
+            format!("untrusted comment: minisign public key E7620F1842B4E81F\n{TEST_KEY}\n");
+        verify_sums_signature(Some(&pub_file), b"test", Some(TEST_SIG.as_bytes())).unwrap();
+    }
+
+    #[test]
+    fn tampered_sums_are_rejected() {
+        let err =
+            verify_sums_signature(Some(TEST_KEY), b"tesT", Some(TEST_SIG.as_bytes())).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("signature check failed"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn tampered_trusted_comment_is_rejected() {
+        let sig = TEST_SIG.replace("file:test", "file:evil");
+        assert!(verify_sums_signature(Some(TEST_KEY), b"test", Some(sig.as_bytes())).is_err());
+    }
+
+    #[test]
+    fn wrong_key_is_rejected() {
+        // Same layout as a minisign key ("Ed" + key id + pubkey) but a
+        // different key, so the key id no longer matches.
+        use base64::Engine;
+        use ed25519_dalek::SigningKey;
+        let other = SigningKey::from_bytes(&[7u8; 32]).verifying_key();
+        let mut raw = b"Ed".to_vec();
+        raw.extend_from_slice(&[1u8; 8]);
+        raw.extend_from_slice(other.as_bytes());
+        let other_key = base64::engine::general_purpose::STANDARD.encode(raw);
+        assert!(
+            verify_sums_signature(Some(&other_key), b"test", Some(TEST_SIG.as_bytes())).is_err()
+        );
+    }
+
+    #[test]
+    fn missing_signature_with_pinned_key_is_an_error() {
+        let err = verify_sums_signature(Some(TEST_KEY), b"test", None).unwrap_err();
+        assert!(format!("{err:#}").contains("unsigned"), "{err:#}");
+    }
+
+    #[test]
+    fn malformed_signature_or_key_is_an_error() {
+        assert!(verify_sums_signature(Some(TEST_KEY), b"test", Some(b"garbage")).is_err());
+        assert!(
+            verify_sums_signature(Some("not-a-key"), b"test", Some(TEST_SIG.as_bytes())).is_err()
+        );
+        assert!(verify_sums_signature(Some("  "), b"test", Some(TEST_SIG.as_bytes())).is_err());
+    }
+
+    #[test]
+    fn no_pinned_key_keeps_unsigned_behaviour() {
+        verify_sums_signature(None, b"anything", None).unwrap();
+        verify_sums_signature(None, b"anything", Some(b"junk")).unwrap();
+    }
 
     #[test]
     fn asset_names_add_exe_only_for_windows_targets() {

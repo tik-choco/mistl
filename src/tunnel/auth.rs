@@ -44,6 +44,68 @@ pub struct AuthRequest {
     pub forward_key: String,
     pub target_addr: String,
     pub proto: String,
+    /// The `did:key` that `crate::net::peer_auth` verified for `peer_id`, or
+    /// `None` for an unverified peer (older mistl, no hello yet). Use
+    /// [`AuthRequest::verified_did`] rather than reading this directly.
+    pub did: Option<String>,
+}
+
+impl AuthRequest {
+    /// The peer's verified DID, only if it really hashes to `peer_id`.
+    /// `None` means "unverified": such a peer is never auto-approved and no
+    /// decision about it is ever remembered (see `TrustStore::lookup`).
+    pub fn verified_did(&self) -> Option<&str> {
+        self.did
+            .as_deref()
+            .filter(|did| crate::identity::node_id_for_did(did) == self.peer_id)
+    }
+}
+
+/// The DID `peer_auth` verified for transport node `peer_id`: in `room` when
+/// known, otherwise (or failing that) in any joined room. Always re-checked
+/// against `node_id_for_did`, so the result provably belongs to `peer_id`.
+///
+/// This only says "the holder of this DID key answered a signed hello as this
+/// node id".
+pub fn verified_did_for_peer(room: Option<&str>, peer_id: &str) -> Option<String> {
+    use crate::net::peer_auth::{verified_did, verified_did_any_room};
+    room.and_then(|room| verified_did(room, peer_id))
+        .or_else(|| verified_did_any_room(peer_id))
+        .filter(|did| crate::identity::node_id_for_did(did) == peer_id)
+}
+
+/// Mid-session mis-delivery check: a session approved for `bound_did` only
+/// accepts payloads whose sender still maps to that DID. A session approved
+/// for an unverified peer (`None`) has nothing to check.
+pub fn binding_holds(bound_did: Option<&str>, room: Option<&str>, from: &str) -> bool {
+    match bound_did {
+        None => true,
+        Some(bound) => verified_did_for_peer(room, from).as_deref() == Some(bound),
+    }
+}
+
+/// Whether config policy auto-approves `req`. Never for an unverified peer.
+/// `allow_peers` holds DIDs and/or legacy node ids; a node id only matches
+/// when the peer's DID is verified (and therefore hashes to it).
+pub(crate) fn policy_allows(
+    auto_accept: bool,
+    allow_peers: &HashSet<String>,
+    req: &AuthRequest,
+) -> bool {
+    let Some(did) = req.verified_did() else {
+        return false;
+    };
+    auto_accept || allow_peers.contains(did) || allow_peers.contains(&req.peer_id)
+}
+
+/// Turns a remember-request into a one-off decision when it cannot be
+/// remembered (unverified peer), so the audit trail matches what was stored.
+pub(crate) fn downgrade_unremembered(decision: AuthDecision) -> AuthDecision {
+    match decision {
+        AuthDecision::AllowAlways => AuthDecision::Allow,
+        AuthDecision::DenyAlways => AuthDecision::Deny,
+        other => other,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -60,14 +122,6 @@ pub enum AuthDecision {
 impl AuthDecision {
     pub fn is_allowed(self) -> bool {
         matches!(self, Self::Allow | Self::AllowAlways)
-    }
-
-    fn trust_decision(self) -> Option<TrustDecision> {
-        match self {
-            Self::AllowAlways => Some(TrustDecision::Allow),
-            Self::DenyAlways => Some(TrustDecision::Deny),
-            Self::Allow | Self::Deny => None,
-        }
     }
 }
 
@@ -152,11 +206,11 @@ impl PolicyAuthorizer {
     }
 
     async fn decide(&self, req: &AuthRequest) -> AuthDecision {
-        let key = TrustKey {
-            peer_id: req.peer_id.clone(),
-            forward_key: req.forward_key.clone(),
-        };
-        if let Some(decision) = self.store.get(&key).await {
+        if let Some(decision) = self
+            .store
+            .lookup(&req.peer_id, req.verified_did(), &req.forward_key)
+            .await
+        {
             let auth_decision = match decision {
                 TrustDecision::Allow => AuthDecision::Allow,
                 TrustDecision::Deny => AuthDecision::Deny,
@@ -166,14 +220,18 @@ impl PolicyAuthorizer {
             return auth_decision;
         }
 
+        // Policy never approves an unverified peer (see `policy_allows`).
         let decision = match &self.policy {
-            AuthPolicy::AutoAccept => AuthDecision::Allow,
-            AuthPolicy::AllowPeers(peers) if peers.contains(&req.peer_id) => AuthDecision::Allow,
-            AuthPolicy::AllowPeers(_) | AuthPolicy::DenyUnknown => AuthDecision::Deny,
+            AuthPolicy::AutoAccept if policy_allows(true, &HashSet::new(), req) => {
+                AuthDecision::Allow
+            }
+            AuthPolicy::AllowPeers(peers) if policy_allows(false, peers, req) => {
+                AuthDecision::Allow
+            }
+            _ => AuthDecision::Deny,
         };
-        if let Some(trust) = decision.trust_decision() {
-            let _ = self.store.remember(key, trust).await;
-        }
+        // Policy decisions are Allow/Deny (never *Always), so nothing is
+        // remembered here.
         self.record(req, decision, AuthEventSource::Policy).await;
         decision
     }
