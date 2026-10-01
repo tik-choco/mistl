@@ -61,6 +61,7 @@ impl UdpManager {
                             peer_id: id.clone(),
                             metrics: metrics.clone(),
                             client_addr: Some(addr),
+                            did: None,
                         },
                     );
                     if old.is_none() {

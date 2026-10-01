@@ -849,7 +849,10 @@ async fn handle_api_call(
 
     // The frontend always gets HTTP 200 for a well-formed call and switches
     // on the `ok` field; only malformed/forbidden requests get non-2xx.
-    match crate::daemon::dispatch(cmd, args, &state).await {
+    // Loopback dashboard sessions are as trusted as the CLI; only a peer
+    // reaching a LAN-exposed dashboard (`--host`) gets the restricted policy.
+    let caller = crate::daemon::Caller::http_from(stream.peer_addr()?.ip());
+    match crate::daemon::dispatch_as(caller, cmd, args, &state).await {
         Ok(data) => {
             write_json_response(stream, 200, "OK", &json!({"ok": true, "data": data})).await
         }

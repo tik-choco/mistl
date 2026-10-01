@@ -2168,6 +2168,7 @@
         </table>
         <div class="empty-note" id="store-sync-empty" data-i18n="store.sync.none">No active folder syncs.</div>
       </div>
+      <div class="store-folder-access" id="store-folder-access" hidden></div>
     </div>
     </div>
     </div>
@@ -3252,6 +3253,11 @@
       "store.sync.startBtn": "Start sync",
       "store.sync.started": "Syncing {name}.",
       "store.sync.none": "No active folder syncs.",
+      "store.access.title": "Folder access requests",
+      "store.access.node": "node",
+      "store.access.approve": "Approve",
+      "store.access.approveRemember": "Approve and remember",
+      "store.access.deny": "Deny",
       "store.sync.stop": "Stop",
       "store.sync.stopped": "Sync stopped.",
       "store.sync.lastSync": "last sync {time}",
@@ -3675,6 +3681,8 @@
       "tunnel.table.remoteAddr": "Remote addr",
       "tunnel.table.actions": "Actions",
       "tunnel.table.remember": "Remember",
+      "tunnel.table.unverified": "unverified",
+      "tunnel.table.unverifiedHint": "This peer has not proven its identity (DID). You can approve it once, but the decision is not remembered.",
       "tunnel.table.direction": "Direction",
       "tunnel.table.addr": "Addr",
       "tunnel.table.port": "Port",
@@ -4059,6 +4067,11 @@
       "store.sync.startBtn": "同期を開始",
       "store.sync.started": "{name} を同期しています。",
       "store.sync.none": "アクティブなフォルダ同期はありません。",
+      "store.access.title": "フォルダへのアクセス要求",
+      "store.access.node": "ノード",
+      "store.access.approve": "承認",
+      "store.access.approveRemember": "承認して記憶",
+      "store.access.deny": "拒否",
       "store.sync.stop": "停止",
       "store.sync.stopped": "同期を停止しました。",
       "store.sync.lastSync": "最終同期 {time}",
@@ -4469,6 +4482,8 @@
       "tunnel.table.remoteAddr": "リモートアドレス",
       "tunnel.table.actions": "操作",
       "tunnel.table.remember": "記憶する",
+      "tunnel.table.unverified": "未検証",
+      "tunnel.table.unverifiedHint": "このピアは本人確認 (DID) が済んでいません。一回限りの承認はできますが、判断は記憶されません。",
       "tunnel.table.direction": "方向",
       "tunnel.table.addr": "アドレス",
       "tunnel.table.port": "ポート",
@@ -4853,6 +4868,11 @@
       "store.sync.startBtn": "开始同步",
       "store.sync.started": "正在同步 {name}。",
       "store.sync.none": "没有正在同步的文件夹。",
+      "store.access.title": "文件夹访问请求",
+      "store.access.node": "节点",
+      "store.access.approve": "批准",
+      "store.access.approveRemember": "批准并记住",
+      "store.access.deny": "拒绝",
       "store.sync.stop": "停止",
       "store.sync.stopped": "已停止同步。",
       "store.sync.lastSync": "上次同步 {time}",
@@ -5263,6 +5283,8 @@
       "tunnel.table.remoteAddr": "远端地址",
       "tunnel.table.actions": "操作",
       "tunnel.table.remember": "记住",
+      "tunnel.table.unverified": "未验证",
+      "tunnel.table.unverifiedHint": "该节点尚未证明其身份 (DID)。可以单次批准，但不会记住该决定。",
       "tunnel.table.direction": "方向",
       "tunnel.table.addr": "地址",
       "tunnel.table.port": "端口",
@@ -8130,7 +8152,14 @@
     });
   }
 
+  var storeFolderAccess = window.MistlStorage.createFolderAccess({
+    mount: document.getElementById("store-folder-access"),
+    call: api,
+    t: t
+  });
+
   function pollStoreSyncList() {
+    storeFolderAccess.refresh();
     return api("store.folder-sync.ls", {}).then(renderStoreSyncList, function () {});
   }
 
@@ -8811,6 +8840,7 @@
   var botSaveBtn = document.getElementById("btn-bot-save");
   var botCancelEditBtn = document.getElementById("btn-bot-cancel-edit");
   var botEditingId = null;
+  var botEditingTrustedAuthors = []; // not editable in the form; preserved across edits
   var botIdTouched = false;
 
   function botParseCommaList(value) {
@@ -9157,6 +9187,7 @@
      room picker to a plain text field in that case. */
   function botResetForm() {
     botEditingId = null;
+    botEditingTrustedAuthors = [];
     botIdTouched = false;
     botForm.reset();
     botEnabledInput.checked = true;
@@ -9232,6 +9263,7 @@
 
   function botStartEdit(pipeline, cfg) {
     botEditingId = pipeline.id;
+    botEditingTrustedAuthors = (pipeline.source && pipeline.source.trusted_authors) || [];
     botIdInput.value = pipeline.id || "";
     botIdInput.readOnly = true; // id can't be changed once created (config.set below replaces by matching id)
     botEnabledInput.checked = !!pipeline.enabled;
@@ -9353,6 +9385,7 @@
     } else {
       source = { kind: "global-articles", rooms: botSourceRoomsValue(), langs: botLangsValue() };
     }
+    if (botEditingTrustedAuthors.length) source.trusted_authors = botEditingTrustedAuthors;
 
     var transforms = [];
     if (botSummarizeEnabled.checked) {
@@ -9586,7 +9619,15 @@
     items.forEach(function (item) {
       item = item || {};
       var tr = el("tr", {});
-      tr.appendChild(el("td", { class: "mono tunnel-grant-peer", text: item.peer_id || "-" }));
+      var peerCell = el("td", { class: "mono tunnel-grant-peer", text: item.peer_id || "-" });
+      /* An unverified peer (no DID-signed hello) can only be approved once;
+         the daemon never remembers a decision for it. */
+      var unverified = item.verified === false;
+      if (unverified) {
+        peerCell.appendChild(document.createTextNode(" "));
+        peerCell.appendChild(el("span", { class: "badge deposited", text: t("tunnel.table.unverified"), title: t("tunnel.table.unverifiedHint") }));
+      }
+      tr.appendChild(peerCell);
       tr.appendChild(el("td", { text: item.proto || "-" }));
       tr.appendChild(el("td", { class: "mono tunnel-grant-target", text: item.forward_key || "-" }));
       tr.appendChild(el("td", { class: "mono", text: item.target_addr || "-" }));
@@ -9594,6 +9635,10 @@
       var actionCell = el("td", {});
       var rememberLabel = el("label", { class: "checkline", style: "margin-right: 8px;" });
       var rememberInput = el("input", { type: "checkbox" });
+      if (unverified) {
+        rememberInput.disabled = true;
+        rememberLabel.title = t("tunnel.table.unverifiedHint");
+      }
       rememberLabel.appendChild(rememberInput);
       rememberLabel.appendChild(el("span", { text: t("tunnel.table.remember") }));
       actionCell.appendChild(rememberLabel);

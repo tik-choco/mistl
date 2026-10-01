@@ -17,6 +17,9 @@
 #   MISTLIB_DEV_TOKEN - fine-grained PAT with Contents: Read, only needed if
 #                       MISTLIB_REPO below is pointed back at the private
 #                       tik-choco-lab/mistlib-dev repository.
+# Release signing (optional; see docs/release-signing.md): the repository
+# variable MISTL_RELEASE_PUBKEY is compiled into the binary, and the signing
+# key is read from repository secrets.
 
 name: release
 
@@ -132,6 +135,18 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      - name: Embed release public key
+        # Only exported when the repository variable is set; option_env! in
+        # src/update sees it at compile time.
+        env:
+          PUBKEY: ${{ vars.MISTL_RELEASE_PUBKEY }}
+        run: |
+          if [ -n "$PUBKEY" ]; then
+            echo "MISTL_RELEASE_PUBKEY=$PUBKEY" >> "$GITHUB_ENV"
+          else
+            echo "::warning::MISTL_RELEASE_PUBKEY is not set; this build cannot verify update signatures"
+          fi
+
       - name: Stamp release version into Cargo.toml
         # Only the [package] section has `version =` at column 0.
         run: sed -i.bak -E 's/^version = "[^"]*"/version = "${{ needs.plan.outputs.version }}"/' Cargo.toml && rm Cargo.toml.bak
@@ -182,6 +197,28 @@ jobs:
 
       - name: Checksums
         run: cd dist && sha256sum * > SHA256SUMS.txt
+
+      - name: Sign checksums (minisign)
+        # Skipped when MINISIGN_SECRET_KEY is not configured, so releases keep
+        # working (unsigned) until the key is set up.
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+        run: |
+          if [ -z "$MINISIGN_SECRET_KEY" ]; then
+            echo "::warning::MINISIGN_SECRET_KEY is not set; publishing without SHA256SUMS.txt.minisig"
+            exit 0
+          fi
+          # From the signed Ubuntu archive rather than an unverified download.
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq minisign
+          umask 077
+          keyfile="$RUNNER_TEMP/minisign.key"
+          trap 'rm -f "$keyfile"' EXIT
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > "$keyfile"
+          printf '%s\n' "$MINISIGN_PASSWORD" | minisign -S -s "$keyfile" \
+            -m dist/SHA256SUMS.txt -t "mistl v${{ needs.plan.outputs.version }}"
+          ls -l dist/SHA256SUMS.txt.minisig
 
       - uses: softprops/action-gh-release@v2
         with:

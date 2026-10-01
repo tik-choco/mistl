@@ -965,6 +965,15 @@ pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Val
             Ok(json!({ "stopped": stopped }))
         }
 
+        // Owner approval for folder-key requests (see `folder_owner`).
+        "store.folder-access.ls"
+        | "store.folder-access.approve"
+        | "store.folder-access.deny"
+        | "store.folder-access.allow"
+        | "store.folder-access.revoke" => {
+            folder_owner::handle_access_command(cmd, &args, store.as_ref(), state).await
+        }
+
         _ => bail!("unknown store command: {cmd}"),
     }
 }
@@ -1225,6 +1234,7 @@ mod tests {
             capacity_bytes: 10 * 1024 * 1024 * 1024,
             room_ids: Vec::new(),
             export_dir: None,
+            folder_auto_grant: false,
         }
     }
 

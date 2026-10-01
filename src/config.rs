@@ -37,6 +37,44 @@ pub struct Config {
     pub bot: BotConfig,
     #[serde(default)]
     pub tunnel: TunnelConfig,
+    #[serde(default)]
+    pub network: NetworkConfig,
+}
+
+/// Peer-authentication policy shared by every room protocol (see
+/// `crate::net::peer_auth`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NetworkConfig {
+    /// did:key identities allowed to be "members" for the modules that
+    /// consult `peer_auth::admitted` (e.g. consensus). Empty (the default)
+    /// means open: any DID-verified peer is admitted. Applied live by
+    /// `config.set` and at daemon startup.
+    pub membership_allowlist: Vec<String>,
+}
+
+impl NetworkConfig {
+    /// Validates the allowlist entries (Ed25519 did:key: 56 chars, `z6Mk`
+    /// multibase prefix).
+    pub fn validate(&self) -> Result<()> {
+        for did in &self.membership_allowlist {
+            if did.len() != 56 || !did.starts_with("did:key:z6Mk") {
+                anyhow::bail!(
+                    "network.membership_allowlist: {did:?} is not a valid Ed25519 did:key (expected 56 chars starting with \"did:key:z6Mk\")"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Pushes the allowlist into the peer-auth layer: empty -> open.
+    pub fn apply(&self) {
+        crate::net::peer_auth::set_membership_allowlist(if self.membership_allowlist.is_empty() {
+            None
+        } else {
+            Some(self.membership_allowlist.clone())
+        });
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,6 +163,12 @@ pub struct StorageConfig {
     /// so this can be changed (or cleared, via `config.set` with a null/empty
     /// value) at any time without a daemon restart.
     pub export_dir: Option<PathBuf>,
+    /// Escape hatch restoring the legacy behaviour of answering every valid
+    /// folder-access request (anyone holding a share link) with the folder
+    /// passphrase, without owner approval. Off by default: requests from
+    /// requesters not on the folder's allowlist wait for approval
+    /// (`store.folder-access.approve`). Read live.
+    pub folder_auto_grant: bool,
 }
 
 impl Default for StorageConfig {
@@ -134,6 +178,7 @@ impl Default for StorageConfig {
             capacity_bytes: 10 * 1024 * 1024 * 1024, // 10 GiB
             room_ids: Vec::new(),
             export_dir: None,
+            folder_auto_grant: false,
         }
     }
 }
@@ -467,6 +512,12 @@ pub struct AiConfig {
     /// Named model configurations, each referencing a `providers` entry by
     /// id ("how to call it"). See [`AiPresetConfig`].
     pub presets: Vec<AiPresetConfig>,
+    /// Identities (did:key or 16-hex node ids) allowed to act as the remote
+    /// LLM provider for this node's consumer side. Empty (the default) keeps
+    /// the legacy "first chat provider wins" behaviour, with a warning and
+    /// `provider_trusted: false` in `ai status`; when non-empty only peers
+    /// whose DID-signed hello is verified and matches an entry are used.
+    pub trusted_providers: Vec<String>,
 }
 
 impl Default for AiConfig {
@@ -485,6 +536,7 @@ impl Default for AiConfig {
             stt_preset_id: String::new(),
             providers: Vec::new(),
             presets: Vec::new(),
+            trusted_providers: Vec::new(),
         }
     }
 }
@@ -573,6 +625,12 @@ pub enum SourceConfig {
         /// `NewsArticle.lang` allowlist; empty means every language.
         #[serde(default)]
         langs: Vec<String>,
+        /// Author allowlist: signer DIDs (`did:key:...`) and/or node ids
+        /// (16 hex chars = first 8 bytes of `sha256(did)`). Matched only
+        /// against the wire's *signature-verified* `fromId`. Empty means
+        /// every author is accepted (the historical behaviour).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        trusted_authors: Vec<String>,
     },
     /// Subscribes to a tc-chat room's signed `tc-chat:post` text posts (see
     /// `crate::bot::source`). Posts published by this bot's own DID are
@@ -581,6 +639,9 @@ pub enum SourceConfig {
     ChatRoom {
         #[serde(default)]
         room: String,
+        /// Same semantics as `GlobalArticles::trusted_authors`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        trusted_authors: Vec<String>,
     },
 }
 
@@ -730,8 +791,8 @@ pub struct TunnelConfig {
     /// unlike TCP/UDP forwarding (which only ever reaches addresses this
     /// node's own forward config explicitly names), a stdio session runs an
     /// arbitrary local command (`stdio_command`) on a remote peer's behalf,
-    /// so it stays opt-in even when `auto_accept`/`allow_peers` would
-    /// otherwise let that peer's connection through.
+    /// so it stays opt-in. Even when enabled, stdio ignores `auto_accept`:
+    /// only an explicit trust decision or `allow_peers` admits the peer.
     pub stdio_enabled: bool,
     /// Command (argv; first element is the executable) run for an accepted
     /// stdio session. Empty by default; meaningless while `stdio_enabled` is
@@ -798,12 +859,40 @@ fn substitute_masked_provider_keys(
             .with_context(|| {
                 format!("ai.providers: masked api_key for unknown provider id {id:?}")
             })?;
+        // Only restore while the destination is unchanged: a masked key
+        // paired with a new base_url would ship the real key to that host.
+        let submitted_url = entry
+            .get("base_url")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(&real.base_url);
+        if url_origin(submitted_url) != url_origin(&real.base_url) {
+            anyhow::bail!(
+                "ai.providers: provider {id:?} base_url changed to a different host; re-enter its api_key instead of reusing the masked \"***\""
+            );
+        }
         entry["api_key"] = serde_json::Value::String(real.api_key.clone());
     }
     Ok(value)
 }
 
 const MASK: &str = "***";
+
+/// `scheme://host:port` of a URL, lowercased, with userinfo/path/query
+/// dropped. A masked secret may only be restored when this is unchanged --
+/// otherwise a client (or an attacker driving `config.set`) could re-point a
+/// destination and have the daemon attach the stored credential to it.
+fn url_origin(url: &str) -> String {
+    let url = url.trim();
+    let (scheme, rest) = url.split_once("://").unwrap_or(("", url));
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..end];
+    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    format!(
+        "{}://{}",
+        scheme.to_ascii_lowercase(),
+        host.to_ascii_lowercase()
+    )
+}
 
 /// Masks a webhook URL for `config.show`: userinfo becomes `***@` and a
 /// query string becomes `?***`. A URL with neither is returned unchanged
@@ -908,12 +997,29 @@ fn substitute_masked_webhook_secrets(
                     _ => {}
                 }
             }
+            // The (possibly just-restored) submitted URL must still point at
+            // the same origin as the stored one before any header secret is
+            // restored, or a masked `Authorization` would follow a changed
+            // URL to a new host.
+            let same_origin = match (
+                sink.get("url").and_then(serde_json::Value::as_str),
+                current_sink,
+            ) {
+                (Some(submitted), Some((real, _))) => url_origin(submitted) == url_origin(real),
+                (None, Some(_)) => true,
+                _ => false,
+            };
             let Some(headers) = sink.get_mut("headers").and_then(|h| h.as_array_mut()) else {
                 continue;
             };
             for header in headers.iter_mut() {
                 if header.get("value").and_then(serde_json::Value::as_str) != Some(MASK) {
                     continue;
+                }
+                if !same_origin {
+                    anyhow::bail!(
+                        "bot.pipelines: webhook url for pipeline {pid:?} sink {index} changed to a different host; re-enter its masked header values instead of reusing \"***\""
+                    );
                 }
                 let name = header
                     .get("name")
@@ -987,7 +1093,10 @@ pub fn set_by_path(config: &Config, path: &str, value: serde_json::Value) -> Res
         .with_context(|| format!("unknown config field {section}.{field}"))?;
     *slot = value;
 
-    serde_json::from_value(tree).with_context(|| format!("invalid value for {section}.{field}"))
+    let updated: Config = serde_json::from_value(tree)
+        .with_context(|| format!("invalid value for {section}.{field}"))?;
+    updated.network.validate()?;
+    Ok(updated)
 }
 
 /// When a change to `path` actually takes effect, shown to users by the CLI
@@ -1034,6 +1143,7 @@ pub fn applies_when(path: &str) -> &'static str {
         // already running, so -- unlike the "next service start" paths
         // below, which need an explicit stop/start of *something* -- there
         // is nothing left for the user to do at all.
+        "network.membership_allowlist" | "ai.trusted_providers" => "applied immediately",
         "ai.providers"
         | "ai.presets"
         | "ai.default_preset_id"
@@ -1045,6 +1155,11 @@ pub fn applies_when(path: &str) -> &'static str {
 }
 
 impl Config {
+    /// Validates the `[network]` section (see [`NetworkConfig::validate`]).
+    pub fn validate_network(&self) -> Result<()> {
+        self.network.validate()
+    }
+
     /// Load config from disk, writing defaults on first run. Runs the
     /// legacy `[ai]` migration (see `migrate_legacy`) and persists it when
     /// it changed anything, so callers always see the current shape.
@@ -1828,6 +1943,7 @@ mod tests {
             enabled: true,
             schedule: "@every 30m".to_string(),
             source: SourceConfig::GlobalArticles {
+                trusted_authors: vec![],
                 rooms: vec!["tc-global-articles".to_string()],
                 langs: vec!["ja".to_string()],
             },
@@ -1871,6 +1987,7 @@ mod tests {
             schedule: "@every 1h".to_string(),
             source: SourceConfig::ChatRoom {
                 room: "team-room".to_string(),
+                trusted_authors: vec!["did:key:zAlice".to_string(), "0123456789abcdef".to_string()],
             },
             transforms: vec![TransformConfig::Translate {
                 preset_id: "worker".to_string(),
@@ -1890,6 +2007,23 @@ mod tests {
     /// support), the fallback is a flat struct (`kind: String` + `Option`
     /// fields) with the same TOML surface -- see the module doc note next to
     /// `SourceConfig`/`TransformConfig`/`SinkConfig`.
+    #[test]
+    fn source_trusted_authors_defaults_empty_and_round_trips_through_json() {
+        // Legacy config without the field parses with an empty allowlist and
+        // serializes back without it (backward compatible).
+        let legacy: SourceConfig =
+            serde_json::from_value(serde_json::json!({"kind": "chat-room", "room": "r"})).unwrap();
+        let value = serde_json::to_value(&legacy).unwrap();
+        assert!(value.get("trusted_authors").is_none());
+
+        let set: SourceConfig = serde_json::from_value(serde_json::json!({
+            "kind": "global-articles", "trusted_authors": ["did:key:zA"]
+        }))
+        .unwrap();
+        let value = serde_json::to_value(&set).unwrap();
+        assert_eq!(value["trusted_authors"], serde_json::json!(["did:key:zA"]));
+    }
+
     #[test]
     fn bot_pipeline_config_round_trips_through_toml() {
         let mut config = Config::default();
@@ -1912,7 +2046,12 @@ mod tests {
         assert_eq!(pipeline.id, "news-audio");
         assert_eq!(pipeline.schedule, "@every 30m");
         match &pipeline.source {
-            SourceConfig::GlobalArticles { rooms, langs } => {
+            SourceConfig::GlobalArticles {
+                rooms,
+                langs,
+                trusted_authors,
+            } => {
+                assert!(trusted_authors.is_empty());
                 assert_eq!(rooms, &vec!["tc-global-articles".to_string()]);
                 assert_eq!(langs, &vec!["ja".to_string()]);
             }
@@ -1961,7 +2100,13 @@ mod tests {
         let pipeline_v2 = &reloaded.bot.pipelines[1];
         assert_eq!(pipeline_v2.id, "chat-digest");
         match &pipeline_v2.source {
-            SourceConfig::ChatRoom { room } => assert_eq!(room, "team-room"),
+            SourceConfig::ChatRoom {
+                room,
+                trusted_authors,
+            } => {
+                assert_eq!(room, "team-room");
+                assert_eq!(trusted_authors, &["did:key:zAlice", "0123456789abcdef"]);
+            }
             other => panic!("expected ChatRoom, got {other:?}"),
         }
         match &pipeline_v2.transforms[0] {
@@ -1995,6 +2140,7 @@ mod tests {
             schedule: "@every 1h".to_string(),
             source: SourceConfig::ChatRoom {
                 room: "team-room".to_string(),
+                trusted_authors: vec![],
             },
             transforms: vec![],
             sinks: vec![SinkConfig::Webhook {
@@ -2390,5 +2536,125 @@ mod tests {
         let orphan_url =
             serde_json::to_value(vec![webhook_pipeline("https://h.example/p?***", &[])]).unwrap();
         assert!(set_by_path(&config, "bot.pipelines", orphan_url).is_err());
+    }
+
+    #[test]
+    fn masked_provider_key_is_not_restored_when_base_url_host_changes() {
+        let mut config = Config::default();
+        config.ai.providers.push(AiProviderConfig {
+            id: "p1".into(),
+            label: "P1".into(),
+            base_url: "https://api.example.com/v1".into(),
+            api_key: "real-secret".into(),
+        });
+        let evil = json!([{ "id": "p1", "label": "P1", "base_url": "https://evil.example/v1", "api_key": "***" }]);
+        let err = set_by_path(&config, "ai.providers", evil).unwrap_err();
+        assert!(err.to_string().contains("re-enter"), "{err}");
+        // Scheme or port change counts too.
+        for url in [
+            "http://api.example.com/v1",
+            "https://api.example.com:8443/v1",
+        ] {
+            let v = json!([{ "id": "p1", "label": "P1", "base_url": url, "api_key": "***" }]);
+            assert!(set_by_path(&config, "ai.providers", v).is_err(), "{url}");
+        }
+        // Path change on the same origin is fine; a re-entered key is fine.
+        let ok = json!([{ "id": "p1", "label": "P1", "base_url": "https://API.example.com/v2", "api_key": "***" }]);
+        assert_eq!(
+            set_by_path(&config, "ai.providers", ok)
+                .unwrap()
+                .ai
+                .providers[0]
+                .api_key,
+            "real-secret"
+        );
+        let fresh = json!([{ "id": "p1", "label": "P1", "base_url": "https://new.example/v1", "api_key": "new-key" }]);
+        assert_eq!(
+            set_by_path(&config, "ai.providers", fresh)
+                .unwrap()
+                .ai
+                .providers[0]
+                .api_key,
+            "new-key"
+        );
+    }
+
+    #[test]
+    fn masked_webhook_header_is_not_restored_when_url_host_changes() {
+        let mut config = Config::default();
+        config.bot.pipelines.push(webhook_pipeline(
+            "https://h.example/p",
+            &[("Authorization", "Bearer SECRET")],
+        ));
+        let moved = serde_json::to_value(vec![webhook_pipeline(
+            "https://evil.example/p",
+            &[("Authorization", "***")],
+        )])
+        .unwrap();
+        let err = set_by_path(&config, "bot.pipelines", moved).unwrap_err();
+        assert!(err.to_string().contains("re-enter"), "{err}");
+        // Same host, different path keeps restoring.
+        let same = serde_json::to_value(vec![webhook_pipeline(
+            "https://h.example/other",
+            &[("Authorization", "***")],
+        )])
+        .unwrap();
+        let updated = set_by_path(&config, "bot.pipelines", same).unwrap();
+        match &updated.bot.pipelines[0].sinks[1] {
+            SinkConfig::Webhook { headers, .. } => assert_eq!(headers[0].value, "Bearer SECRET"),
+            other => panic!("expected webhook, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn legacy_upstream_fields_cannot_be_set_via_config_set() {
+        // `ai.upstream_url`/`upstream_api_key` are skip_serializing legacy
+        // fields, so `set_by_path` cannot address them: the destination can
+        // never be changed independently of the stored key.
+        let config = Config::default();
+        assert!(set_by_path(&config, "ai.upstream_url", json!("https://evil.example")).is_err());
+        assert!(set_by_path(&config, "ai.upstream_api_key", json!("k")).is_err());
+    }
+
+    fn did_ok() -> String {
+        crate::identity::did_for_seed(1)
+    }
+
+    #[test]
+    fn membership_allowlist_is_validated() {
+        let config = Config::default();
+        let updated =
+            set_by_path(&config, "network.membership_allowlist", json!([did_ok()])).unwrap();
+        assert_eq!(updated.network.membership_allowlist, vec![did_ok()]);
+        for bad in ["did:key:zAlice", "did:web:example.com", &did_ok()[..55]] {
+            assert!(
+                set_by_path(&config, "network.membership_allowlist", json!([bad])).is_err(),
+                "{bad}"
+            );
+        }
+        assert!(Config::default().network.membership_allowlist.is_empty());
+    }
+
+    #[test]
+    fn network_apply_maps_empty_to_open_and_list_to_some() {
+        let mut net = NetworkConfig::default();
+        net.apply();
+        assert_eq!(crate::net::peer_auth::membership_allowlist(), None);
+        net.membership_allowlist = vec![did_ok()];
+        net.apply();
+        assert_eq!(
+            crate::net::peer_auth::membership_allowlist(),
+            Some(vec![did_ok()])
+        );
+        NetworkConfig::default().apply();
+    }
+
+    #[test]
+    fn trusted_providers_round_trips_and_defaults_empty() {
+        let config = Config::default();
+        assert!(config.ai.trusted_providers.is_empty());
+        let updated = set_by_path(&config, "ai.trusted_providers", json!([did_ok()])).unwrap();
+        assert_eq!(updated.ai.trusted_providers, vec![did_ok()]);
+        assert_eq!(applies_when("ai.trusted_providers"), "applied immediately");
     }
 }

@@ -115,7 +115,15 @@ struct AiService {
     api_server: Mutex<Option<Arc<ApiServer>>>,
     /// Inactivity timeout for p2p requests (resets per chunk).
     request_timeout: Duration,
+    /// Bounds concurrently running inbound-message handlers.
+    handlers: Arc<tokio::sync::Semaphore>,
+    /// Inbound messages dropped because `handlers` was exhausted.
+    dropped_messages: std::sync::atomic::AtomicU64,
 }
+
+/// Max concurrently running inbound-message handlers (each may hold an
+/// upstream LLM call); excess messages are dropped and counted.
+const MAX_INFLIGHT_HANDLERS: usize = 64;
 
 static SERVICE: OnceCell<Arc<AiService>> = OnceCell::const_new();
 
@@ -164,7 +172,12 @@ async fn init_service(state: &Arc<AppState>) -> Result<Arc<AiService>> {
         provider: RwLock::new(None),
         api_server: Mutex::new(None),
         request_timeout: Duration::from_secs(config.ai.request_timeout_secs.max(1)),
+        handlers: Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT_HANDLERS)),
+        dropped_messages: std::sync::atomic::AtomicU64::new(0),
     });
+    service
+        .consumer
+        .set_trusted_providers(config.ai.trusted_providers.clone());
 
     {
         let service = service.clone();
@@ -174,9 +187,23 @@ async fn init_service(state: &Arc<AppState>) -> Result<Arc<AiService>> {
                 let Some(msg) = protocol::decode(data) else {
                     return; // Not an ai protocol message; ignore.
                 };
+                let Ok(permit) = service.handlers.clone().try_acquire_owned() else {
+                    let n = service
+                        .dropped_messages
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                        + 1;
+                    if n.is_power_of_two() {
+                        warn!(
+                            dropped = n,
+                            "ai: handler pool exhausted; dropping inbound message"
+                        );
+                    }
+                    return;
+                };
                 let from = from.to_string();
                 let service = service.clone();
                 rt.spawn(async move {
+                    let _permit = permit;
                     service.consumer.handle_message(&from, &msg);
                     let provider = service.provider.read().expect("ai provider lock").clone();
                     if let Some(provider) = provider {
@@ -481,9 +508,17 @@ async fn status(service: &Arc<AiService>) -> Result<Value> {
         .await
         .as_ref()
         .map(|server| server.addr().to_string());
-    let remote = service.consumer.provider().map(
-        |info| json!({ "node_id": info.node_id, "models": info.models, "services": info.services }),
-    );
+    let remote = service.consumer.provider().map(|info| {
+        json!({
+            "node_id": info.node_id,
+            "models": info.models,
+            "services": info.services,
+            // False = pinned by first-hello-wins (no `ai.trusted_providers`
+            // match); the dashboard should warn.
+            "provider_trusted": info.trusted,
+            "provider_did": info.did,
+        })
+    });
     Ok(json!({
         "room": service.room,
         "node_id": service.node_id,
@@ -496,6 +531,13 @@ async fn status(service: &Arc<AiService>) -> Result<Value> {
         }),
         "serving": serving,
         "remote_provider": remote,
+        "dropped_messages": service
+            .dropped_messages
+            .load(std::sync::atomic::Ordering::Relaxed),
+        "trusted_providers_configured": !service
+            .consumer
+            .trusted_providers()
+            .is_empty(),
     }))
 }
 
@@ -692,6 +734,16 @@ pub async fn reload_provider_if_running(state: &Arc<AppState>) {
         Err(err) => {
             warn!(%err, "ai: failed to reload provider after a config change; the previous provider keeps running");
         }
+    }
+}
+
+/// Applies `ai.trusted_providers` to a running consumer (no-op before the AI
+/// service starts; `init_service` reads it then). Called from `config.set`.
+pub fn apply_trusted_providers(state: &Arc<AppState>) {
+    if let Some(service) = SERVICE.get() {
+        service
+            .consumer
+            .set_trusted_providers(state.config().ai.trusted_providers);
     }
 }
 

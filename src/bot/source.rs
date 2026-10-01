@@ -127,6 +127,22 @@ fn timestamp_too_far_ahead(timestamp_ms: i64, now_ms: i64) -> bool {
     timestamp_ms > now_ms.saturating_add(MAX_FUTURE_SKEW_MS)
 }
 
+/// True when `from_id` (a wire's signature-verified `fromId` DID) is allowed
+/// by `trusted`: an empty list allows everyone; otherwise an entry must equal
+/// the DID or the node id derived from it (first 16 hex of `sha256(did)`,
+/// case-insensitive). Never call this with an id that was not verified by
+/// [`crate::wiresign::verify_wire`].
+fn author_trusted(trusted: &[String], from_id: &str) -> bool {
+    if trusted.is_empty() {
+        return true;
+    }
+    let node_id = crate::identity::node_id_for_did(from_id);
+    trusted.iter().any(|entry| {
+        let entry = entry.trim();
+        entry == from_id || entry.eq_ignore_ascii_case(&node_id)
+    })
+}
+
 /// Appends `wire`, first evicting the sender's own oldest entry when it is
 /// at [`MAX_BUFFERED_PER_SENDER`], then trimming the whole buffer to `cap`.
 fn push_capped<T>(buf: &mut VecDeque<T>, wire: T, cap: usize, from_id: impl Fn(&T) -> &str) {
@@ -456,6 +472,7 @@ pub(super) async fn poll_candidates(
     pipeline_id: &str,
     rooms: &[String],
     langs: &[String],
+    trusted_authors: &[String],
 ) -> Result<Vec<Candidate>> {
     let hub = ensure_hub().await;
     let rooms = effective_rooms(rooms);
@@ -485,6 +502,9 @@ pub(super) async fn poll_candidates(
                 }
                 if wire.from_id == own_did {
                     continue; // this bot's own article -- see the module doc
+                }
+                if !author_trusted(trusted_authors, &wire.from_id) {
+                    continue;
                 }
                 if unresolved.iter().any(|(_, w)| w.id == wire.id) {
                     continue; // same article seen via more than one configured room
@@ -785,6 +805,7 @@ pub(super) async fn poll_chat_candidates(
     data_dir: &std::path::Path,
     pipeline_id: &str,
     room: &str,
+    trusted_authors: &[String],
 ) -> Result<Vec<Candidate>> {
     let room = room.trim();
     if room.is_empty() {
@@ -814,6 +835,9 @@ pub(super) async fn poll_chat_candidates(
                 }
                 if wire.from_id == own_did {
                     continue; // this bot's own post -- see the module doc
+                }
+                if !author_trusted(trusted_authors, &wire.from_id) {
+                    continue;
                 }
                 unresolved.push(wire.clone());
             }
@@ -936,6 +960,24 @@ mod tests {
     fn parse_and_filter_rejects_missing_required_fields() {
         let bytes = serde_json::to_vec(&serde_json::json!({ "id": "a", "title": "t" })).unwrap();
         assert!(parse_and_filter(&bytes, "did:key:zAuthor", &[]).is_none());
+    }
+
+    #[test]
+    fn author_trusted_empty_list_allows_everyone() {
+        assert!(author_trusted(&[], "did:key:zAnyone"));
+    }
+
+    #[test]
+    fn author_trusted_matches_did_or_derived_node_id() {
+        let did = "did:key:zAlice";
+        let node_id = crate::identity::node_id_for_did(did);
+        assert!(author_trusted(&[did.to_string()], did));
+        assert!(author_trusted(&[format!(" {node_id} ")], did));
+        assert!(author_trusted(&[node_id.to_uppercase()], did));
+        assert!(!author_trusted(&["did:key:zBob".to_string()], did));
+        assert!(!author_trusted(&["0000000000000000".to_string()], did));
+        // A prefix of the DID is not a match.
+        assert!(!author_trusted(&["did:key:z".to_string()], did));
     }
 
     #[test]

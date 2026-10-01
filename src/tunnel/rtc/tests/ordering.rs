@@ -13,7 +13,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use super::super::event::{dispatch_event, run_payload_worker};
+use super::super::event::{dispatch_event, raw_event_channel, run_payload_worker};
 use super::super::payload::P2pPayload;
 use super::super::state::PeerRole;
 use super::{encode, test_manager};
@@ -63,7 +63,7 @@ async fn burst_of_raw_events_is_processed_in_order() {
     }
 
     let weak = Arc::downgrade(&manager.inner);
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, rx) = raw_event_channel();
     tokio::spawn(run_payload_worker(weak.clone(), rx));
 
     const N: u32 = 10;
@@ -101,7 +101,7 @@ async fn burst_of_raw_events_is_processed_in_order() {
 async fn rapid_leave_then_join_always_ends_with_peer_present() {
     let manager = test_manager("self", PeerRole::Client);
     let weak = Arc::downgrade(&manager.inner);
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, rx) = raw_event_channel();
     tokio::spawn(run_payload_worker(weak.clone(), rx));
 
     const ITERATIONS: u32 = 200;

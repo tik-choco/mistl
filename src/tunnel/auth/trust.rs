@@ -97,6 +97,83 @@ impl TrustStore {
         self.entries.read().await.get(key).copied()
     }
 
+    /// The remembered decision for a peer on `forward_key`.
+    ///
+    /// Entries are keyed on the peer's DID (`peer_id` field = `did:key:...`).
+    /// Old node-id-keyed entries still load, but a node id alone is not an
+    /// identity, so they are honored like this:
+    /// - verified `did` (must hash to `peer_id`): the DID entry wins; a
+    ///   legacy `(peer_id, key)` entry is migrated to the DID on the spot
+    ///   (afterwards both the DID and its node id must match, since lookups
+    ///   are by the DID verified for this very `peer_id`);
+    /// - unverified (`did == None`): only a legacy *deny* applies. A legacy
+    ///   allow is ignored (the peer is prompted instead): trust is only
+    ///   granted to a verified DID.
+    pub async fn lookup(
+        &self,
+        peer_id: &str,
+        did: Option<&str>,
+        forward_key: &str,
+    ) -> Option<TrustDecision> {
+        let legacy = TrustKey {
+            peer_id: peer_id.to_string(),
+            forward_key: forward_key.to_string(),
+        };
+        // `peer_id` is attacker-chosen: never let it alias a DID-keyed row.
+        let legacy_ok = !peer_id.starts_with("did:");
+        let did = did.filter(|did| crate::identity::node_id_for_did(did) == peer_id);
+        let Some(did) = did else {
+            if !legacy_ok {
+                return None;
+            }
+            return match self.get(&legacy).await {
+                Some(TrustDecision::Deny) => Some(TrustDecision::Deny),
+                _ => None,
+            };
+        };
+        let did_key = TrustKey {
+            peer_id: did.to_string(),
+            forward_key: forward_key.to_string(),
+        };
+        if let Some(decision) = self.get(&did_key).await {
+            return Some(decision);
+        }
+        if !legacy_ok {
+            return None;
+        }
+        let decision = self.get(&legacy).await?;
+        // Migrate: attach the DID, drop the node-id row. If persisting the
+        // new row fails keep the old one so nothing is lost.
+        if self.remember(did_key, decision).await.is_ok() {
+            let _ = self.remove(&legacy).await;
+        }
+        Some(decision)
+    }
+
+    /// Remembers `decision` for a *verified* peer, keyed on its DID. Returns
+    /// `Ok(false)` (storing nothing) when the peer is unverified: decisions
+    /// about unverified peers are one-off only.
+    pub async fn remember_for(
+        &self,
+        peer_id: &str,
+        did: Option<&str>,
+        forward_key: &str,
+        decision: TrustDecision,
+    ) -> Result<bool> {
+        let Some(did) = did.filter(|did| crate::identity::node_id_for_did(did) == peer_id) else {
+            return Ok(false);
+        };
+        self.remember(
+            TrustKey {
+                peer_id: did.to_string(),
+                forward_key: forward_key.to_string(),
+            },
+            decision,
+        )
+        .await?;
+        Ok(true)
+    }
+
     pub async fn list(&self) -> Vec<TrustEntry> {
         let mut entries = self
             .entries
@@ -132,18 +209,10 @@ impl TrustStore {
 
     async fn persist(&self) -> Result<()> {
         let _guard = self.persist_lock.lock().await;
-        if let Some(parent) = self.path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
         // Snapshot under the persist lock so the last writer always writes the
-        // newest state, then swap it in atomically (tmp + rename).
+        // newest state; `write_private` swaps it in atomically (0600 on Unix).
         let text = serde_json::to_string_pretty(&self.list().await)?;
-        let mut tmp_name = self.path.file_name().unwrap_or_default().to_os_string();
-        tmp_name.push(".tmp");
-        let temporary = self.path.with_file_name(tmp_name);
-        tokio::fs::write(&temporary, text).await?;
-        tokio::fs::rename(&temporary, &self.path).await?;
-        Ok(())
+        crate::statefile::write_private(&self.path, text.as_bytes())
     }
 }
 

@@ -333,6 +333,39 @@ pub enum StoreAction {
         #[command(subcommand)]
         action: StoreFolderShareAction,
     },
+    /// Review requests for a shared folder's key: a share link alone no
+    /// longer grants access, the owner approves each requester (or keeps
+    /// a per-folder allowlist)
+    FolderAccess {
+        #[command(subcommand)]
+        action: StoreFolderAccessAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum StoreFolderAccessAction {
+    /// List pending access requests and per-folder allowlists
+    Ls,
+    /// Send the folder key to a pending requester
+    Approve {
+        /// Pending request id (from `folder-access ls`)
+        id: String,
+        /// Also add the requester to the folder's allowlist
+        #[arg(long)]
+        remember: bool,
+    },
+    /// Refuse a pending request
+    Deny { id: String },
+    /// Add a requester (DID or 16-hex node id) to a folder's allowlist
+    Allow {
+        folder_id: String,
+        requester: String,
+    },
+    /// Remove a requester from a folder's allowlist
+    Revoke {
+        folder_id: String,
+        requester: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -897,6 +930,35 @@ pub fn dispatch(cli: Cli) -> Result<()> {
                     render_stopped,
                 ),
             },
+            StoreAction::FolderAccess { action } => {
+                let (cmd, args) = match action {
+                    StoreFolderAccessAction::Ls => ("store.folder-access.ls", json!({})),
+                    StoreFolderAccessAction::Approve { id, remember } => (
+                        "store.folder-access.approve",
+                        json!({ "id": id, "remember": remember }),
+                    ),
+                    StoreFolderAccessAction::Deny { id } => {
+                        ("store.folder-access.deny", json!({ "id": id }))
+                    }
+                    StoreFolderAccessAction::Allow {
+                        folder_id,
+                        requester,
+                    } => (
+                        "store.folder-access.allow",
+                        json!({ "folder_id": folder_id, "requester": requester }),
+                    ),
+                    StoreFolderAccessAction::Revoke {
+                        folder_id,
+                        requester,
+                    } => (
+                        "store.folder-access.revoke",
+                        json!({ "folder_id": folder_id, "requester": requester }),
+                    ),
+                };
+                store_call(cmd, args, json, |response| {
+                    serde_json::to_string_pretty(response).unwrap_or_default()
+                })
+            }
         },
         Command::Stream { action } => match action {
             StreamAction::Start { room } => {

@@ -165,6 +165,11 @@ pub struct SyncEntry {
     pub started_at: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub last_synced_at: Option<String>,
+    /// Highest owner-signed envelope `clock` accepted so far. Envelopes with
+    /// a non-zero clock at or below it are dropped so a replayed old
+    /// (validly signed) `folder-state`/`folder-change` can't roll files back.
+    #[serde(default)]
+    pub last_clock: i64,
     /// Most recent sync failure, cleared on the next success.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub last_error: Option<String>,
@@ -1007,6 +1012,7 @@ pub async fn register_sync(
         last_folder_signature: None,
         started_at: chrono::Utc::now().to_rfc3339(),
         last_synced_at: None,
+        last_clock: 0,
         last_error: None,
         folders: Vec::new(),
         files: Vec::new(),
@@ -1448,6 +1454,10 @@ fn envelope_from_owner(entry: &SyncEntry, envelope: &ShareEnvelope) -> bool {
     envelope.from == entry.owner_node_id && envelope.room_id == entry.room_id
 }
 
+fn envelope_clock_fresh(entry: &SyncEntry, envelope: &ShareEnvelope) -> bool {
+    envelope.clock <= 0 || envelope.clock > entry.last_clock
+}
+
 async fn handle_envelope(store: &Store, envelope: &ShareEnvelope) -> Result<()> {
     let Some(folder_id) = envelope.folder_id.clone() else {
         return Ok(());
@@ -1462,6 +1472,24 @@ async fn handle_envelope(store: &Store, envelope: &ShareEnvelope) -> Result<()> 
             "folder-sync: ignoring envelope not from the folder owner/room"
         );
         return Ok(());
+    }
+    // Replay protection: the owner's signed `clock` (ms) must advance. An
+    // envelope without a clock (0) cannot be ordered and is let through.
+    if !envelope_clock_fresh(&entry, envelope) {
+        debug!(folder_id = %folder_id, clock = envelope.clock, "folder-sync: dropping stale/replayed envelope");
+        return Ok(());
+    }
+    if envelope.clock > 0
+        && matches!(
+            envelope.type_.as_str(),
+            "folder-change" | "folder-state" | "folder-share"
+        )
+    {
+        let clock = envelope.clock;
+        update_entry(store, &folder_id, move |e| {
+            e.last_clock = e.last_clock.max(clock)
+        })
+        .await?;
     }
 
     let result = match envelope.type_.as_str() {
@@ -1632,6 +1660,7 @@ mod sync_tests {
             last_folder_signature: None,
             started_at: "2026-01-01T00:00:00Z".to_string(),
             last_synced_at: None,
+            last_clock: 0,
             last_error: None,
             folders: Vec::new(),
             files: Vec::new(),
@@ -1653,6 +1682,20 @@ mod sync_tests {
         envelope.from = "did:key:zOwner".to_string();
         envelope.room_id = "other-room".to_string();
         assert!(!envelope_from_owner(&entry, &envelope));
+    }
+
+    #[test]
+    fn replayed_or_stale_clock_is_not_fresh() {
+        let mut entry = sample_entry("f1", Path::new("/tmp/x"));
+        entry.last_clock = 1000;
+        let env = |clock| ShareEnvelope {
+            clock,
+            ..ShareEnvelope::default()
+        };
+        assert!(!envelope_clock_fresh(&entry, &env(1000)));
+        assert!(!envelope_clock_fresh(&entry, &env(999)));
+        assert!(envelope_clock_fresh(&entry, &env(1001)));
+        assert!(envelope_clock_fresh(&entry, &env(0)), "unclocked passes");
     }
 
     fn folder_rec(id: &str, parent: Option<&str>, name: &str) -> FolderRecord {

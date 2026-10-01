@@ -40,7 +40,8 @@
 //!   that an unmodified OpenAI client can be pointed at it, and every such
 //!   client sends this endpoint that way.
 //! - Upstream/backend errors: before any deltas were streamed -> `502` with
-//!   `{"error":{"message":...}}` (or `400` for malformed requests); once
+//!   `{"error":{"message":...}}` carrying a generic message (the detail is
+//!   logged only, as it can embed upstream URLs/tokens) (or `400` for malformed requests); once
 //!   streaming has begun, emit an SSE `{"error":...}` event and terminate
 //!   the HTTP chunked body cleanly (without a success `[DONE]` event).
 //! - Anything else -> `404`.
@@ -427,6 +428,11 @@ async fn write_json_response(
     stream.flush().await
 }
 
+/// What local clients see for any upstream/backend failure. The real error
+/// (which can embed the upstream URL, a token in a query string, or response
+/// bodies) goes to the log only.
+const BACKEND_ERROR_MESSAGE: &str = "upstream backend error (see the mistl daemon log)";
+
 async fn write_error(
     stream: &mut TcpStream,
     status: u16,
@@ -497,6 +503,26 @@ async fn handle_connection(
     stt_call: SttFn,
 ) -> Result<()> {
     let local_addr = stream.local_addr().context("reading local address")?;
+    // Same rule as the dashboard: while external connections are OFF, only
+    // loopback peers are served (matters when `ai.api_listen` is not
+    // loopback).
+    if crate::daemon::external_connections_blocked()
+        && !stream
+            .peer_addr()
+            .context("reading peer address")?
+            .ip()
+            .to_canonical()
+            .is_loopback()
+    {
+        let _ = write_error(
+            &mut stream,
+            403,
+            "Forbidden",
+            "external connections are OFF",
+        )
+        .await;
+        return Ok(());
+    }
     let (head, leftover) =
         match tokio::time::timeout(HEAD_READ_TIMEOUT, read_request_head(&mut stream)).await {
             Ok(Ok(Some(pair))) => pair,
@@ -664,7 +690,8 @@ async fn handle_audio_speech(stream: &mut TcpStream, body: &[u8], call: &TtsFn) 
             stream.write_all(&audio.bytes).await?;
         }
         Err(err) => {
-            let _ = write_error(stream, 502, "Bad Gateway", &err.to_string()).await;
+            warn!("api_server: backend error: {err:#}");
+            let _ = write_error(stream, 502, "Bad Gateway", BACKEND_ERROR_MESSAGE).await;
         }
     }
     Ok(())
@@ -726,7 +753,8 @@ async fn handle_audio_transcriptions(
             let _ = write_json_response(stream, 200, "OK", &json!({ "text": text })).await;
         }
         Err(err) => {
-            let _ = write_error(stream, 502, "Bad Gateway", &err.to_string()).await;
+            warn!("api_server: backend error: {err:#}");
+            let _ = write_error(stream, 502, "Bad Gateway", BACKEND_ERROR_MESSAGE).await;
         }
     }
     Ok(())
@@ -901,7 +929,8 @@ async fn handle_chat_completions(
                 Ok(())
             }
             Err(error) => {
-                let _ = write_error(stream, 502, "Bad Gateway", &format!("{error:#}")).await;
+                warn!("api_server: backend error: {error:#}");
+                let _ = write_error(stream, 502, "Bad Gateway", BACKEND_ERROR_MESSAGE).await;
                 Ok(())
             }
         };
@@ -984,11 +1013,13 @@ async fn handle_chat_completions(
         }
         Err(error) => {
             if !stream_started {
-                // No response bytes have been committed, so preserve the
-                // backend error as a normal OpenAI-shaped HTTP failure.
-                let _ = write_error(stream, 502, "Bad Gateway", &format!("{error:#}")).await;
+                // No response bytes have been committed, so answer with a
+                // normal OpenAI-shaped HTTP failure (generic text; see
+                // BACKEND_ERROR_MESSAGE).
+                warn!("api_server: backend error: {error:#}");
+                let _ = write_error(stream, 502, "Bad Gateway", BACKEND_ERROR_MESSAGE).await;
             } else {
-                // HTTP status is already committed. Surface the real error in
+                // HTTP status is already committed. Surface a generic error in
                 // band and always finish the chunked body; abruptly closing it
                 // makes clients report only "incomplete chunked read".
                 warn!("api_server: backend error mid-stream: {error:#}");
@@ -996,7 +1027,7 @@ async fn handle_chat_completions(
                     "data: {}\n\n",
                     json!({
                         "error": {
-                            "message": format!("{error:#}"),
+                            "message": BACKEND_ERROR_MESSAGE,
                             "type": "backend_error",
                         }
                     })
@@ -1431,7 +1462,8 @@ mod tests {
             "an immediate failure must not commit an SSE response: {head}"
         );
         let value: Value = serde_json::from_slice(body).expect("valid JSON error body");
-        assert_eq!(value["error"]["message"], "upstream exploded");
+        assert_eq!(value["error"]["message"], BACKEND_ERROR_MESSAGE);
+        assert!(!String::from_utf8_lossy(body).contains("exploded"));
     }
 
     #[tokio::test]
@@ -1474,7 +1506,7 @@ mod tests {
         assert!(
             events
                 .iter()
-                .any(|event| { event["error"]["message"] == "upstream failed after a delta" }),
+                .any(|event| { event["error"]["message"] == BACKEND_ERROR_MESSAGE }),
             "expected a surfaced backend error: {text}"
         );
         assert!(
@@ -1538,7 +1570,8 @@ mod tests {
         let (head, body) = split_response(&raw);
         assert_eq!(status_code(&head), 502);
         let json: Value = serde_json::from_slice(body).expect("valid json");
-        assert!(json["error"]["message"].is_string());
+        assert_eq!(json["error"]["message"], BACKEND_ERROR_MESSAGE);
+        assert!(!String::from_utf8_lossy(body).contains("exploded"));
     }
 
     #[tokio::test]

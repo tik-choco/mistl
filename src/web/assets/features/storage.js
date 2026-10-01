@@ -245,5 +245,63 @@
     };
   }
 
-  global.MistlStorage = Object.freeze({ create: create, visibleItems: visibleItems });
+  /* Owner-approval list for folder-key requests (`store.folder-access.*`).
+     options: { mount, call(cmd, args) -> Promise, t }. Requester and folder
+     names are peer-influenced, so everything is rendered with textContent. */
+  function createFolderAccess(options) {
+    var mount = options.mount;
+    var doc = mount.ownerDocument;
+    function label(key, fallback) {
+      var value = options.t ? options.t(key) : key;
+      return value && value !== key ? value : fallback;
+    }
+    function node(tag, className, text) {
+      var result = doc.createElement(tag);
+      if (className) result.className = className;
+      if (text != null) result.textContent = String(text);
+      return result;
+    }
+    var lastSnapshot = null;
+    function act(button, cmd, args) {
+      button.disabled = true;
+      options.call(cmd, args).then(refresh, function () { button.disabled = false; });
+    }
+    function render(pending) {
+      var snapshot = JSON.stringify(pending);
+      if (snapshot === lastSnapshot) return;
+      lastSnapshot = snapshot;
+      mount.textContent = "";
+      mount.hidden = pending.length === 0;
+      if (!pending.length) return;
+      mount.appendChild(node("h3", "store-access-title", label("store.access.title", "Folder access requests")));
+      pending.forEach(function (req) {
+        var row = node("div", "store-access-row");
+        var info = node("div", "store-access-info");
+        info.appendChild(node("strong", null, req.folder_name || req.folder_id));
+        info.appendChild(node("span", "store-access-who", req.requester_did));
+        info.appendChild(node("span", "store-access-meta", label("store.access.node", "node") + " " + req.requester_node_id + " · " + req.first_seen));
+        var actions = node("div", "store-access-actions");
+        var approve = node("button", null, label("store.access.approve", "Approve"));
+        var remember = node("button", null, label("store.access.approveRemember", "Approve and remember"));
+        var deny = node("button", null, label("store.access.deny", "Deny"));
+        approve.type = remember.type = deny.type = "button";
+        approve.addEventListener("click", function () { act(approve, "store.folder-access.approve", { id: req.id }); });
+        remember.addEventListener("click", function () { act(remember, "store.folder-access.approve", { id: req.id, remember: true }); });
+        deny.addEventListener("click", function () { act(deny, "store.folder-access.deny", { id: req.id }); });
+        [approve, remember, deny].forEach(function (b) { actions.appendChild(b); });
+        row.appendChild(info);
+        row.appendChild(actions);
+        mount.appendChild(row);
+      });
+    }
+    function refresh() {
+      return options.call("store.folder-access.ls", {}).then(function (data) {
+        render(Array.isArray(data && data.pending) ? data.pending : []);
+      }, function () {});
+    }
+    mount.hidden = true;
+    return { refresh: refresh };
+  }
+
+  global.MistlStorage = Object.freeze({ create: create, createFolderAccess: createFolderAccess, visibleItems: visibleItems });
 })(window);

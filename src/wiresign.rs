@@ -35,6 +35,9 @@ use serde_json::{Map, Number, Value};
 
 use crate::identity::Identity;
 
+/// Length of a 64-byte Ed25519 signature as unpadded base64url.
+const ED25519_SIGNATURE_B64URL_LEN: usize = 86;
+
 /// Deterministic, key-sorted JSON stringification, byte-for-byte compatible
 /// with tc-chat/tc-news's `stableStringify` (`src/lib/wireSign.ts`):
 ///
@@ -171,6 +174,15 @@ pub fn verify_wire(obj: &Value) -> Result<bool> {
     let Some(signature_str) = map.get("signature").and_then(Value::as_str) else {
         return Ok(false);
     };
+    // Cheap shape gates before any decoding or payload serialization: an
+    // Ed25519 signature is always 64 bytes (86 unpadded base64url chars),
+    // and an Ed25519 did:key always has a fixed length (see
+    // `crate::identity::pubkey_from_did`).
+    if signature_str.len() != ED25519_SIGNATURE_B64URL_LEN
+        || from_id.len() != crate::identity::ED25519_DID_KEY_LEN
+    {
+        return Ok(false);
+    }
     let Ok(signature_bytes) = URL_SAFE_NO_PAD.decode(signature_str) else {
         return Ok(false);
     };
@@ -419,6 +431,23 @@ mod tests {
         let mut wire = json!({ "type": "tc-bot:test", "fromId": "did:key:zSomeoneElse" });
         let err = sign_wire(&mut wire, &identity).expect_err("mismatched fromId must be rejected");
         assert!(err.to_string().contains("fromId"));
+    }
+
+    #[test]
+    fn verify_wire_rejects_oversized_from_id_and_signature_quickly() {
+        let identity = crate::identity::for_test();
+        let mut wire = json!({ "type": "tc-bot:test", "fromId": identity.did() });
+        sign_wire(&mut wire, &identity).unwrap();
+        assert!(verify_wire(&wire).unwrap());
+
+        let started = std::time::Instant::now();
+        let mut huge_did = wire.clone();
+        huge_did["fromId"] = json!(format!("did:key:z{}", "2".repeat(1_000_000)));
+        assert!(!verify_wire(&huge_did).unwrap());
+        let mut huge_sig = wire.clone();
+        huge_sig["signature"] = json!("A".repeat(1_000_000));
+        assert!(!verify_wire(&huge_sig).unwrap());
+        assert!(started.elapsed() < std::time::Duration::from_millis(200));
     }
 
     #[test]

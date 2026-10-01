@@ -228,10 +228,12 @@ impl ForwardController {
         if let Some(task) = handle.task {
             task.abort();
         }
-        if handle.spec.direction == Direction::Serve
-            && let Some(manager) = &self.rtc_manager
-        {
-            manager.unpublish_tunnel_target(key).await;
+        if let Some(manager) = &self.rtc_manager {
+            if handle.spec.direction == Direction::Serve {
+                manager.unpublish_tunnel_target(key).await;
+            } else {
+                manager.clear_route_pin(key).await;
+            }
         }
         Ok(())
     }

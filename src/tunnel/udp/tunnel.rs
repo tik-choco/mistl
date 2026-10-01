@@ -7,7 +7,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::RwLock;
 use tracing::{debug, error};
 
-use crate::tunnel::auth::AuthRequest;
+use crate::tunnel::auth::{AuthRequest, binding_holds, verified_did_for_peer};
 use crate::tunnel::rtc::{RTCManager, TunnelMessage};
 
 use super::{
@@ -34,6 +34,7 @@ impl UdpManager {
             ),
         }
 
+        let room = self.rtc_manager.current_room().await;
         let existing = {
             let conns = self.conns.read().await;
             if let Some(uc) = conns.get(&tm.conn_id) {
@@ -43,6 +44,15 @@ impl UdpManager {
                 if uc.peer_id != peer_id {
                     debug!(
                         "dropping udp data for conn {} from non-owner peer {}",
+                        tm.conn_id, peer_id
+                    );
+                    return;
+                }
+                // Mis-delivery protection: the sender must still map to the
+                // DID this session was approved for.
+                if !binding_holds(uc.did.as_deref(), Some(&room), peer_id) {
+                    debug!(
+                        "dropping udp data for conn {}: sender {} no longer maps to the approved DID",
                         tm.conn_id, peer_id
                     );
                     return;
@@ -86,6 +96,7 @@ impl UdpManager {
         // Serve side: a new session needs authorization first. That can block
         // on a human, so it runs off this message loop; packets for the conn
         // that arrive meanwhile are queued (bounded) on `pending`.
+        let did = verified_did_for_peer(Some(&room), peer_id);
         let sessions = {
             let conns = self.conns.read().await;
             conns.values().filter(|uc| uc.peer_id == peer_id).count()
@@ -110,6 +121,7 @@ impl UdpManager {
                 tm.conn_id.clone(),
                 PendingUdp {
                     peer_id: peer_id.to_string(),
+                    did: did.clone(),
                     queued: vec![payload.clone()],
                 },
             );
@@ -118,14 +130,19 @@ impl UdpManager {
         let mgr = self.clone();
         let conn_id = tm.conn_id.clone();
         let peer_id = peer_id.to_string();
-        tokio::spawn(async move { mgr.authorize_and_open(conn_id, peer_id).await });
+        tokio::spawn(async move { mgr.authorize_and_open(conn_id, peer_id, did).await });
     }
 
     /// Resolves authorization for a pending serve-side session (spawned by
     /// `handle_data`) and, if allowed, opens the backend socket, flushes the
     /// packets queued meanwhile and starts relaying replies.
-    async fn authorize_and_open(self: Arc<Self>, conn_id: String, peer_id: String) {
-        let allowed = self.authorize_remote_session(&peer_id).await;
+    async fn authorize_and_open(
+        self: Arc<Self>,
+        conn_id: String,
+        peer_id: String,
+        did: Option<String>,
+    ) {
+        let allowed = self.authorize_remote_session(&peer_id, did.clone()).await;
         if !allowed || self.runtime.is_cancelled() {
             self.pending.lock().await.remove(&conn_id);
             debug!(
@@ -143,7 +160,12 @@ impl UdpManager {
                 return;
             }
         };
-        if let Err(e) = sock.connect(&self.remote_addr).await {
+        let connected =
+            match crate::tunnel::forward_args::resolve_non_link_local(&self.remote_addr).await {
+                Ok(sa) => sock.connect(sa).await,
+                Err(e) => Err(e),
+            };
+        if let Err(e) = connected {
             error!("Failed to connect UDP: {}", e);
             self.pending.lock().await.remove(&conn_id);
             return;
@@ -167,6 +189,7 @@ impl UdpManager {
                     peer_id: peer_id.clone(),
                     metrics: metrics.clone(),
                     client_addr: None,
+                    did: entry.did.clone(),
                 },
             );
             if old.is_none() {
@@ -190,12 +213,13 @@ impl UdpManager {
         });
     }
 
-    async fn authorize_remote_session(&self, peer_id: &str) -> bool {
+    async fn authorize_remote_session(&self, peer_id: &str, did: Option<String>) -> bool {
         let req = AuthRequest {
             peer_id: peer_id.to_string(),
             forward_key: self.target.clone(),
             target_addr: self.remote_addr.clone(),
             proto: "udp".to_string(),
+            did,
         };
         self.authorizer.authorize(&req).await.is_allowed()
     }

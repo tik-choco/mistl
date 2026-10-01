@@ -141,6 +141,7 @@ async fn events_render_auth_audit_log() {
                 forward_key: "tcp:80".to_string(),
                 target_addr: "127.0.0.1:80".to_string(),
                 proto: "tcp".to_string(),
+                did: None,
             },
             AuthDecision::Allow,
             AuthEventSource::Policy,

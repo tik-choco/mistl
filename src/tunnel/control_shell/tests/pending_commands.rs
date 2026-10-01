@@ -15,6 +15,7 @@ async fn pending_lists_auth_requests() {
         forward_key: "tcp:80".to_string(),
         target_addr: "127.0.0.1:80".to_string(),
         proto: "tcp".to_string(),
+        did: None,
     };
     let receiver = pending.enqueue_for_test(request).await;
 
@@ -37,6 +38,7 @@ async fn approve_resolves_pending_auth_request() {
             forward_key: "tcp:80".to_string(),
             target_addr: "127.0.0.1:80".to_string(),
             proto: "tcp".to_string(),
+            did: None,
         })
         .await;
 
@@ -58,6 +60,7 @@ async fn deny_always_resolves_pending_auth_request() {
             forward_key: "tcp:80".to_string(),
             target_addr: "127.0.0.1:80".to_string(),
             proto: "tcp".to_string(),
+            did: None,
         })
         .await;
 

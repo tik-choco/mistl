@@ -104,6 +104,7 @@ pub async fn serve(state: Arc<AppState>) -> Result<IpcServer> {
     };
     crate::statefile::write_private(&info_path()?, &serde_json::to_vec(&info)?)?;
 
+    let slots = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
     let handle = tokio::spawn(async move {
         loop {
             let (socket, addr) = match listener.accept().await {
@@ -113,10 +114,16 @@ pub async fn serve(state: Arc<AppState>) -> Result<IpcServer> {
                     continue;
                 }
             };
+            // Cap concurrent connections; excess ones are dropped at once.
+            let Ok(permit) = slots.clone().try_acquire_owned() else {
+                debug!(%addr, "ipc connection refused: too many open connections");
+                continue;
+            };
             debug!(%addr, "ipc connection");
             let state = state.clone();
             let token = token.clone();
             tokio::spawn(async move {
+                let _permit = permit;
                 if let Err(error) = handle_connection(socket, state, token).await {
                     debug!(%error, "ipc connection ended with error");
                 }
@@ -135,6 +142,13 @@ pub async fn serve(state: Arc<AppState>) -> Result<IpcServer> {
 /// connection instead of buffering without bound (the peer may be
 /// unauthenticated).
 const MAX_LINE_BYTES: usize = 1024 * 1024;
+/// Concurrent IPC connections served at once.
+const MAX_CONNECTIONS: usize = 32;
+/// How long an authenticated connection may sit idle between requests. The
+/// CLI sends one request per connection and waits for its reply, so this only
+/// reaps abandoned sockets (a slow command is not "idle": the timeout covers
+/// reading the next request, not running the current one).
+const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 /// How long a fresh connection has to deliver its first (authenticating) line.
 const FIRST_LINE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -191,9 +205,14 @@ async fn handle_connection(
             .await
             .context("ipc client sent no request in time")??
         } else {
-            read_line_limited(&mut reader, MAX_LINE_BYTES).await?
+            tokio::time::timeout(IDLE_TIMEOUT, read_line_limited(&mut reader, MAX_LINE_BYTES))
+                .await
+                .context("ipc connection idle")??
         };
         let Some(line) = line else { break };
+        // Anything but a valid, authenticated request ends the connection
+        // after the error reply (no retrying tokens on one socket).
+        let mut close_after = true;
         let response = match serde_json::from_str::<Request>(&line) {
             Ok(request)
                 if token_eq(&request.token, &token)
@@ -201,7 +220,15 @@ async fn handle_connection(
                     && request.instance == crate::runtime::context().instance
                     && request.ipc_version == crate::runtime::IPC_VERSION =>
             {
-                match crate::daemon::dispatch(&request.cmd, request.args, &state).await {
+                close_after = false;
+                match crate::daemon::dispatch_as(
+                    crate::daemon::Caller::Ipc,
+                    &request.cmd,
+                    request.args,
+                    &state,
+                )
+                .await
+                {
                     Ok(data) => Response {
                         ok: true,
                         data: Some(data),
@@ -228,6 +255,9 @@ async fn handle_connection(
         let mut payload = serde_json::to_vec(&response)?;
         payload.push(b'\n');
         write_half.write_all(&payload).await?;
+        if close_after {
+            break;
+        }
     }
     Ok(())
 }

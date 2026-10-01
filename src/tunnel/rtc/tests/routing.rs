@@ -77,10 +77,43 @@ async fn capability_payload_tracks_targeted_server_peers() {
 }
 
 #[tokio::test]
-async fn select_server_peer_round_robins_across_advertised_peers() {
+async fn select_server_peer_pins_the_first_pick_and_ignores_later_advertisers() {
     let manager = test_manager("self", PeerRole::Client);
+    let advertise = |peer: &'static str| {
+        let inner = manager.inner.clone();
+        async move {
+            handle_payload(
+                inner,
+                peer.to_string(),
+                encode(P2pPayload::Capabilities {
+                    forwards: vec!["tcp:80".to_string()],
+                }),
+            )
+            .await;
+        }
+    };
 
-    for peer in ["server-b", "server-a", "server-c"] {
+    advertise("server-b").await;
+    advertise("server-c").await;
+    // First pick is deterministic (sorted) and then sticks.
+    for _ in 0..4 {
+        assert_eq!(
+            manager.select_server_peer_for("tcp:80").await.as_deref(),
+            Some("server-b")
+        );
+    }
+    // A late advertiser sorting earlier must not take the traffic over.
+    advertise("server-a").await;
+    assert_eq!(
+        manager.select_server_peer_for("tcp:80").await.as_deref(),
+        Some("server-b")
+    );
+}
+
+#[tokio::test]
+async fn pinned_peer_gone_yields_none_until_cleared() {
+    let manager = test_manager("self", PeerRole::Client);
+    for peer in ["server-a", "server-b"] {
         handle_payload(
             manager.inner.clone(),
             peer.to_string(),
@@ -90,22 +123,25 @@ async fn select_server_peer_round_robins_across_advertised_peers() {
         )
         .await;
     }
-
-    // Deterministic ordering (sorted) with a round-robin cursor.
-    let mut picks = Vec::new();
-    for _ in 0..6 {
-        picks.push(manager.select_server_peer_for("tcp:80").await.unwrap());
-    }
     assert_eq!(
-        picks,
-        vec![
-            "server-a".to_string(),
-            "server-b".to_string(),
-            "server-c".to_string(),
-            "server-a".to_string(),
-            "server-b".to_string(),
-            "server-c".to_string(),
-        ]
+        manager.select_server_peer_for("tcp:80").await.as_deref(),
+        Some("server-a")
+    );
+    // The pinned peer stops advertising: no silent fail-over to server-b.
+    handle_payload(
+        manager.inner.clone(),
+        "server-a".to_string(),
+        encode(P2pPayload::Capabilities {
+            forwards: Vec::new(),
+        }),
+    )
+    .await;
+    assert_eq!(manager.select_server_peer_for("tcp:80").await, None);
+    // Explicit re-target (forward removal) releases the pin.
+    manager.clear_route_pin("tcp:80").await;
+    assert_eq!(
+        manager.select_server_peer_for("tcp:80").await.as_deref(),
+        Some("server-b")
     );
 }
 

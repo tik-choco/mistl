@@ -405,11 +405,19 @@ async fn run_pipeline_work(
     // has since been removed. Validate only before importing fresh content.
     check_transforms_resolve(config, &pipeline.transforms)?;
     let candidates = match &pipeline.source {
-        SourceConfig::GlobalArticles { rooms, langs } => {
-            source::poll_candidates(state, data_dir, &pipeline.id, rooms, langs).await
+        SourceConfig::GlobalArticles {
+            rooms,
+            langs,
+            trusted_authors,
+        } => {
+            source::poll_candidates(state, data_dir, &pipeline.id, rooms, langs, trusted_authors)
+                .await
         }
-        SourceConfig::ChatRoom { room } => {
-            source::poll_chat_candidates(state, data_dir, &pipeline.id, room).await
+        SourceConfig::ChatRoom {
+            room,
+            trusted_authors,
+        } => {
+            source::poll_chat_candidates(state, data_dir, &pipeline.id, room, trusted_authors).await
         }
     }
     .context("source failed")?;
@@ -517,9 +525,32 @@ fn check_transforms_resolve(config: &Config, transforms: &[TransformConfig]) -> 
 /// stops anything -- it's purely diagnostic, matching the brief's warning
 /// examples (`preset "worker" not found in ai.presets`, an unset sink
 /// target, ...), each paired with the config path and a fix command.
+/// A `trusted_authors` entry must be a `did:key:` DID or a 16-hex node id.
+fn is_valid_trusted_author(entry: &str) -> bool {
+    let entry = entry.trim();
+    entry.starts_with("did:key:")
+        || (entry.len() == 16 && entry.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
 fn validate_pipeline(config: &Config, pipeline: &PipelineConfig) -> Vec<String> {
     let mut warnings = Vec::new();
     let prefix = format!("bot.pipelines[id={:?}]", pipeline.id);
+
+    let trusted_authors = match &pipeline.source {
+        SourceConfig::GlobalArticles {
+            trusted_authors, ..
+        }
+        | SourceConfig::ChatRoom {
+            trusted_authors, ..
+        } => trusted_authors,
+    };
+    for entry in trusted_authors {
+        if !is_valid_trusted_author(entry) {
+            warnings.push(format!(
+                "{prefix}.source.trusted_authors entry {entry:?} is neither a did:key nor a 16-hex node id; it will never match"
+            ));
+        }
+    }
 
     for transform in &pipeline.transforms {
         let (kind, preset_id) = match transform {
@@ -799,7 +830,7 @@ async fn cmd_status(engine: &Arc<BotEngine>, state: &Arc<AppState>) -> Result<Va
                     }
                 }
             }
-            SourceConfig::ChatRoom { room } => {
+            SourceConfig::ChatRoom { room, .. } => {
                 let room = room.trim();
                 if !room.is_empty() {
                     rooms.insert(room.to_string());
@@ -855,7 +886,7 @@ async fn cmd_options(state: &Arc<AppState>) -> Result<Value> {
                     add_room(room, &mut rooms);
                 }
             }
-            SourceConfig::ChatRoom { room } => add_room(room, &mut rooms),
+            SourceConfig::ChatRoom { room, .. } => add_room(room, &mut rooms),
         }
         for sink in &pipeline.sinks {
             match sink {
@@ -906,6 +937,7 @@ mod tests {
             source: SourceConfig::GlobalArticles {
                 rooms: vec![],
                 langs: vec![],
+                trusted_authors: vec![],
             },
             transforms: vec![
                 TransformConfig::Summarize {
@@ -1130,6 +1162,29 @@ mod tests {
         let config = configured_ai();
         let pipeline = sample_pipeline("p1", "@every 1h");
         assert!(validate_pipeline(&config, &pipeline).is_empty());
+    }
+
+    #[test]
+    fn validate_pipeline_flags_malformed_trusted_authors() {
+        let config = configured_ai();
+        let mut pipeline = sample_pipeline("p1", "@every 1h");
+        pipeline.source = SourceConfig::ChatRoom {
+            room: "r".to_string(),
+            trusted_authors: vec![
+                "did:key:zAlice".to_string(),
+                "0123456789abcdef".to_string(),
+                "alice".to_string(),
+            ],
+        };
+        let warnings = validate_pipeline(&config, &pipeline);
+        assert_eq!(
+            warnings
+                .iter()
+                .filter(|w| w.contains("trusted_authors"))
+                .count(),
+            1
+        );
+        assert!(warnings.iter().any(|w| w.contains("\"alice\"")));
     }
 
     #[test]

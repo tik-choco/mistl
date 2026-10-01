@@ -83,12 +83,8 @@ impl RoomStore {
     }
 
     async fn persist(&self) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
         let text = serde_json::to_string_pretty(&*self.entries.read().await)?;
-        tokio::fs::write(&self.path, text).await?;
-        Ok(())
+        crate::statefile::write_private(&self.path, text.as_bytes())
     }
 }
 

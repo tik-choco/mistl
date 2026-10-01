@@ -27,6 +27,31 @@ pub struct PersistedForward {
     pub addr: String,
     pub listen_port: i32,
     pub target: String,
+    /// Who created the forward. Absent in files written before this field
+    /// existed, which then load as [`ForwardOrigin::Remote`] (see there).
+    #[serde(default)]
+    pub origin: ForwardOrigin,
+}
+
+/// Provenance of a persisted forward, consulted by the config-driven
+/// auto-approve layer (`session::ConfiguredAuthorizer`) so that a serve
+/// forward a *remote* peer created through a graph grant is never
+/// auto-approved by `auto_accept`/`allow_peers`.
+///
+/// The `Default` is deliberately `Remote` (fail closed): an old file has no
+/// marker and we cannot tell who created the entry, and the only cost of
+/// guessing wrong in this direction is that the owner's own pre-existing
+/// graph forward goes through the human approval queue once (and can then
+/// be remembered in the trust store, which still takes precedence). Guessing
+/// `Local` would silently keep auto-approving anything a remote grant holder
+/// had already planted. Code that creates forwards on behalf of the local
+/// user sets `Local` explicitly (see [`PersistedForward::from_spec`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForwardOrigin {
+    Local,
+    #[default]
+    Remote,
 }
 
 impl PersistedForward {
@@ -41,7 +66,13 @@ impl PersistedForward {
             addr: spec.addr.clone(),
             listen_port: spec.listen_port,
             target: spec.target.clone(),
+            origin: ForwardOrigin::Local,
         }
+    }
+
+    pub fn with_origin(mut self, origin: ForwardOrigin) -> Self {
+        self.origin = origin;
+        self
     }
 
     pub fn to_spec(&self) -> Result<ForwardSpec> {
@@ -110,12 +141,8 @@ impl ForwardStore {
     }
 
     async fn persist(&self) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
         let text = serde_json::to_string_pretty(&*self.entries.read().await)?;
-        tokio::fs::write(&self.path, text).await?;
-        Ok(())
+        crate::statefile::write_private(&self.path, text.as_bytes())
     }
 }
 
@@ -193,5 +220,24 @@ mod tests {
         store.add(&spec()).await.unwrap();
         assert_eq!(store.list().await.len(), 1);
         let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn legacy_entries_without_origin_load_as_remote() {
+        let dir = std::env::temp_dir().join(format!("mistl-tunnel-fwd-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("forwards.json");
+        std::fs::write(
+            &path,
+            r#"[{"direction":"connect","proto":"tcp","addr":"","listen_port":8080,"target":"tcp:1"}]"#,
+        )
+        .unwrap();
+        let store = ForwardStore::load(&path).await.unwrap();
+        assert_eq!(store.list().await[0].origin, ForwardOrigin::Remote);
+        // Entries created through `from_spec` are local and round-trip.
+        store.add(&spec()).await.unwrap();
+        let reloaded = ForwardStore::load(&path).await.unwrap();
+        assert_eq!(reloaded.list().await[1].origin, ForwardOrigin::Local);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -4,7 +4,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tracing::{debug, error, warn};
 
-use crate::tunnel::auth::AuthRequest;
+use crate::tunnel::auth::{AuthRequest, binding_holds, verified_did_for_peer};
 use crate::tunnel::forward_runtime::ForwardPeerRuntime;
 use crate::tunnel::rtc::TunnelMessage;
 
@@ -57,7 +57,14 @@ impl TcpManager {
             return;
         }
 
-        if !self.track_pending_conn(&tm.conn_id, peer_id).await {
+        // Resolve the peer's verified DID once, here: it is what the
+        // authorizer decides on and what later payloads are checked against.
+        let room = self.rtc_manager.current_room().await;
+        let did = verified_did_for_peer(Some(&room), peer_id);
+        if !self
+            .track_pending_conn(&tm.conn_id, peer_id, did.clone())
+            .await
+        {
             warn!(
                 "rejecting tunnel connect {} from {}: connection limit reached",
                 tm.conn_id, peer_id
@@ -76,7 +83,7 @@ impl TcpManager {
         let mgr = Arc::new(self.clone_inner());
         let conn_id = tm.conn_id.clone();
         let pid = peer_id.to_string();
-        tokio::spawn(async move { mgr.authorize_and_activate(conn_id, pid).await });
+        tokio::spawn(async move { mgr.authorize_and_activate(conn_id, pid, did).await });
     }
 
     /// Resolves authorization for a `Pending` conn (spawned by
@@ -86,12 +93,18 @@ impl TcpManager {
     /// so `data`/`close` for `conn_id` are handled the whole time this is in
     /// flight (see `TcpManager::handle_remote_data` and `ConnState::Pending`
     /// for how `data` is buffered until this resolves).
-    async fn authorize_and_activate(self: Arc<Self>, conn_id: String, peer_id: String) {
+    async fn authorize_and_activate(
+        self: Arc<Self>,
+        conn_id: String,
+        peer_id: String,
+        did: Option<String>,
+    ) {
         let req = AuthRequest {
             peer_id: peer_id.clone(),
             forward_key: self.target.clone(),
             target_addr: self.remote_addr.clone(),
             proto: "tcp".to_string(),
+            did,
         };
         let decision = self.authorizer.authorize(&req).await;
 
@@ -123,7 +136,11 @@ impl TcpManager {
         }
 
         let addr = &self.remote_addr;
-        match TcpStream::connect(addr).await {
+        let connected = match crate::tunnel::forward_args::resolve_non_link_local(addr).await {
+            Ok(sa) => TcpStream::connect(sa).await,
+            Err(e) => Err(e),
+        };
+        match connected {
             Ok(stream) => {
                 if self.runtime.is_cancelled() {
                     return;
@@ -166,12 +183,28 @@ impl TcpManager {
         // Only the peer that owns the conn may feed it: conn ids are chosen by
         // the sender, so without this any room peer could inject into (or, via
         // a gap, tear down) another peer's connection by guessing its id.
-        if tc.read().await.peer_id != peer_id {
-            debug!(
-                "dropping tunnel data for conn {} from non-owner peer {}",
-                tm.conn_id, peer_id
-            );
-            return;
+        let bound_did = {
+            let guard = tc.read().await;
+            if guard.peer_id != peer_id {
+                debug!(
+                    "dropping tunnel data for conn {} from non-owner peer {}",
+                    tm.conn_id, peer_id
+                );
+                return;
+            }
+            guard.did.clone()
+        };
+        // Mis-delivery protection: the sender must still map to the DID this
+        // conn was approved for.
+        if bound_did.is_some() {
+            let room = self.rtc_manager.current_room().await;
+            if !binding_holds(bound_did.as_deref(), Some(&room), peer_id) {
+                debug!(
+                    "dropping tunnel data for conn {}: sender {} no longer maps to the approved DID",
+                    tm.conn_id, peer_id
+                );
+                return;
+            }
         }
 
         // While the conn is still `Pending` (authorization in flight -- see

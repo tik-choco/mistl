@@ -2,6 +2,7 @@ use super::*;
 
 use std::path::PathBuf;
 
+mod did_trust;
 mod pending;
 
 fn request(peer_id: &str, forward_key: &str) -> AuthRequest {
@@ -10,7 +11,17 @@ fn request(peer_id: &str, forward_key: &str) -> AuthRequest {
         forward_key: forward_key.to_string(),
         target_addr: "127.0.0.1:80".to_string(),
         proto: "tcp".to_string(),
+        did: None,
     }
+}
+
+/// A request from a DID-verified peer (fresh identity): `(request, node, did)`.
+fn verified_request(forward_key: &str) -> (AuthRequest, String, String) {
+    let identity = crate::identity::for_test();
+    let (node, did) = (identity.node_id(), identity.did().to_string());
+    let mut req = request(&node, forward_key);
+    req.did = Some(did.clone());
+    (req, node, did)
 }
 
 fn temp_store_path(name: &str) -> PathBuf {
@@ -36,12 +47,13 @@ async fn allowlist_allows_only_listed_peer() {
     let store = TrustStore::load(temp_store_path("allowlist"))
         .await
         .unwrap();
-    let authorizer = PolicyAuthorizer::new(AuthPolicy::allow_peers(["peer-a"]), store);
+    let (listed, _, did) = verified_request("tcp:80");
+    let authorizer = PolicyAuthorizer::new(AuthPolicy::allow_peers([did]), store);
 
-    assert_eq!(
-        authorizer.authorize(&request("peer-a", "tcp:80")).await,
-        AuthDecision::Allow
-    );
+    assert_eq!(authorizer.authorize(&listed).await, AuthDecision::Allow);
+    let (other, _, _) = verified_request("tcp:80");
+    assert_eq!(authorizer.authorize(&other).await, AuthDecision::Deny);
+    // Unverified peers never match policy.
     assert_eq!(
         authorizer.authorize(&request("peer-b", "tcp:80")).await,
         AuthDecision::Deny
@@ -186,10 +198,11 @@ async fn policy_authorizer_records_policy_decision_events() {
 async fn policy_authorizer_records_trust_store_decision_events() {
     let path = temp_store_path("audit-trust");
     let store = TrustStore::load(&path).await.unwrap();
+    let (req, _, did) = verified_request("tcp:80");
     store
         .remember(
             TrustKey {
-                peer_id: "peer-a".to_string(),
+                peer_id: did,
                 forward_key: "tcp:80".to_string(),
             },
             TrustDecision::Allow,
@@ -200,7 +213,7 @@ async fn policy_authorizer_records_trust_store_decision_events() {
     let authorizer =
         PolicyAuthorizer::with_audit_log(AuthPolicy::DenyUnknown, store, audit_log.clone());
 
-    let decision = authorizer.authorize(&request("peer-a", "tcp:80")).await;
+    let decision = authorizer.authorize(&req).await;
     let events = audit_log.list().await;
 
     assert_eq!(decision, AuthDecision::Allow);

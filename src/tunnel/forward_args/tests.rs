@@ -136,3 +136,40 @@ fn link_local_hosts_are_detected() {
         assert!(!is_link_local_host(addr), "{addr}");
     }
 }
+
+#[test]
+fn remote_targets_must_match_the_forward_key_grammar() {
+    for ok in ["tcp:80", "udp:5353", "tcp:65535@node-a", "graph_free_ok"] {
+        assert_eq!(is_valid_remote_target(ok), ok != "graph_free_ok", "{ok}");
+    }
+    for bad in [
+        "stdio",
+        "@stdio",
+        "tcp:0",
+        "tcp:65536",
+        "tcp:",
+        "tcp:80x",
+        "http:80",
+        "tcp:127.0.0.1:80",
+        "",
+        "tcp:80@",
+    ] {
+        assert!(!is_valid_remote_target(bad), "{bad}");
+    }
+}
+
+#[tokio::test]
+async fn connect_time_check_rejects_link_local_resolutions() {
+    for addr in [
+        "169.254.169.254:80",
+        "[fe80::1]:80",
+        "[::ffff:169.254.169.254]:80",
+    ] {
+        let err = resolve_non_link_local(addr).await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{addr}");
+    }
+    assert_eq!(
+        resolve_non_link_local("127.0.0.1:80").await.unwrap(),
+        "127.0.0.1:80".parse().unwrap()
+    );
+}
