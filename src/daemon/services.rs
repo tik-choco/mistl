@@ -3,9 +3,11 @@ use super::AppState;
 use std::sync::Arc;
 
 pub(super) fn spawn(state: Arc<AppState>) {
+    crate::ai::migrate_provide_state();
     if !state.network.permitted() {
         return;
     }
+    crate::ai::spawn_http_refresh(state.clone(), None);
     // Background self-update: periodically check GitHub Releases and, if
     // enabled, stage a newer binary (applied on the next daemon start).
     crate::update::spawn_auto_update(state.clone());
@@ -35,14 +37,8 @@ pub(super) fn spawn(state: Arc<AppState>) {
     // `[bot] enabled = false`.
     crate::bot::spawn_background(state.clone());
 
-    // AI network `provide`: if `ai provide start` (CLI or the dashboard
-    // toggle) was left enabled on a previous run, resume it automatically
-    // instead of coming back up silently not providing (see
-    // `crate::ai::spawn_provide_autoresume`'s doc comment -- this is the fix
-    // for a real "rebuild -> restart -> providing was off and nobody
-    // noticed" confusion). A no-op (quiet debug log) when it was never
-    // enabled, and never fails daemon startup on its own.
-    crate::ai::spawn_provide_autoresume(state.clone());
+    // Join referenced rooms and provide according to enabled Room flags.
+    crate::ai::spawn_room_connections(state.clone());
 
     // Restore the local OpenAI-compatible API listener when it was left
     // running. Its bind address still comes from the current config.

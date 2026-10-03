@@ -120,7 +120,7 @@ $ mistl daemon stop
 
 # Configuration (no config.toml editing needed)
 $ mistl config show           # secrets masked
-$ mistl config set ai.default_preset_id default
+$ mistl config set ai.default_ref '{"provider_id":"http","model":"example-model"}'
 $ mistl config set stream.room my-room
 
 # Profile / DID keys
@@ -169,16 +169,17 @@ $ mistl tunnel tui            # interactive terminal UI (talks to the daemon)
 $ mistl ui                    # starts the daemon if needed, opens the browser
 
 # AI network
-$ mistl ai provide start      # serve LLM inference to peers using the resolved default preset
+$ mistl ai provide start      # turn provide on for enabled Rooms with a nonempty shared list
+$ mistl ai provide stop       # turn provide off for every Room
 $ mistl ai serve start        # local OpenAI-compatible API -> http://127.0.0.1:6478/v1
 $ mistl ai chat "hello" --model mock-echo-1
 $ mistl ai models
 $ mistl ai status
 ```
 
-With `ai serve` running, any OpenAI client works against this node — requests go to
-the local provider when one is running, otherwise to the first provider discovered
-on the p2p network:
+With `ai serve` running, OpenAI clients use the configured `ai.default_ref` or
+resolve an explicit raw model id through the enabled providers' model caches.
+HTTP providers call their endpoint directly; Room providers use the p2p network:
 
 ```console
 $ curl http://127.0.0.1:6478/v1/chat/completions \
@@ -211,7 +212,7 @@ transcodes the audio to AAC (what AVPro plays over RTSP), and serves both tracks
 the RTSP URL. Paste the printed URL into any AVPro-based VRChat video player.
 Note: the p2p transport supports multiple simultaneous rooms per process, so
 `stream.room` (shared by both `stream relay` and `stream share`) can name its
-own room independent of `chat_relay.rooms` and `ai.room_id` -- or reuse one of
+own room independent of `chat_relay.rooms` and AI Room providers -- or reuse one of
 them if you'd rather keep everything in one room.
 
 **Any number of viewers (mesh + cascade):** VRChat's AVPro can only play a URL,
@@ -301,31 +302,31 @@ stdio_enabled = false                        # let approved peers run `stdio_com
 # stdio_command = ["pwsh", "-NoLogo"]       # only used when stdio_enabled = true
 
 [ai]
-# room_id = "my-llm-room"                   # default: the default rendezvous room (see note)
-# default_preset_id = "default"             # which [[ai.presets]] entry `ai provide`/`ai serve` use by default
-# tts_preset_id = "tts-default"             # which preset answers inbound tts_request; unset = TTS not offered
-# stt_preset_id = "stt-default"             # which preset answers inbound stt_request; unset = STT not offered
-# advertised_models = ["llama3"]            # default: fetched from the resolved preset's provider /models
+# default_ref = { provider_id = "http", model = "example-model" }
+# tts = { provider_id = "http", model = "speech-model", voice = "speaker", lang_voices = { en = "english-speaker" } }
+# stt = { provider_id = "http", model = "transcription-model" }
 api_listen = "127.0.0.1:6478"                # local OpenAI-compatible API (serve)
 request_timeout_secs = 120                   # p2p inactivity timeout (resets per chunk)
 
-# [[ai.providers]]                          # connection info ("where to connect")
-# id = "default"
-# label = "Default"
-# base_url = "http://127.0.0.1:11434/v1"    # OpenAI-compatible upstream, e.g. Ollama
+# [[ai.providers]]                          # HTTP endpoint
+# id = "http"
+# label = "My endpoint"
+# base_url = "http://127.0.0.1:8000/v1"
 # api_key = ""
+# enabled = true                            # absent = true; disabling preserves references
+# models = ["example-model"]                # discovery cache
+# models_fetched_at = "2026-10-01T00:00:00Z"
+# provide = false
+# shared = []
 
-# [[ai.presets]]                            # named model config ("how to call it")
-# id = "default"
-# label = "Default"
-# provider_id = "default"                   # references an [[ai.providers]] id
-# model = "llama3"
-# temperature = 0.7
-# reasoning_effort = "medium"               # optional: "none" | "minimal" | "low" | "medium" | "high"
-# voice = "alloy"                           # only meaningful for a preset referenced by tts_preset_id
-# [ai.presets.lang_voices]                  # optional per-language voice overrides (tts_request.lang hint)
-# en = "af_heart"                           # key: BCP-47 primary subtag, lowercase (matched case-insensitively)
-# ja = "jf_alpha"                           # value: a real upstream voice id, same namespace as `voice` above
+# [[ai.providers]]                          # Room provider
+# id = "room"
+# label = "Team"
+# base_url = "mist-network://team-room"
+# api_key = ""
+# enabled = true
+# provide = true                            # automatically provide while this Room is enabled
+# shared = [{ provider_id = "http", model = "example-model" }]
 
 [ui]
 enabled = true                               # serve the dashboard from the daemon
@@ -333,10 +334,10 @@ listen = "127.0.0.1:6480"                    # keep on loopback (no auth)
 ```
 
 Note: storage, chat_relay, ai, and stream relay can each join their **own** room --
-the p2p transport supports multiple simultaneous rooms per process. `[ai] room_id`
-defaults to the default rendezvous room (`"mistl-mailbox-v1"`, kept for wire
-compatibility with existing deployments) for convenience when unset; set it
-explicitly to join a different room, e.g. an existing mistai app room.
+the p2p transport supports multiple simultaneous rooms per process. AI rooms are
+providers with a mist-network://<room> URL. Each enabled room can share its own
+HTTP model references, and joins/leaves apply live. See [AI configuration](docs/ai-config.md)
+for model resolution, IPC shapes and automatic migration of legacy presets.
 `[storage] room_ids` has no such fallback -- leave it unset (or empty) to keep
 the store purely local (no network join at all). Unlike the other room
 settings, `room_ids` is a list: the store joins **all** listed rooms
@@ -497,8 +498,8 @@ descendant processes are not yet fully supervised.
   tracks either; it relies on either already being connected to the new leader's
   re-publish or receiving a fresh negotiation
 - No bot capability advertisement (every connected peer is treated as a bot candidate)
-- `ai` implements the mistai protocol's chat, and TTS/STT once `tts_preset_id`/
-  `stt_preset_id` are configured (otherwise voice requests get an immediate
+- `ai` implements the mistai protocol's chat, and TTS/STT once `ai.tts`/
+  `ai.stt` are configured (otherwise voice requests get an immediate
   `voice_error`); `raft_message` scheduling is passed through untouched
 - The local API server (`ai serve`) has no auth; keep `api_listen` on loopback unless
   the network is trusted

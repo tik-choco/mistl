@@ -11,7 +11,8 @@
 //!   `Authorization: Bearer {api_key}` (header always sent, even when the
 //!   key is empty, matching openai.ts).
 //! - Request body: `{"model", "messages", "stream": true}` plus
-//!   `"temperature"` only when configured. `model` = the per-request model
+//!   optional reasoning effort and tools. Temperature uses the upstream default.
+//!   `model` = the per-request model
 //!   if `Some`, else `config.model`; if neither is set, fail with a clear
 //!   "no model configured" error before sending.
 //! - Non-2xx -> error including status and the first 500 chars of the body.
@@ -44,8 +45,6 @@ pub struct UpstreamConfig {
     pub api_key: String,
     /// Model used when a request doesn't specify one.
     pub model: Option<String>,
-    /// Sampling temperature; omitted from the request when `None`.
-    pub temperature: Option<f64>,
     /// Reasoning effort hint ("none"|"minimal"|"low"|"medium"|"high", a free
     /// string -- not validated here); omitted from the request when
     /// `None`. Mirrors the web apps' @tik-choco/mistai client behavior.
@@ -297,9 +296,6 @@ pub async fn stream_chat_completion_tools(
     }
     if let Some(tc) = &tools.tool_choice {
         body["tool_choice"] = tc.clone();
-    }
-    if let Some(temperature) = config.temperature {
-        body["temperature"] = json!(temperature);
     }
     if let Some(reasoning_effort) = &config.reasoning_effort {
         body["reasoning_effort"] = json!(reasoning_effort);
@@ -701,12 +697,11 @@ mod tests {
             .to_string()
     }
 
-    fn cfg(base_url: String, model: Option<&str>, temperature: Option<f64>) -> UpstreamConfig {
+    fn cfg(base_url: String, model: Option<&str>, _temperature: Option<f64>) -> UpstreamConfig {
         UpstreamConfig {
             base_url,
             api_key: "test-key-123".to_string(),
             model: model.map(String::from),
-            temperature,
             reasoning_effort: None,
         }
     }
@@ -859,7 +854,7 @@ mod tests {
             json!("override-model"),
             "per-request model should override the config model"
         );
-        assert_eq!(value["temperature"], json!(0.75));
+        assert!(value.get("temperature").is_none());
         assert_eq!(value["reasoning_effort"], json!("high"));
         assert_eq!(value["stream"], json!(true));
         assert!(

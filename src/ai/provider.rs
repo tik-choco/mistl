@@ -3,7 +3,7 @@
 //! Chat (`llm_request`) is always served once this `Provider` exists (see
 //! `super::provide_start`). TTS/STT are served only when a `tts`/`stt`
 //! closure was supplied at construction time ([`Provider::new_with_voice`],
-//! wired from `ai.tts_preset_id`/`ai.stt_preset_id` in `super::provide_start`);
+//! wired from `ai.tts`/`ai.stt` in `super::provide_start`);
 //! when the corresponding closure is absent, voice requests get an
 //! immediate `voice_error` reply instead of silently going unanswered, so a
 //! peer's `ConsumerClient.requestTts`/`requestStt` gets a clear, prompt
@@ -56,7 +56,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use tracing::warn;
 
-use crate::config::ResolvedAiPreset;
+use crate::config::ResolvedModel;
 
 use super::openai::ToolOptions;
 use super::openai::{self, UpstreamConfig};
@@ -84,7 +84,7 @@ type VoiceFuture<T> = Pin<Box<dyn Future<Output = anyhow::Result<T>> + Send>>;
 
 /// Synthesizes speech: `(text, model_override, voice_override, lang_hint)`
 /// -> audio. Built in `super::provide_start` from the resolved
-/// `ai.tts_preset_id` preset (which supplies the default model/voice, and
+/// `ai.tts` model reference (which supplies the default model/voice, and
 /// per-language voice overrides, when the request omits them -- see
 /// `super::resolve_tts_voice`); `None` on [`Provider`] means this node
 /// doesn't offer TTS. `lang_hint` is the `tts_request.lang` BCP-47 tag
@@ -99,7 +99,7 @@ pub type TtsCallFn = Arc<
 
 /// Transcribes speech: `(audio_bytes, mime, model_override, file_name)` ->
 /// text. Built in `super::provide_start` from the resolved
-/// `ai.stt_preset_id` preset; `None` on [`Provider`] means this node
+/// `ai.stt` model reference; `None` on [`Provider`] means this node
 /// doesn't offer STT.
 pub type SttCallFn = Arc<
     dyn Fn(Vec<u8>, String, Option<String>, Option<String>) -> VoiceFuture<String> + Send + Sync,
@@ -363,14 +363,12 @@ impl SttBuffers {
 /// Outcome of [`Provider::resolve_llm_call`]: which upstream (if any)
 /// should serve one `llm_request`.
 enum LlmCallResolution {
-    /// Use the default injected `call` closure, unchanged: either no
-    /// `model` was requested, or this provider has no advertised list at
-    /// all (legacy pass-through: any `model` is forwarded to `call`
-    /// verbatim, unchecked).
+    /// Use the injected default call. It selects the enabled HTTP default
+    /// or first usable shared reference without forwarding a peer's unknown id.
     Default,
-    /// The requested `model` named a preset in [`Provider::advertised`] --
-    /// call that preset's own upstream directly instead of `call`.
-    Resolved(ResolvedAiPreset),
+    /// The requested `model` named a model reference in [`Provider::advertised`] --
+    /// call that model reference's own upstream directly instead of `call`.
+    Resolved(ResolvedModel),
     /// A `model` was requested, an advertised list *is* configured, but it
     /// matched none of it.
     Reject,
@@ -410,16 +408,11 @@ pub struct Provider {
     send: SendFn,
     call: LlmCallFn,
     models: Vec<String>,
-    /// Advertised-name -> resolved preset (base_url/api_key/model/
-    /// temperature/reasoning_effort), used by [`Provider::resolve_llm_call`]
-    /// to route an `llm_request` whose `model` names one of `models` to
-    /// *that preset's own* upstream, rather than always going through the
-    /// single default `call` closure (whose upstream is fixed to the
-    /// default preset's, and can't speak for a different preset that
-    /// happens to point at a different provider). Empty means "no
-    /// advertised list configured" -- the legacy pass-through mode where
-    /// any `model` (or none) always goes through `call` verbatim, unchecked.
-    advertised: HashMap<String, ResolvedAiPreset>,
+    /// Raw shared model id -> exact enabled HTTP connection. Each room has
+    /// its own table; shared_restricted also covers nonempty lists whose
+    /// references are currently unavailable.
+    advertised: HashMap<String, ResolvedModel>,
+    shared_restricted: std::sync::atomic::AtomicBool,
     tts: Option<TtsCallFn>,
     stt: Option<SttCallFn>,
     /// TTS voice catalog to advertise in `provider_hello.voices`
@@ -460,7 +453,7 @@ impl Provider {
     }
 
     /// Full constructor, additionally taking the advertised-name ->
-    /// resolved-preset routing table (see [`Provider::advertised`] and
+    /// resolved-model reference routing table (see [`Provider::advertised`] and
     /// [`Provider::resolve_llm_call`]). Prefer [`Provider::new_with_voice`]
     /// (an empty table -- legacy pass-through mode) when that routing isn't
     /// needed, as most of this module's own tests do.
@@ -468,7 +461,7 @@ impl Provider {
         send: SendFn,
         call: LlmCallFn,
         models: Vec<String>,
-        advertised: HashMap<String, ResolvedAiPreset>,
+        advertised: HashMap<String, ResolvedModel>,
         tts: Option<TtsCallFn>,
         stt: Option<SttCallFn>,
         voices: Vec<String>,
@@ -477,6 +470,7 @@ impl Provider {
             send,
             call,
             models,
+            shared_restricted: std::sync::atomic::AtomicBool::new(!advertised.is_empty()),
             advertised,
             tts,
             stt,
@@ -823,30 +817,26 @@ impl Provider {
             .drop_peer(from);
     }
 
-    /// Which upstream (if any) should serve one `llm_request.model`, per
-    /// mistllm-wire's "advertised name = preset label" contract: a bare
-    /// `model` mismatch never falls back to the default preset, it's
-    /// rejected outright, so a peer can't accidentally get an unrelated
-    /// preset's answer under a name it didn't ask for.
+    /// Preserve the room's explicit sharing boundary even if every ref is disabled.
+    pub fn set_shared_restricted(&self, restricted: bool) {
+        self.shared_restricted
+            .store(restricted, std::sync::atomic::Ordering::Relaxed);
+    }
+
     fn resolve_llm_call(&self, model: &Option<String>) -> LlmCallResolution {
-        if self.advertised.is_empty() {
-            // Legacy pass-through mode: no advertised list is configured,
-            // so a peer-supplied `model` is IGNORED (callers pass `None`
-            // to the default `call`), pinning every request to the default
-            // preset's own model. A peer must not pick arbitrary models on
-            // the operator's upstream.
+        let Some(name) = model.as_deref().filter(|m| !m.trim().is_empty()) else {
             return LlmCallResolution::Default;
-        }
-        let Some(name) = model else {
-            // No model requested: the first advertised preset.
-            return match self.models.first().and_then(|n| self.advertised.get(n)) {
-                Some(resolved) => LlmCallResolution::Resolved(resolved.clone()),
-                None => LlmCallResolution::Default,
-            };
         };
-        match self.advertised.get(name) {
-            Some(resolved) => LlmCallResolution::Resolved(resolved.clone()),
-            None => LlmCallResolution::Reject,
+        if let Some(resolved) = self.advertised.get(name) {
+            return LlmCallResolution::Resolved(resolved.clone());
+        }
+        if self
+            .shared_restricted
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            LlmCallResolution::Reject
+        } else {
+            LlmCallResolution::Default
         }
     }
 
@@ -929,16 +919,15 @@ impl Provider {
         let (delta_tx, mut delta_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let call_fut: LlmCallFuture = match resolution {
             LlmCallResolution::Resolved(resolved) => {
-                // A named preset may point at a *different* provider than
-                // the default preset's `call` closure was built from, so
+                // A named model reference may point at a *different* provider than
+                // the default model reference's `call` closure was built from, so
                 // this calls the upstream directly against the resolved
-                // preset's own connection info instead of reusing `call`.
+                // model reference's own connection info instead of reusing `call`.
                 let call_model = resolved.model.clone();
                 let upstream = UpstreamConfig {
                     base_url: resolved.base_url,
                     api_key: resolved.api_key,
                     model: Some(resolved.model),
-                    temperature: resolved.temperature,
                     reasoning_effort: resolved.reasoning_effort,
                 };
                 Box::pin(async move {
@@ -1088,18 +1077,8 @@ impl Provider {
         });
     }
 
-    /// Call the upstream directly, bypassing the network (used by the
-    /// local API server / `ai chat` when this node provides).
-    ///
-    /// Resolves `model` through [`Provider::resolve_llm_call`] exactly like
-    /// the p2p path ([`Provider::handle_llm_request`]) does. Both surfaces
-    /// advertise the *same* names -- `/v1/models` is fed from the same
-    /// `advertised` table as `provider_hello.models` -- so an advertised
-    /// name has to mean the same thing whichever door it arrives at.
-    /// Without this the local API server forwarded the client's `model`
-    /// string to the upstream verbatim, and every name it had just
-    /// advertised (a preset *label*, e.g. `"Default"`) came back a 404 from
-    /// an upstream that only knows raw model ids.
+    /// Resolve a raw model id through the same sharing boundary as the wire path.
+    #[cfg(test)]
     pub async fn call_upstream(
         &self,
         messages: Vec<super::protocol::ChatMessage>,
@@ -1109,15 +1088,14 @@ impl Provider {
     ) -> anyhow::Result<super::openai::ChatOutput> {
         match self.resolve_llm_call(&model) {
             LlmCallResolution::Resolved(resolved) => {
-                // Same as the p2p path: a named preset may point at a
+                // Same as the p2p path: a named model reference may point at a
                 // different provider than `call` was built from, so call
-                // that preset's own connection info directly.
+                // that model reference's own connection info directly.
                 let call_model = resolved.model.clone();
                 let upstream = UpstreamConfig {
                     base_url: resolved.base_url,
                     api_key: resolved.api_key,
                     model: Some(resolved.model),
-                    temperature: resolved.temperature,
                     reasoning_effort: resolved.reasoning_effort,
                 };
                 openai::stream_chat_completion_tools(
@@ -1132,7 +1110,7 @@ impl Provider {
             LlmCallResolution::Default => (self.call)(messages, tools, None, delta_tx).await,
             // Named a model that is not in the advertised list. The p2p
             // path answers `model_not_shared`; the local caller gets the
-            // same refusal as an error rather than an unrelated preset's
+            // same refusal as an error rather than an unrelated model reference's
             // answer or a leaked upstream 404.
             LlmCallResolution::Reject => anyhow::bail!(MODEL_NOT_SHARED_MESSAGE),
         }
@@ -1626,12 +1604,11 @@ mod tests {
         );
     }
 
-    fn sample_resolved_preset() -> ResolvedAiPreset {
-        ResolvedAiPreset {
+    fn sample_resolved_model() -> ResolvedModel {
+        ResolvedModel {
             base_url: "http://upstream.invalid/v1".to_string(),
             api_key: "sk-test".to_string(),
             model: "gpt-4o".to_string(),
-            temperature: None,
             reasoning_effort: None,
             voice: None,
             lang_voices: HashMap::new(),
@@ -1642,18 +1619,18 @@ mod tests {
     async fn call_upstream_resolves_an_advertised_name_rather_than_using_the_default_call() {
         // The local API server advertises the same names as
         // `provider_hello`, so one of those names must reach *that
-        // preset's* upstream. Before this was wired up the name went to
+        // model reference's* upstream. Before this was wired up the name went to
         // the injected default `call`, whose success value masked the
         // misrouting (and, against a real upstream, surfaced as a 404 for
         // a model id the upstream had never heard of).
         let (send, _sent) = fake_send();
         let call = fake_call_success(vec!["from-default-call"], "from-default-call");
         let mut advertised = HashMap::new();
-        advertised.insert("Chat".to_string(), sample_resolved_preset());
+        advertised.insert("gpt-4o".to_string(), sample_resolved_model());
         let provider = Provider::new(
             send,
             call,
-            vec!["Chat".into()],
+            vec!["gpt-4o".into()],
             advertised,
             None,
             None,
@@ -1664,17 +1641,17 @@ mod tests {
             .call_upstream(
                 messages(),
                 ToolOptions::default(),
-                Some("Chat".to_string()),
+                Some("gpt-4o".to_string()),
                 None,
             )
             .await;
 
-        // `sample_resolved_preset`'s base_url is unroutable, so this errors
+        // `sample_resolved_model`'s base_url is unroutable, so this errors
         // -- attempting it at all is the assertion: the default `call`
         // would have returned `Ok("from-default-call")`.
         assert!(
             result.is_err(),
-            "an advertised name must go to its own preset's upstream, not the default call"
+            "an advertised name must go to its own model reference's upstream, not the default call"
         );
     }
 
@@ -1683,11 +1660,11 @@ mod tests {
         let (send, _sent) = fake_send();
         let call = fake_call_success(vec!["x"], "x");
         let mut advertised = HashMap::new();
-        advertised.insert("Chat".to_string(), sample_resolved_preset());
+        advertised.insert("gpt-4o".to_string(), sample_resolved_model());
         let provider = Provider::new(
             send,
             call,
-            vec!["Chat".into()],
+            vec!["gpt-4o".into()],
             advertised,
             None,
             None,
@@ -1707,30 +1684,34 @@ mod tests {
     }
 
     #[test]
-    fn resolve_llm_call_routes_no_model_to_the_first_advertised_preset() {
+    fn resolve_llm_call_routes_empty_model_to_default_closure() {
         let (send, _sent) = fake_send();
         let call = fake_call_success(vec![], "");
         let mut advertised = HashMap::new();
-        advertised.insert("Chat".to_string(), sample_resolved_preset());
+        advertised.insert("gpt-4o".to_string(), sample_resolved_model());
         let provider = Provider::new(
             send,
             call,
-            vec!["Chat".into()],
+            vec!["gpt-4o".into()],
             advertised,
             None,
             None,
             vec![],
         );
-        match provider.resolve_llm_call(&None) {
-            LlmCallResolution::Resolved(resolved) => assert_eq!(resolved.model, "gpt-4o"),
-            _ => panic!("expected Resolved(first advertised)"),
-        }
+        assert!(matches!(
+            provider.resolve_llm_call(&None),
+            LlmCallResolution::Default
+        ));
+        assert!(matches!(
+            provider.resolve_llm_call(&Some(String::new())),
+            LlmCallResolution::Default
+        ));
     }
 
     #[test]
     fn resolve_llm_call_is_default_in_legacy_mode_with_no_advertised_table() {
         // No advertised list configured at all: the peer-supplied model is
-        // ignored and the default preset serves the request (see
+        // ignored and the default model reference serves the request (see
         // `legacy_mode_ignores_the_peer_supplied_model`).
         let (send, _sent) = fake_send();
         let call = fake_call_success(vec![], "");
@@ -1746,17 +1727,17 @@ mod tests {
         let (send, _sent) = fake_send();
         let call = fake_call_success(vec![], "");
         let mut advertised = HashMap::new();
-        advertised.insert("Chat".to_string(), sample_resolved_preset());
+        advertised.insert("gpt-4o".to_string(), sample_resolved_model());
         let provider = Provider::new(
             send,
             call,
-            vec!["Chat".into()],
+            vec!["gpt-4o".into()],
             advertised,
             None,
             None,
             vec![],
         );
-        match provider.resolve_llm_call(&Some("Chat".to_string())) {
+        match provider.resolve_llm_call(&Some("gpt-4o".to_string())) {
             LlmCallResolution::Resolved(resolved) => assert_eq!(resolved.model, "gpt-4o"),
             _ => panic!("expected Resolved"),
         }
@@ -1767,11 +1748,11 @@ mod tests {
         let (send, _sent) = fake_send();
         let call = fake_call_success(vec![], "");
         let mut advertised = HashMap::new();
-        advertised.insert("Chat".to_string(), sample_resolved_preset());
+        advertised.insert("gpt-4o".to_string(), sample_resolved_model());
         let provider = Provider::new(
             send,
             call,
-            vec!["Chat".into()],
+            vec!["gpt-4o".into()],
             advertised,
             None,
             None,
@@ -1790,11 +1771,11 @@ mod tests {
         // before reaching either the default closure or any upstream call.
         let call = fake_call_error("default closure must not be used for a rejected model");
         let mut advertised = HashMap::new();
-        advertised.insert("Chat".to_string(), sample_resolved_preset());
+        advertised.insert("gpt-4o".to_string(), sample_resolved_model());
         let provider = Provider::new(
             send,
             call,
-            vec!["Chat".into()],
+            vec!["gpt-4o".into()],
             advertised,
             None,
             None,
@@ -1835,7 +1816,7 @@ mod tests {
         assert_eq!(logs[0].status, "error");
     }
 
-    /// End-to-end: a matching advertised name routes to *that preset's own*
+    /// End-to-end: a matching advertised name routes to *that model reference's own*
     /// upstream (a real HTTP call against a mock server bound to a
     /// different address than any "default" closure would use), proving
     /// `handle_llm_request` bypasses the injected `call` closure entirely
@@ -1843,7 +1824,7 @@ mod tests {
     /// upstream. Also asserts the *real* model id (not the advertised
     /// label) is what actually reaches the upstream request body.
     #[tokio::test]
-    async fn llm_request_with_a_matching_advertised_name_calls_that_presets_own_upstream() {
+    async fn llm_request_with_a_matching_raw_id_calls_that_models_own_upstream() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 
@@ -1881,7 +1862,8 @@ mod tests {
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let request = read_request(&mut socket).await;
-            let body = r#"{"choices":[{"message":{"content":"hi from resolved preset"}}]}"#;
+            let body =
+                r#"{"choices":[{"message":{"content":"hi from resolved model reference"}}]}"#;
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),
@@ -1897,12 +1879,11 @@ mod tests {
             fake_call_error("default closure must not be used for a resolved advertised model");
         let mut advertised = HashMap::new();
         advertised.insert(
-            "Chat".to_string(),
-            ResolvedAiPreset {
+            "gpt-4o".to_string(),
+            ResolvedModel {
                 base_url: format!("http://{addr}"),
                 api_key: "sk-resolved".to_string(),
                 model: "real-upstream-model".to_string(),
-                temperature: None,
                 reasoning_effort: None,
                 voice: None,
                 lang_voices: HashMap::new(),
@@ -1911,7 +1892,7 @@ mod tests {
         let provider = Provider::new(
             send,
             call,
-            vec!["Chat".into()],
+            vec!["gpt-4o".into()],
             advertised,
             None,
             None,
@@ -1927,7 +1908,7 @@ mod tests {
                     tool_choice: None,
                     id: "req1".into(),
                     messages: messages(),
-                    model: Some("Chat".into()),
+                    model: Some("gpt-4o".into()),
                 },
             )
             .await;
@@ -1936,7 +1917,7 @@ mod tests {
         let request_text = String::from_utf8_lossy(&raw_request);
         assert!(
             request_text.contains("real-upstream-model"),
-            "the resolved preset's own model id must reach the upstream body: {request_text}"
+            "the resolved model reference's own model id must reach the upstream body: {request_text}"
         );
         assert!(
             !request_text.contains("\"Chat\""),
@@ -1948,7 +1929,7 @@ mod tests {
             (to, ProtocolMessage::LlmResponseDone { id, content, .. }) => {
                 assert_eq!(to, "consumer1");
                 assert_eq!(id, "req1");
-                assert_eq!(content.as_deref(), Some("hi from resolved preset"));
+                assert_eq!(content.as_deref(), Some("hi from resolved model reference"));
             }
             other => panic!("expected llm_response_done, got: {other:?}"),
         }
@@ -2044,8 +2025,8 @@ mod tests {
 
     #[test]
     fn hello_advertises_voices_when_tts_configured_with_a_voice_catalog() {
-        // Mirrors mod.rs's build_provider wiring: a tts_preset_id whose
-        // resolved preset has a `voice` set produces a one-element
+        // Mirrors mod.rs's build_provider wiring: an ai.tts reference whose
+        // resolved model reference has a `voice` set produces a one-element
         // `voices` catalog (tts-voice-selection-v1 §2.1/§3.5 minimal
         // implementation).
         let (send, _sent) = fake_send();

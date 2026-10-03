@@ -15,6 +15,7 @@ use crate::config::{self, Config};
 
 /// Shared state for all daemon services.
 pub struct AppState {
+    pub(crate) ai_model_discovery: crate::ai::ModelDiscovery,
     pub network: crate::network::NetworkControl,
     /// Live configuration. Behind a lock so `config.set` can hot-reload it:
     /// services read it when they (re)start, so most changes apply on the
@@ -47,6 +48,45 @@ impl AppState {
 
     pub fn set_config(&self, config: Config) {
         *self.config.write().expect("config lock poisoned") = config;
+    }
+
+    pub fn set_config_path(&self, path: &str, value: Value) -> Result<()> {
+        let mut config = self.config.write().expect("config lock poisoned");
+        let updated = config::set_by_path(&config, path, value)?;
+        updated.save()?;
+        *config = updated;
+        Ok(())
+    }
+
+    pub fn set_ai_provide(&self, start: bool) -> Result<Vec<String>> {
+        let mut config = self.config.write().expect("config lock poisoned");
+        let mut updated = config.clone();
+        let rooms = crate::ai::set_provide_flags(&mut updated.ai, start);
+        updated.save()?;
+        *config = updated;
+        Ok(rooms)
+    }
+
+    pub fn cache_ai_models(
+        &self,
+        fetched: &crate::config::AiProviderConfig,
+        models: &[String],
+    ) -> Result<()> {
+        let mut config = self.config.write().expect("config lock poisoned");
+        let mut updated = config.clone();
+        if let Some(provider) = updated.ai.providers.iter_mut().find(|p| {
+            p.id == fetched.id
+                && p.base_url == fetched.base_url
+                && p.api_key == fetched.api_key
+                && p.enabled
+        }) {
+            provider.models = models.to_vec();
+            provider.models_fetched_at =
+                Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+            updated.save()?;
+            *config = updated;
+        }
+        Ok(())
     }
 
     pub fn request_shutdown(&self) {
@@ -104,6 +144,7 @@ impl AppState {
         // The receiver is dropped immediately: `watch::Sender::send` tolerates
         // having no receivers, so `request_shutdown` stays harmless in tests.
         Arc::new(Self {
+            ai_model_discovery: crate::ai::ModelDiscovery::default(),
             network: crate::network::NetworkControl::for_test(),
             config: std::sync::RwLock::new(Config::default()),
             started_at: Instant::now(),
@@ -143,6 +184,7 @@ async fn daemon_main(host_override: Option<String>) -> Result<()> {
     let config = Config::load()?;
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     let state = Arc::new(AppState {
+        ai_model_discovery: crate::ai::ModelDiscovery::default(),
         network: crate::network::NetworkControl::load(&config::data_dir()?),
         config: std::sync::RwLock::new(config),
         started_at: Instant::now(),
@@ -617,12 +659,7 @@ pub async fn dispatch_as(
         }
         "config.show" => {
             let mut value = serde_json::to_value(state.config())?;
-            // Never hand secrets to clients; \"***\" marks \"set\" and is
-            // rejected by config.set so it can't be written back.
-            if value["ai"]["upstream_api_key"].is_string() {
-                value["ai"]["upstream_api_key"] = json!("***");
-            }
-            // Same masking for the provider/preset shape's per-provider
+            // Never hand secrets to clients. Mask the per-provider
             // api_key -- an empty string is left as-is so the dashboard can
             // show "not set" vs. "set", and set_by_path substitutes the
             // real value back in when a masked array round-trips.
@@ -643,36 +680,28 @@ pub async fn dispatch_as(
             let path = args
                 .get("path")
                 .and_then(Value::as_str)
-                .context("config.set needs a string `path` (e.g. \"ai.default_preset_id\")")?;
+                .context("config.set needs a string `path` (e.g. \"ai.default_ref\")")?;
             let value = args.get("value").cloned().unwrap_or(Value::Null);
-            let updated = config::set_by_path(&state.config(), path, value)?;
-            updated.save()?;
-            state.set_config(updated);
+            let previous_ai = state.config().ai;
+            state.set_config_path(path, value)?;
+            if path == "ai.providers" {
+                crate::ai::spawn_http_refresh(state.clone(), Some(&previous_ai));
+            }
             if path == "network.membership_allowlist" {
                 state.config().network.apply();
             }
             if path == "ai.trusted_providers" {
                 crate::ai::apply_trusted_providers(state);
             }
-            // These paths feed the running AI provider (see
-            // `ai::build_provider`); reloading it live -- instead of making
-            // the user stop/start providing, let alone restart the daemon
-            // -- so a preset/model edit is just... immediately true. Fired
-            // fire-and-forget (it may hit the network re-fetching upstream
-            // models) so this response isn't held up waiting on it.
+            // Finish applying room membership and advertisements before
+            // replying so disabled providers cannot accept another request.
             if state.network.permitted()
                 && matches!(
                     path,
-                    "ai.providers"
-                        | "ai.presets"
-                        | "ai.default_preset_id"
-                        | "ai.tts_preset_id"
-                        | "ai.stt_preset_id"
-                        | "ai.advertised_models"
+                    "ai.providers" | "ai.default_ref" | "ai.tts" | "ai.stt" | "bot.pipelines"
                 )
             {
-                let state = state.clone();
-                tokio::spawn(async move { crate::ai::reload_provider_if_running(&state).await });
+                crate::ai::reload_provider_if_running(state).await?;
             }
             Ok(json!({ "saved": true, "applies": config::applies_when(path) }))
         }
@@ -699,6 +728,31 @@ pub async fn dispatch_as(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn config_show_masks_provider_keys_and_keeps_current_ai_shape() {
+        let state = AppState::for_test();
+        let mut config = Config::default();
+        config.ai.providers.push(config::AiProviderConfig {
+            id: "http".into(),
+            base_url: "http://local/v1".into(),
+            api_key: "secret".into(),
+            ..Default::default()
+        });
+        config.ai.default_ref = Some(config::ModelRef {
+            provider_id: "http".into(),
+            model: "raw".into(),
+        });
+        state.set_config(config);
+        let shown = dispatch("config.show", json!({}), &state).await.unwrap();
+        assert_eq!(
+            shown["ai"],
+            json!({ "default_ref": { "provider_id": "http", "model": "raw" }, "tts": null, "stt": null,
+            "providers": [{ "id": "http", "label": "", "base_url": "http://local/v1", "api_key": "***",
+                "enabled": true, "models": [], "models_fetched_at": null, "provide": false, "shared": [] }],
+            "api_listen": "127.0.0.1:6478", "request_timeout_secs": 120, "trusted_providers": [] })
+        );
+    }
 
     const REMOTE: Caller = Caller::Http { remote: true };
     const LOCAL: Caller = Caller::Http { remote: false };
@@ -730,7 +784,7 @@ mod tests {
             assert!(err.contains(MSG), "{path}: {err}");
         }
         for path in [
-            "ai.default_preset_id",
+            "ai.default_ref",
             "bot.pipelines",
             "tunnel.room_id",
             "identity.display_name",

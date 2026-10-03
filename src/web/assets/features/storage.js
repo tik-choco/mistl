@@ -417,7 +417,11 @@
       var x = button("×", "modal-close", close); x.setAttribute("aria-label", t("close"));
       head.append(h, x); panel.append(head, body, note); overlay.append(panel);
       modal = { overlay: overlay, panel: panel, body: body, note: note, opener: doc.activeElement, title: h };
-      overlay.addEventListener("click", function (e) { if (e.target === overlay) close(); });
+      // Close only when the press also started on the overlay, so a text
+      // selection dragged out of the dialog doesn't close it.
+      var pressStarted = false;
+      overlay.addEventListener("mousedown", function (e) { pressStarted = e.target === overlay; });
+      overlay.addEventListener("click", function (e) { var shouldClose = pressStarted && e.target === overlay; pressStarted = false; if (shouldClose) close(); });
       overlay.addEventListener("keydown", function (e) {
         if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close(); }
         if (e.key !== "Tab") return;

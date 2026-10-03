@@ -468,51 +468,75 @@ async fn run_pipeline_work(
     Ok(())
 }
 
-/// Checks every `summarize`/`tts` transform's `preset_id` resolves against
-/// `config.ai` -- and, for a `tts` transform, that the resolved preset also
-/// has a `voice` set (required by `crate::ai::tts::synthesize`; see
-/// `transform::synthesize_audio`) -- returning a config-path-plus-fix-command
-/// error for the first problem found (per the brief's B5 policy). Mirrors
-/// [`validate_pipeline`]'s equivalent checks exactly, just as a hard
-/// fail-fast instead of a collected warning.
+fn transform_model(
+    transform: &TransformConfig,
+) -> (&'static str, Option<&crate::config::ModelRef>) {
+    match transform {
+        TransformConfig::Summarize { model, .. } => ("summarize", model.as_ref()),
+        TransformConfig::Translate { model, .. } => ("translate", model.as_ref()),
+        TransformConfig::Tts { model, .. } => ("tts", model.as_ref()),
+    }
+}
+
+fn transform_warning(config: &Config, transform: &TransformConfig) -> Option<String> {
+    let (kind, reference) = transform_model(transform);
+    if let Some(reference) = reference {
+        if config
+            .ai
+            .providers
+            .iter()
+            .any(|p| p.id == reference.provider_id && !p.enabled)
+        {
+            return Some(format!(
+                "{kind}.model {reference:?}: provider is disabled in ai.providers; execution uses ai.default_ref if usable"
+            ));
+        }
+    }
+    let Some(resolved) = crate::config::resolve_ref(&config.ai, reference) else {
+        return Some(format!(
+            "{kind}.model {reference:?} is unavailable; set bot.pipelines model and ai.providers / ai.default_ref with mistl config set"
+        ));
+    };
+    if let TransformConfig::Tts { voice, .. } = transform {
+        let fallback = config
+            .ai
+            .tts
+            .as_ref()
+            .filter(|v| {
+                crate::config::effective_ref(&config.ai, reference)
+                    .is_some_and(|r| r.provider_id == v.provider_id)
+            })
+            .and_then(|v| v.voice.as_deref());
+        if voice
+            .as_deref()
+            .or(fallback)
+            .is_none_or(|v| v.trim().is_empty())
+            && !resolved.base_url.starts_with("mist-network://")
+        {
+            return Some(format!(
+                "tts.model {reference:?}: voice is not set; set bot.pipelines tts.voice or ai.tts.voice for the same provider"
+            ));
+        }
+    }
+    None
+}
+
 fn check_transforms_resolve(config: &Config, transforms: &[TransformConfig]) -> Result<()> {
     for transform in transforms {
-        let (kind, preset_id) = match transform {
-            TransformConfig::Summarize { preset_id } => ("summarize", preset_id),
-            TransformConfig::Tts { preset_id, .. } => ("tts", preset_id),
-            TransformConfig::Translate { preset_id, .. } => ("translate", preset_id),
-        };
-        if preset_id.trim().is_empty() {
-            bail!(
-                "a transform's preset_id is not set; set it with \
-                 `mistl config set bot.pipelines <json>`"
-            );
-        }
         if let TransformConfig::Translate { target_lang, .. } = transform
             && target_lang.trim().is_empty()
         {
             bail!(
-                "a translate transform's target_lang is not set; set it with \
-                 `mistl config set bot.pipelines <json>`"
+                "translate.target_lang is not set; set it with mistl config set bot.pipelines <json>"
             );
         }
-        let resolved =
-            crate::config::resolve_preset(&config.ai, Some(preset_id)).with_context(|| {
-                format!(
-                    "preset {preset_id:?} not found in ai.presets; add it with \
-                 `mistl config set ai.presets <json>` (and ai.providers -- see `mistl config show`)"
-                )
-            })?;
-        if kind == "tts" {
-            let voice_set = resolved
-                .voice
-                .as_deref()
-                .is_some_and(|voice| !voice.trim().is_empty());
-            if !voice_set {
-                bail!(
-                    "ai.presets[id={preset_id:?}].voice is not set; set it with \
-                     `mistl config set ai.presets <json>`"
-                );
+        // Disabled references may execute with the configured default, while still warning in the UI.
+        let (_, reference) = transform_model(transform);
+        crate::config::resolve_ref(&config.ai, reference)
+            .context("bot.pipelines model is unavailable; check ai.providers and ai.default_ref")?;
+        if let Some(warning) = transform_warning(config, transform) {
+            if !warning.contains("provider is disabled") {
+                bail!("{warning}");
             }
         }
     }
@@ -553,43 +577,13 @@ fn validate_pipeline(config: &Config, pipeline: &PipelineConfig) -> Vec<String> 
     }
 
     for transform in &pipeline.transforms {
-        let (kind, preset_id) = match transform {
-            TransformConfig::Summarize { preset_id } => ("summarize", preset_id),
-            TransformConfig::Tts { preset_id, .. } => ("tts", preset_id),
-            TransformConfig::Translate { preset_id, .. } => ("translate", preset_id),
-        };
         if let TransformConfig::Translate { target_lang, .. } = transform
             && target_lang.trim().is_empty()
         {
-            warnings.push(format!(
-                "{prefix}.transforms[kind=\"translate\"].target_lang is not set; set it with \
-                 `mistl config set bot.pipelines <json>`"
-            ));
+            warnings.push(format!("{prefix}.transforms[kind=\"translate\"].target_lang is not set; set bot.pipelines with mistl config set"));
         }
-        if preset_id.trim().is_empty() {
-            warnings.push(format!(
-                "{prefix}.transforms[kind={kind:?}].preset_id is not set; set it with \
-                 `mistl config set bot.pipelines <json>`"
-            ));
-        } else if crate::config::resolve_preset(&config.ai, Some(preset_id)).is_none() {
-            warnings.push(format!(
-                "preset {preset_id:?} not found in ai.presets; add it with \
-                 `mistl config set ai.presets <json>` (and ai.providers -- see `mistl config show`)"
-            ));
-        } else if kind == "tts" {
-            let voice_set = config
-                .ai
-                .presets
-                .iter()
-                .find(|p| &p.id == preset_id)
-                .and_then(|p| p.voice.as_ref())
-                .is_some_and(|voice| !voice.trim().is_empty());
-            if !voice_set {
-                warnings.push(format!(
-                    "ai.presets[id={preset_id:?}].voice is not set; set it with \
-                     `mistl config set ai.presets <json>`"
-                ));
-            }
+        if let Some(warning) = transform_warning(config, transform) {
+            warnings.push(format!("{prefix}.transforms: {warning}"));
         }
     }
 
@@ -867,8 +861,10 @@ async fn cmd_options(state: &Arc<AppState>) -> Result<Value> {
         }
     };
     add_room(source::GLOBAL_ARTICLES_ROOM_ID, &mut rooms);
-    if let Some(room) = &config.ai.room_id {
-        add_room(room, &mut rooms);
+    for provider in config.ai.providers.iter().filter(|p| p.enabled) {
+        if let Some(room) = provider.room() {
+            add_room(room, &mut rooms);
+        }
     }
     for room in &config.storage.room_ids {
         add_room(room, &mut rooms);
@@ -926,7 +922,7 @@ async fn cmd_options(state: &Arc<AppState>) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AiPresetConfig, AiProviderConfig};
+    use crate::config::AiProviderConfig;
     use std::collections::HashMap;
 
     fn sample_pipeline(id: &str, schedule: &str) -> PipelineConfig {
@@ -941,10 +937,20 @@ mod tests {
             },
             transforms: vec![
                 TransformConfig::Summarize {
-                    preset_id: "worker".to_string(),
+                    preset_id: String::new(),
+                    model: Some(crate::config::ModelRef {
+                        provider_id: "openai".into(),
+                        model: "worker".into(),
+                    }),
+                    reasoning_effort: None,
                 },
                 TransformConfig::Tts {
-                    preset_id: "tts-default".to_string(),
+                    preset_id: String::new(),
+                    model: Some(crate::config::ModelRef {
+                        provider_id: "openai".into(),
+                        model: "tts-default".into(),
+                    }),
+                    voice: None,
                     format: None,
                     speed: None,
                 },
@@ -958,32 +964,15 @@ mod tests {
     fn configured_ai() -> Config {
         let mut config = Config::default();
         config.ai.providers.push(AiProviderConfig {
-            id: "openai".to_string(),
-            label: "OpenAI".to_string(),
-            base_url: "https://api.openai.com/v1".to_string(),
-            api_key: "sk-test".to_string(),
+            id: "openai".into(),
+            base_url: "http://test/v1".into(),
+            ..Default::default()
         });
-        config.ai.presets.push(AiPresetConfig {
-            id: "worker".to_string(),
-            label: "Worker".to_string(),
-            provider_id: "openai".to_string(),
-            model: "gpt-4o-mini".to_string(),
-            temperature: None,
-            reasoning_effort: None,
-            voice: None,
-            lang_voices: HashMap::new(),
-            kind: "chat".to_string(),
-        });
-        config.ai.presets.push(AiPresetConfig {
-            id: "tts-default".to_string(),
-            label: "TTS".to_string(),
-            provider_id: "openai".to_string(),
-            model: "tts-1".to_string(),
-            temperature: None,
-            reasoning_effort: None,
-            voice: Some("alloy".to_string()),
-            lang_voices: HashMap::new(),
-            kind: "tts".to_string(),
+        config.ai.tts = Some(crate::config::VoiceConfig {
+            provider_id: "openai".into(),
+            model: "tts-default".into(),
+            voice: Some("alloy".into()),
+            ..Default::default()
         });
         config
     }
@@ -1195,7 +1184,7 @@ mod tests {
         assert!(
             warnings
                 .iter()
-                .any(|w| w.contains("worker") && w.contains("ai.presets"))
+                .any(|w| w.contains("worker") && w.contains("ai.providers"))
         );
         assert!(warnings.iter().any(|w| w.contains("tts-default")));
     }
@@ -1203,13 +1192,7 @@ mod tests {
     #[test]
     fn validate_pipeline_flags_a_tts_preset_missing_a_voice() {
         let mut config = configured_ai();
-        config
-            .ai
-            .presets
-            .iter_mut()
-            .find(|p| p.id == "tts-default")
-            .unwrap()
-            .voice = None;
+        config.ai.tts.as_mut().unwrap().voice = None;
         let pipeline = sample_pipeline("p1", "@every 1h");
         let warnings = validate_pipeline(&config, &pipeline);
         assert!(
@@ -1376,15 +1359,14 @@ mod tests {
         // A summarize-only pipeline has no tts step, so a missing voice
         // anywhere in ai.presets must not block it.
         let mut config = configured_ai();
-        config
-            .ai
-            .presets
-            .iter_mut()
-            .find(|p| p.id == "tts-default")
-            .unwrap()
-            .voice = None;
+        config.ai.tts.as_mut().unwrap().voice = None;
         let summarize_only = vec![TransformConfig::Summarize {
-            preset_id: "worker".to_string(),
+            preset_id: String::new(),
+            model: Some(crate::config::ModelRef {
+                provider_id: "openai".into(),
+                model: "worker".into(),
+            }),
+            reasoning_effort: None,
         }];
         assert!(check_transforms_resolve(&config, &summarize_only).is_ok());
     }

@@ -51,7 +51,7 @@ pub(super) struct AudioOutcome {
 /// Runs `transforms` in order against `article`. A `tts` step with no
 /// preceding `summarize` step falls back to `article.excerpt`/`article.title`
 /// (see [`fallback_script`]) -- a pipeline consisting of `tts` alone is
-/// still a valid (if unpolished) configuration. Any step failing (preset
+/// still a valid (if unpolished) configuration. Any step failing (model reference
 /// unresolved, upstream error) aborts the chain -- per the pipeline flow's
 /// "source/transform の致命的エラーのみ run FAIL" rule, a transform failure
 /// fails the whole run for this article's batch (see `bot::run_pipeline`).
@@ -65,13 +65,28 @@ pub(super) async fn run_chain(
     let mut outcome = TransformOutcome::default();
     for step in transforms {
         match step {
-            TransformConfig::Summarize { preset_id } => {
-                outcome.script = Some(summarize(&config.ai, preset_id, article).await?);
+            TransformConfig::Summarize {
+                model,
+                reasoning_effort,
+                ..
+            } => {
+                outcome.script = Some(
+                    summarize(
+                        Some(state),
+                        &config.ai,
+                        model.as_ref(),
+                        reasoning_effort.as_deref(),
+                        article,
+                    )
+                    .await?,
+                );
             }
             TransformConfig::Tts {
-                preset_id,
+                model,
+                voice,
                 format,
                 speed,
+                ..
             } => {
                 let raw_text = outcome
                     .script
@@ -82,7 +97,8 @@ pub(super) async fn run_chain(
                     synthesize_audio(
                         state,
                         &config.ai,
-                        preset_id,
+                        model.as_ref(),
+                        voice.as_deref(),
                         format.as_deref(),
                         *speed,
                         &text,
@@ -92,8 +108,10 @@ pub(super) async fn run_chain(
                 );
             }
             TransformConfig::Translate {
-                preset_id,
+                model,
+                reasoning_effort,
                 target_lang,
+                ..
             } => {
                 let title = outcome
                     .title
@@ -103,8 +121,16 @@ pub(super) async fn run_chain(
                     .script
                     .clone()
                     .unwrap_or_else(|| article.body.clone());
-                let (translated_title, translated_text) =
-                    translate(&config.ai, preset_id, target_lang, &title, &text).await?;
+                let (translated_title, translated_text) = translate(
+                    Some(state),
+                    &config.ai,
+                    model.as_ref(),
+                    reasoning_effort.as_deref(),
+                    target_lang,
+                    &title,
+                    &text,
+                )
+                .await?;
                 outcome.title = Some(translated_title);
                 outcome.script = Some(translated_text);
                 outcome.lang = Some(target_lang.clone());
@@ -139,31 +165,32 @@ fn translate_system_prompt(target_lang: &str, for_title: bool) -> String {
     prompt
 }
 
-/// Calls `preset_id`'s LLM to translate `input`, resolving the preset fresh
+/// Calls `model_ref`'s LLM to translate `input`, resolving the model reference fresh
 /// on every call (mirrors [`summarize`]'s per-call resolution) so that a
 /// skipped call -- see [`translate`]'s empty-title short-circuit -- never
-/// touches `ai.presets` or the upstream at all. `empty_label` names the
+/// touches `ai.providers` or the upstream at all. `empty_label` names the
 /// missing piece in the empty-result bail (`"title"` or `"translation"`).
 async fn translate_one(
+    state: Option<&Arc<AppState>>,
     ai: &AiConfig,
-    preset_id: &str,
+    model_ref: Option<&crate::config::ModelRef>,
+    effort: Option<&str>,
     system_prompt: String,
     input: &str,
     empty_label: &str,
 ) -> Result<String> {
-    let resolved = crate::config::resolve_preset(ai, Some(preset_id)).with_context(|| {
+    let resolved = crate::config::resolve_ref(ai, model_ref).with_context(|| {
         format!(
-            "bot: transform \"translate\" preset {preset_id:?} not found in ai.presets; \
-             add it with `mistl config set ai.presets <json>` (and ai.providers / \
-             ai.default_preset_id -- see `mistl config show`)"
+            "bot: transform \"translate\" model reference {model_ref:?} not found in ai.providers; \
+             add it with `mistl config set ai.providers <json>` (and ai.providers / \
+             ai.default_ref -- see `mistl config show`)"
         )
     })?;
     let upstream = UpstreamConfig {
         base_url: resolved.base_url,
         api_key: resolved.api_key,
         model: (!resolved.model.is_empty()).then_some(resolved.model),
-        temperature: resolved.temperature,
-        reasoning_effort: resolved.reasoning_effort,
+        reasoning_effort: effort.map(String::from),
     };
     let messages = vec![
         ChatMessage {
@@ -177,31 +204,33 @@ async fn translate_one(
             ..Default::default()
         },
     ];
-    let translated = openai::stream_chat_completion(&upstream, &messages, None, None)
+    let translated = call_completion(state, ai, model_ref, effort, &upstream, messages)
         .await
         .with_context(|| {
-            format!("bot: transform \"translate\" failed calling preset {preset_id:?}")
+            format!("bot: transform \"translate\" failed calling model reference {model_ref:?}")
         })?;
     let translated = translated.trim().to_string();
     if translated.is_empty() {
         anyhow::bail!(
-            "bot: transform \"translate\" (preset {preset_id:?}) returned an empty {empty_label}"
+            "bot: transform \"translate\" (model reference {model_ref:?}) returned an empty {empty_label}"
         );
     }
     Ok(translated)
 }
 
-/// Translates `title` + `text` into `target_lang` via the preset's LLM,
+/// Translates `title` + `text` into `target_lang` via the model reference's LLM,
 /// returning `(translated_title, translated_text)`. Uses two independent
 /// upstream calls -- one per field -- rather than one call with a
 /// combined prompt, so neither result depends on fragile parsing of the
 /// other out of a single response (e.g. "first line is the title"). When
 /// `title` is blank (some sources, like chat posts, have none), the title
 /// call is skipped entirely and the original (blank) title is returned
-/// unchanged -- no upstream call, no preset resolution.
+/// unchanged -- no upstream call, no model reference resolution.
 async fn translate(
+    state: Option<&Arc<AppState>>,
     ai: &AiConfig,
-    preset_id: &str,
+    model_ref: Option<&crate::config::ModelRef>,
+    effort: Option<&str>,
     target_lang: &str,
     title: &str,
     text: &str,
@@ -210,8 +239,10 @@ async fn translate(
         title.to_string()
     } else {
         translate_one(
+            state,
             ai,
-            preset_id,
+            model_ref,
+            effort,
             translate_system_prompt(target_lang, true),
             title,
             "title",
@@ -219,8 +250,10 @@ async fn translate(
         .await?
     };
     let translated_text = translate_one(
+        state,
         ai,
-        preset_id,
+        model_ref,
+        effort,
         translate_system_prompt(target_lang, false),
         text,
         "translation",
@@ -242,20 +275,25 @@ fn build_summarize_prompt(article: &Article) -> String {
     prompt
 }
 
-async fn summarize(ai: &AiConfig, preset_id: &str, article: &Article) -> Result<String> {
-    let resolved = crate::config::resolve_preset(ai, Some(preset_id)).with_context(|| {
+async fn summarize(
+    state: Option<&Arc<AppState>>,
+    ai: &AiConfig,
+    model_ref: Option<&crate::config::ModelRef>,
+    effort: Option<&str>,
+    article: &Article,
+) -> Result<String> {
+    let resolved = crate::config::resolve_ref(ai, model_ref).with_context(|| {
         format!(
-            "bot: transform \"summarize\" preset {preset_id:?} not found in ai.presets; \
-             add it with `mistl config set ai.presets <json>` (and ai.providers / \
-             ai.default_preset_id -- see `mistl config show`)"
+            "bot: transform \"summarize\" model reference {model_ref:?} not found in ai.providers; \
+             add it with `mistl config set ai.providers <json>` (and ai.providers / \
+             ai.default_ref -- see `mistl config show`)"
         )
     })?;
     let upstream = UpstreamConfig {
         base_url: resolved.base_url,
         api_key: resolved.api_key,
         model: (!resolved.model.is_empty()).then_some(resolved.model),
-        temperature: resolved.temperature,
-        reasoning_effort: resolved.reasoning_effort,
+        reasoning_effort: effort.map(String::from),
     };
     let messages = vec![
         ChatMessage {
@@ -269,15 +307,15 @@ async fn summarize(ai: &AiConfig, preset_id: &str, article: &Article) -> Result<
             ..Default::default()
         },
     ];
-    let script = openai::stream_chat_completion(&upstream, &messages, None, None)
+    let script = call_completion(state, ai, model_ref, effort, &upstream, messages)
         .await
         .with_context(|| {
-            format!("bot: transform \"summarize\" failed calling preset {preset_id:?}")
+            format!("bot: transform \"summarize\" failed calling model reference {model_ref:?}")
         })?;
     let script = script.trim().to_string();
     if script.is_empty() {
         anyhow::bail!(
-            "bot: transform \"summarize\" (preset {preset_id:?}) returned an empty script"
+            "bot: transform \"summarize\" (model reference {model_ref:?}) returned an empty script"
         );
     }
     Ok(script)
@@ -326,37 +364,62 @@ pub(super) fn extension_for_mime(mime: &str) -> &'static str {
     }
 }
 
+async fn call_completion(
+    state: Option<&Arc<AppState>>,
+    ai: &AiConfig,
+    model: Option<&crate::config::ModelRef>,
+    effort: Option<&str>,
+    upstream: &UpstreamConfig,
+    messages: Vec<ChatMessage>,
+) -> Result<String> {
+    if upstream.base_url.starts_with("mist-network://") {
+        let state = state.context("bot: a Room model requires the daemon AI service")?;
+        crate::ai::chat_model(
+            state,
+            model.or(ai.default_ref.as_ref()),
+            effort.map(String::from),
+            messages,
+        )
+        .await
+    } else {
+        openai::stream_chat_completion(upstream, &messages, None, None).await
+    }
+}
+
 async fn synthesize_audio(
     state: &Arc<AppState>,
     ai: &AiConfig,
-    preset_id: &str,
+    model_ref: Option<&crate::config::ModelRef>,
+    voice_override: Option<&str>,
     format: Option<&str>,
     speed: Option<f64>,
     text: &str,
     article_id: &str,
 ) -> Result<AudioOutcome> {
-    let resolved = crate::config::resolve_preset(ai, Some(preset_id)).with_context(|| {
+    let resolved = crate::config::resolve_ref(ai, model_ref).with_context(|| {
         format!(
-            "bot: transform \"tts\" preset {preset_id:?} not found in ai.presets; \
-             add it with `mistl config set ai.presets <json>` (and ai.providers -- see \
+            "bot: transform \"tts\" model reference {model_ref:?} not found in ai.providers; \
+             add it with `mistl config set ai.providers <json>` (and ai.providers -- see \
              `mistl config show`)"
         )
     })?;
-    let voice = resolved
-        .voice
+    let voice = voice_override.map(String::from).or_else(|| {
+        ai.tts.as_ref().filter(|v| crate::config::effective_ref(ai, model_ref).is_some_and(|r| r.provider_id == v.provider_id)).and_then(|v| v.voice.clone())
+    })
         .filter(|voice| !voice.trim().is_empty())
         .with_context(|| {
             format!(
-                "bot: transform \"tts\" preset {preset_id:?} has no voice set; set it with \
-                 `mistl config set ai.presets <json>` (add a \"voice\" field to that preset)"
+                "bot: transform \"tts\" model reference {model_ref:?} has no voice set; set it with \
+                 `mistl config set bot.pipelines <json>` (set tts.voice or ai.tts.voice)"
             )
-        })?;
+        }).or_else(|err| if resolved.base_url.starts_with("mist-network://") { Ok(String::new()) } else { Err(err) })?;
 
     let provider = AiProviderConfig {
-        id: preset_id.to_string(),
-        label: preset_id.to_string(),
+        id: String::new(),
+        label: String::new(),
         base_url: resolved.base_url,
         api_key: resolved.api_key,
+        ..Default::default()
     };
     let params = TtsParams {
         model: resolved.model,
@@ -365,9 +428,17 @@ async fn synthesize_audio(
         format: format.map(str::to_string),
         speed,
     };
-    let audio = tts::synthesize(&provider, params)
-        .await
-        .with_context(|| format!("bot: transform \"tts\" failed calling preset {preset_id:?}"))?;
+    let audio = if provider.base_url.starts_with("mist-network://") {
+        let reference = model_ref
+            .or(ai.default_ref.as_ref())
+            .context("ai.default_ref is not set")?;
+        crate::ai::synthesize_model(state, reference, params).await
+    } else {
+        tts::synthesize(&provider, params).await
+    }
+    .with_context(|| {
+        format!("bot: transform \"tts\" failed calling model reference {model_ref:?}")
+    })?;
 
     let store = crate::storage::store(state).await?;
     let name = format!("{article_id}.{}", extension_for_mime(&audio.mime));
@@ -422,18 +493,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn translate_reports_a_clear_error_when_the_preset_is_unresolved() {
+    async fn translate_reports_a_clear_error_when_the_model_ref_is_unresolved() {
         let ai = AiConfig::default();
-        let err = translate(&ai, "missing-preset", "en", "見出し", "本文")
-            .await
-            .expect_err("an unresolved preset must error");
+        let err = translate(
+            None,
+            &ai,
+            Some(&crate::config::ModelRef {
+                provider_id: "missing-provider".into(),
+                model: "m".into(),
+            }),
+            None,
+            "en",
+            "見出し",
+            "本文",
+        )
+        .await
+        .expect_err("an unresolved model reference must error");
         let msg = err.to_string();
         assert!(
-            msg.contains("missing-preset"),
-            "error should name the preset: {msg}"
+            msg.contains("missing-provider"),
+            "error should name the model reference: {msg}"
         );
         assert!(
-            msg.contains("ai.presets"),
+            msg.contains("ai.providers"),
             "error should point at the config path: {msg}"
         );
     }
@@ -442,22 +524,33 @@ mod tests {
     async fn translate_skips_the_upstream_call_for_a_blank_title_but_still_translates_the_body() {
         // A blank title takes the `title.trim().is_empty()` branch in
         // `translate` and never reaches `translate_one` -- so it can't
-        // fail even though the preset below is unresolvable. The body has
+        // fail even though the model reference below is unresolvable. The body has
         // no such branch, so it always goes through `translate_one` and
-        // errors here on preset resolution. Were the title path
+        // errors here on model reference resolution. Were the title path
         // mistakenly *not* skipped, the result would be unchanged (`Err`,
         // same message) since both paths share the same unresolvable
-        // preset -- so this pins down "the body call still runs and fails
+        // model reference -- so this pins down "the body call still runs and fails
         // when the title is blank", with the skip itself covered by
         // reading `translate`'s `if title.trim().is_empty()` guard.
         let ai = AiConfig::default();
-        let err = translate(&ai, "missing-preset", "en", "   ", "本文")
-            .await
-            .expect_err("the body call must still run (and fail) even when the title is blank");
+        let err = translate(
+            None,
+            &ai,
+            Some(&crate::config::ModelRef {
+                provider_id: "missing-provider".into(),
+                model: "m".into(),
+            }),
+            None,
+            "en",
+            "   ",
+            "本文",
+        )
+        .await
+        .expect_err("the body call must still run (and fail) even when the title is blank");
         let msg = err.to_string();
         assert!(
-            msg.contains("missing-preset"),
-            "error should name the preset: {msg}"
+            msg.contains("missing-provider"),
+            "error should name the model reference: {msg}"
         );
     }
 }

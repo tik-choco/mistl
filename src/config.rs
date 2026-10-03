@@ -3,7 +3,6 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use tracing::warn;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -317,24 +316,70 @@ pub struct ChatRelayConfig {
     pub rooms: Vec<String>,
 }
 
-/// Connection-only settings for one upstream endpoint (the part shared
-/// across however many presets point at it): "where to connect". Mirrors
-/// the shared LLM config contract's `LlmProviderV1` (see
-/// `protocol/docs/data-contracts/docs/llm-config.md`); mistl can't share
-/// the web apps' `tc-shared-llm-config-v1` localStorage key directly (no
-/// browser storage in a daemon), but `[ai]` adopts the same provider/preset
-/// shape so the two stay conceptually interchangeable.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// HTTP endpoint or Room provider, including discovery cache and per-room sharing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AiProviderConfig {
     pub id: String,
     pub label: String,
     pub base_url: String,
     pub api_key: String,
+    pub enabled: bool,
+    pub models: Vec<String>,
+    pub models_fetched_at: Option<String>,
+    pub provide: bool,
+    pub shared: Vec<ModelRef>,
 }
 
-/// A named model configuration referencing a provider by id: "how to call
-/// it". Mirrors the shared LLM config contract's `ModelPresetV1`.
+impl Default for AiProviderConfig {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            label: String::new(),
+            base_url: String::new(),
+            api_key: String::new(),
+            enabled: true,
+            models: Vec::new(),
+            models_fetched_at: None,
+            provide: false,
+            shared: Vec::new(),
+        }
+    }
+}
+
+impl AiProviderConfig {
+    pub fn room(&self) -> Option<&str> {
+        self.base_url
+            .strip_prefix("mist-network://")
+            .filter(|r| !r.trim().is_empty())
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelRef {
+    pub provider_id: String,
+    pub model: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VoiceConfig {
+    pub provider_id: String,
+    pub model: String,
+    pub voice: Option<String>,
+    pub lang_voices: HashMap<String, String>,
+}
+
+impl VoiceConfig {
+    pub fn model_ref(&self) -> ModelRef {
+        ModelRef {
+            provider_id: self.provider_id.clone(),
+            model: self.model.clone(),
+        }
+    }
+}
+
+/// Deserialize-only legacy preset, retained solely for Config::load migration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AiPresetConfig {
@@ -344,37 +389,8 @@ pub struct AiPresetConfig {
     pub model: String,
     pub temperature: Option<f64>,
     pub reasoning_effort: Option<String>,
-    /// Upstream TTS voice id (e.g. "alloy"), used by the bot pipeline's `tts`
-    /// transform (`crate::ai::tts::synthesize`) when a preset is resolved for
-    /// speech. Meaningless for a chat-completion preset; left unset there.
-    #[serde(default)]
     pub voice: Option<String>,
-    /// Per-language TTS voice overrides (mistllm-wire tts-lang-hint-v1):
-    /// key is a BCP-47 *primary* language subtag (e.g. `"en"`, `"ja"` --
-    /// not a full tag like `"en-US"`), matched case-insensitively; value is
-    /// a real upstream voice id, exactly like [`AiPresetConfig::voice`].
-    /// Consulted by `crate::ai::resolve_tts_voice` when an inbound
-    /// `tts_request` carries a `lang` hint and doesn't itself specify
-    /// `voice` (an explicit request `voice` always wins over `lang`).
-    /// Empty (the default -- absent from an old config.toml deserializes
-    /// the same way) means "no per-language overrides configured"; `voice`
-    /// above remains the language-agnostic fallback either way. Meaningless
-    /// for a chat-completion preset, same as `voice`. `skip_serializing_if`
-    /// keeps an unconfigured (empty) map from cluttering every preset's
-    /// serialized `config.toml` entry with an empty `[..lang_voices]` table.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub lang_voices: HashMap<String, String>,
-    /// What this preset is for: `"chat"` | `"tts"` | `"stt"`. Purely a UI
-    /// categorization hint (which single checkbox a preset gets in the
-    /// dashboard's AI Network "what to provide" checklist, and which config
-    /// path -- `ai.advertised_models` / `ai.tts_preset_id` / `ai.stt_preset_id`
-    /// -- toggling it writes to); has no effect on request routing, which
-    /// is always driven by those three fields directly, not by this one.
-    /// `""` (e.g. an old config.toml predating this field) is treated the
-    /// same as `"chat"`, mirroring the `default_preset_id`-style "empty
-    /// string = fall back to the default" convention used elsewhere in this
-    /// struct's sibling configs.
-    #[serde(default)]
     pub kind: String,
 }
 
@@ -403,140 +419,121 @@ fn unique_provider_id(providers: &[AiProviderConfig], base: &str) -> String {
     }
 }
 
-/// A preset resolved against its provider: everything needed to build an
-/// upstream client, in one place. Returned by [`resolve_preset`].
+/// Connection and model resolved without modifying the stored reference.
 #[derive(Debug, Clone)]
-pub struct ResolvedAiPreset {
+pub struct ResolvedModel {
     pub base_url: String,
     pub api_key: String,
     pub model: String,
-    pub temperature: Option<f64>,
     pub reasoning_effort: Option<String>,
-    /// See [`AiPresetConfig::voice`].
     pub voice: Option<String>,
-    /// See [`AiPresetConfig::lang_voices`].
     pub lang_voices: HashMap<String, String>,
 }
 
-/// Mirrors the shared LLM config contract's `resolvePreset(config,
-/// presetId?)`: resolves `preset_id` if it names a known preset, else falls
-/// back to `ai.default_preset_id`; a blank/unknown `preset_id` also falls
-/// back. Returns `None` if no preset could be resolved this way, or if the
-/// resolved preset's `provider_id` doesn't match any configured provider.
-pub fn resolve_preset(ai: &AiConfig, preset_id: Option<&str>) -> Option<ResolvedAiPreset> {
-    let wanted = preset_id.map(str::trim).filter(|id| !id.is_empty());
-    let preset = wanted
-        .and_then(|id| ai.presets.iter().find(|p| p.id == id))
-        .or_else(|| ai.presets.iter().find(|p| p.id == ai.default_preset_id))?;
-    let provider = ai.providers.iter().find(|p| p.id == preset.provider_id)?;
-    Some(ResolvedAiPreset {
+/// Exact resolution for sharing: never borrow another provider or model.
+pub fn resolve_ref_exact(ai: &AiConfig, reference: &ModelRef) -> Option<ResolvedModel> {
+    let provider = ai
+        .providers
+        .iter()
+        .find(|p| p.id == reference.provider_id && p.enabled)?;
+    if reference.model.trim().is_empty() {
+        return None;
+    }
+    Some(ResolvedModel {
         base_url: provider.base_url.clone(),
         api_key: provider.api_key.clone(),
-        model: preset.model.clone(),
-        temperature: preset.temperature,
-        reasoning_effort: preset.reasoning_effort.clone(),
-        voice: preset.voice.clone(),
-        lang_voices: preset.lang_voices.clone(),
+        model: reference.model.clone(),
+        reasoning_effort: None,
+        voice: None,
+        lang_voices: HashMap::new(),
     })
+}
+
+/// Tasks may fall back to the configured default when their provider is disabled.
+/// Missing references/providers are errors; no first-provider/model guessing.
+pub fn effective_ref<'a>(
+    ai: &'a AiConfig,
+    reference: Option<&'a ModelRef>,
+) -> Option<&'a ModelRef> {
+    let reference = reference.or(ai.default_ref.as_ref())?;
+    let provider = ai
+        .providers
+        .iter()
+        .find(|p| p.id == reference.provider_id)?;
+    if !provider.enabled {
+        let default = ai.default_ref.as_ref()?;
+        resolve_ref_exact(ai, default)?;
+        return Some(default);
+    }
+    Some(reference)
+}
+
+pub fn resolve_ref(ai: &AiConfig, reference: Option<&ModelRef>) -> Option<ResolvedModel> {
+    let reference = effective_ref(ai, reference)?;
+    resolve_ref_exact(ai, reference)
+}
+
+pub fn resolve_voice(ai: &AiConfig, voice: Option<&VoiceConfig>) -> Option<ResolvedModel> {
+    let voice = voice?;
+    let mut resolved = resolve_ref(ai, Some(&voice.model_ref()))?;
+    resolved.voice = voice.voice.clone();
+    resolved.lang_voices = voice.lang_voices.clone();
+    Some(resolved)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AiConfig {
-    /// Room id for the AI network. Falls back to the shared default
-    /// rendezvous room (`net::DEFAULT_ROOM`) when unset; the p2p transport
-    /// supports multiple simultaneous rooms per process, so set this
-    /// explicitly to join an existing mistai (tc-mistllm etc.) room.
+    pub default_ref: Option<ModelRef>,
+    pub tts: Option<VoiceConfig>,
+    pub stt: Option<ModelRef>,
+    pub providers: Vec<AiProviderConfig>,
+    pub api_listen: String,
+    pub request_timeout_secs: u64,
+    pub trusted_providers: Vec<String>,
+    // Deserialize-only fields, consumed by Config::load's migration.
+    #[serde(skip_serializing)]
     pub room_id: Option<String>,
-    /// Legacy pre-provider/preset upstream URL. Deserializable (so old
-    /// config.toml files keep loading) but never re-serialized --
-    /// `Config::load` merges it into `providers`/`presets` via
-    /// `migrate_legacy` on first read, then `save()` drops it from disk
-    /// for good.
     #[serde(skip_serializing)]
     pub upstream_url: Option<String>,
-    /// Legacy pre-provider/preset API key. See `upstream_url`.
     #[serde(skip_serializing)]
     pub upstream_api_key: Option<String>,
-    /// Legacy pre-provider/preset default model. See `upstream_url`.
     #[serde(skip_serializing)]
     pub default_model: Option<String>,
-    /// Legacy pre-provider/preset temperature. See `upstream_url`.
     #[serde(skip_serializing)]
     pub temperature: Option<f64>,
-    /// Which `presets` entries (by **preset id**, not raw upstream model
-    /// id) are advertised in `provider_hello.models` when this node
-    /// provides -- mistllm-wire's "advertised name = preset label"
-    /// contract: each selected preset's advertised name is its
-    /// `label.trim()` when non-empty, else its `model`
-    /// (`crate::ai::build_provider`'s `resolve_advertised_models`), and an
-    /// inbound `llm_request.model` naming one of those advertised names is
-    /// routed to *that preset's own* upstream (base_url/api_key/model),
-    /// not forwarded to the default preset's upstream verbatim (see
-    /// `crate::ai::provider::Provider::resolve_llm_call`).
-    ///
-    /// Empty means the legacy pass-through mode: `provider_hello` omits
-    /// `models` entirely (no upstream `GET /models` fallback -- removed),
-    /// and any inbound `model` is forwarded to the default preset's
-    /// upstream as-is, unchecked.
-    ///
-    /// Old config.toml files (or direct `mistl config set
-    /// ai.advertised_models` calls) may still contain raw model ids from
-    /// before this field meant "preset id"; `Config::load` normalizes them
-    /// via `migrate_advertised_models` on first read (id already valid ->
-    /// unchanged; matches some preset's `model` -> rewritten to that
-    /// preset's id; matches neither -> dropped).
+    #[serde(skip_serializing)]
     pub advertised_models: Vec<String>,
-    /// Listen address of the local OpenAI-compatible API server (`ai serve`).
-    pub api_listen: String,
-    /// Inactivity timeout for a p2p LLM request (resets on every streamed chunk).
-    pub request_timeout_secs: u64,
-    /// Which `presets` entry `ai provide`/`ai serve` resolve to by default
-    /// (see `resolve_preset`). "" = unset. Mirrors the shared LLM config
-    /// contract's `defaultPresetId`.
+    #[serde(skip_serializing)]
     pub default_preset_id: String,
-    /// Which `presets` entry answers inbound `tts_request`s when providing
-    /// to the network (see `resolve_preset`). "" = TTS not offered --
-    /// `provider_hello.services` omits `"tts"` and voice requests get an
-    /// immediate `voice_error` (see `crate::ai::provider`). Unlike
-    /// `default_preset_id`, an empty value here is never defaulted away by
-    /// `resolve_preset` -- callers must check for "" themselves before
-    /// resolving, since falling back to the chat default preset would
-    /// silently opt a node into serving TTS it never configured.
+    #[serde(skip_serializing)]
     pub tts_preset_id: String,
-    /// Same as `tts_preset_id`, for inbound `stt_request`s.
+    #[serde(skip_serializing)]
     pub stt_preset_id: String,
-    /// Named upstream connections ("where to connect"). See
-    /// [`AiProviderConfig`].
-    pub providers: Vec<AiProviderConfig>,
-    /// Named model configurations, each referencing a `providers` entry by
-    /// id ("how to call it"). See [`AiPresetConfig`].
+    #[serde(skip_serializing)]
     pub presets: Vec<AiPresetConfig>,
-    /// Identities (did:key or 16-hex node ids) allowed to act as the remote
-    /// LLM provider for this node's consumer side. Empty (the default) keeps
-    /// the legacy "first chat provider wins" behaviour, with a warning and
-    /// `provider_trusted: false` in `ai status`; when non-empty only peers
-    /// whose DID-signed hello is verified and matches an entry are used.
-    pub trusted_providers: Vec<String>,
 }
 
 impl Default for AiConfig {
     fn default() -> Self {
         Self {
+            default_ref: None,
+            tts: None,
+            stt: None,
+            providers: Vec::new(),
+            api_listen: "127.0.0.1:6478".into(),
+            request_timeout_secs: 120,
+            trusted_providers: Vec::new(),
             room_id: None,
             upstream_url: None,
             upstream_api_key: None,
             default_model: None,
-            advertised_models: Vec::new(),
             temperature: None,
-            api_listen: "127.0.0.1:6478".into(), // 6478 = "MIST" on a phone keypad
-            request_timeout_secs: 120,
+            advertised_models: Vec::new(),
             default_preset_id: String::new(),
             tts_preset_id: String::new(),
             stt_preset_id: String::new(),
-            providers: Vec::new(),
             presets: Vec::new(),
-            trusted_providers: Vec::new(),
         }
     }
 }
@@ -649,32 +646,32 @@ pub enum SourceConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum TransformConfig {
-    /// LLM summarization into a read-aloud script (`crate::ai::openai`,
-    /// resolved via `[[ai.presets]]`). Left blank (rather than `Option`, to
-    /// match `AiProviderConfig`/`AiPresetConfig`'s own style) is a runtime
-    /// validation warning, not a parse error -- see `crate::bot`'s
-    /// `validate_pipeline`.
     Summarize {
         #[serde(default)]
+        model: Option<ModelRef>,
+        #[serde(default)]
+        reasoning_effort: Option<String>,
+        #[serde(default, skip_serializing)]
         preset_id: String,
     },
-    /// Direct-upstream TTS (`crate::ai::tts::synthesize`). `preset_id`
-    /// resolves the model + `AiPresetConfig::voice`; `format`/`speed`
-    /// override `TtsParams` per-pipeline.
     Tts {
         #[serde(default)]
+        model: Option<ModelRef>,
+        #[serde(default)]
+        voice: Option<String>,
+        #[serde(default, skip_serializing)]
         preset_id: String,
         #[serde(default)]
         format: Option<String>,
         #[serde(default)]
         speed: Option<f64>,
     },
-    /// LLM translation of the item's title + body into `target_lang`
-    /// (`crate::ai::openai`, resolved via `[[ai.presets]]` like
-    /// `Summarize`). `target_lang` is a BCP-47-ish language tag (`"ja"`,
-    /// `"en"`, ...); empty is a runtime validation warning.
     Translate {
         #[serde(default)]
+        model: Option<ModelRef>,
+        #[serde(default)]
+        reasoning_effort: Option<String>,
+        #[serde(default, skip_serializing)]
         preset_id: String,
         #[serde(default)]
         target_lang: String,
@@ -1041,7 +1038,7 @@ fn substitute_masked_webhook_secrets(
 }
 
 /// Set one config field addressed as `section.field` (e.g.
-/// "ai.default_preset_id"), returning the updated config. Values round-trip
+/// "ai.default_ref"), returning the updated config. Values round-trip
 /// through serde so types are validated against the real Config shape;
 /// `null` clears optional fields.
 pub fn set_by_path(config: &Config, path: &str, value: serde_json::Value) -> Result<Config> {
@@ -1144,12 +1141,7 @@ pub fn applies_when(path: &str) -> &'static str {
         // below, which need an explicit stop/start of *something* -- there
         // is nothing left for the user to do at all.
         "network.membership_allowlist" | "ai.trusted_providers" => "applied immediately",
-        "ai.providers"
-        | "ai.presets"
-        | "ai.default_preset_id"
-        | "ai.tts_preset_id"
-        | "ai.stt_preset_id"
-        | "ai.advertised_models" => "applied immediately",
+        "ai.providers" | "ai.default_ref" | "ai.tts" | "ai.stt" => "applied immediately",
         _ => "next service start",
     }
 }
@@ -1173,8 +1165,13 @@ impl Config {
                 let rtsp = std::net::TcpListener::bind("127.0.0.1:0")?;
                 config.ai.api_listen = api.local_addr()?.to_string();
                 config.stream.rtsp_url = format!("rtsp://{}/stream", rtsp.local_addr()?);
-                config.ai.room_id =
-                    Some(format!("mistl-dev-{}", crate::runtime::context().instance));
+                let room = format!("mistl-dev-{}", crate::runtime::context().instance);
+                config.ai.providers.push(AiProviderConfig {
+                    id: "room".into(),
+                    label: room.clone(),
+                    base_url: format!("mist-network://{room}"),
+                    ..Default::default()
+                });
                 config.update.auto_check = false;
                 config.update.auto_apply = false;
             }
@@ -1210,7 +1207,7 @@ impl Config {
         // `upstream_url`/`default_model` fields only) gets its freshly
         // synthesized "default" preset in place before this tries to match
         // `advertised_models` entries against `presets`.
-        let advertised_changed = self.migrate_advertised_models();
+        let advertised_changed = self.migrate_model_refs();
         let stream_changed = self.migrate_legacy_stream_room();
         let mailbox_changed = self.migrate_legacy_mailbox();
         ai_changed || advertised_changed || stream_changed || mailbox_changed
@@ -1277,6 +1274,7 @@ impl Config {
                     label: "Default".to_string(),
                     base_url: upstream_url.to_string(),
                     api_key: legacy_key,
+                    ..Default::default()
                 });
                 id
             }
@@ -1303,59 +1301,146 @@ impl Config {
         true
     }
 
-    /// Normalizes `ai.advertised_models` from a flat list of raw upstream
-    /// model ids (its pre-`advertised-name-contract` shape) into a list of
-    /// **preset ids**, per `AiConfig::advertised_models`'s current doc
-    /// comment. Runs on every `Config::load`, not just once on an old
-    /// config -- unlike `migrate_legacy_ai`/`migrate_legacy_stream_room`
-    /// this isn't a one-shot "drop the legacy field for good" migration
-    /// (there is no separate legacy field here to retire; `advertised_models`
-    /// keeps its name and TOML key), it just keeps re-normalizing the same
-    /// field, which is why it must stay idempotent.
-    ///
-    /// For each entry, checked against the *current* `presets` (including
-    /// any preset `migrate_legacy_ai` just synthesized):
-    /// - Already names a known preset id -> left as-is.
-    /// - Doesn't name a preset id, but matches some preset's `model` ->
-    ///   rewritten to that preset's id (first configured match wins when
-    ///   more than one preset shares the same `model`), with a `warn!`.
-    /// - Matches neither -> dropped, with a `warn!`.
-    ///
-    /// Returns whether anything changed (and thus whether the caller should
-    /// persist). Idempotent: a config whose `advertised_models` already only
-    /// contains valid preset ids returns `false`.
-    fn migrate_advertised_models(&mut self) -> bool {
-        if self.ai.advertised_models.is_empty() {
-            return false;
+    /// One-time preset and room migration. New fields always win.
+    fn migrate_model_refs(&mut self) -> bool {
+        let ai = &mut self.ai;
+        let mut changed = ai.room_id.is_some()
+            || !ai.presets.is_empty()
+            || !ai.default_preset_id.is_empty()
+            || !ai.tts_preset_id.is_empty()
+            || !ai.stt_preset_id.is_empty()
+            || !ai.advertised_models.is_empty()
+            || ai.upstream_url.is_some()
+            || ai.upstream_api_key.is_some()
+            || ai.default_model.is_some()
+            || ai.temperature.is_some();
+        let model_ref = |p: &AiPresetConfig| ModelRef {
+            provider_id: p.provider_id.clone(),
+            model: p.model.clone(),
+        };
+        if ai.default_ref.is_none() {
+            ai.default_ref = ai
+                .presets
+                .iter()
+                .find(|p| p.id == ai.default_preset_id)
+                .map(model_ref);
         }
-        // Cloned up front so the lookups below don't borrow `self.ai`
-        // immutably while `self.ai.advertised_models` is rebuilt.
-        let presets = self.ai.presets.clone();
-        let mut changed = false;
-        let mut next = Vec::with_capacity(self.ai.advertised_models.len());
-        for entry in &self.ai.advertised_models {
-            if presets.iter().any(|p| &p.id == entry) {
-                next.push(entry.clone());
-            } else if let Some(preset) = presets.iter().find(|p| &p.model == entry) {
-                warn!(
-                    old = %entry,
-                    new = %preset.id,
-                    "ai: advertised_models entry names a raw upstream model id, not a preset id; \
-                     rewriting to the matching preset's id"
-                );
-                next.push(preset.id.clone());
-                changed = true;
-            } else {
-                warn!(
-                    entry = %entry,
-                    "ai: advertised_models entry doesn't match any configured preset id or model; dropping it"
-                );
-                changed = true;
+        if ai.tts.is_none() {
+            ai.tts = ai
+                .presets
+                .iter()
+                .find(|p| p.id == ai.tts_preset_id)
+                .map(|p| VoiceConfig {
+                    provider_id: p.provider_id.clone(),
+                    model: p.model.clone(),
+                    voice: p.voice.clone(),
+                    lang_voices: p.lang_voices.clone(),
+                });
+        }
+        if ai.stt.is_none() {
+            ai.stt = ai
+                .presets
+                .iter()
+                .find(|p| p.id == ai.stt_preset_id)
+                .map(model_ref);
+        }
+        for pipeline in &mut self.bot.pipelines {
+            for transform in &mut pipeline.transforms {
+                let (model, preset_id, effort, voice) = match transform {
+                    TransformConfig::Summarize {
+                        model,
+                        preset_id,
+                        reasoning_effort,
+                    }
+                    | TransformConfig::Translate {
+                        model,
+                        preset_id,
+                        reasoning_effort,
+                        ..
+                    } => (model, preset_id, Some(reasoning_effort), None),
+                    TransformConfig::Tts {
+                        model,
+                        preset_id,
+                        voice,
+                        ..
+                    } => (model, preset_id, None, Some(voice)),
+                };
+                if !preset_id.is_empty() {
+                    changed = true;
+                    if let Some(preset) = ai.presets.iter().find(|p| &p.id == preset_id) {
+                        if model.is_none() {
+                            *model = Some(model_ref(preset));
+                        }
+                        if let Some(effort) = effort {
+                            if effort.is_none() {
+                                *effort = preset.reasoning_effort.clone();
+                            }
+                        }
+                        if let Some(voice) = voice {
+                            if voice.is_none() {
+                                *voice = preset.voice.clone();
+                            }
+                        }
+                    } else {
+                        // Preserve a visibly unusable assignment instead of adopting the default.
+                        if model.is_none() {
+                            *model = Some(ModelRef {
+                                provider_id: String::new(),
+                                model: preset_id.clone(),
+                            });
+                        }
+                    }
+                    preset_id.clear();
+                }
             }
         }
-        if changed {
-            self.ai.advertised_models = next;
+        let legacy_room = ai.room_id.take().filter(|r| !r.trim().is_empty());
+        let advertised = std::mem::take(&mut ai.advertised_models);
+        if legacy_room.is_some() || !advertised.is_empty() {
+            let room = legacy_room.unwrap_or_else(|| crate::net::DEFAULT_ROOM.to_string());
+            let url = format!("mist-network://{room}");
+            let index = if let Some(index) = ai.providers.iter().position(|p| p.base_url == url) {
+                index
+            } else {
+                let id = unique_provider_id(&ai.providers, "room");
+                ai.providers.push(AiProviderConfig {
+                    id,
+                    label: room,
+                    base_url: url,
+                    ..Default::default()
+                });
+                ai.providers.len() - 1
+            };
+            let shared: Vec<_> = advertised
+                .iter()
+                .filter_map(|id| {
+                    let preset = ai
+                        .presets
+                        .iter()
+                        .find(|p| &p.id == id)
+                        .or_else(|| ai.presets.iter().find(|p| &p.model == id))?;
+                    let provider = ai.providers.iter().find(|p| p.id == preset.provider_id)?;
+                    if provider.room().is_some() {
+                        return None;
+                    }
+                    Some(model_ref(preset))
+                })
+                .collect();
+            if ai.providers[index].shared.is_empty() {
+                ai.providers[index].shared = shared;
+            }
+            if !advertised.is_empty() {
+                ai.providers[index].provide = true;
+            }
         }
+        ai.presets.clear();
+        ai.default_preset_id.clear();
+        ai.tts_preset_id.clear();
+        ai.stt_preset_id.clear();
+        ai.upstream_url = None;
+        ai.upstream_api_key = None;
+        ai.default_model = None;
+        ai.temperature = None;
         changed
     }
 
@@ -1442,15 +1527,15 @@ mod tests {
             ("stream.cascade", json!(true)),
             ("chat_relay.rooms", json!(["room-a"])),
             ("chat_relay.enabled", json!(true)),
-            ("ai.room_id", json!("room-a")),
             ("ai.request_timeout_secs", json!(30)),
             ("ai.api_listen", json!("127.0.0.1:6480")),
-            ("ai.default_preset_id", json!("default")),
-            ("ai.tts_preset_id", json!("tts-default")),
-            ("ai.stt_preset_id", json!("stt-default")),
-            ("ai.advertised_models", json!(["a", "b"])),
+            (
+                "ai.default_ref",
+                json!({ "provider_id": "p", "model": "m" }),
+            ),
+            ("ai.tts", json!({ "provider_id": "p", "model": "speech" })),
+            ("ai.stt", json!(null)),
             ("ai.providers", json!([])),
-            ("ai.presets", json!([])),
             ("scheduler.enabled", json!(true)),
             ("bot.enabled", json!(true)),
             ("bot.pipelines", json!([])),
@@ -1474,214 +1559,272 @@ mod tests {
         }
     }
 
-    #[test]
-    fn migrate_legacy_creates_provider_preset_and_default_from_legacy_fields() {
-        let mut config = Config::default();
-        config.ai.upstream_url = Some("http://127.0.0.1:11434/v1/".to_string());
-        config.ai.upstream_api_key = Some("sk-legacy".to_string());
-        config.ai.default_model = Some("llama3".to_string());
-        config.ai.temperature = Some(0.5);
-
-        assert!(config.migrate_legacy());
-
-        assert_eq!(config.ai.providers.len(), 1);
-        let provider = &config.ai.providers[0];
-        assert_eq!(provider.id, "default");
-        assert_eq!(provider.label, "Default");
-        assert_eq!(provider.base_url, "http://127.0.0.1:11434/v1/");
-        assert_eq!(provider.api_key, "sk-legacy");
-
-        assert_eq!(config.ai.presets.len(), 1);
-        let preset = &config.ai.presets[0];
-        assert_eq!(preset.id, "default");
-        assert_eq!(preset.provider_id, "default");
-        assert_eq!(preset.model, "llama3");
-        assert_eq!(preset.temperature, Some(0.5));
-        assert_eq!(preset.reasoning_effort, None);
-
-        assert_eq!(config.ai.default_preset_id, "default");
+    fn legacy_ai_config() -> Config {
+        toml::from_str(r#"
+            [ai]
+            room_id = "legacy-room"
+            default_preset_id = "chat"
+            tts_preset_id = "speech"
+            stt_preset_id = "listen"
+            advertised_models = ["chat", "raw", "network", "missing"]
+            [[ai.providers]]
+            id = "http"
+            base_url = "http://local/v1"
+            api_key = "secret"
+            [[ai.providers]]
+            id = "network"
+            base_url = "mist-network://other"
+            [[ai.presets]]
+            id = "chat"
+            label = "Friendly label"
+            provider_id = "http"
+            model = "raw"
+            reasoning_effort = "high"
+            [[ai.presets]]
+            id = "speech"
+            provider_id = "http"
+            model = "speech-raw"
+            voice = "speaker"
+            lang_voices = { en = "english" }
+            [[ai.presets]]
+            id = "listen"
+            provider_id = "http"
+            model = "listen-raw"
+            [[ai.presets]]
+            id = "network"
+            provider_id = "network"
+            model = "remote"
+            [[bot.pipelines]]
+            id = "task"
+            schedule = "@every 1h"
+            source = { kind = "chat-room", room = "chat" }
+            transforms = [ { kind = "summarize", preset_id = "chat" },
+                { kind = "translate", preset_id = "chat", target_lang = "en", reasoning_effort = "low" },
+                { kind = "tts", preset_id = "speech" } ]
+        "#).unwrap()
     }
 
     #[test]
-    fn migrate_legacy_is_idempotent() {
-        let mut config = Config::default();
-        config.ai.upstream_url = Some("http://127.0.0.1:11434/v1".to_string());
-        config.ai.default_model = Some("llama3".to_string());
-
+    fn legacy_presets_become_refs_and_room_shared_raw_ids() {
+        let mut config = legacy_ai_config();
         assert!(config.migrate_legacy());
-        assert!(
-            config.migrate_legacy(),
-            "legacy fields are still present in memory, so persisting again is still requested"
-        );
-
         assert_eq!(
-            config.ai.providers.len(),
-            1,
-            "provider must not be duplicated"
+            config.ai.default_ref,
+            Some(ModelRef {
+                provider_id: "http".into(),
+                model: "raw".into()
+            })
         );
-        assert_eq!(config.ai.presets.len(), 1, "preset must not be duplicated");
-        assert_eq!(config.ai.default_preset_id, "default");
-    }
-
-    #[test]
-    fn migrate_legacy_never_overwrites_an_existing_preset_or_default_preset_id() {
-        let mut config = Config::default();
-        config.ai.upstream_url = Some("http://127.0.0.1:11434/v1".to_string());
-        config.ai.default_model = Some("llama3".to_string());
-        config.ai.presets.push(AiPresetConfig {
-            id: "default".to_string(),
-            label: "Custom".to_string(),
-            provider_id: "elsewhere".to_string(),
-            model: "custom-model".to_string(),
-            temperature: None,
-            reasoning_effort: None,
-            voice: None,
-            lang_voices: HashMap::new(),
-            kind: "chat".to_string(),
-        });
-        config.ai.default_preset_id = "other".to_string();
-
-        assert!(config.migrate_legacy());
-
-        // The pre-existing "default" preset is untouched...
-        assert_eq!(config.ai.presets.len(), 1);
-        assert_eq!(config.ai.presets[0].model, "custom-model");
-        assert_eq!(config.ai.presets[0].provider_id, "elsewhere");
-        // ...and the already-set default_preset_id is left alone.
-        assert_eq!(config.ai.default_preset_id, "other");
-        // A provider is still merged in -- merge-never-delete applies per
-        // entity, independently of the preset already existing.
-        assert_eq!(config.ai.providers.len(), 1);
-    }
-
-    #[test]
-    fn migrate_legacy_is_a_noop_on_a_pristine_config() {
-        let mut config = Config::default();
-        assert!(!config.migrate_legacy());
-        assert!(config.ai.providers.is_empty());
+        assert_eq!(
+            config.ai.tts.as_ref().unwrap().voice.as_deref(),
+            Some("speaker")
+        );
+        assert_eq!(config.ai.tts.as_ref().unwrap().lang_voices["en"], "english");
+        assert_eq!(config.ai.stt.as_ref().unwrap().model, "listen-raw");
+        let room = config
+            .ai
+            .providers
+            .iter()
+            .find(|p| p.room() == Some("legacy-room"))
+            .unwrap();
+        assert!(room.provide);
+        assert_eq!(room.shared.len(), 2);
+        assert_eq!(room.shared[0].model, "raw");
+        assert!(room.shared.iter().all(|r| r.provider_id == "http"));
         assert!(config.ai.presets.is_empty());
-        assert_eq!(config.ai.default_preset_id, "");
-        assert_eq!(config.stream.room, None);
+        assert!(!config.migrate_legacy());
+        let text = toml::to_string_pretty(&config).unwrap();
+        let ai = serde_json::to_value(&config.ai).unwrap();
+        for field in ["presets", "advertised_models", "room_id", "temperature"] {
+            assert!(ai.get(field).is_none(), "{field}: {ai}");
+        }
+        assert!(!text.contains("preset_id"));
+        let mut reloaded: Config = toml::from_str(&text).unwrap();
+        assert!(!reloaded.migrate_legacy());
     }
 
     #[test]
-    fn migrate_advertised_models_leaves_valid_preset_ids_untouched() {
-        let mut config = Config::default();
-        config.ai.presets.push(AiPresetConfig {
-            id: "chat-a".to_string(),
-            label: "Chat A".to_string(),
-            provider_id: "p1".to_string(),
-            model: "gpt-4o".to_string(),
-            temperature: None,
-            reasoning_effort: None,
-            voice: None,
-            lang_voices: HashMap::new(),
-            kind: "chat".to_string(),
-        });
-        config.ai.advertised_models = vec!["chat-a".to_string()];
+    fn task_migration_keeps_effort_and_voice() {
+        let mut config = legacy_ai_config();
+        config.migrate_legacy();
+        match &config.bot.pipelines[0].transforms[0] {
+            TransformConfig::Summarize {
+                model,
+                reasoning_effort,
+                ..
+            } => {
+                assert_eq!(model.as_ref().unwrap().model, "raw");
+                assert_eq!(reasoning_effort.as_deref(), Some("high"));
+            }
+            _ => panic!("summarize"),
+        }
+        match &config.bot.pipelines[0].transforms[1] {
+            TransformConfig::Translate {
+                reasoning_effort, ..
+            } => assert_eq!(reasoning_effort.as_deref(), Some("low")),
+            _ => panic!("translate"),
+        }
+        match &config.bot.pipelines[0].transforms[2] {
+            TransformConfig::Tts { voice, .. } => assert_eq!(voice.as_deref(), Some("speaker")),
+            _ => panic!("tts"),
+        }
+    }
 
-        assert!(
-            !config.migrate_legacy(),
-            "already-valid preset ids need no rewrite"
+    #[test]
+    fn migration_keeps_new_assignments_and_existing_room_provider() {
+        let mut config = legacy_ai_config();
+        config.ai.default_ref = Some(ModelRef {
+            provider_id: "network".into(),
+            model: "kept".into(),
+        });
+        config.ai.providers.push(AiProviderConfig {
+            id: "existing-room".into(),
+            label: "Kept".into(),
+            base_url: "mist-network://legacy-room".into(),
+            ..Default::default()
+        });
+        config.migrate_legacy();
+        assert_eq!(config.ai.default_ref.as_ref().unwrap().model, "kept");
+        assert_eq!(
+            config
+                .ai
+                .providers
+                .iter()
+                .filter(|p| p.room() == Some("legacy-room"))
+                .count(),
+            1
         );
-        assert_eq!(config.ai.advertised_models, vec!["chat-a".to_string()]);
+        assert_eq!(config.ai.providers.last().unwrap().label, "Kept");
     }
 
     #[test]
-    fn migrate_advertised_models_rewrites_a_raw_model_id_to_its_preset_id() {
-        let mut config = Config::default();
-        config.ai.presets.push(AiPresetConfig {
-            id: "chat-a".to_string(),
-            label: "Chat A".to_string(),
-            provider_id: "p1".to_string(),
-            model: "gpt-4o".to_string(),
-            temperature: None,
-            reasoning_effort: None,
-            voice: None,
-            lang_voices: HashMap::new(),
-            kind: "chat".to_string(),
-        });
-        config.ai.advertised_models = vec!["gpt-4o".to_string()];
-
+    fn oldest_upstream_migration_uses_default_room_and_is_idempotent() {
+        let mut config: Config = toml::from_str(
+            r#"[ai]
+            upstream_url = "http://local/v1"
+            upstream_api_key = "key"
+            default_model = "raw"
+            temperature = 0.5
+            advertised_models = ["raw"]"#,
+        )
+        .unwrap();
         assert!(config.migrate_legacy());
-        assert_eq!(config.ai.advertised_models, vec!["chat-a".to_string()]);
-        // Idempotent: the second run sees only the already-rewritten id.
         assert!(!config.migrate_legacy());
-        assert_eq!(config.ai.advertised_models, vec!["chat-a".to_string()]);
+        assert_eq!(config.ai.default_ref.as_ref().unwrap().model, "raw");
+        let room = config
+            .ai
+            .providers
+            .iter()
+            .find(|p| p.room() == Some(crate::net::DEFAULT_ROOM))
+            .unwrap();
+        assert!(room.provide);
+        assert_eq!(room.shared[0].model, "raw");
     }
 
     #[test]
-    fn migrate_advertised_models_prefers_the_first_configured_preset_when_several_share_a_model() {
-        let mut config = Config::default();
-        config.ai.presets.push(AiPresetConfig {
-            id: "first".to_string(),
-            label: "First".to_string(),
-            provider_id: "p1".to_string(),
-            model: "gpt-4o".to_string(),
-            temperature: None,
-            reasoning_effort: None,
-            voice: None,
-            lang_voices: HashMap::new(),
-            kind: "chat".to_string(),
+    fn disabled_ref_uses_default_without_rewriting_config() {
+        let mut config = legacy_ai_config();
+        config.migrate_legacy();
+        config.ai.providers.push(AiProviderConfig {
+            id: "disabled".into(),
+            enabled: false,
+            ..Default::default()
         });
-        config.ai.presets.push(AiPresetConfig {
-            id: "second".to_string(),
-            label: "Second".to_string(),
-            provider_id: "p2".to_string(),
-            model: "gpt-4o".to_string(),
-            temperature: None,
-            reasoning_effort: None,
-            voice: None,
-            lang_voices: HashMap::new(),
-            kind: "chat".to_string(),
+        let reference = ModelRef {
+            provider_id: "disabled".into(),
+            model: "kept".into(),
+        };
+        assert_eq!(
+            resolve_ref(&config.ai, Some(&reference)).unwrap().model,
+            "raw"
+        );
+        assert_eq!(reference.model, "kept");
+        assert!(resolve_ref_exact(&config.ai, &reference).is_none());
+        config.ai.providers[0].enabled = false;
+        assert!(resolve_ref(&config.ai, Some(&reference)).is_none());
+        assert_eq!(config.ai.default_ref.as_ref().unwrap().provider_id, "http");
+    }
+
+    #[test]
+    fn missing_ref_does_not_adopt_default_or_first_provider() {
+        let mut config = legacy_ai_config();
+        config.migrate_legacy();
+        let reference = ModelRef {
+            provider_id: "missing".into(),
+            model: "kept".into(),
+        };
+        assert!(resolve_ref(&config.ai, Some(&reference)).is_none());
+    }
+
+    #[test]
+    fn legacy_ai_fields_are_deserialize_only_and_not_settable() {
+        let config = Config::default();
+        for field in [
+            "room_id",
+            "presets",
+            "default_preset_id",
+            "tts_preset_id",
+            "stt_preset_id",
+            "advertised_models",
+        ] {
+            assert!(set_by_path(&config, &format!("ai.{field}"), json!(null)).is_err());
+            assert!(
+                serde_json::to_value(&config.ai)
+                    .unwrap()
+                    .get(field)
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn provider_new_fields_and_optional_voice_round_trip() {
+        let config = Config::default();
+        let config = set_by_path(&config, "ai.providers", json!([{ "id": "room", "base_url": "mist-network://room",
+            "enabled": false, "models": ["raw"], "models_fetched_at": "2026-10-01T00:00:00Z", "provide": true,
+            "shared": [{ "provider_id": "http", "model": "raw" }] }])).unwrap();
+        let config = set_by_path(
+            &config,
+            "ai.default_ref",
+            json!({ "provider_id": "room", "model": "raw" }),
+        )
+        .unwrap();
+        let config = set_by_path(&config, "ai.tts", json!({ "provider_id": "http", "model": "speech", "voice": "speaker", "lang_voices": { "en": "english" } })).unwrap();
+        let reloaded: Config = toml::from_str(&toml::to_string_pretty(&config).unwrap()).unwrap();
+        assert!(!reloaded.ai.providers[0].enabled);
+        assert!(reloaded.ai.providers[0].provide);
+        assert_eq!(reloaded.ai.providers[0].shared[0].model, "raw");
+        assert_eq!(
+            reloaded.ai.tts.as_ref().unwrap().lang_voices["en"],
+            "english"
+        );
+        assert!(
+            set_by_path(&reloaded, "ai.tts", json!(null))
+                .unwrap()
+                .ai
+                .tts
+                .is_none()
+        );
+        assert!(AiProviderConfig::default().enabled);
+    }
+
+    #[test]
+    fn ai_json_contract_contains_only_current_fields() {
+        let mut config = Config::default();
+        config.ai.providers.push(AiProviderConfig {
+            id: "http".into(),
+            base_url: "http://local/v1".into(),
+            ..Default::default()
         });
-        config.ai.advertised_models = vec!["gpt-4o".to_string()];
-
-        assert!(config.migrate_legacy());
-        assert_eq!(config.ai.advertised_models, vec!["first".to_string()]);
-    }
-
-    #[test]
-    fn migrate_advertised_models_drops_an_entry_matching_no_preset() {
-        let mut config = Config::default();
-        config.ai.presets.push(AiPresetConfig {
-            id: "chat-a".to_string(),
-            label: "Chat A".to_string(),
-            provider_id: "p1".to_string(),
-            model: "gpt-4o".to_string(),
-            temperature: None,
-            reasoning_effort: None,
-            voice: None,
-            lang_voices: HashMap::new(),
-            kind: "chat".to_string(),
-        });
-        config.ai.advertised_models = vec!["chat-a".to_string(), "ghost-model".to_string()];
-
-        assert!(config.migrate_legacy());
-        assert_eq!(config.ai.advertised_models, vec!["chat-a".to_string()]);
-    }
-
-    #[test]
-    fn migrate_advertised_models_is_a_noop_when_empty() {
-        let mut config = Config::default();
-        assert!(!config.migrate_legacy());
-        assert!(config.ai.advertised_models.is_empty());
-    }
-
-    #[test]
-    fn migrate_legacy_ai_synthesized_default_preset_satisfies_a_matching_advertised_entry() {
-        // A config predating both the provider/preset split *and* the
-        // advertised-name contract: legacy upstream fields plus a raw model
-        // id in advertised_models. migrate_legacy_ai must run first so the
-        // "default" preset it synthesizes is available for this rewrite in
-        // the very same migrate_legacy() call.
-        let mut config = Config::default();
-        config.ai.upstream_url = Some("http://127.0.0.1:11434/v1".to_string());
-        config.ai.default_model = Some("llama3".to_string());
-        config.ai.advertised_models = vec!["llama3".to_string()];
-
-        assert!(config.migrate_legacy());
-        assert_eq!(config.ai.advertised_models, vec!["default".to_string()]);
+        assert_eq!(
+            serde_json::to_value(&config.ai).unwrap(),
+            json!({
+                "default_ref": null, "tts": null, "stt": null,
+                "providers": [{ "id": "http", "label": "", "base_url": "http://local/v1", "api_key": "",
+                    "enabled": true, "models": [], "models_fetched_at": null, "provide": false, "shared": [] }],
+                "api_listen": "127.0.0.1:6478", "request_timeout_secs": 120, "trusted_providers": []
+            })
+        );
     }
 
     #[test]
@@ -1724,31 +1867,6 @@ mod tests {
     }
 
     #[test]
-    fn set_by_path_round_trips_ai_providers_presets_and_default_preset_id() {
-        let config = Config::default();
-        let updated = set_by_path(
-            &config,
-            "ai.providers",
-            json!([{ "id": "p1", "label": "P1", "base_url": "http://x/v1", "api_key": "k" }]),
-        )
-        .unwrap();
-        assert_eq!(updated.ai.providers.len(), 1);
-        assert_eq!(updated.ai.providers[0].id, "p1");
-
-        let updated = set_by_path(
-            &updated,
-            "ai.presets",
-            json!([{ "id": "pr1", "label": "Pr1", "provider_id": "p1", "model": "m1" }]),
-        )
-        .unwrap();
-        assert_eq!(updated.ai.presets.len(), 1);
-        assert_eq!(updated.ai.presets[0].provider_id, "p1");
-
-        let updated = set_by_path(&updated, "ai.default_preset_id", json!("pr1")).unwrap();
-        assert_eq!(updated.ai.default_preset_id, "pr1");
-    }
-
-    #[test]
     fn set_by_path_ai_providers_substitutes_masked_api_key_from_current_config() {
         let mut config = Config::default();
         config.ai.providers.push(AiProviderConfig {
@@ -1756,6 +1874,7 @@ mod tests {
             label: "P1".to_string(),
             base_url: "http://x/v1".to_string(),
             api_key: "real-secret".to_string(),
+            ..Default::default()
         });
 
         let updated = set_by_path(
@@ -1843,14 +1962,7 @@ mod tests {
         ];
         // These feed reload_provider_if_running (ai::mod), unlike
         // ai.room_id above which still needs a restart (joins its room once).
-        let applied_immediately = [
-            "ai.providers",
-            "ai.presets",
-            "ai.default_preset_id",
-            "ai.tts_preset_id",
-            "ai.stt_preset_id",
-            "ai.advertised_models",
-        ];
+        let applied_immediately = ["ai.providers", "ai.default_ref", "ai.tts", "ai.stt"];
         for path in next_service_start {
             assert_eq!(applies_when(path), "next service start", "path: {path}");
         }
@@ -1949,10 +2061,20 @@ mod tests {
             },
             transforms: vec![
                 TransformConfig::Summarize {
-                    preset_id: "worker".to_string(),
+                    preset_id: String::new(),
+                    model: Some(crate::config::ModelRef {
+                        provider_id: "openai".into(),
+                        model: "worker".into(),
+                    }),
+                    reasoning_effort: None,
                 },
                 TransformConfig::Tts {
-                    preset_id: "tts-default".to_string(),
+                    preset_id: String::new(),
+                    model: Some(crate::config::ModelRef {
+                        provider_id: "openai".into(),
+                        model: "tts-default".into(),
+                    }),
+                    voice: None,
                     format: Some("mp3".to_string()),
                     speed: None,
                 },
@@ -1990,7 +2112,12 @@ mod tests {
                 trusted_authors: vec!["did:key:zAlice".to_string(), "0123456789abcdef".to_string()],
             },
             transforms: vec![TransformConfig::Translate {
-                preset_id: "worker".to_string(),
+                preset_id: String::new(),
+                model: Some(crate::config::ModelRef {
+                    provider_id: "openai".into(),
+                    model: "worker".into(),
+                }),
+                reasoning_effort: None,
                 target_lang: "en".to_string(),
             }],
             sinks: vec![SinkConfig::ArticlePublish {
@@ -2059,16 +2186,19 @@ mod tests {
         }
         assert_eq!(pipeline.transforms.len(), 2);
         match &pipeline.transforms[0] {
-            TransformConfig::Summarize { preset_id } => assert_eq!(preset_id, "worker"),
+            TransformConfig::Summarize { model, .. } => {
+                assert_eq!(model.as_ref().unwrap().model, "worker")
+            }
             other => panic!("expected Summarize, got {other:?}"),
         }
         match &pipeline.transforms[1] {
             TransformConfig::Tts {
-                preset_id,
+                model,
                 format,
                 speed,
+                ..
             } => {
-                assert_eq!(preset_id, "tts-default");
+                assert_eq!(model.as_ref().unwrap().model, "tts-default");
                 assert_eq!(format.as_deref(), Some("mp3"));
                 assert_eq!(*speed, None);
             }
@@ -2111,10 +2241,9 @@ mod tests {
         }
         match &pipeline_v2.transforms[0] {
             TransformConfig::Translate {
-                preset_id,
-                target_lang,
+                model, target_lang, ..
             } => {
-                assert_eq!(preset_id, "worker");
+                assert_eq!(model.as_ref().unwrap().model, "worker");
                 assert_eq!(target_lang, "en");
             }
             other => panic!("expected Translate, got {other:?}"),
@@ -2287,129 +2416,6 @@ mod tests {
     }
 
     #[test]
-    fn ai_preset_config_lang_voices_round_trips_through_toml() {
-        let mut config = Config::default();
-        config.ai.providers.push(AiProviderConfig {
-            id: "openai".to_string(),
-            label: "OpenAI".to_string(),
-            base_url: "https://api.openai.com/v1".to_string(),
-            api_key: "sk-test".to_string(),
-        });
-        let mut lang_voices = HashMap::new();
-        lang_voices.insert("en".to_string(), "af_heart".to_string());
-        lang_voices.insert("ja".to_string(), "jf_alpha".to_string());
-        config.ai.presets.push(AiPresetConfig {
-            id: "tts-default".to_string(),
-            label: "TTS".to_string(),
-            provider_id: "openai".to_string(),
-            model: "tts-1".to_string(),
-            temperature: None,
-            reasoning_effort: None,
-            voice: Some("alloy".to_string()),
-            lang_voices,
-            kind: "tts".to_string(),
-        });
-
-        let text = toml::to_string_pretty(&config).unwrap();
-        let reloaded: Config = toml::from_str(&text).unwrap();
-        assert_eq!(
-            reloaded.ai.presets[0]
-                .lang_voices
-                .get("en")
-                .map(String::as_str),
-            Some("af_heart")
-        );
-        assert_eq!(
-            reloaded.ai.presets[0]
-                .lang_voices
-                .get("ja")
-                .map(String::as_str),
-            Some("jf_alpha")
-        );
-
-        let resolved = resolve_preset(&reloaded.ai, Some("tts-default")).unwrap();
-        assert_eq!(
-            resolved.lang_voices.get("en").map(String::as_str),
-            Some("af_heart")
-        );
-        // `voice` remains the language-agnostic fallback, independent of
-        // `lang_voices`.
-        assert_eq!(resolved.voice.as_deref(), Some("alloy"));
-    }
-
-    #[test]
-    fn ai_preset_config_lang_voices_absent_defaults_to_empty() {
-        // A hand-written config.toml predating this field (no `lang_voices`
-        // key at all in the preset table) must still deserialize:
-        // `#[serde(default)]` gives an empty map, not a parse error.
-        let text = r#"
-            [[ai.presets]]
-            id = "tts-default"
-            label = "TTS"
-            provider_id = "openai"
-            model = "tts-1"
-            voice = "alloy"
-        "#;
-        let config: Config = toml::from_str(text).expect("preset without lang_voices must parse");
-        assert!(config.ai.presets[0].lang_voices.is_empty());
-    }
-
-    #[test]
-    fn ai_tts_stt_preset_id_round_trips_and_resolves() {
-        let mut config = Config::default();
-        config.ai.providers.push(AiProviderConfig {
-            id: "openai".to_string(),
-            label: "OpenAI".to_string(),
-            base_url: "https://api.openai.com/v1".to_string(),
-            api_key: "sk-test".to_string(),
-        });
-        config.ai.presets.push(AiPresetConfig {
-            id: "tts-default".to_string(),
-            label: "TTS".to_string(),
-            provider_id: "openai".to_string(),
-            model: "tts-1".to_string(),
-            temperature: None,
-            reasoning_effort: None,
-            voice: Some("alloy".to_string()),
-            lang_voices: HashMap::new(),
-            kind: "tts".to_string(),
-        });
-        config.ai.presets.push(AiPresetConfig {
-            id: "stt-default".to_string(),
-            label: "STT".to_string(),
-            provider_id: "openai".to_string(),
-            model: "whisper-1".to_string(),
-            temperature: None,
-            reasoning_effort: None,
-            voice: None,
-            lang_voices: HashMap::new(),
-            kind: "stt".to_string(),
-        });
-        config.ai.tts_preset_id = "tts-default".to_string();
-        config.ai.stt_preset_id = "stt-default".to_string();
-
-        let text = toml::to_string_pretty(&config).unwrap();
-        let reloaded: Config = toml::from_str(&text).unwrap();
-        assert_eq!(reloaded.ai.tts_preset_id, "tts-default");
-        assert_eq!(reloaded.ai.stt_preset_id, "stt-default");
-
-        let tts = resolve_preset(&reloaded.ai, Some(&reloaded.ai.tts_preset_id)).unwrap();
-        assert_eq!(tts.model, "tts-1");
-        assert_eq!(tts.voice.as_deref(), Some("alloy"));
-        let stt = resolve_preset(&reloaded.ai, Some(&reloaded.ai.stt_preset_id)).unwrap();
-        assert_eq!(stt.model, "whisper-1");
-
-        // An unset id must not silently fall back to default_preset_id at
-        // the config layer -- resolve_preset() itself *would* fall back
-        // (see its doc comment), so callers (ai::mod's provide_start) are
-        // responsible for checking for "" before ever calling it. This
-        // test just documents that default_preset_id and tts/stt_preset_id
-        // are independent fields.
-        assert_eq!(Config::default().ai.tts_preset_id, "");
-        assert_eq!(Config::default().ai.stt_preset_id, "");
-    }
-
-    #[test]
     fn tunnel_config_defaults_are_disabled_and_empty() {
         let config = Config::default();
         assert!(!config.tunnel.enabled);
@@ -2546,6 +2552,7 @@ mod tests {
             label: "P1".into(),
             base_url: "https://api.example.com/v1".into(),
             api_key: "real-secret".into(),
+            ..Default::default()
         });
         let evil = json!([{ "id": "p1", "label": "P1", "base_url": "https://evil.example/v1", "api_key": "***" }]);
         let err = set_by_path(&config, "ai.providers", evil).unwrap_err();

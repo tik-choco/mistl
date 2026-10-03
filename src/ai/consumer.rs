@@ -1,29 +1,15 @@
 //! Consumer side of the AI network, ported from mistai's `consumer.ts` +
 //! `client.ts` discovery behavior.
 //!
-//! ## Discovery (first *chat* provider wins)
+//! ## Discovery
 //!
-//! The service broadcasts `consumer_hello` after joining; providers answer
-//! with `provider_hello`. This consumer only ever issues `llm_request`s
-//! (chat), so a `provider_hello` that does not advertise the `"chat"`
-//! service (per `protocol::advertises_service` -- a missing `services`
-//! field defaults to `["chat"]` per the wire spec) is not a candidate at
-//! all: it is never locked onto and never triggers a `consumer_hello`
-//! reply, even if no provider is currently locked in. Among hellos that do
-//! advertise chat, the first sender becomes the locked-in provider; later
-//! hellos from the *same* id refresh its model/service list, hellos from
-//! other ids are ignored. When the locked-in provider disconnects
-//! ([`Consumer::on_peer_disconnected`]), every in-flight request is
-//! rejected and the lock is cleared so a new (chat) provider can be
-//! discovered.
-//!
-//! This is intentionally a narrow, additive change to the existing
-//! first-wins rule (filter candidates to chat providers, otherwise
-//! unchanged) rather than the fuller per-service provider table the wire
-//! spec's "consumer 側の provider 選択手順" section describes (service-
-//! scoped candidate pools, model-aware ranking, failover) -- this consumer
-//! only ever speaks `llm_request`/chat, so that generality isn't needed
-//! here.
+//! Each room keeps a bounded catalog of provider hellos. The first eligible
+//! chat provider is pinned for default requests; explicit raw model ids prefer
+//! a provider advertising that id. Voice discovery selects the advertised
+//! service without pinning a voice-only peer as the chat default.
+//! `ai.trusted_providers` applies to the entire catalog, using the transport
+//! sender's verified identity in this room. Disconnects remove the peer and
+//! reject requests bound to that peer, leaving other providers' requests intact.
 //!
 //! ## Request lifecycle (mirrors consumer.ts)
 //!
@@ -147,9 +133,13 @@ pub struct Consumer {
     /// A `watch` channel lets `wait_for_provider` await lock-in without
     /// polling.
     provider: watch::Sender<Option<ProviderInfo>>,
+    catalog: Mutex<BTreeMap<String, ProviderInfo>>,
+    catalog_changed: tokio::sync::Notify,
+    catalog_seen: std::sync::atomic::AtomicBool,
     /// `ai.trusted_providers`; empty = legacy first-wins (with a warning).
     trusted: Mutex<Vec<String>>,
     did_lookup: Mutex<DidLookup>,
+    room: Mutex<Option<String>>,
 }
 
 impl Consumer {
@@ -159,8 +149,12 @@ impl Consumer {
             send,
             pending: Mutex::new(HashMap::new()),
             provider,
+            catalog: Mutex::new(BTreeMap::new()),
+            catalog_changed: tokio::sync::Notify::new(),
+            catalog_seen: std::sync::atomic::AtomicBool::new(false),
             trusted: Mutex::new(Vec::new()),
             did_lookup: Mutex::new(crate::net::peer_auth::verified_did_any_room),
+            room: Mutex::new(None),
         })
     }
 
@@ -168,10 +162,18 @@ impl Consumer {
         self.trusted.lock().expect("trusted lock").clone()
     }
 
+    pub fn set_room(&self, room: String) {
+        *self.room.lock().expect("consumer room lock") = Some(room);
+    }
+
     /// Installs `ai.trusted_providers`. A currently pinned provider that no
     /// longer qualifies is dropped so a trusted one can take over.
     pub fn set_trusted_providers(&self, list: Vec<String>) {
         *self.trusted.lock().expect("trusted lock") = list.clone();
+        self.catalog
+            .lock()
+            .expect("catalog lock")
+            .retain(|_, info| list.is_empty() || provider_matches(&list, info.did.as_deref()));
         if list.is_empty() {
             return;
         }
@@ -196,30 +198,77 @@ impl Consumer {
     /// the provider classify us). `provider_hello`s that don't advertise
     /// `"chat"` (see [`protocol::advertises_service`]) are not candidates
     /// at all -- see the module doc's "Discovery" section.
-    pub fn handle_message(&self, from: &str, msg: &ProtocolMessage) {
+    /// Returns true when an accepted hello updates the bounded room catalog.
+    pub fn handle_message(&self, from: &str, msg: &ProtocolMessage) -> bool {
         match msg {
             ProtocolMessage::ProviderHello {
                 models,
                 services,
                 voices,
             } => {
-                if !protocol::advertises_service(services, protocol::SERVICE_CHAT) {
-                    debug!(
-                        %from,
-                        ?services,
-                        "ai: ignoring provider_hello that does not advertise chat"
-                    );
-                    return;
+                if models.as_ref().is_some_and(|values| {
+                    values.len() > 256 || values.iter().any(|v| v.len() > 512)
+                }) || services
+                    .as_ref()
+                    .is_some_and(|values| values.len() > 32 || values.iter().any(|v| v.len() > 128))
+                    || voices.as_ref().is_some_and(|values| {
+                        values.len() > 256 || values.iter().any(|v| v.len() > 256)
+                    })
+                {
+                    return false;
                 }
                 let trusted_list = self.trusted.lock().expect("trusted lock").clone();
-                let did = (*self.did_lookup.lock().expect("did lookup lock"))(from);
+                let did =
+                    if let Some(room) = self.room.lock().expect("consumer room lock").as_deref() {
+                        crate::net::peer_auth::verified_did(room, from)
+                    } else {
+                        (*self.did_lookup.lock().expect("did lookup lock"))(from)
+                    };
                 let trusted = provider_matches(&trusted_list, did.as_deref());
                 if !trusted_list.is_empty() && !trusted {
                     debug!(
                         %from,
                         "ai: ignoring provider_hello from a peer not in ai.trusted_providers"
                     );
-                    return;
+                    return false;
+                }
+                if services.as_ref().is_some_and(Vec::is_empty) {
+                    self.catalog_seen
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    self.on_peer_disconnected(from);
+                    return true;
+                }
+                {
+                    let mut catalog = self.catalog.lock().expect("catalog lock");
+                    if catalog.len() < 256 || catalog.contains_key(from) {
+                        catalog.insert(
+                            from.to_string(),
+                            ProviderInfo {
+                                did: did.clone(),
+                                trusted,
+                                node_id: from.to_string(),
+                                models: models.clone().unwrap_or_default(),
+                                services: services.clone(),
+                                voices: voices.clone(),
+                            },
+                        );
+                    } else {
+                        return false;
+                    }
+                }
+                self.catalog_seen
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                self.catalog_changed.notify_waiters();
+                if !protocol::advertises_service(services, protocol::SERVICE_CHAT) {
+                    self.provider.send_if_modified(|current| {
+                        if current.as_ref().is_some_and(|p| p.node_id == from) {
+                            *current = None;
+                            true
+                        } else {
+                            false
+                        }
+                    });
+                    return true;
                 }
                 let mut locked_in = false;
                 self.provider.send_if_modified(|current| match current {
@@ -255,6 +304,7 @@ impl Consumer {
                     }
                     (self.send)(from, ProtocolMessage::ConsumerHello);
                 }
+                return true;
             }
             ProtocolMessage::LlmResponseChunk { id, delta, seq } => {
                 self.send_event(
@@ -292,6 +342,7 @@ impl Consumer {
             }
             _ => {}
         }
+        false
     }
 
     fn send_event(&self, from: &str, id: &str, event: Event) {
@@ -305,21 +356,23 @@ impl Consumer {
         }
     }
 
-    /// Peer left: if it was the locked-in provider, reject all in-flight
-    /// requests ("provider disconnected") and clear the lock.
+    /// Reject only requests bound to the departing provider and clear its pin.
     pub fn on_peer_disconnected(&self, node_id: &str) {
-        let mut cleared = false;
+        self.catalog.lock().expect("catalog lock").remove(node_id);
+        self.catalog_changed.notify_waiters();
         self.provider.send_if_modified(|current| {
             if current.as_ref().map(|info| info.node_id.as_str()) == Some(node_id) {
                 *current = None;
-                cleared = true;
                 true
             } else {
                 false
             }
         });
-        if cleared {
-            self.reject_all("provider disconnected");
+        let pending = self.pending.lock().expect("consumer pending lock");
+        for (_, tx) in pending.values().filter(|(peer, _)| peer == node_id) {
+            let _ = tx.send(Event::Rejected {
+                reason: "provider disconnected".into(),
+            });
         }
     }
 
@@ -328,8 +381,100 @@ impl Consumer {
         self.provider.borrow().clone()
     }
 
+    pub fn models(&self) -> Vec<String> {
+        let mut models = std::collections::BTreeSet::new();
+        for info in self.catalog.lock().expect("catalog lock").values() {
+            if protocol::advertises_service(&info.services, protocol::SERVICE_CHAT) {
+                models.extend(info.models.iter().cloned());
+            }
+        }
+        models.into_iter().collect()
+    }
+
+    pub async fn wait_for_catalog(&self, timeout: Duration) -> bool {
+        tokio::time::timeout(timeout, async {
+            loop {
+                let notified = self.catalog_changed.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if self.has_catalog() {
+                    return;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+
+    pub fn has_catalog(&self) -> bool {
+        self.catalog_seen.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn provider_for_model(&self, model: Option<&str>) -> Option<ProviderInfo> {
+        let matches = |info: &ProviderInfo| {
+            protocol::advertises_service(&info.services, protocol::SERVICE_CHAT)
+                && model.is_none_or(|model| info.models.iter().any(|m| m == model))
+        };
+        self.provider()
+            .filter(matches)
+            .or_else(|| {
+                self.catalog
+                    .lock()
+                    .expect("catalog lock")
+                    .values()
+                    .find(|info| matches(info))
+                    .cloned()
+            })
+            .or_else(|| self.provider().filter(|info| info.models.is_empty()))
+    }
+
+    pub async fn wait_for_model(
+        &self,
+        model: Option<&str>,
+        timeout: Duration,
+    ) -> Result<ProviderInfo> {
+        tokio::time::timeout(timeout, async {
+            loop {
+                let notified = self.catalog_changed.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if let Some(info) = self.provider_for_model(model) {
+                    return info;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("ai: no provider for the requested model found in the room"))
+    }
+
+    pub async fn wait_for_service(&self, service: &str, timeout: Duration) -> Result<ProviderInfo> {
+        tokio::time::timeout(timeout, async {
+            loop {
+                let notified = self.catalog_changed.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                let info = self
+                    .catalog
+                    .lock()
+                    .expect("catalog lock")
+                    .values()
+                    .find(|p| protocol::advertises_service(&p.services, service))
+                    .cloned();
+                if let Some(info) = info {
+                    return info;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("ai: no {service} provider found in the room"))
+    }
+
     /// Wait until a provider is locked in (or `timeout` elapses -> error
     /// "no provider found"). Returns immediately when already locked.
+    #[cfg(test)]
     pub async fn wait_for_provider(&self, timeout: Duration) -> Result<ProviderInfo> {
         let mut rx = self.provider.subscribe();
         let wait = async {
@@ -390,10 +535,14 @@ impl Consumer {
         delta_tx: Option<UnboundedSender<String>>,
     ) -> Result<ChatOutput> {
         if tools.request_uses_tools(&messages) {
-            let supported = self.provider().is_some_and(|info| {
-                info.node_id == provider_id
-                    && protocol::advertises_service(&info.services, protocol::SERVICE_TOOLS)
-            });
+            let supported = self
+                .catalog
+                .lock()
+                .expect("catalog lock")
+                .get(provider_id)
+                .is_some_and(|info| {
+                    protocol::advertises_service(&info.services, protocol::SERVICE_TOOLS)
+                });
             if !supported {
                 return Err(anyhow::Error::new(ToolsUnsupported));
             }
@@ -566,6 +715,126 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use tokio::time::sleep;
+
+    #[test]
+    fn room_catalog_unions_raw_models_and_prefers_an_explicit_match() {
+        let consumer = Consumer::new(Arc::new(|_, _| {}));
+        for (peer, models) in [
+            ("first", vec![]),
+            ("second", vec!["raw".into(), "other".into()]),
+        ] {
+            consumer.handle_message(
+                peer,
+                &ProtocolMessage::ProviderHello {
+                    models: Some(models),
+                    services: Some(vec!["chat".into()]),
+                    voices: None,
+                },
+            );
+        }
+        assert_eq!(consumer.models(), vec!["other", "raw"]);
+        assert_eq!(
+            consumer.provider_for_model(Some("raw")).unwrap().node_id,
+            "second"
+        );
+        consumer.handle_message(
+            "second",
+            &ProtocolMessage::ProviderHello {
+                models: Some(vec![]),
+                services: Some(vec![]),
+                voices: None,
+            },
+        );
+        assert!(consumer.models().is_empty());
+    }
+
+    #[tokio::test]
+    async fn voice_only_peers_are_discovered_without_becoming_chat_providers() {
+        let consumer = Consumer::new(Arc::new(|_, _| {}));
+        consumer.handle_message(
+            "voice",
+            &ProtocolMessage::ProviderHello {
+                models: None,
+                services: Some(vec!["tts".into()]),
+                voices: None,
+            },
+        );
+        assert!(consumer.provider().is_none());
+        assert_eq!(
+            consumer
+                .wait_for_service("tts", Duration::from_millis(10))
+                .await
+                .unwrap()
+                .node_id,
+            "voice"
+        );
+        consumer.on_peer_disconnected("voice");
+        assert!(
+            consumer
+                .wait_for_service("tts", Duration::from_millis(1))
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn disconnect_rejects_only_requests_for_that_catalog_provider() {
+        let consumer = Consumer::new(Arc::new(|_, _| {}));
+        let (first_tx, mut first_rx) = mpsc::unbounded_channel();
+        let (second_tx, mut second_rx) = mpsc::unbounded_channel();
+        consumer
+            .pending
+            .lock()
+            .unwrap()
+            .insert("one".into(), ("first".into(), first_tx));
+        consumer
+            .pending
+            .lock()
+            .unwrap()
+            .insert("two".into(), ("second".into(), second_tx));
+        consumer.on_peer_disconnected("second");
+        assert!(first_rx.try_recv().is_err());
+        assert!(matches!(second_rx.try_recv(), Ok(Event::Rejected { .. })));
+    }
+
+    #[tokio::test]
+    async fn tools_work_with_a_model_provider_that_is_not_the_default_pin() {
+        let (consumer, sent) = locked(Some(vec!["chat".into()]));
+        consumer.handle_message(
+            "second",
+            &ProtocolMessage::ProviderHello {
+                models: Some(vec!["raw".into()]),
+                services: Some(vec!["chat".into(), "tools".into()]),
+                voices: None,
+            },
+        );
+        let task = {
+            let consumer = consumer.clone();
+            tokio::spawn(async move {
+                consumer
+                    .request_tools(
+                        "second",
+                        vec![chat("hi")],
+                        tool_opts(),
+                        Some("raw".into()),
+                        Duration::from_millis(500),
+                        None,
+                    )
+                    .await
+            })
+        };
+        sleep(Duration::from_millis(20)).await;
+        let id = last_request_id(&sent);
+        consumer.handle_message(
+            "second",
+            &ProtocolMessage::LlmResponseDone {
+                id,
+                content: Some("ok".into()),
+                tool_calls: None,
+            },
+        );
+        assert_eq!(task.await.unwrap().unwrap().content, "ok");
+    }
 
     type Sent = Arc<Mutex<Vec<(String, ProtocolMessage)>>>;
 

@@ -161,7 +161,7 @@ pub enum AutostartAction {
 pub enum ConfigAction {
     /// Show the current configuration (secrets masked)
     Show,
-    /// Set one field, e.g. `mistl config set ai.default_preset_id default`
+    /// Set one field, e.g. `mistl config set ai.default_ref <json>`
     Set {
         /// Field path as section.field (see `mistl config show`)
         path: String,
@@ -517,7 +517,8 @@ pub enum AiAction {
     Status,
     /// List models advertised by the reachable provider
     Models,
-    /// Provide inference to the network from the configured upstream
+    /// Set room sharing flags: start enables enabled rooms with shared models;
+    /// stop clears every room's provide flag
     Provide {
         #[command(subcommand)]
         action: AiToggleAction,
@@ -1268,6 +1269,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&response)?);
                 if let Some(applies) = response.get("applies").and_then(Value::as_str)
                     && applies != "next service start"
+                    && applies != "applied immediately"
                 {
                     println!("note: this change takes effect after a {applies}");
                 }
