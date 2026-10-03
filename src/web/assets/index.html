@@ -35,6 +35,8 @@
     /* motion + depth tokens (single source of truth for the refreshed UI) */
     --ease: cubic-bezier(0.16, 1, 0.3, 1);       /* expo-out: soft, unhurried settle */
     --ease-out: cubic-bezier(0.33, 1, 0.68, 1);
+    --motion-fast: 120ms;
+    --motion-base: 200ms;
     --dur: 0.34s;
     --dur-fast: 0.16s;
     --sidenav-w: 224px;
@@ -358,6 +360,7 @@
   .kv dt { color: var(--text-faint); }
   .kv dd { margin: 0; color: var(--text); word-break: break-all; }
 
+  #panel-ai, .ai-model-overlay, button, .toggle-switch { --ease-out: cubic-bezier(.2,.8,.2,1); }
   button {
     font-family: var(--sans);
     font-size: 13px;
@@ -368,14 +371,14 @@
     background: var(--bg-alt);
     color: var(--text);
     cursor: pointer;
-    transition: border-color var(--dur-fast) var(--ease-out),
-                color var(--dur-fast) var(--ease-out),
-                background var(--dur-fast) var(--ease-out),
-                transform var(--dur-fast) var(--ease-out),
-                box-shadow var(--dur-fast) var(--ease-out);
+    transition: border-color var(--motion-fast) var(--ease-out),
+                color var(--motion-fast) var(--ease-out),
+                background var(--motion-fast) var(--ease-out),
+                transform var(--motion-fast) var(--ease-out),
+                box-shadow var(--motion-fast) var(--ease-out);
   }
   button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); transform: translateY(-1px); }
-  button:active:not(:disabled) { transform: translateY(0); }
+  button:active:not(:disabled) { transform: scale(.98); }
   button.primary:hover:not(:disabled) { color: var(--accent); box-shadow: 0 4px 14px var(--accent-dim); }
   button:disabled { opacity: 0.55; cursor: default; }
   button.primary { background: var(--accent-dim); color: var(--accent); border-color: transparent; }
@@ -1076,13 +1079,6 @@
     min-width: 160px;
   }
 
-  /* ---- ai providers/presets editor (custom settings subsection, see
-     buildAiProvidersPresetsField) -- one .settings-row per provider/preset,
-     inputs styled the same as everywhere else in the settings drawers. ---- */
-  .ai-provider-list, .ai-preset-list { display: flex; flex-direction: column; gap: 8px; }
-  .ai-provider-row, .ai-preset-row { padding-bottom: 8px; border-bottom: 1px solid var(--panel-border); }
-  .ai-provider-row:last-child, .ai-preset-row:last-child { border-bottom: none; padding-bottom: 0; }
-
   /* ---- chip-style editor for "list" settings fields (chat_relay.rooms,
      storage.room_ids) -- chips styled off .badge, each with its own remove
      button, plus an add row below. ---- */
@@ -1166,134 +1162,8 @@
     color: var(--text-dim);
   }
 
-  /* ---- connection tab: provider/preset card grid (JS-built, see
-     buildAiProvidersPresetsField) ------------------------------------- */
-  #panel-ai .ai-connection-section {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-  #panel-ai .ai-cardgrid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-    gap: 8px;
-  }
-  #panel-ai .ai-card {
-    position: relative;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    min-width: 0;
-    padding: 10px 12px;
-    border: 1px solid var(--panel-border);
-    border-radius: var(--radius);
-    background: var(--panel);
-    box-shadow: var(--shadow-sm);
-    cursor: pointer;
-    transition: transform var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out);
-  }
-  #panel-ai .ai-card:hover {
-    transform: translateY(-1px);
-    box-shadow: var(--shadow);
-  }
-  #panel-ai .ai-card-label {
-    font-size: 13px;
-    font-weight: 700;
-    color: var(--text);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    padding-right: 16px; /* clears the top-right remove affordance */
-  }
-  #panel-ai .ai-card-sub {
-    font-size: 12px;
-    color: var(--text-faint);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  #panel-ai .ai-card-remove {
-    position: absolute;
-    top: 4px;
-    right: 4px;
-    width: 18px;
-    height: 18px;
-    padding: 0;
-    border: none;
-    border-radius: 50%;
-    background: none;
-    color: var(--text-faint);
-    font-size: 13px;
-    line-height: 1;
-    cursor: pointer;
-  }
-  #panel-ai .ai-card-remove:hover { background: var(--err-dim); color: var(--err); }
+  #panel-ai .ai-connection-section { display: flex; flex-direction: column; gap: 8px; }
 
-  /* dashed add-tile that closes each grid */
-  #panel-ai .ai-add-tile {
-    align-items: center;
-    justify-content: center;
-    flex-direction: row;
-    gap: 6px;
-    border: 1px dashed var(--panel-border);
-    color: var(--text-faint);
-    background: transparent;
-    box-shadow: none;
-    font-size: 12.5px;
-    font-weight: 600;
-  }
-  #panel-ai .ai-add-tile:hover {
-    border-color: var(--accent);
-    color: var(--accent);
-    transform: none;
-    box-shadow: none;
-  }
-  #panel-ai .ai-add-tile-icon { font-size: 16px; line-height: 1; flex: none; }
-
-  /* clicking a card (or the add-tile) expands an inline edit form spanning
-     the whole grid; only one open at a time (JS-enforced) */
-  #panel-ai .ai-card.ai-card-editing {
-    grid-column: 1 / -1;
-    cursor: default;
-  }
-  #panel-ai .ai-card.ai-card-editing:hover {
-    transform: none;
-    box-shadow: var(--shadow-sm);
-  }
-  #panel-ai .ai-card-editor {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-  #panel-ai .ai-card-editor-row {
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-  #panel-ai .ai-card-editor .field { min-width: 160px; }
-  #panel-ai .ai-card-editor-actions {
-    display: flex;
-    gap: 8px;
-    justify-content: flex-end;
-    padding-top: 6px;
-    border-top: 1px solid var(--panel-border);
-  }
-
-  /* small "default" badge on the resolved default preset's card face --
-     reuses the app-wide .badge, just accent-tinted like other active/ok
-     badge variants */
-  #panel-ai .badge.ai-default-badge {
-    background: var(--accent-dim);
-    color: var(--accent);
-    margin-left: 6px;
-  }
-
-  /* ---- network tab: role cards (provide / serve) -------------------- */
-  #panel-ai .ai-role-cards {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-    gap: 12px;
-  }
   #panel-ai .ai-role-card {
     display: flex;
     flex-direction: column;
@@ -1343,7 +1213,7 @@
   @keyframes ai-dot-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 
   /* ---- network tab: setup-guide empty state (JS-built into
-     #ai-setup-state, hidden entirely once a default preset resolves) --- */
+     #ai-setup-state, hidden entirely once a default model resolves) --- */
   #panel-ai .ai-setup-card {
     display: flex;
     flex-direction: column;
@@ -1372,24 +1242,6 @@
   #panel-ai .ai-setup-desc { font-size: 12.5px; color: var(--text-dim); max-width: 420px; }
   #panel-ai .ai-setup-cta { margin-top: 4px; }
 
-  /* ---- AI Network tab: provide checklist (buildAiProvideChecklist) -- one
-     row per configured preset, with Chat/TTS/STT checkboxes deciding what
-     this node advertises/serves when providing to the network ---------- */
-  #panel-ai .ai-provide-checklist { display: flex; flex-direction: column; gap: 6px; width: 100%; }
-  #panel-ai .ai-provide-row {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    flex-wrap: wrap;
-    padding: 6px 8px;
-    border: 1px solid var(--panel-border);
-    border-radius: var(--radius);
-    background: var(--panel);
-  }
-  #panel-ai .ai-provide-row-label { flex: 1; min-width: 140px; font-size: 13px; }
-  #panel-ai .ai-provide-row-model { color: var(--text-faint); font-size: 11.5px; margin-left: 6px; }
-  #panel-ai .ai-provide-check { display: flex; align-items: center; gap: 5px; font-size: 12.5px; cursor: pointer; white-space: nowrap; }
-
   /* ---- topology card fold (collapsible body, reuses .drawer-chevron) --- */
   /* .cascade-card's own flex/gap only had one child once the body moved
      inside <details>; recreate the same column + 10px gap on the fold
@@ -1416,11 +1268,11 @@
   .toggle-switch input { opacity: 0; width: 0; height: 0; position: absolute; }
   .toggle-switch .slider {
     position: absolute; inset: 0; cursor: pointer;
-    background: var(--panel-border); border-radius: 999px; transition: background 0.15s;
+    background: var(--panel-border); border-radius: 999px; transition: background var(--motion-fast) var(--ease-out);
   }
   .toggle-switch .slider::before {
     content: ""; position: absolute; width: 14px; height: 14px; left: 3px; top: 3px;
-    background: #fff; border-radius: 50%; transition: transform 0.15s;
+    background: #fff; border-radius: 50%; transition: transform var(--motion-fast) var(--ease-out);
   }
   .toggle-switch input:checked + .slider { background: var(--accent); }
   .toggle-switch input:checked + .slider::before { transform: translateX(16px); }
@@ -1728,14 +1580,180 @@
     #topology-dock { position: static; width: 100%; padding: 16px 14px; background: var(--bg); border-top: 1px solid var(--panel-border); }
   }
 
-  .ai-network-settings { margin-bottom: 24px; }
-  .ai-network-settings .settings-section { border: 0; padding: 0; }
   .topology-node-glyph { fill: none; stroke: var(--text-dim); stroke-width: 1.7; stroke-linecap: round; }
   .topology-node-box.kind-self + .topology-node-glyph { stroke: var(--accent); }
   .topology-node-clickable:focus-visible { outline: none; }
   .topology-node-clickable:focus-visible .topology-node-box,
   .topology-node-clickable:hover .topology-node-box { stroke: var(--accent); stroke-width: 3; }
   #topology-card .topology-dot { stroke: var(--panel); stroke-width: 2; }
+  /* Provider cards and the shared model picker. */
+  .ai-provider-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .ai-provider-card { border: 1px solid var(--panel-border); border-radius: var(--radius); background: var(--panel); min-width: 0; }
+  .ai-provider-card[data-disabled=true] { background: var(--bg-alt); }
+  .ai-provider-head { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 14px; cursor: pointer; }
+  .ai-provider-head .toggle-switch { flex: 0 0 auto; }
+  .ai-provider-summary { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; border: 0; padding: 0; background: transparent; text-align: left; color: var(--text); }
+  .ai-provider-summary:hover { background: transparent; }
+  .ai-provider-summary .ai-chevron { flex: 0 0 auto; margin-left: 0; color: var(--text-dim); }
+  .ai-provider-identity { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; }
+  .ai-provider-kind { flex-shrink: 0; font-size: 10px; font-weight: 700; border: 1px solid var(--panel-border); border-radius: 5px; padding: 2px 6px; color: var(--text-dim); }
+  .ai-provider-name { flex: 0 1 auto; max-width: 160px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+  .ai-provider-address { flex: 1; min-width: 0; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+  .ai-provider-status { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; max-width: min(35%, 220px); min-width: 0; padding: 5px 7px; border-radius: 20px; font-size: 11px; color: var(--text-dim); }
+  .ai-provider-status-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ai-provider-status-dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: var(--text-faint); }
+  .ai-provider-status[data-connection-state=connected] .ai-provider-status-dot { background: var(--ok); }
+  .ai-provider-status[data-connection-state=searching] .ai-provider-status-dot { background: var(--warn); }
+  .ai-provider-status[data-connection-state=error] .ai-provider-status-dot { background: var(--err); }
+  .ai-provider-status[data-providing=true] .ai-provider-status-dot { outline: 1px solid var(--ok); outline-offset: 3px; }
+  .ai-status-popover { position: fixed; z-index: 1100; width: min(300px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow-y: auto; overscroll-behavior: contain; padding: 14px 16px; border: 1px solid var(--panel-border); border-radius: var(--radius); background: var(--panel); box-shadow: var(--shadow); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+  .ai-status-popover[hidden] { display: none; }
+  .ai-status-popover strong { display: block; margin-bottom: 6px; }
+  .ai-status-error { color: var(--err); }
+  @media (max-width: 480px) {
+    .ai-provider-head { gap: 8px; flex-wrap: nowrap; padding: 10px; }
+    .ai-provider-summary { gap: 8px; }
+    .ai-provider-identity { display: grid; gap: 3px; }
+    .ai-provider-name { max-width: none; }
+    .ai-provider-address { display: block; font-size: 11px; }
+    .ai-provider-status { width: 32px; height: 32px; max-width: none; padding: 0; justify-content: center; border-color: transparent; background: transparent; }
+    .ai-provider-status-text { display: none; }
+    .ai-provider-status-dot { width: 10px; height: 10px; }
+  }
+  .ai-connection-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+  .ai-connection-header .desc { margin: 0; }
+  .ai-connection-header button { flex-shrink: 0; }
+  .ai-connection-overlay { position: fixed; inset: 0; z-index: 1100; background: transparent; }
+  .ai-connection-overlay[hidden], .ai-connection-popup[hidden] { display: none; }
+  .ai-connection-popup { position: fixed; width: min(380px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow-y: auto; overscroll-behavior: contain; padding: 20px; background: var(--panel); border: 1px solid var(--panel-border); border-radius: var(--radius); box-shadow: var(--shadow); display: flex; flex-direction: column; gap: 16px; }
+  .ai-connection-popup label { display: flex; flex-direction: column; gap: 6px; min-width: 0; font-size: 12px; }
+  .ai-connection-popup input, .ai-connection-popup select { width: 100%; min-width: 0; }
+  .ai-connection-fields { display: flex; flex-direction: column; gap: 12px; }
+  .ai-connection-fields [hidden] { display: none; }
+  .ai-connection-kind { display: flex; position: relative; isolation: isolate; padding: 3px; border-radius: 8px; background: var(--bg-alt); }
+  .ai-connection-kind::before { content: ''; position: absolute; top: 3px; bottom: 3px; left: 3px; width: calc(50% - 3px); border-radius: 6px; background: var(--accent-dim); transform: translateX(0); transition: transform var(--motion-base) var(--ease-out); z-index: -1; }
+  .ai-connection-kind[data-kind=room]::before { transform: translateX(100%); }
+  .ai-connection-kind button { flex: 1; border: 0; background: transparent; }
+  .ai-connection-kind button[aria-pressed=true] { color: var(--accent); }
+  .ai-connection-popup .row { flex-wrap: wrap; align-items: flex-end; }
+  .ai-connection-popup .row > label { flex: 1; }
+  .ai-connection-footer { justify-content: flex-end; }
+  .ai-connection-error { color: var(--err); font-size: 12px; }
+  .ai-connection-popup button:active:not(:disabled) { transform: scale(.98); }
+  @media (max-width: 519px) {
+    .ai-connection-header { align-items: flex-start; flex-direction: column; }
+    .ai-connection-header button { align-self: flex-end; }
+    .ai-connection-overlay { background: rgba(0, 0, 0, .28); }
+    .ai-connection-popup { top: 50% !important; left: 50% !important; translate: -50% -50%; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .ai-connection-kind::before { transition: none; }
+    .ai-connection-popup button:active:not(:disabled) { transform: none; }
+  }
+  .ai-provider-editor { display: grid; gap: 14px; padding: 16px; border-top: 1px solid var(--panel-border); }
+  .ai-provider-field { display: grid; grid-template-columns: 110px minmax(0, 1fr); align-items: start; gap: 14px; font-size: 13px; }
+  .ai-provider-field > label { padding-top: 10px; color: var(--text-dim); }
+  .ai-provider-field-control { min-width: 0; }
+  .ai-provider-field-feedback { font-size: 11px; color: var(--ok); margin-top: 4px; overflow-wrap: anywhere; }
+  .ai-provider-field-feedback[data-state=error], .ai-provider-key-note { color: var(--err); }
+  .ai-provider-field-feedback:empty { display: none; }
+  .ai-provider-key-note { font-size: 12px; margin-top: 6px; }
+  .ai-provider-key-note[hidden], .ai-provider-field-control button[hidden] { display: none; }
+  .ai-provider-actions { display: flex; justify-content: flex-end; }
+  .ai-provider-editor input { width: 100%; min-width: 0; }
+  .ai-provider-editor[hidden] { display: none; }
+  @media (max-width: 600px) {
+    .ai-provider-field { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+    .ai-provider-field > label { padding-top: 0; }
+  }
+  .ai-provider-card .row { flex-wrap: wrap; }
+  .ai-model-search { width: 100%; min-width: 0; flex-shrink: 0; border: 1px solid var(--panel-border); background: var(--bg-alt); color: var(--text); border-radius: 6px; padding: 9px 10px; font: inherit; font-size: 13px; }
+  .ai-model-search:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .ai-model-picker { min-width: 0; width: 100%; }
+  .ai-model-trigger { text-align: left; width: 100%; overflow-wrap: anywhere; padding: 10px 12px; }
+  .ai-model-trigger::after { content: ' \25be'; color: var(--text-dim); }
+  .ai-model-warning { color: var(--warn); font-size: 12px; margin-top: 4px; }
+  .ai-model-dialog { width: min(640px, calc(100vw - 32px)); max-width: 640px; height: min(420px, calc(100dvh - 32px)); max-height: calc(100dvh - 32px); display: flex; flex-direction: column; gap: 12px; padding: 20px; }
+  .ai-model-dialog .modal-header { flex-shrink: 0; }
+  .ai-model-dialog .modal-close { margin-left: auto; }
+  .ai-model-results { overflow-y: auto; min-height: 0; overscroll-behavior: contain; }
+  .ai-model-panes { display: grid; grid-template-columns: 200px minmax(0, 1fr); flex: 1; min-height: 0; gap: 12px; }
+  .ai-model-sources { overflow-y: auto; min-height: 0; border-right: 1px solid var(--panel-border); padding-right: 8px; overscroll-behavior: contain; }
+  .ai-model-source { display: flex; flex-direction: column; gap: 3px; width: 100%; min-width: 0; text-align: left; padding: 9px 8px; border: 0; border-radius: 5px; background: transparent; }
+  .ai-model-source-name { display: block; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+  .ai-model-source-detail { color: var(--text-dim); font-size: 11px; }
+  .ai-model-source:hover, .ai-model-source[aria-selected="true"] { background: var(--accent-dim); }
+  .ai-model-source[data-empty="true"] { opacity: .45; }
+  .ai-model-option .ai-model-label { display: flex; flex-direction: column; gap: 3px; }
+  .ai-model-option .ai-model-provider { color: var(--text-dim); font-size: 11px; }
+  @media (max-width: 519px) {
+    .ai-model-dialog { padding: 14px; }
+    .ai-model-panes { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); gap: 8px; }
+    .ai-model-sources { display: flex; overflow-x: auto; overflow-y: hidden; border-right: 0; border-bottom: 1px solid var(--panel-border); padding: 0 0 8px; gap: 4px; }
+    .ai-model-source { flex: 0 0 auto; width: auto; max-width: 180px; border: 1px solid var(--panel-border); }
+  }
+  .ai-model-group { position: sticky; top: 0; background: var(--panel); padding: 8px; font-size: 11px; color: var(--text-dim); font-weight: 700; border-bottom: 1px solid var(--panel-border); z-index: 1; }
+  .ai-provider-count[data-state="ok"] { color: var(--ok); }
+  .ai-provider-count[data-state="error"] { color: var(--err); }
+  .ai-provider-count { overflow-wrap: anywhere; }
+  .ai-model-option { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; background: transparent; border: 0; padding: 9px 8px; border-radius: 4px; overflow-wrap: anywhere; cursor: pointer; font-size: 13px; }
+  .ai-model-option span { min-width: 0; }
+  .ai-model-option input { flex: 0 0 auto; }
+  .ai-model-option:hover, .ai-model-option.active { background: var(--accent-dim); }
+  .toggle-switch input:focus-visible + .slider { outline: 2px solid var(--accent); outline-offset: 3px; }
+  .ai-model-cached { opacity: .55; }
+  .ai-model-option:disabled { opacity: .7; cursor: default; }
+  .ai-model-mark { margin-left: auto; flex-shrink: 0; color: var(--text-dim); font-size: 11px; }
+  .ai-sharing-section { display: flex; flex-direction: column; gap: 12px; }
+  .ai-sharing-rooms, .ai-sharing-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .ai-sharing-room { position: relative; display: flex; min-width: 0; max-width: 100%; padding-right: 34px; border: 1px solid var(--panel-border); border-radius: var(--radius); transition: background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out); }
+  .ai-sharing-room[data-providing="true"] { border-color: var(--accent); background: var(--accent-dim); }
+  .ai-sharing-room > .ai-room-chip { min-width: 0; border: 0; background: transparent; }
+  .ai-sharing-room > .ai-room-copy { position: absolute; right: 4px; top: 50%; margin-top: -14px; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 6px; background: transparent; flex-shrink: 0; }
+  .ai-subtab-content { min-width: 0; }
+  #panel-ai .subtabs { position: relative; isolation: isolate; }
+  #panel-ai .subtabs button { position: relative; background: transparent; box-shadow: none; transition: color var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out); }
+  .ai-tab-highlight { position: absolute; top: 0; left: 0; z-index: -1; border-radius: 7px; background: var(--panel); box-shadow: var(--shadow-sm); pointer-events: none; }
+  .ai-chevron { display: inline-block; width: 7px; height: 7px; margin: 0 2px 2px 9px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(45deg); transition: transform var(--motion-base) var(--ease-out); }
+  [aria-expanded="true"] > .ai-chevron { transform: rotate(225deg); }
+  #panel-ai button:hover:not(:disabled), .ai-model-overlay button:hover:not(:disabled) { transform: none; }
+  #panel-ai button:active:not(:disabled), .ai-model-overlay button:active:not(:disabled) { transform: scale(.98); }
+  .ai-sharing-row { transition: background var(--motion-fast) var(--ease-out); }
+  .ai-sharing-row:hover { background: var(--bg-alt); }
+  .ai-room-copy { display: inline-flex; align-items: center; justify-content: center; }
+  .ai-copy-icon { position: relative; width: 16px; height: 16px; flex: none; }
+  .ai-copy-icon::before, .ai-copy-icon::after { content: ""; position: absolute; transition: opacity var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out); }
+  .ai-copy-icon::before { inset: 3px 1px 1px 4px; border: 1.5px solid currentColor; border-radius: 2px; box-shadow: -3px -3px 0 -1px var(--panel), -3px -3px 0 0 currentColor; }
+  .ai-copy-icon::after { width: 9px; height: 5px; left: 3px; top: 4px; border-left: 2px solid var(--ok); border-bottom: 2px solid var(--ok); opacity: 0; transform: rotate(-45deg) scale(.6); }
+  .ai-room-copy[data-copied="true"] .ai-copy-icon::before { opacity: 0; transform: scale(.6); }
+  .ai-room-copy[data-copied="true"] .ai-copy-icon::after { opacity: 1; transform: rotate(-45deg) scale(1); }
+  @media (prefers-reduced-motion: reduce) {
+    :root { --motion-fast: 0ms; --motion-base: 0ms; }
+    button:hover:not(:disabled), button:active:not(:disabled),
+    #panel-ai button:active:not(:disabled), .ai-model-overlay button:active:not(:disabled) { transform: none; }
+    .ai-chevron, [aria-expanded="true"] > .ai-chevron { transform: none; }
+  }
+  #panel-ai .subtab-page.active { animation: none; }
+  #panel-ai.active > *:nth-child(-n+4) { animation: none; }
+  .ai-room-chip { text-align: left; overflow-wrap: anywhere; }
+  .ai-room-chip[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-dim); }
+  .ai-room-chip .ai-room-status { display: block; font-size: 11px; font-weight: normal; color: var(--text-dim); }
+  .ai-sharing-results { max-height: 480px; overflow-y: auto; overscroll-behavior: contain; }
+  .ai-sharing-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 8px; border-bottom: 1px solid var(--panel-border); }
+  .ai-sharing-model { min-width: 0; overflow-wrap: anywhere; }
+  .ai-sharing-chips { flex-shrink: 0; max-width: 60%; justify-content: flex-end; }
+  @media (max-width: 560px) {
+    .ai-connection-popup .row:not(.ai-connection-footer) { flex-direction: column; align-items: stretch; }
+    .ai-connection-popup .row:not(.ai-connection-footer) > button { align-self: flex-start; }
+    .ai-sharing-row { align-items: flex-start; flex-direction: column; gap: 6px; }
+    .ai-sharing-chips { max-width: 100%; justify-content: flex-start; }
+  }
+  .ai-task-settings { max-width: 620px; }
+  .ai-task-row { margin-bottom: 20px; }
+  .ai-task-row > input { width: 100%; }
+  .ai-task-row > .settings-label { display: block; margin: 10px 0 6px; }
+  .bot-form-row-transforms .field { min-width: min(100%, 230px); }
+  .bot-form-row-transforms .ai-model-picker { flex: 0 1 auto; }
 </style>
 <link rel="stylesheet" href="/assets/features/topology.css">
 <link rel="stylesheet" href="/assets/features/storage.css">
@@ -1927,58 +1945,35 @@
 
   <section class="panel panel-span2" id="panel-ai">
     <h2><span data-i18n="ai.title">AI</span> <span class="spacer"></span>
-      <button data-role="refresh" data-target="ai" data-i18n="common.refresh">Refresh</button>
     </h2>
-    <div class="topo-strip" id="topo-strip-ai">
-      <span class="topo-strip-label" data-i18n="topoStrip.room">room</span>
-      <span class="mono" data-role="room">&mdash;</span>
-      <span class="topo-strip-note" data-role="note" hidden></span>
-      <span class="topo-strip-peers" data-role="peers"></span>
-      <a href="#topology-card" data-i18n="topoStrip.viewFull">View full topology</a>
-    </div>
     <div class="subtabs" role="tablist" data-i18n-aria-label="ai.tabs.groupLabel" aria-label="AI sections">
-      <button type="button" data-subtab-target="connection" data-i18n="ai.tab.connection">Connection</button>
-      <button type="button" data-subtab-target="network" data-i18n="ai.tab.network">AI Network</button>
+      <button type="button" data-subtab-target="connection" data-i18n="ai.tab.connection">Connections</button>
+      <button type="button" data-subtab-target="tasks" data-i18n="ai.tab.tasks">Tasks</button>
+      <button type="button" data-subtab-target="sharing" data-i18n="ai.tab.sharing">Sharing</button>
     </div>
+    <div class="ai-subtab-content">
     <div class="subtab-page" data-subtab="connection">
       <div id="ai-connection-editor"></div>
     </div>
-    <div class="subtab-page" data-subtab="network">
-      <div class="ai-network-settings" id="settings-drawer-body-ai"></div>
+    <div class="subtab-page" data-subtab="tasks">
+      <div id="ai-task-editor"></div>
       <div id="ai-setup-state"></div>
-      <div class="ai-role-cards">
-        <div class="ai-role-card" id="ai-card-provide">
-          <div class="ai-role-card-head">
-            <span class="ai-status-dot" id="ai-dot-provide" aria-hidden="true"></span>
-            <div class="ai-role-card-heading">
-              <div class="ai-role-card-title" data-i18n="ai.net.provideTitle">Provide to the network</div>
-              <div class="ai-role-card-desc" data-i18n="ai.net.provideDesc">Answer AI requests from peers using your configured upstream provider.</div>
-            </div>
-          </div>
-          <div class="ai-role-card-body">
-            <dl class="kv" id="ai-kv"></dl>
-            <div id="ai-models" class="row"></div>
-          </div>
-          <div class="ai-role-card-foot">
-            <button id="btn-ai-provide-toggle" class="primary" data-i18n="ai.startProviding">Start providing</button>
+      <div id="settings-drawer-body-ai"></div>
+      <div class="ai-role-card" id="ai-card-serve">
+        <div class="ai-role-card-head">
+          <span class="ai-status-dot" id="ai-dot-serve" aria-hidden="true"></span>
+          <div class="ai-role-card-heading">
+            <div class="ai-role-card-title" data-i18n="ai.net.serveTitle">Local API server</div>
+            <div class="ai-role-card-desc" data-i18n="ai.net.serveDesc">Expose an OpenAI-compatible endpoint on this machine.</div>
           </div>
         </div>
-        <div class="ai-role-card" id="ai-card-serve">
-          <div class="ai-role-card-head">
-            <span class="ai-status-dot" id="ai-dot-serve" aria-hidden="true"></span>
-            <div class="ai-role-card-heading">
-              <div class="ai-role-card-title" data-i18n="ai.net.serveTitle">Local API server</div>
-              <div class="ai-role-card-desc" data-i18n="ai.net.serveDesc">Expose an OpenAI-compatible endpoint on this machine, answered by AI providers on the network.</div>
-            </div>
-          </div>
-          <div class="ai-role-card-body">
-            <div id="ai-serve-callout"></div>
-          </div>
-          <div class="ai-role-card-foot">
-            <button id="btn-ai-serve-toggle" class="primary" data-i18n="ai.startServe">Start API server</button>
-          </div>
-        </div>
+        <div class="ai-role-card-body"><div id="ai-serve-callout"></div></div>
+        <div class="ai-role-card-foot"><button id="btn-ai-serve-toggle" class="primary" data-i18n="ai.startServe">Start API server</button></div>
       </div>
+    </div>
+    <div class="subtab-page" data-subtab="sharing">
+      <div id="ai-sharing-editor"></div>
+    </div>
     </div>
     <div class="topology-slot" id="topology-slot-ai"></div>
 
@@ -2362,14 +2357,14 @@
         <div class="field bot-group" data-bot-group="transform-summarize">
           <label class="checkline bot-toggle" hidden><input type="checkbox" id="bot-summarize-enabled"> <span data-i18n="bot.form.summarizeLabel">Summarize</span></label>
           <label class="bot-group-plain-label" data-i18n="bot.form.summarizeLabel">Summarize</label>
-          <select id="bot-summarize-preset"></select>
+          <div id="bot-summarize-model"></div>
         </div>
 
         <div class="field bot-group" data-bot-group="transform-translate" hidden>
           <label class="checkline bot-toggle" hidden><input type="checkbox" id="bot-translate-enabled"> <span data-i18n="bot.form.translateLabel">Translate</span></label>
           <label class="bot-group-plain-label" data-i18n="bot.form.translateLabel">Translate</label>
           <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-            <select id="bot-translate-preset"></select>
+            <div id="bot-translate-model"></div>
             <select id="bot-translate-target-lang" data-i18n-aria-label="bot.form.translateTargetLabel" data-i18n-title="bot.form.translateTargetLabel" aria-label="Target language" title="Target language">
               <option value="ja">ja</option>
               <option value="en">en</option>
@@ -2388,7 +2383,8 @@
           <label class="checkline bot-toggle" hidden><input type="checkbox" id="bot-tts-enabled"> <span data-i18n="bot.form.ttsLabel">Text-to-speech</span></label>
           <label class="bot-group-plain-label" data-i18n="bot.form.ttsLabel">Text-to-speech</label>
           <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-            <select id="bot-tts-preset"></select>
+            <div id="bot-tts-model"></div>
+            <input type="text" id="bot-tts-voice" data-i18n-placeholder="ai.model.voice" data-i18n-aria-label="ai.model.voice" placeholder="Voice">
             <select id="bot-tts-format">
               <option value="" data-i18n="bot.form.formatDefault">Default</option>
               <option value="mp3">mp3</option>
@@ -2731,6 +2727,72 @@
 
   var T = {
     en: {
+      "ai.sharing.toggle": "Share {model} with {room}",
+      "ai.sharing.noHttp": "Add an enabled HTTP connection in Connections to share its models.",
+      "ai.sharing.noRooms": "Add a room to share models.",
+      "ai.sharing.existingRoom": "Choose from Connections",
+      "ai.sharing.noExistingRooms": "No rooms waiting to share",
+      "ai.sharing.useRoom": "Use room",
+      "ai.sharing.newRoomId": "New room ID",
+      "ai.sharing.randomRoomId": "Generate random ID",
+      "ai.sharing.roomLabel": "Label (optional)",
+      "ai.sharing.createRoom": "Add room",
+      "ai.sharing.duplicateRoom": "Existing room selected.",
+      "ai.sharing.copyRoomId": "Copy room ID",
+      "ai.sharing.paused": "Paused",
+      "ai.tab.sharing": "Sharing",
+      "ai.model.effort": "Reasoning effort",
+      "settings.ai.providers.keyPlaceholder": "API key",
+      "ai.tab.connection": "Connections",
+      "ai.tab.tasks": "Tasks",
+      "ai.setup.desc": "Add an AI connection and select a default model in Tasks.",
+      "settings.ai.providers.desc": "HTTP endpoints and rooms used by this daemon. Disabling a connection preserves its model references.",
+      "settings.ai.providers.removeConfirm": "Remove this connection? Existing model references will be kept and show a warning.",
+      "bot.form.ttsNoVoiceHint": "Enter a voice, or configure a TTS voice for the same provider in Tasks.",
+      "ai.provider.addHttp": "+ HTTP",
+      "ai.connection.add": "+ Add connection",
+      "ai.connection.kind": "Connection type",
+      "ai.connection.room": "Room",
+      "ai.connection.name": "Name",
+      "ai.connection.url": "Base URL",
+      "ai.connection.submit": "Add",
+      "ai.connection.invalidUrl": "Enter a valid HTTP or HTTPS URL.",
+      "ai.connection.requiredRoom": "Enter a room ID.",
+      "ai.connection.duplicateRoom": "This room is already registered.",
+      "ai.connection.useExisting": "Enable and select existing room",
+      "ai.provider.addRoom": "+ Room",
+      "ai.provider.enabled": "Enable {provider}",
+      "ai.provider.saving": "Saving...",
+      "ai.provider.saved": "Saved",
+      "ai.provider.keyHostChange": "Re-enter the API key to change to a different host.",
+      "ai.provider.models": "{count} cached models",
+      "ai.provider.fetching": "Fetching models\u2026",
+      "ai.provider.ok": "Connected \u00b7 {count} models",
+      "ai.provider.error": "Model list unavailable",
+      "ai.room.id": "Room ID",
+      "ai.room.shared": "Shared HTTP models",
+      "ai.room.provide": "Provide to this room",
+      "ai.room.joined": "Connected",
+      "ai.room.idle": "Not connected",
+      "ai.room.peers": "{count} peers",
+      "ai.task.default_ref": "Default model",
+      "ai.task.tts": "Text-to-speech",
+      "ai.task.stt": "Speech-to-text",
+      "ai.model.select": "Select a model",
+      "ai.model.search": "Search models and connections",
+      "ai.model.disabled": "Connection is disabled",
+      "ai.model.missing": "Connection is missing",
+      "ai.model.assigned": "Currently assigned",
+      "ai.model.recent": "Recent",
+      "ai.model.sources": "Sources",
+      "ai.model.all": "All",
+      "ai.model.live": "Live",
+      "ai.model.cache": "Cached list",
+      "ai.model.browser": "Browser default",
+      "ai.model.useDefault": "Use default model",
+      "ai.model.roomAuto": "Let {provider} choose",
+      "ai.model.empty": "No matching models",
+      "ai.model.voice": "Voice",
       "daemon.connected": "Connected",
       "pageTitle": "MISTL dashboard",
       "lang.en": "EN",
@@ -2934,9 +2996,7 @@
       "topoStrip.chatRelayOff": "tc-chat relay is off or has no rooms configured",
       "topoStrip.viewFull": "View topology",
       "ai.title": "AI",
-      "ai.upstreamHint": "Set an OpenAI-compatible upstream in Settings to provide inference.",
       "ai.openSettings": "Open AI settings",
-      "ai.readyHint": "Upstream is configured. Start providing to answer AI requests from the network.",
       "ai.endpointLabel": "OpenAI-compatible endpoint",
       "ai.statusLabel": "status",
       "ai.room": "room",
@@ -2948,33 +3008,16 @@
       "ai.yes": "yes",
       "ai.no": "no",
       "ai.modelsLabel": "models:",
-      "ai.startProviding": "Start providing",
-      "ai.stopProviding": "Stop providing",
       "ai.startServe": "Start API server",
       "ai.stopServe": "Stop API server",
-      "ai.alreadyProviding": "Already providing.",
-      "ai.nowProviding": "Now providing AI models.",
-      "ai.stoppedProviding": "Stopped providing.",
-      "ai.wasNotProviding": "Was not providing.",
       "ai.serveAlready": "API server already running at {listen}",
       "ai.serveStarted": "API server listening at {listen}",
       "ai.serveStopped": "API server stopped.",
       "ai.serveWasNotRunning": "API server was not running.",
-      "ai.tab.connection": "Connection",
-      "ai.tab.network": "AI Network",
-      "ai.net.provideTitle": "Provide to the network",
-      "ai.net.provideDesc": "Answer AI requests from peers using your configured upstream provider.",
       "ai.net.serveTitle": "Local API server",
       "ai.net.serveDesc": "Expose an OpenAI-compatible endpoint on this machine, answered by AI providers on the network.",
       "ai.net.serveIdleHint": "Not running. Start the server to get a local endpoint URL.",
-      "ai.setup.title": "No AI connection yet",
-      "ai.setup.desc": "Add an OpenAI-compatible provider and a model preset to enable AI features.",
-      "ai.setup.cta": "Configure connection",
-      "ai.setup.disabledHint": "Configure a provider and preset first",
-      "ai.editor.save": "Save",
-      "ai.editor.cancel": "Cancel",
-      "ai.editor.defaultBadge": "default",
-      "ai.editor.kindLabel": "Provides",
+      "ai.connection.cancel": "Cancel",
       "ai.tabs.groupLabel": "AI sections",
       "chatRelay.title": "Chat",
       "chatRelay.log.roomLabel": "tc-chat room",
@@ -3209,8 +3252,6 @@
       "bot.form.ttsLabel": "Text-to-speech",
       "bot.form.formatDefault": "Default",
       "bot.form.speedPlaceholder": "Speed (e.g. 1.0)",
-      "bot.form.ttsNoVoiceHint": "This preset has no voice configured — audio will fail to synthesize.",
-      "bot.form.presetNone": "(none)",
       "bot.form.sinkChatRoomLabel": "Chat room",
       "bot.form.sinkWebhookUrlLabel": "Webhook URL",
       "bot.form.sinkWebhookIncludeAudioLabel": "Include audio",
@@ -3277,7 +3318,6 @@
       "bot.form.sinkWebhookLabel": "Webhook",
       "bot.form.sinkWebhookUrlPlaceholder": "https://example.com/webhook",
       "bot.form.sinkWebhookMaxAudioPlaceholder": "e.g. 8",
-      "bot.form.ttsNoVoicePresetsHint": "No presets have a voice configured — text-to-speech will fail until one is set up in AI presets.",
       "bot.form.enterId": "Enter a pipeline ID.",
       "bot.form.enterSchedule": "Choose or enter a schedule.",
       "bot.form.enterChatRoom": "Choose or enter a chat room.",
@@ -3370,35 +3410,11 @@
       "settings.field.chat_relay.rooms.desc": "Comma-separated tc-chat room ids to relay. Persists and replays their signed chat traffic so messages keep arriving even without a tc-chat tab open.",
       "settings.field.chat_relay.enabled.label": "Enable tc-chat relay",
       "settings.field.chat_relay.enabled.desc": "Join the rooms above and act as a standing relay/bot for tc-chat messages.",
-      "settings.field.ai.room_id.label": "Room id",
-      "settings.field.ai.room_id.desc": "tc-chat room used to discover AI providers and consumers.",
       "settings.field.ai.request_timeout_secs.label": "Request timeout (seconds)",
       "settings.field.ai.request_timeout_secs.desc": "How long to wait for an upstream response before giving up.",
       "settings.field.ai.api_listen.label": "API listen address",
       "settings.field.ai.api_listen.desc": "Address:port the local OpenAI-compatible API server binds to.",
-      "settings.ai.providers.title": "Providers",
-      "settings.ai.providers.desc": "OpenAI-compatible upstream endpoints this daemon can call. Presets below pick one by id.",
-      "settings.ai.providers.addBtn": "Add provider",
-      "settings.ai.providers.removeBtn": "Remove",
-      "settings.ai.providers.removeConfirm": "{count} preset(s) use this provider and will stop working. Remove it anyway?",
-      "settings.ai.providers.labelPlaceholder": "Label",
-      "settings.ai.providers.baseUrlPlaceholder": "Base URL (e.g. https://api.openai.com/v1)",
-      "settings.ai.presets.title": "Presets",
-      "settings.ai.presets.desc": "Named model configurations, each pointing at a provider above.",
-      "settings.ai.presets.addBtn": "Add preset",
-      "settings.ai.presets.removeBtn": "Remove",
-      "settings.ai.presets.needProvider": "Add a provider first",
-      "settings.ai.presets.labelPlaceholder": "Label",
-      "settings.ai.presets.modelPlaceholder": "Model name",
-      "settings.ai.presets.fetchModelsError": "Failed to fetch model list",
-      "settings.ai.presets.temperaturePlaceholder": "Temperature",
-      "settings.ai.defaultPreset.label": "Default preset",
-      "settings.ai.defaultPreset.desc": "Which preset \"ai provide\"/\"ai serve\" use when a request doesn't name one.",
-      "ai.net.provideChat": "Chat",
-      "ai.net.provideTts": "TTS",
-      "ai.net.provideStt": "STT",
-      "ai.net.provideCheckbox": "Provide",
-      "ai.net.provideNoPresets": "Add a preset in the Connection tab first.",
+      "settings.ai.providers.removeBtn": "Delete connection",
       "settings.field.ui.listen.label": "Listen address",
       "settings.field.ui.listen.desc": "Address:port this dashboard binds to.",
       "settings.field.ui.enabled.label": "Enabled",
@@ -3480,6 +3496,72 @@
       "tunnel.toast.stopped": "Tunnel stopped.",
     },
     ja: {
+      "ai.sharing.toggle": "{model}を{room}に共有",
+      "ai.sharing.noHttp": "接続先で有効なHTTP接続先を追加してください。",
+      "ai.sharing.noRooms": "ルームを追加すると、モデルを提供できます。",
+      "ai.sharing.existingRoom": "接続先から選ぶ",
+      "ai.sharing.noExistingRooms": "追加できる接続先がありません",
+      "ai.sharing.useRoom": "このルームを使う",
+      "ai.sharing.newRoomId": "新しいルームID",
+      "ai.sharing.randomRoomId": "ランダム生成",
+      "ai.sharing.roomLabel": "ラベル（任意）",
+      "ai.sharing.createRoom": "ルームを追加",
+      "ai.sharing.duplicateRoom": "既存のルームを選択しました。",
+      "ai.sharing.copyRoomId": "IDをコピー",
+      "ai.sharing.paused": "停止",
+      "ai.tab.sharing": "提供",
+      "ai.model.effort": "推論の強さ",
+      "settings.ai.providers.keyPlaceholder": "APIキー",
+      "ai.tab.connection": "接続先",
+      "ai.tab.tasks": "タスク",
+      "ai.setup.desc": "AI接続を追加し、タスクで既定モデルを選んでください。",
+      "settings.ai.providers.desc": "このデーモンが使うHTTP接続先とルーム。無効化してもモデル参照は保持されます。",
+      "settings.ai.providers.removeConfirm": "この接続先を削除しますか？既存のモデル参照は保持され、警告が表示されます。",
+      "bot.form.ttsNoVoiceHint": "音声を入力するか、タスクで同じ接続先のTTS音声を設定してください。",
+      "ai.provider.addHttp": "+ HTTP",
+      "ai.connection.add": "+ \u63a5\u7d9a\u5148\u3092\u8ffd\u52a0",
+      "ai.connection.kind": "\u63a5\u7d9a\u5148\u306e\u7a2e\u985e",
+      "ai.connection.room": "\u30eb\u30fc\u30e0",
+      "ai.connection.name": "\u540d\u524d",
+      "ai.connection.url": "Base URL",
+      "ai.connection.submit": "\u8ffd\u52a0",
+      "ai.connection.invalidUrl": "\u6709\u52b9\u306a HTTP / HTTPS URL \u3092\u5165\u529b\u3057\u3066\u304f\u3060\u3055\u3044\u3002",
+      "ai.connection.requiredRoom": "\u30eb\u30fc\u30e0ID\u3092\u5165\u529b\u3057\u3066\u304f\u3060\u3055\u3044\u3002",
+      "ai.connection.duplicateRoom": "\u3053\u306e\u30eb\u30fc\u30e0\u306f\u65e2\u306b\u767b\u9332\u3055\u308c\u3066\u3044\u307e\u3059",
+      "ai.connection.useExisting": "\u65e2\u5b58\u306e\u30eb\u30fc\u30e0\u3092\u6709\u52b9\u5316\u3057\u3066\u9078\u629e",
+      "ai.provider.addRoom": "+ ルーム",
+      "ai.provider.enabled": "{provider}を有効にする",
+      "ai.provider.saving": "保存中...",
+      "ai.provider.saved": "保存済み",
+      "ai.provider.keyHostChange": "別のホストに変更するには API key を入力し直してください",
+      "ai.provider.models": "キャッシュ {count}モデル",
+      "ai.provider.fetching": "モデルを取得中\u2026",
+      "ai.provider.ok": "接続成功 \u00b7 {count}モデル",
+      "ai.provider.error": "モデル一覧の取得失敗",
+      "ai.room.id": "ルームID",
+      "ai.room.shared": "共有するHTTPモデル",
+      "ai.room.provide": "このルームに提供",
+      "ai.room.joined": "接続中",
+      "ai.room.idle": "未接続",
+      "ai.room.peers": "ピア {count}",
+      "ai.task.default_ref": "既定モデル",
+      "ai.task.tts": "音声合成",
+      "ai.task.stt": "音声認識",
+      "ai.model.select": "モデルを選択",
+      "ai.model.search": "モデル・接続先を検索",
+      "ai.model.disabled": "接続先が無効です",
+      "ai.model.missing": "接続先が見つかりません",
+      "ai.model.assigned": "割当中",
+      "ai.model.recent": "最近",
+      "ai.model.sources": "接続先",
+      "ai.model.all": "すべて",
+      "ai.model.live": "最新",
+      "ai.model.cache": "前回の一覧",
+      "ai.model.browser": "ブラウザ標準",
+      "ai.model.useDefault": "既定モデルを使う",
+      "ai.model.roomAuto": "{provider}におまかせ",
+      "ai.model.empty": "一致するモデルがありません",
+      "ai.model.voice": "音声 (voice)",
       "daemon.connected": "接続中",
       "pageTitle": "MISTL ダッシュボード",
       "lang.en": "EN",
@@ -3683,9 +3765,7 @@
       "topoStrip.chatRelayOff": "tc-chatリレーはオフ、またはルームが未設定です",
       "topoStrip.viewFull": "トポロジーを表示",
       "ai.title": "AI",
-      "ai.upstreamHint": "推論を提供するには、設定でOpenAI互換のアップストリームを指定してください。",
       "ai.openSettings": "AI設定を開く",
-      "ai.readyHint": "アップストリームが設定されています。「提供を開始」すると、ネットワークからのAIリクエストに応答できます。",
       "ai.endpointLabel": "OpenAI互換エンドポイント",
       "ai.statusLabel": "状態",
       "ai.room": "ルーム",
@@ -3697,33 +3777,16 @@
       "ai.yes": "はい",
       "ai.no": "いいえ",
       "ai.modelsLabel": "モデル:",
-      "ai.startProviding": "提供を開始",
-      "ai.stopProviding": "提供を停止",
       "ai.startServe": "APIサーバーを開始",
       "ai.stopServe": "APIサーバーを停止",
-      "ai.alreadyProviding": "すでに提供中です。",
-      "ai.nowProviding": "AIモデルの提供を開始しました。",
-      "ai.stoppedProviding": "提供を停止しました。",
-      "ai.wasNotProviding": "提供していませんでした。",
       "ai.serveAlready": "APIサーバーはすでに{listen}で稼働しています",
       "ai.serveStarted": "APIサーバーが{listen}で待ち受けを開始しました",
       "ai.serveStopped": "APIサーバーを停止しました。",
       "ai.serveWasNotRunning": "APIサーバーは稼働していませんでした。",
-      "ai.tab.connection": "接続",
-      "ai.tab.network": "AIネットワーク",
-      "ai.net.provideTitle": "ネットワークへの提供",
-      "ai.net.provideDesc": "設定済みのアップストリームプロバイダーを使って、ピアからのAIリクエストに応答します。",
       "ai.net.serveTitle": "ローカルAPIサーバー",
       "ai.net.serveDesc": "このマシン上にOpenAI互換のエンドポイントを公開し、ネットワーク上のAIプロバイダーが応答します。",
       "ai.net.serveIdleHint": "停止しています。サーバーを開始するとローカルのエンドポイントURLを取得できます。",
-      "ai.setup.title": "AI接続はまだありません",
-      "ai.setup.desc": "OpenAI互換のプロバイダーとモデルのプリセットを追加すると、AI機能を利用できるようになります。",
-      "ai.setup.cta": "接続を設定",
-      "ai.setup.disabledHint": "先にプロバイダーとプリセットを設定してください",
-      "ai.editor.save": "保存",
-      "ai.editor.cancel": "キャンセル",
-      "ai.editor.defaultBadge": "デフォルト",
-      "ai.editor.kindLabel": "提供内容",
+      "ai.connection.cancel": "キャンセル",
       "ai.tabs.groupLabel": "AI セクション",
       "chatRelay.title": "チャット",
       "chatRelay.log.roomLabel": "tc-chatルーム",
@@ -3958,8 +4021,6 @@
       "bot.form.ttsLabel": "音声合成 (TTS)",
       "bot.form.formatDefault": "デフォルト",
       "bot.form.speedPlaceholder": "速度 (例: 1.0)",
-      "bot.form.ttsNoVoiceHint": "このプリセットには voice が設定されていません — 音声合成に失敗します。",
-      "bot.form.presetNone": "（なし）",
       "bot.form.sinkChatRoomLabel": "チャットルーム",
       "bot.form.sinkWebhookUrlLabel": "Webhook URL",
       "bot.form.sinkWebhookIncludeAudioLabel": "音声を含める",
@@ -4026,7 +4087,6 @@
       "bot.form.sinkWebhookLabel": "Webhook",
       "bot.form.sinkWebhookUrlPlaceholder": "https://example.com/webhook",
       "bot.form.sinkWebhookMaxAudioPlaceholder": "例: 8",
-      "bot.form.ttsNoVoicePresetsHint": "音声 (voice) が設定されたプリセットがありません — AIプリセットで設定するまで音声合成は失敗します。",
       "bot.form.enterId": "パイプラインIDを入力してください。",
       "bot.form.enterSchedule": "スケジュールを選択または入力してください。",
       "bot.form.enterChatRoom": "チャットルームを選択または入力してください。",
@@ -4119,35 +4179,11 @@
       "settings.field.chat_relay.rooms.desc": "中継するtc-chatルームIDをカンマ区切りで指定します。署名済みのチャットトラフィックを保存・再送信するため、tc-chatタブを開いていなくてもメッセージが届き続けます。",
       "settings.field.chat_relay.enabled.label": "tc-chatリレーを有効化",
       "settings.field.chat_relay.enabled.desc": "上記のルームに参加し、tc-chatメッセージの常駐リレー/ボットとして動作します。",
-      "settings.field.ai.room_id.label": "ルームID",
-      "settings.field.ai.room_id.desc": "AIプロバイダーと利用者を発見するために使うtc-chatルームです。",
       "settings.field.ai.request_timeout_secs.label": "リクエストタイムアウト (秒)",
       "settings.field.ai.request_timeout_secs.desc": "アップストリームからの応答を待つ最大時間です。",
       "settings.field.ai.api_listen.label": "API待ち受けアドレス",
       "settings.field.ai.api_listen.desc": "ローカルのOpenAI互換APIサーバーが待ち受けるアドレス:ポートです。",
-      "settings.ai.providers.title": "プロバイダー",
-      "settings.ai.providers.desc": "提供時にこのデーモンが呼び出せるOpenAI互換のアップストリームエンドポイントです。下のプリセットがIDで1つを参照します。",
-      "settings.ai.providers.addBtn": "プロバイダーを追加",
-      "settings.ai.providers.removeBtn": "削除",
-      "settings.ai.providers.removeConfirm": "{count}件のプリセットがこのプロバイダーを使用しています。削除すると動作しなくなります。それでも削除しますか？",
-      "settings.ai.providers.labelPlaceholder": "ラベル",
-      "settings.ai.providers.baseUrlPlaceholder": "ベースURL (例: https://api.openai.com/v1)",
-      "settings.ai.presets.title": "プリセット",
-      "settings.ai.presets.desc": "上のプロバイダーを参照する、名前付きのモデル設定です。",
-      "settings.ai.presets.addBtn": "プリセットを追加",
-      "settings.ai.presets.removeBtn": "削除",
-      "settings.ai.presets.needProvider": "先にプロバイダーを追加してください",
-      "settings.ai.presets.labelPlaceholder": "ラベル",
-      "settings.ai.presets.modelPlaceholder": "モデル名",
-      "settings.ai.presets.fetchModelsError": "モデル一覧の取得に失敗しました",
-      "settings.ai.presets.temperaturePlaceholder": "Temperature",
-      "settings.ai.defaultPreset.label": "デフォルトプリセット",
-      "settings.ai.defaultPreset.desc": "リクエストでプリセットが指定されなかった場合に「ai provide」「ai serve」が使用するプリセットです。",
-      "ai.net.provideChat": "チャット",
-      "ai.net.provideTts": "TTS",
-      "ai.net.provideStt": "STT",
-      "ai.net.provideCheckbox": "提供する",
-      "ai.net.provideNoPresets": "先にConnectionタブでプリセットを追加してください。",
+      "settings.ai.providers.removeBtn": "接続先を削除",
       "settings.field.ui.listen.label": "待ち受けアドレス",
       "settings.field.ui.listen.desc": "このダッシュボードが待ち受けるアドレス:ポートです。",
       "settings.field.ui.enabled.label": "有効化",
@@ -4229,6 +4265,67 @@
       "tunnel.toast.stopped": "トンネルを停止しました。",
     },
     zh: {
+      "ai.model.voice": "音色",
+      "ai.model.empty": "没有匹配的模型",
+      "ai.model.roomAuto": "由{provider}选择",
+      "ai.model.useDefault": "使用默认模型",
+      "ai.model.browser": "浏览器默认",
+      "ai.model.cache": "缓存列表",
+      "ai.model.live": "最新",
+      "ai.model.assigned": "已分配",
+      "ai.model.missing": "连接不存在",
+      "ai.model.disabled": "连接已禁用",
+      "ai.model.search": "搜索模型和连接",
+      "ai.model.select": "选择模型",
+      "ai.task.stt": "语音识别",
+      "ai.task.tts": "语音合成",
+      "ai.task.default_ref": "默认模型",
+      "ai.room.peers": "{count}个节点",
+      "ai.room.idle": "未连接",
+      "ai.room.joined": "已连接",
+      "ai.room.provide": "向此房间提供",
+      "ai.room.shared": "共享的HTTP模型",
+      "ai.room.id": "房间ID",
+      "ai.provider.error": "无法获取模型列表",
+      "ai.provider.ok": "已连接 · {count}个模型",
+      "ai.provider.fetching": "正在获取模型…",
+      "ai.provider.models": "缓存{count}个模型",
+      "ai.provider.enabled": "启用{provider}",
+      "ai.provider.saving": "正在保存...",
+      "ai.provider.saved": "已保存",
+      "ai.provider.keyHostChange": "更改为其他主机时，请重新输入 API 密钥。",
+      "ai.provider.addRoom": "+ 房间",
+      "ai.provider.addHttp": "+ HTTP",
+      "ai.connection.add": "+ \u6dfb\u52a0\u8fde\u63a5",
+      "ai.connection.kind": "\u8fde\u63a5\u7c7b\u578b",
+      "ai.connection.room": "\u623f\u95f4",
+      "ai.connection.name": "\u540d\u79f0",
+      "ai.connection.url": "Base URL",
+      "ai.connection.submit": "\u6dfb\u52a0",
+      "ai.connection.invalidUrl": "\u8bf7\u8f93\u5165\u6709\u6548\u7684 HTTP \u6216 HTTPS URL\u3002",
+      "ai.connection.requiredRoom": "\u8bf7\u8f93\u5165\u623f\u95f4ID\u3002",
+      "ai.connection.duplicateRoom": "\u6b64\u623f\u95f4\u5df2\u6ce8\u518c",
+      "ai.connection.useExisting": "\u542f\u7528\u5e76\u9009\u62e9\u73b0\u6709\u623f\u95f4",
+      "ai.model.effort": "推理强度",
+      "ai.sharing.toggle": "与{room}共享{model}",
+      "ai.sharing.noHttp": "在连接中添加并启用HTTP连接以共享模型。",
+      "ai.sharing.noRooms": "添加房间以共享模型。",
+      "ai.sharing.existingRoom": "从连接中选择",
+      "ai.sharing.noExistingRooms": "没有可添加的房间",
+      "ai.sharing.useRoom": "使用此房间",
+      "ai.sharing.newRoomId": "新房间ID",
+      "ai.sharing.randomRoomId": "随机生成",
+      "ai.sharing.roomLabel": "标签（可选）",
+      "ai.sharing.createRoom": "添加房间",
+      "ai.sharing.duplicateRoom": "已选择现有房间。",
+      "ai.sharing.copyRoomId": "复制房间 ID",
+      "ai.sharing.paused": "已停止",
+      "ai.model.recent": "最近",
+      "ai.model.sources": "来源",
+      "ai.model.all": "全部",
+      "ai.tab.sharing": "共享",
+      "ai.tab.tasks": "任务",
+      "settings.ai.providers.keyPlaceholder": "API密钥",
       "daemon.connected": "已连接",
       "pageTitle": "MISTL 仪表盘",
       "lang.en": "EN",
@@ -4432,9 +4529,7 @@
       "topoStrip.chatRelayOff": "tc-chat 中继已关闭或未配置房间",
       "topoStrip.viewFull": "查看拓扑",
       "ai.title": "AI",
-      "ai.upstreamHint": "在设置中配置 OpenAI 兼容的上游服务以提供推理。",
       "ai.openSettings": "打开 AI 设置",
-      "ai.readyHint": "上游服务已配置。开始提供服务即可响应来自网络的 AI 请求。",
       "ai.endpointLabel": "OpenAI 兼容端点",
       "ai.statusLabel": "状态",
       "ai.room": "房间",
@@ -4446,33 +4541,18 @@
       "ai.yes": "是",
       "ai.no": "否",
       "ai.modelsLabel": "模型：",
-      "ai.startProviding": "开始提供",
-      "ai.stopProviding": "停止提供",
       "ai.startServe": "启动 API 服务器",
       "ai.stopServe": "停止 API 服务器",
-      "ai.alreadyProviding": "已在提供中。",
-      "ai.nowProviding": "已开始提供 AI 模型。",
-      "ai.stoppedProviding": "已停止提供。",
-      "ai.wasNotProviding": "此前未在提供服务。",
       "ai.serveAlready": "API 服务器已在 {listen} 运行",
       "ai.serveStarted": "API 服务器已在 {listen} 开始监听",
       "ai.serveStopped": "API 服务器已停止。",
       "ai.serveWasNotRunning": "API 服务器此前未运行。",
       "ai.tab.connection": "连接",
-      "ai.tab.network": "AI 网络",
-      "ai.net.provideTitle": "为网络提供服务",
-      "ai.net.provideDesc": "使用已配置的上游提供方，响应来自节点的 AI 请求。",
       "ai.net.serveTitle": "本地 API 服务器",
       "ai.net.serveDesc": "在本机开放一个 OpenAI 兼容端点，由网络上的 AI 提供方响应。",
       "ai.net.serveIdleHint": "尚未运行。启动服务器即可获取本地端点 URL。",
-      "ai.setup.title": "尚未建立 AI 连接",
-      "ai.setup.desc": "添加一个 OpenAI 兼容的提供方和模型预设，即可启用 AI 功能。",
-      "ai.setup.cta": "配置连接",
-      "ai.setup.disabledHint": "请先配置提供方和预设",
-      "ai.editor.save": "保存",
-      "ai.editor.cancel": "取消",
-      "ai.editor.defaultBadge": "默认",
-      "ai.editor.kindLabel": "提供内容",
+      "ai.setup.desc": "添加AI连接，并在任务中选择默认模型。",
+      "ai.connection.cancel": "取消",
       "ai.tabs.groupLabel": "AI 部分",
       "chatRelay.title": "聊天",
       "chatRelay.log.roomLabel": "tc-chat 房间",
@@ -4707,8 +4787,7 @@
       "bot.form.ttsLabel": "语音合成 (TTS)",
       "bot.form.formatDefault": "默认",
       "bot.form.speedPlaceholder": "语速 (例如 1.0)",
-      "bot.form.ttsNoVoiceHint": "此预设未配置 voice —— 语音合成将会失败。",
-      "bot.form.presetNone": "（无）",
+      "bot.form.ttsNoVoiceHint": "输入音色，或在任务中配置同一连接的TTS音色。",
       "bot.form.sinkChatRoomLabel": "聊天室",
       "bot.form.sinkWebhookUrlLabel": "Webhook URL",
       "bot.form.sinkWebhookIncludeAudioLabel": "包含音频",
@@ -4775,7 +4854,6 @@
       "bot.form.sinkWebhookLabel": "Webhook",
       "bot.form.sinkWebhookUrlPlaceholder": "https://example.com/webhook",
       "bot.form.sinkWebhookMaxAudioPlaceholder": "例如 8",
-      "bot.form.ttsNoVoicePresetsHint": "没有任何预设配置了语音 (voice) —— 在 AI 预设中设置之前，语音合成会失败。",
       "bot.form.enterId": "请输入管道 ID。",
       "bot.form.enterSchedule": "请选择或输入计划表达式。",
       "bot.form.enterChatRoom": "请选择或输入聊天室。",
@@ -4868,35 +4946,13 @@
       "settings.field.chat_relay.rooms.desc": "要中继的 tc-chat 房间 ID，以逗号分隔。会保存并重放已签名的聊天流量，即使未打开 tc-chat 标签页，消息也会持续送达。",
       "settings.field.chat_relay.enabled.label": "启用 tc-chat 中继",
       "settings.field.chat_relay.enabled.desc": "加入上方房间，并作为 tc-chat 消息的常驻中继/机器人。",
-      "settings.field.ai.room_id.label": "房间 ID",
-      "settings.field.ai.room_id.desc": "用于发现 AI 提供方与使用方的 tc-chat 房间。",
       "settings.field.ai.request_timeout_secs.label": "请求超时 (秒)",
       "settings.field.ai.request_timeout_secs.desc": "等待上游响应的最长时间，超过则放弃。",
       "settings.field.ai.api_listen.label": "API 监听地址",
       "settings.field.ai.api_listen.desc": "本地 OpenAI 兼容 API 服务器绑定的地址:端口。",
-      "settings.ai.providers.title": "提供方",
-      "settings.ai.providers.desc": "此守护进程提供服务时可调用的 OpenAI 兼容上游端点。下面的预设按 ID 选择其中一个。",
-      "settings.ai.providers.addBtn": "添加提供方",
-      "settings.ai.providers.removeBtn": "删除",
-      "settings.ai.providers.removeConfirm": "有 {count} 个预设正在使用此提供方，删除后它们将无法使用。仍要删除吗？",
-      "settings.ai.providers.labelPlaceholder": "标签",
-      "settings.ai.providers.baseUrlPlaceholder": "Base URL（例如 https://api.openai.com/v1）",
-      "settings.ai.presets.title": "预设",
-      "settings.ai.presets.desc": "命名的模型配置，每个都指向上面的一个提供方。",
-      "settings.ai.presets.addBtn": "添加预设",
-      "settings.ai.presets.removeBtn": "删除",
-      "settings.ai.presets.needProvider": "请先添加一个提供方",
-      "settings.ai.presets.labelPlaceholder": "标签",
-      "settings.ai.presets.modelPlaceholder": "模型名称",
-      "settings.ai.presets.fetchModelsError": "获取模型列表失败",
-      "settings.ai.presets.temperaturePlaceholder": "Temperature",
-      "settings.ai.defaultPreset.label": "默认预设",
-      "settings.ai.defaultPreset.desc": "当请求未指定预设时，“ai provide”/“ai serve” 使用的预设。",
-      "ai.net.provideChat": "聊天",
-      "ai.net.provideTts": "TTS",
-      "ai.net.provideStt": "STT",
-      "ai.net.provideCheckbox": "提供",
-      "ai.net.provideNoPresets": "请先在“Connection”标签页中添加一个预设。",
+      "settings.ai.providers.desc": "此守护进程使用的HTTP连接和房间。禁用连接会保留模型引用。",
+      "settings.ai.providers.removeBtn": "删除连接",
+      "settings.ai.providers.removeConfirm": "删除此连接？现有模型引用将保留并显示警告。",
       "settings.field.ui.listen.label": "监听地址",
       "settings.field.ui.listen.desc": "此仪表盘绑定的地址:端口。",
       "settings.field.ui.enabled.label": "启用",
@@ -5131,10 +5187,10 @@
     return node;
   }
 
-  function copyToClipboard(text) {
+  function copyToClipboard(text, onCopied) {
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(text).then(
-        function () { showToast(t("common.copied"), "success"); },
+        function () { showToast(t("common.copied"), "success"); if (onCopied) onCopied(); },
         function () { showToast(t("common.copyFailed"), "error"); }
       );
     } else {
@@ -6726,7 +6782,7 @@
     cascadeSource.hidden = false;
   }
 
-  /* ---- per-module mini-strips (tc-chat Relay / AI / Store panels) ----
+  /* ---- per-module mini-strips (tc-chat Relay / Store panels) ----
      Shows the module's room id (from topology.status.modules -- the same
      config-or-default resolution the module itself uses) and the
      process-wide peer dots. Per-room peer membership is not observable
@@ -6749,31 +6805,8 @@
     });
   }
 
-  function renderTopoStrip(module) {
-    var root = document.getElementById("topo-strip-" + module);
-    var roomEl = root.querySelector('[data-role="room"]');
-    var noteEl = root.querySelector('[data-role="note"]');
-    var peersEl = root.querySelector('[data-role="peers"]');
-    var data = state.topology;
-    var info = data && data.modules && data.modules[module] ? data.modules[module] : null;
-
-    roomEl.textContent = info && info.room ? info.room : "—";
-    noteEl.hidden = !(info && !info.joined);
-    if (info && !info.joined) noteEl.textContent = t("topoStrip.notJoined");
-
-    renderTopoStripPeers(peersEl);
-  }
-
-  /* Store and chat_relay differ from ai: topology.status's modules.store
-     (and modules.chat_relay) is null when there's nothing to show --
-     storage.room_ids empty (local-only), or chat_relay.rooms empty/disabled
-     -- or {rooms: [{room, joined}]} listing every room the module has
-     joined at once (both can join several, unlike the single-room ai
-     module) -- so they need their own renderer rather than reusing
-     renderTopoStrip's single-room shape. Room ids render as small
-     click-to-copy chips (like the full topology card's .topology-room-chip),
-     each labelled with its own joined state since "joined" isn't uniform
-     across a multi-room list. */
+  /* Store and chat_relay list every joined room, or a local/off hint.
+     Room chips carry their own joined state and copy the complete room ID. */
   function renderMultiRoomTopoStrip(stripId, info, localNoteKey) {
     var root = document.getElementById(stripId);
     var roomEl = root.querySelector('[data-role="room"]');
@@ -6816,7 +6849,6 @@
 
   function renderTopoStrips() {
     renderChatRelayTopoStrip();
-    renderTopoStrip("ai");
     renderStoreTopoStrip();
   }
 
@@ -6828,7 +6860,7 @@
      simply misses and the line stays hidden until/unless it's added).
      Multi-room modules (Store, chat_relay) aren't listed here since their
      mini-strip already shows every room as its own chip. */
-  var TOPOLOGY_PANEL_MODULE = { "panel-chat": "stream", "panel-ai": "ai" };
+  var TOPOLOGY_PANEL_MODULE = { "panel-chat": "stream" };
 
   function renderTopologyContext() {
     if (!topologyContextEl) return;
@@ -7136,77 +7168,24 @@
 
   /* ---------- ai panel ---------- */
 
-  var aiKv = document.getElementById("ai-kv");
-  var aiModelsBox = document.getElementById("ai-models");
   var aiSetupBox = document.getElementById("ai-setup-state");
-  var aiDotProvide = document.getElementById("ai-dot-provide");
   var aiDotServe = document.getElementById("ai-dot-serve");
   var aiServeCallout = document.getElementById("ai-serve-callout");
-  var btnAiProvideToggle = document.getElementById("btn-ai-provide-toggle");
   var btnAiServeToggle = document.getElementById("btn-ai-serve-toggle");
 
-  // Mirrors resolve_preset (config.rs): true once ai.default_preset_id
-  // names an existing preset whose provider_id names an existing provider
-  // -- i.e. `ai provide`/`ai serve` would actually have somewhere to send
-  // requests without the caller naming a preset explicitly.
-  function aiDefaultPresetResolves(aiCfg) {
-    var providers = Array.isArray(aiCfg.providers) ? aiCfg.providers : [];
-    var presets = Array.isArray(aiCfg.presets) ? aiCfg.presets : [];
-    if (!providers.length || !presets.length || !aiCfg.default_preset_id) return false;
-    var preset = presets.filter(function (p) { return p.id === aiCfg.default_preset_id; })[0];
-    if (!preset) return false;
-    return providers.some(function (p) { return p.id === preset.provider_id; });
+  function aiDefaultModelResolves(aiCfg) {
+    var ref = aiCfg.default_ref;
+    return !!(ref && ref.model && (aiCfg.providers || []).some(function (p) { return p.id === ref.provider_id && p.enabled !== false; }));
   }
 
-  // Retargeted from the old #ai-hints info-banner to the Network tab's
-  // #ai-setup-state empty state (see the tc-translate-style redesign):
-  // renders the setup-guide card when there's no usable default preset yet
-  // (hidden otherwise), and disables both provide/serve toggle buttons in
-  // that case so there's nothing to click into a guaranteed-failing
-  // ai.provide.start/ai.serve.start. Called after every ai.status poll AND
-  // from saveSetting() (so editing providers/presets in the Connection tab
-  // updates this live) -- must stay a safe no-op before config.show has
-  // ever resolved.
   function refreshAiHints() {
-    if (!aiSetupBox) return;
+    if (!aiSetupBox || !state.config) return;
+    var cfg = state.config.ai || {};
+    var configured = aiDefaultModelResolves(cfg);
     aiSetupBox.innerHTML = "";
-    var cfg = state.config;
-    if (!cfg) {
-      aiSetupBox.style.display = "none";
-      return;
-    }
-    var aiCfg = cfg.ai || {};
-    var configured = aiDefaultPresetResolves(aiCfg);
-    if (configured) {
-      aiSetupBox.style.display = "none";
-    } else {
-      aiSetupBox.style.display = "";
-      var card = el("div", { class: "ai-setup-card" });
-      var icon = el("div", { class: "ai-setup-icon" });
-      // Static trusted markup (not user input) -- matches the line-icon
-      // style already used for e.g. the settings-drawer gear (stroke =
-      // currentColor), just built here instead of inline in the HTML since
-      // #ai-setup-state's contents are entirely JS-authored per the markup
-      // contract.
-      icon.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.6 5.4L19 10l-5.4 1.6L12 17l-1.6-5.4L5 10l5.4-1.6L12 3z"/></svg>';
-      card.appendChild(icon);
-      card.appendChild(el("div", { class: "ai-setup-title", text: t("ai.setup.title") }));
-      card.appendChild(el("div", { class: "ai-setup-desc", text: t("ai.setup.desc") }));
-      var cta = el("button", { type: "button", class: "primary ai-setup-cta" });
-      cta.textContent = t("ai.setup.cta");
-      cta.addEventListener("click", function () {
-        if (subtabActivate["panel-ai"]) subtabActivate["panel-ai"]("connection");
-      });
-      card.appendChild(cta);
-      aiSetupBox.appendChild(card);
-    }
-    var disabledHint = configured ? "" : t("ai.setup.disabledHint");
-    [btnAiProvideToggle, btnAiServeToggle].forEach(function (btn) {
-      if (!btn) return;
-      btn.disabled = !configured;
-      if (disabledHint) btn.title = disabledHint;
-      else btn.removeAttribute("title");
-    });
+    if (!configured) aiSetupBox.appendChild(el("div", { class: "ai-setup-card", text: t("ai.setup.desc") }));
+    aiSetupBox.hidden = configured;
+    btnAiServeToggle.disabled = !(state.ai && state.ai.serving) && !configured;
   }
 
   function setAiToggleButton(btn, active, startKey, stopKey) {
@@ -7218,11 +7197,10 @@
   }
 
   function renderAiToggleButtons(a) {
-    setAiToggleButton(btnAiProvideToggle, !!(a && a.providing), "ai.startProviding", "ai.stopProviding");
     setAiToggleButton(btnAiServeToggle, !!(a && a.serving), "ai.startServe", "ai.stopServe");
   }
 
-  // Fills the Network tab's "Local API server" role card body: a
+  // Fills the Tasks tab's "Local API server" role card body: a
   // click-to-copy url-callout (same markup/behavior as the stream panel's)
   // while serving, else a short muted idle hint. Split out of renderAi so
   // both the "no status yet" early-return and the normal path share it.
@@ -7251,31 +7229,10 @@
   }
 
   function renderAi() {
-    aiKv.innerHTML = "";
     var a = state.ai;
     renderAiToggleButtons(a);
-    if (aiDotProvide) aiDotProvide.classList.toggle("on", !!(a && a.providing));
     if (aiDotServe) aiDotServe.classList.toggle("on", !!(a && a.serving));
-    if (!a) {
-      addKv(aiKv, t("ai.statusLabel"), t("stream.statusUnknown"));
-      renderAiServeCallout(a);
-      refreshAiHints();
-      return;
-    }
-    addKv(aiKv, t("ai.room"), a.room);
-    addKv(aiKv, t("ai.nodeId"), a.node_id, true);
-    addKv(aiKv, t("ai.connectedPeers"), a.connected_peers);
-    addKv(aiKv, t("ai.providing"), a.providing ? t("ai.yes") : t("ai.no"));
-    // Serving now has its own role card (renderAiServeCallout / #ai-dot-serve)
-    // so it's dropped from this kv list -- everything else here is unchanged.
-    // #ai-models (once a read-only badge list of a.models) is now owned by
-    // buildAiProvidersPresetsField's renderProvideChecklist -- an editable
-    // checklist driven by config, not this status poll -- so it's untouched
-    // here.
-    if (a.remote_provider) {
-      addKv(aiKv, t("ai.remoteProvider"), a.remote_provider.node_id, true);
-    }
-
+    aiRefreshRoomStatuses();
     renderAiServeCallout(a);
     refreshAiHints();
   }
@@ -7289,27 +7246,6 @@
       renderAi();
     });
   }
-
-  document.querySelector('[data-target="ai"]').addEventListener("click", function (e) {
-    runAction(e.currentTarget, "ai.status", {}, function (data) {
-      state.ai = data;
-      renderAi();
-    });
-  });
-
-  btnAiProvideToggle.addEventListener("click", function (e) {
-    if (state.ai && state.ai.providing) {
-      runAction(e.currentTarget, "ai.provide.stop", {}, function (data) {
-        showToast(data.was_running ? t("ai.stoppedProviding") : t("ai.wasNotProviding"), "success");
-        pollAiStatus();
-      });
-    } else {
-      runAction(e.currentTarget, "ai.provide.start", {}, function (data) {
-        showToast(data.already_running ? t("ai.alreadyProviding") : t("ai.nowProviding"), "success");
-        pollAiStatus();
-      });
-    }
-  });
 
   btnAiServeToggle.addEventListener("click", function (e) {
     if (state.ai && state.ai.serving) {
@@ -7971,8 +7907,16 @@
 
   storePickerCancelBtn.addEventListener("click", closeStorePicker);
   storePickerCloseBtn.addEventListener("click", closeStorePicker);
+  // Close only when the press also started on the overlay: a text selection
+  // dragged out of the dialog otherwise ends with a click on the overlay.
+  var storePickerPressStarted = false;
+  storePickerOverlay.addEventListener("mousedown", function (e) {
+    storePickerPressStarted = e.target === storePickerOverlay;
+  });
   storePickerOverlay.addEventListener("click", function (e) {
-    if (e.target === storePickerOverlay) closeStorePicker();
+    var shouldClose = storePickerPressStarted && e.target === storePickerOverlay;
+    storePickerPressStarted = false;
+    if (shouldClose) closeStorePicker();
   });
   document.addEventListener("keydown", function (e) {
     if (e.key === "Escape" && !storePickerOverlay.hidden) closeStorePicker();
@@ -8483,13 +8427,13 @@
   var botChatRoomSelect = document.getElementById("bot-chatroom-select");
   var botChatRoomCustom = document.getElementById("bot-chatroom-custom");
   var botSummarizeEnabled = document.getElementById("bot-summarize-enabled");
-  var botSummarizePresetSelect = document.getElementById("bot-summarize-preset");
+  var botSummarizeModelPicker = document.getElementById("bot-summarize-model");
   var botTranslateEnabled = document.getElementById("bot-translate-enabled");
-  var botTranslatePresetSelect = document.getElementById("bot-translate-preset");
+  var botTranslateModelPicker = document.getElementById("bot-translate-model");
   var botTranslateTargetLang = document.getElementById("bot-translate-target-lang");
   var botTranslateTargetLangCustom = document.getElementById("bot-translate-target-lang-custom");
   var botTtsEnabled = document.getElementById("bot-tts-enabled");
-  var botTtsPresetSelect = document.getElementById("bot-tts-preset");
+  var botTtsModelPicker = document.getElementById("bot-tts-model");
   var botTtsFormatSelect = document.getElementById("bot-tts-format");
   var botTtsSpeedInput = document.getElementById("bot-tts-speed");
   var botTtsVoiceHint = document.getElementById("bot-tts-voice-hint");
@@ -8520,52 +8464,41 @@
     return (value || "").split(",").map(function (s) { return s.trim(); }).filter(function (s) { return s.length > 0; });
   }
 
-  /* ---- presets (from bot.options when available, else state.config.ai.presets) ---- */
+  var aiModelLists = {};
+  var aiModelRequests = {};
+  var aiModelFetchStates = {};
+  var aiModelListeners = [];
+  var aiProviderWrite = Promise.resolve();
 
-  function botPresetsList() {
-    if (state.botOptions && state.botOptions.presets) return state.botOptions.presets;
-    var raw = (state.config && state.config.ai && state.config.ai.presets) || [];
-    return raw.map(function (p) {
-      return { id: p.id, label: p.label || p.id, model: p.model, has_voice: !!(p.voice && String(p.voice).trim()) };
-    });
+  var botTtsVoiceInput = document.getElementById("bot-tts-voice");
+  function botBuildEffort(kind) {
+    var group = document.querySelector('[data-bot-group="transform-' + kind + '"]');
+    var id = "bot-" + kind + "-effort";
+    group.appendChild(el("label", { for: id, "data-i18n": "ai.model.effort", text: t("ai.model.effort") }));
+    var select = el("select", { id: id });
+    select.appendChild(el("option", { value: "", "data-i18n": "settings.optionDefault", text: t("settings.optionDefault") }));
+    ["minimal", "low", "medium", "high", "xhigh"].forEach(function (value) { select.appendChild(el("option", { value: value, text: value })); });
+    group.appendChild(select);
+    return select;
   }
-
-  function botFillPresetSelect(select, value, opts) {
-    opts = opts || {};
-    var all = botPresetsList();
-    var list = all;
-    if (opts.voiceFirst) {
-      var voiced = all.filter(function (p) { return p.has_voice; });
-      if (voiced.length) list = voiced;
-    }
-    select.innerHTML = "";
-    select.appendChild(el("option", { value: "", text: t("bot.form.presetNone") }));
-    list.forEach(function (p) {
-      var label = p.model ? (p.label || p.id) + " (" + p.model + ")" : (p.label || p.id);
-      select.appendChild(el("option", { value: p.id, text: label }));
-    });
-    if (value && !list.some(function (p) { return p.id === value; })) {
-      select.appendChild(el("option", { value: value, text: value }));
-    }
+  var botSummarizeEffort = botBuildEffort("summarize");
+  var botTranslateEffort = botBuildEffort("translate");
+  function botSetEffort(select, value) {
+    if (value && !Array.prototype.some.call(select.options, function (option) { return option.value === value; })) select.appendChild(el("option", { value: value, text: value }));
     select.value = value || "";
   }
+  buildAiModelPicker(botSummarizeModelPicker, null, { allowDefault: true });
+  buildAiModelPicker(botTranslateModelPicker, null, { allowDefault: true });
+  buildAiModelPicker(botTtsModelPicker, null, { allowDefault: true, roomAuto: true });
 
-  /* Shows a hint under the TTS row: either no preset in the whole list has a
-     `voice` configured (global warning), or the currently-selected one
-     doesn't (the pipeline still runs -- the daemon only warns, see
-     bot.list's per-pipeline `warnings` -- but audio synthesis will fail). */
   function botUpdateTtsVoiceHint() {
-    var all = botPresetsList();
-    if (all.length && !all.some(function (p) { return p.has_voice; })) {
-      botTtsVoiceHint.textContent = t("bot.form.ttsNoVoicePresetsHint");
-      return;
-    }
-    var id = botTtsPresetSelect.value;
-    var preset = null;
-    for (var i = 0; i < all.length; i++) { if (all[i].id === id) { preset = all[i]; break; } }
-    botTtsVoiceHint.textContent = (id && preset && !preset.has_voice) ? t("bot.form.ttsNoVoiceHint") : "";
+    var ref = botTtsModelPicker._ref || aiConfig().default_ref;
+    var fallback = aiConfig().tts;
+    var voice = botTtsVoiceInput.value.trim() || (ref && fallback && ref.provider_id === fallback.provider_id && fallback.voice);
+    botTtsVoiceHint.textContent = ref && !voice ? t("bot.form.ttsNoVoiceHint") : "";
   }
-  botTtsPresetSelect.addEventListener("change", botUpdateTtsVoiceHint);
+  botTtsModelPicker.addEventListener("change", botUpdateTtsVoiceHint);
+  botTtsVoiceInput.addEventListener("input", botUpdateTtsVoiceHint);
 
   /* ---- rooms (from bot.options; degrades to a plain text input if that
      IPC command isn't available on an older daemon) ---- */
@@ -8712,9 +8645,9 @@
     botFillRoomSelect(botChatRoomSelect, {});
     botFillRoomSelect(botSinkChatRoomSelect, {});
     botFillRoomSelect(botSinkArticleRoomSelect, {});
-    botFillPresetSelect(botSummarizePresetSelect, botSummarizePresetSelect.value);
-    botFillPresetSelect(botTranslatePresetSelect, botTranslatePresetSelect.value);
-    botFillPresetSelect(botTtsPresetSelect, botTtsPresetSelect.value, { voiceFirst: true });
+    botSummarizeModelPicker._refresh();
+    botTranslateModelPicker._refresh();
+    botTtsModelPicker._refresh();
     botUpdateTtsVoiceHint();
   }
 
@@ -8852,7 +8785,7 @@
   });
   botIdInput.addEventListener("input", function () { botIdTouched = true; });
 
-  /* Refetches config.show + bot.options on every reset so the preset/room
+  /* Refetches config.show + bot.options on every reset so the model/room
      pickers reflect the latest server state even if the Settings drawer was
      never opened (state.config is otherwise only populated by pollConfig()
      at startup or when a settings drawer is refreshed). bot.options may 404
@@ -8863,6 +8796,7 @@
     botEditingTrustedAuthors = [];
     botIdTouched = false;
     botForm.reset();
+    [botSummarizeModelPicker, botTranslateModelPicker, botTtsModelPicker].forEach(function (picker) { picker._setRef(null); });
     botEnabledInput.checked = true;
     botIdInput.readOnly = false;
     var defaultRecipe = document.querySelector('input[name="bot-recipe"][value="news-audio"]');
@@ -8968,12 +8902,15 @@
       var translate = botFindByKind(pipeline.transforms, "translate");
       var tts = botFindByKind(pipeline.transforms, "tts");
       botSummarizeEnabled.checked = !!summarize;
-      botFillPresetSelect(botSummarizePresetSelect, summarize ? summarize.preset_id : "");
+      botSummarizeModelPicker._setRef(summarize ? summarize.model : null);
+      botSetEffort(botSummarizeEffort, summarize && summarize.reasoning_effort);
       botTranslateEnabled.checked = !!translate;
-      botFillPresetSelect(botTranslatePresetSelect, translate ? translate.preset_id : "");
+      botTranslateModelPicker._setRef(translate ? translate.model : null);
+      botSetEffort(botTranslateEffort, translate && translate.reasoning_effort);
       botSetSimplePickerValue(botTranslateTargetLang, botTranslateTargetLangCustom, translate ? (translate.target_lang || "") : "ja");
       botTtsEnabled.checked = !!tts;
-      botFillPresetSelect(botTtsPresetSelect, tts ? tts.preset_id : "", { voiceFirst: true });
+      botTtsModelPicker._setRef(tts ? tts.model : null);
+      botTtsVoiceInput.value = (tts && tts.voice) || "";
       botTtsFormatSelect.value = (tts && tts.format) || "";
       botTtsSpeedInput.value = (tts && tts.speed !== null && tts.speed !== undefined) ? String(tts.speed) : "";
 
@@ -9062,12 +8999,12 @@
 
     var transforms = [];
     if (botSummarizeEnabled.checked) {
-      transforms.push({ kind: "summarize", preset_id: botSummarizePresetSelect.value });
+      transforms.push({ kind: "summarize", model: botSummarizeModelPicker._ref, reasoning_effort: botSummarizeEffort.value || null });
     }
     if (botTranslateEnabled.checked) {
       var targetLang = botSimplePickerValue(botTranslateTargetLang, botTranslateTargetLangCustom);
       if (!targetLang) { showToast(t("bot.form.enterTargetLang"), "error"); return; }
-      transforms.push({ kind: "translate", preset_id: botTranslatePresetSelect.value, target_lang: targetLang });
+      transforms.push({ kind: "translate", model: botTranslateModelPicker._ref, reasoning_effort: botTranslateEffort.value || null, target_lang: targetLang });
     }
     if (botTtsEnabled.checked) {
       var speedVal = botTtsSpeedInput.value.trim();
@@ -9078,7 +9015,8 @@
       }
       transforms.push({
         kind: "tts",
-        preset_id: botTtsPresetSelect.value,
+        model: botTtsModelPicker._ref,
+        voice: botTtsVoiceInput.value.trim() || null,
         format: botTtsFormatSelect.value || null,
         speed: speedNum
       });
@@ -9800,7 +9738,6 @@
       { key: "enabled", labelKey: "settings.field.chat_relay.enabled.label", descKey: "settings.field.chat_relay.enabled.desc", type: "toggle" }
     ] },
     { section: "ai", titleKey: "settings.section.ai", container: "settings-drawer-body-ai", fields: [
-      { key: "room_id", labelKey: "settings.field.ai.room_id.label", descKey: "settings.field.ai.room_id.desc", type: "text", advanced: true },
       { key: "request_timeout_secs", labelKey: "settings.field.ai.request_timeout_secs.label", descKey: "settings.field.ai.request_timeout_secs.desc", type: "number", advanced: true },
       { key: "api_listen", labelKey: "settings.field.ai.api_listen.label", descKey: "settings.field.ai.api_listen.desc", type: "text", advanced: true }
     ] },
@@ -9848,7 +9785,7 @@
     var drawer = document.getElementById("settings-drawer-" + section) ||
       document.getElementById("settings-drawer-" + section.replace(/_/g, "-"));
     if (drawer) drawer.open = true;
-    if (section === "ai" && subtabActivate["panel-ai"]) subtabActivate["panel-ai"]("network");
+    if (section === "ai" && subtabActivate["panel-ai"]) subtabActivate["panel-ai"]("tasks");
     if (input) {
       var details = input.closest ? input.closest("details") : null;
       while (details) {
@@ -10034,661 +9971,984 @@
     return wrap;
   }
 
-  /* ---------- ai providers/presets editor (custom settings subsection) ---
-     ai.providers/ai.presets/ai.default_preset_id (see config.rs
-     AiProviderConfig/AiPresetConfig) aren't flat scalars, so the
-     descriptor-driven buildSettingsField above can't render them; this
-     hand-builds a tc-translate-style card grid: one .ai-card tile per
-     provider/preset (label + secondary line, small (x) remove affordance),
-     closed by a dashed "add" tile. Clicking a tile (or the add-tile) swaps
-     it in place for an inline edit form spanning the grid, with an
-     explicit Save/Cancel footer -- edits are staged in the form's inputs
-     and only committed to config.set on Save (Cancel discards them).
-     Wired into renderSettings for the "ai" section only, mounted into
-     #ai-connection-editor (Connection sub-tab of the AI panel) instead of
-     the settings drawer. config.set always takes the *whole*
-     providers/presets array, so Save reads the current array via
-     providers()/presets() (backed by sectionCfg, kept in sync by
-     saveSetting), patches/appends/removes the one entry that changed, and
-     writes the whole array back. */
+  /* Model references stay intact when their connection is disabled or removed. */
 
-  function aiProviderRefCount(presets, providerId) {
-    return presets.filter(function (p) { return p.provider_id === providerId; }).length;
+  var aiReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+  var aiMotions = new Set();
+  function aiMotionOptions(node, fast) {
+    var css = getComputedStyle(node);
+    var token = css.getPropertyValue(fast ? "--motion-fast" : "--motion-base").trim();
+    return { duration: token ? parseFloat(token) * (token.endsWith("ms") ? 1 : 1000) : fast ? 120 : 200,
+      easing: css.getPropertyValue("--ease-out").trim() || "cubic-bezier(.2,.8,.2,1)" };
+  }
+  function aiAnimate(node, frames, fast, done) {
+    if (node._aiMotion) node._aiMotion(false);
+    if (aiReducedMotion.matches || !node.animate) { if (done) done(); return; }
+    var options = aiMotionOptions(node, fast), animation = node.animate(frames, options), timer;
+    function finish(complete) {
+      if (node._aiMotion !== finish) return;
+      node._aiMotion = null; aiMotions.delete(finish); clearTimeout(timer);
+      animation.onfinish = animation.oncancel = null; animation.cancel();
+      if (complete && done) done();
+    }
+    node._aiMotion = finish; aiMotions.add(finish);
+    animation.onfinish = function () { finish(true); };
+    animation.oncancel = function () { finish(true); };
+    function fallback() {
+      if (animation.playState === "paused") timer = setTimeout(fallback, options.duration + 60);
+      else finish(true);
+    }
+    timer = setTimeout(fallback, options.duration + 60);
+  }
+  aiReducedMotion.addEventListener("change", function () {
+    if (aiReducedMotion.matches) Array.from(aiMotions).forEach(function (finish) { finish(true); });
+  });
+  function aiDisclosure(node, open, done) {
+    var from = node.hidden ? 0 : node.getBoundingClientRect().height;
+    var opacity = node.hidden ? "0" : getComputedStyle(node).opacity;
+    if (node._aiMotion) node._aiMotion(false);
+    node.hidden = false; node.inert = !open; node._expanded = open;
+    var css = getComputedStyle(node), height = node.getBoundingClientRect().height;
+    var full = { height: height + "px", opacity: 1, paddingTop: css.paddingTop, paddingBottom: css.paddingBottom,
+      borderTopWidth: css.borderTopWidth, borderBottomWidth: css.borderBottomWidth, overflow: "hidden" };
+    var empty = { height: "0px", opacity: 0, paddingTop: "0px", paddingBottom: "0px", borderTopWidth: "0px", borderBottomWidth: "0px", overflow: "hidden" };
+    aiAnimate(node, [Object.assign({}, open && !from ? empty : full, { height: from + "px", opacity: opacity }), open ? full : empty], false, function () {
+      if (!open) node.hidden = true;
+      if (done) done();
+    });
+  }
+  function aiEnter(node) { aiAnimate(node, [{ opacity: 0, transform: "translateY(4px)" }, { opacity: 1, transform: "none" }]); }
+  function aiChevron(button) { button.appendChild(el("span", { class: "ai-chevron", "aria-hidden": "true" })); }
+
+  function aiConfig() { return (state.config && state.config.ai) || {}; }
+  function aiProviders() { return aiConfig().providers || []; }
+  function aiIsRoom(p) { return (p.base_url || "").indexOf("mist-network://") === 0; }
+  function aiProvider(id) { return aiProviders().filter(function (p) { return p.id === id; })[0]; }
+  function aiSameRef(a, b) { return !!a && !!b && a.provider_id === b.provider_id && a.model === b.model; }
+  function aiRefWarning(ref) {
+    if (!ref || !ref.provider_id) return "";
+    var p = aiProvider(ref.provider_id);
+    return !p ? t("ai.model.missing") : p.enabled === false ? t("ai.model.disabled") : "";
+  }
+  function aiRefLabel(ref, emptyLabel) {
+    if (!ref || !ref.model) return emptyLabel;
+    var p = aiProvider(ref.provider_id);
+    return ref.model + " \u00b7 " + (p ? p.label || p.id : ref.provider_id);
+  }
+  function aiModelMatches(query, ref, p) {
+    var hay = (ref.model + " " + (p.label || p.id)).toLowerCase();
+    return query.toLowerCase().trim().split(/\s+/).every(function (part) { return hay.indexOf(part) !== -1; });
+  }
+  function aiNotifyModels() {
+    aiModelListeners = aiModelListeners.filter(function (entry) { return entry.node.isConnected; });
+    aiModelListeners.forEach(function (entry) { entry.refresh(); });
+    document.querySelectorAll(".ai-model-picker").forEach(function (node) { node._refresh(); });
+  }
+  function aiFetchModels(p, force) {
+    if (!p || p.enabled === false) return Promise.resolve();
+    var signature = JSON.stringify([p.base_url, p.api_key]);
+    if (aiModelRequests[p.id]) {
+      if (aiModelRequests[p.id].signature === signature) return aiModelRequests[p.id].promise;
+      return aiModelRequests[p.id].promise.then(function () { return aiFetchModels(aiProvider(p.id), force); });
+    }
+    var previous = aiModelFetchStates[p.id];
+    if (!force && previous && previous.signature === signature && Date.now() - previous.succeededAt < 10000) return Promise.resolve();
+    var fetching = { signature: signature, state: "fetching" };
+    aiModelFetchStates[p.id] = fetching;
+    var request = api("ai.upstream_models", { provider_id: p.id }).then(function (data) {
+      var current = aiProvider(p.id);
+      if (!current || current.enabled === false || JSON.stringify([current.base_url, current.api_key]) !== signature) return;
+      if (data.error) throw new Error(data.error);
+      aiModelLists[p.id] = { models: Array.isArray(data.models) ? data.models : [], live: !!data.live, base_url: p.base_url };
+      fetching.state = data.live ? "ok" : "cache";
+      if (data.live) {
+        fetching.succeededAt = Date.now();
+        // IPC persists the cache. Keep the current view in sync without a config write.
+        current.models = aiModelLists[p.id].models.slice();
+        current.models_fetched_at = new Date().toISOString();
+      }
+    }).catch(function (err) {
+      fetching.state = "error";
+      fetching.error = err.message || String(err);
+    }).then(function () { delete aiModelRequests[p.id]; aiNotifyModels(); });
+    aiModelRequests[p.id] = { signature: signature, promise: request };
+    aiNotifyModels();
+    return request;
+  }
+  function aiModelFetchLabel(p) {
+    var fetch = aiModelFetchStates[p.id];
+    if (p.enabled === false) return t("ai.model.disabled");
+    if (fetch && fetch.state === "fetching") return t("ai.provider.fetching");
+    if (fetch && fetch.state === "error") return t("ai.provider.error") + ": " + fetch.error.replace(/\s+/g, " ").slice(0, 80) + (fetch.error.length > 80 ? "\u2026" : "");
+    if (fetch && fetch.state === "ok") return t("ai.provider.ok", { count: (p.models || []).length });
+    return t("ai.provider.models", { count: (p.models || []).length });
+  }
+  function aiRefreshModels(force) {
+    return Promise.all(aiProviders().filter(function (p) { return p.enabled !== false; }).map(function (p) { return aiFetchModels(p, force); }));
+  }
+  function aiRecentModels() {
+    try {
+      var value = JSON.parse(localStorage.getItem("mistl-recent-models") || "[]");
+      return Array.isArray(value) ? value.filter(function (r) { return r && typeof r.provider_id === "string" && typeof r.model === "string"; }).slice(0, 8) : [];
+    } catch (e) { return []; }
+  }
+  function aiRememberModel(ref) {
+    if (!ref) return;
+    try {
+      localStorage.setItem("mistl-recent-models", JSON.stringify([ref].concat(aiRecentModels().filter(function (r) { return !aiSameRef(r, ref); })).slice(0, 8)));
+    } catch (e) { /* Storage is optional. */ }
+  }
+  function aiModelEntries(p, cached) {
+    var list = aiModelLists[p.id];
+    if (list && list.base_url !== p.base_url) list = null;
+    var live = list && list.live;
+    var models = list && list.live && !aiIsRoom(p) ? list.models : (list ? list.models : []).concat(cached || p.models || []);
+    return models.filter(function (m, i) { return typeof m === "string" && models.indexOf(m) === i; }).map(function (model) {
+      return { ref: { provider_id: p.id, model: model }, dim: aiIsRoom(p) && !(live && list.models.indexOf(model) !== -1) };
+    });
+  }
+  function aiRefIsCached(ref) {
+    var p = ref && aiProvider(ref.provider_id);
+    var list = p && aiModelLists[p.id];
+    return p && aiIsRoom(p) && ref.model !== "network-auto" && !(list && list.base_url === p.base_url && list.live && list.models.indexOf(ref.model) !== -1);
   }
 
-  // Shallow-copies obj with one field overridden -- this file has no
-  // Object.assign/spread (ES5 style throughout), so array entries are
-  // patched by hand instead.
+  function buildAiModelPicker(host, ref, opts) {
+    opts = opts || {};
+    host.classList.add("ai-model-picker");
+    var button = el("button", { type: "button", class: "ai-model-trigger", "aria-haspopup": "dialog", "aria-expanded": "false" });
+    var warning = el("div", { class: "ai-model-warning", role: "status" });
+    host.appendChild(button);
+    host.appendChild(warning);
+    host._ref = ref || null;
+    host._refresh = function () {
+      var inherited = !host._ref && opts.allowDefault && aiConfig().default_ref;
+      button.textContent = inherited ? aiRefLabel(inherited) + " (" + t("ai.model.useDefault") + ")" : aiRefLabel(host._ref, t(opts.voice ? "ai.model.browser" : opts.allowDefault ? "ai.model.useDefault" : "ai.model.select"));
+      warning.textContent = aiRefWarning(host._ref || inherited);
+      warning.hidden = !warning.textContent;
+    };
+    host._setRef = function (next) { host._ref = next || null; host._refresh(); };
+    host._refresh();
+    button.addEventListener("click", function () {
+      if (button.getAttribute("aria-expanded") === "true") return;
+      var overlay = el("div", { class: "modal-overlay ai-model-overlay" });
+      var panel = el("div", { class: "modal-panel ai-model-dialog", role: "dialog", "aria-modal": "true", "aria-label": t("ai.model.select") });
+      var head = el("div", { class: "modal-header" });
+      head.appendChild(el("span", { text: t("ai.model.select") }));
+      var closeBtn = el("button", { type: "button", class: "modal-close", text: "\u00d7", "aria-label": t("common.close") });
+      head.appendChild(closeBtn);
+      panel.appendChild(head);
+      var search = el("input", { type: "search", class: "ai-model-search", placeholder: t("ai.model.search"), "aria-label": t("ai.model.search"), autocomplete: "off" });
+      panel.appendChild(search);
+      var panes = el("div", { class: "ai-model-panes" });
+      var sources = el("div", { class: "ai-model-sources", role: "listbox", "aria-label": t("ai.model.sources") });
+      var results = el("div", { class: "ai-model-results", role: "listbox", "aria-label": t("ai.model.select") });
+      panes.appendChild(sources); panes.appendChild(results); panel.appendChild(panes);
+      overlay.appendChild(panel);
+      document.body.appendChild(overlay);
+      aiAnimate(overlay, [{ opacity: 0 }, { opacity: 1 }]);
+      aiAnimate(panel, [{ transform: "scale(.98)" }, { transform: "none" }]);
+      button.setAttribute("aria-expanded", "true");
+      var assigned = host._ref || (opts.allowDefault && aiConfig().default_ref);
+      var initialProvider = assigned && aiProvider(assigned.provider_id);
+      var source = initialProvider && initialProvider.enabled !== false ? "provider:" + initialProvider.id : null;
+      var narrowed = null, searching = false;
+      var cache = {};
+      aiProviders().forEach(function (p) { cache[p.id] = (p.models || []).slice(); });
+      var closing = false;
+      function close() {
+        if (closing) return;
+        closing = true; overlay.inert = true;
+        button.setAttribute("aria-expanded", "false"); button.focus();
+        aiAnimate(panel, [{ transform: getComputedStyle(panel).transform }, { transform: "scale(.98)" }], true);
+        aiAnimate(overlay, [{ opacity: getComputedStyle(overlay).opacity }, { opacity: 0 }], true, function () { overlay.remove(); });
+      }
+      function choose(next) {
+        host._setRef(next);
+        aiRememberModel(next);
+        close();
+        host.dispatchEvent(new Event("change"));
+      }
+      function render(event) {
+        if (closing) return;
+        var active = document.activeElement;
+        var focusedPane = results.contains(active) ? results : sources.contains(active) ? sources : null;
+        var provider = active.getAttribute("data-provider-id"), model = active.getAttribute("data-model"), sourceKey = active.getAttribute("data-source-key");
+        var scroll = results.scrollTop, leftScroll = sources.scrollTop, chipScroll = sources.scrollLeft;
+        var query = search.value.trim(), providers = aiProviders().filter(function (p) { return p.enabled !== false; });
+        if (!!query !== searching) narrowed = null;
+        searching = !!query;
+        var recent = [];
+        (assigned ? [assigned] : []).concat(aiRecentModels().filter(function (r) { var p = aiProvider(r.provider_id); return p && p.enabled !== false; })).forEach(function (r) {
+          if (recent.length < 8 && !recent.some(function (prev) { return aiSameRef(prev, r); })) recent.push(r);
+        });
+        if (!source || (source === "recent" ? !recent.length : !providers.some(function (p) { return "provider:" + p.id === source; }))) source = recent.length ? "recent" : providers.length ? "provider:" + providers[0].id : null;
+        if (narrowed && narrowed !== "recent" && !providers.some(function (p) { return "provider:" + p.id === narrowed; })) narrowed = null;
+        sources.innerHTML = ""; results.innerHTML = "";
+        function sourceRow(key, label, detail, empty, immediate, title, isProvider) {
+          var sourceId = isProvider ? "provider:" + key : key;
+          var node = el("button", { type: "button", class: "ai-model-source", role: "option", "data-source": key,
+            "data-source-key": sourceId, "aria-selected": String(searching ? sourceId === (narrowed || "all") : sourceId === source), title: title || label });
+          node.appendChild(el("span", { class: "ai-model-source-name", text: label }));
+          if (detail) node.appendChild(el("span", { class: "ai-model-source-detail", text: detail }));
+          if (searching && empty) node.dataset.empty = "true";
+          node.addEventListener("click", function () {
+            if (immediate) { choose(null); return; }
+            if (searching) narrowed = sourceId === "all" ? null : sourceId;
+            else source = sourceId;
+            render({ type: "source" });
+            var selected = Array.prototype.find.call(sources.querySelectorAll("button"), function (row) { return row.dataset.sourceKey === sourceId; });
+            if (selected) selected.focus();
+          });
+          sources.appendChild(node); return node;
+        }
+        function entries(p) {
+          var list = aiModelEntries(p, cache[p.id]);
+          recent.forEach(function (r) { if (r.provider_id === p.id && !list.some(function (entry) { return aiSameRef(entry.ref, r); })) list.push({ ref: r }); });
+          if ((opts.voice || opts.roomAuto) && aiIsRoom(p) && !list.some(function (entry) { return entry.ref.model === "network-auto"; })) list.unshift({ ref: { provider_id: p.id, model: "network-auto" } });
+          list.sort(function (a, b) {
+            function priority(entry) { return (opts.voice || opts.roomAuto) && aiIsRoom(p) && entry.ref.model === "network-auto" ? 2 : aiSameRef(entry.ref, assigned) ? 1 : 0; }
+            return priority(b) - priority(a);
+          });
+          return list;
+        }
+        var groups = providers.map(function (p) { var list = entries(p); return { provider: p, entries: list, matches: list.filter(function (entry) { return aiModelMatches(query, entry.ref, p); }) }; });
+        if (searching) sourceRow("all", t("ai.model.all"), String(groups.reduce(function (count, group) { return count + group.matches.length; }, 0)));
+        var recentMatches = recent.filter(function (ref) { var p = aiProvider(ref.provider_id); return p && p.enabled !== false && aiModelMatches(query, ref, p); });
+        if (recent.length) sourceRow("recent", t("ai.model.recent"), String(searching ? recentMatches.length : recent.length), !recentMatches.length);
+        if (opts.voice) sourceRow("browser", t("ai.model.browser"), "", false, true);
+        else if (opts.allowDefault) sourceRow("default", t("ai.model.useDefault"), "", false, true);
+        groups.forEach(function (group) {
+          var p = group.provider, fetch = aiModelFetchStates[p.id];
+          var count = searching ? group.matches.length : group.entries.filter(function (entry) { return entry.ref.model !== "network-auto"; }).length;
+          var stateLabel = aiIsRoom(p) ? aiConnectionRoomStatus(p) : fetch && fetch.state === "error" ? t("ai.provider.error") : fetch && fetch.state === "fetching" ? t("ai.provider.fetching") : "";
+          var node = sourceRow(p.id, p.label || p.id, (aiIsRoom(p) ? t("ai.connection.room") : "HTTP") + " \u00b7 " + count + (stateLabel ? " \u00b7 " + stateLabel : ""), !count, false,
+            (p.label || p.id) + (fetch && fetch.error ? "\n" + fetch.error : ""), true);
+          node.dataset.count = count;
+        });
+        var rendered = [];
+        function row(ref) {
+          if (rendered.some(function (prev) { return aiSameRef(prev, ref); })) return;
+          rendered.push(ref);
+          var p = aiProvider(ref.provider_id), warning = aiRefWarning(ref);
+          var node = el("button", { type: "button", class: "ai-model-option" + (aiRefIsCached(ref) ? " ai-model-cached" : ""), role: "option",
+            "data-provider-id": ref.provider_id, "data-model": ref.model, "aria-selected": String(aiSameRef(assigned, ref)) });
+          node.disabled = !!warning;
+          if (aiSameRef(assigned, ref)) node.appendChild(el("span", { class: "ai-model-check", text: "\u2713", "aria-hidden": "true" }));
+          var label = el("span", { class: "ai-model-label" });
+          label.appendChild(el("span", { text: ref.model === "network-auto" && p && aiIsRoom(p) ? t("ai.model.roomAuto", { provider: p.label || p.id }) : ref.model }));
+          if (searching ? narrowed === "recent" : source === "recent") label.appendChild(el("span", { class: "ai-model-provider", text: p ? p.label || p.id : ref.provider_id }));
+          node.appendChild(label);
+          if (searching && aiRecentModels().some(function (r) { return aiSameRef(r, ref); })) node.appendChild(el("span", { class: "ai-model-mark", text: t("ai.model.recent") }));
+          if (warning) node.appendChild(el("span", { class: "ai-model-warning", text: warning }));
+          node.addEventListener("click", function () { choose(ref); }); results.appendChild(node);
+        }
+        if (searching ? narrowed === "recent" : source === "recent") (searching ? recentMatches : recent).forEach(function (ref) { row(ref); });
+        else groups.forEach(function (group) {
+          var p = group.provider;
+          if (searching ? narrowed && narrowed !== "provider:" + p.id : source !== "provider:" + p.id) return;
+          var list = searching ? group.matches : group.entries;
+          if (list.length) results.appendChild(el("div", { class: "ai-model-group", text: (p.label || p.id) + " \u00b7 " + (aiIsRoom(p) ? t("ai.connection.room") : "HTTP") }));
+          list.forEach(function (entry) { row(entry.ref); });
+        });
+        if (!rendered.length) results.appendChild(el("div", { class: "muted", text: t("ai.model.empty") }));
+        sources.scrollTop = leftScroll; sources.scrollLeft = chipScroll;
+        results.scrollTop = event && (event.type === "input" || event.type === "source") ? 0 : scroll;
+        if (focusedPane) {
+          var replacement = Array.prototype.find.call(focusedPane.querySelectorAll("button:not(:disabled)"), function (node) {
+            return focusedPane === sources ? node.dataset.sourceKey === sourceKey : node.dataset.providerId === provider && node.dataset.model === model;
+          });
+          (replacement || search).focus();
+        }
+        if (event && event.type === "source") aiAnimate(results, [{ opacity: 0 }, { opacity: 1 }], true);
+      }
+      search.addEventListener("input", render);
+      panel.addEventListener("keydown", function (e) {
+        if (e.key === "Escape") { e.preventDefault(); close(); return; }
+        if (e.key === "Tab") {
+          var focusable = Array.prototype.slice.call(panel.querySelectorAll("button:not(:disabled), input"));
+          var current = focusable.indexOf(document.activeElement);
+          if ((e.shiftKey && current === 0) || (!e.shiftKey && current === focusable.length - 1)) {
+            e.preventDefault(); focusable[e.shiftKey ? focusable.length - 1 : 0].focus();
+          }
+          return;
+        }
+        var inSources = sources.contains(document.activeElement);
+        var rows = (inSources ? sources : results).querySelectorAll("button:not(:disabled)");
+        if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+          if (document.activeElement === search) return;
+          e.preventDefault();
+          var targetPane = e.key === "ArrowLeft" ? sources : results;
+          var target = targetPane.querySelector('[aria-selected="true"]:not(:disabled)') || targetPane.querySelector("button:not(:disabled)");
+          if (target) { target.focus(); if (target.scrollIntoView) target.scrollIntoView({ block: "nearest", inline: "nearest" }); }
+          return;
+        }
+        if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+          e.preventDefault();
+          if (!rows.length) return;
+          var index = Array.prototype.indexOf.call(rows, document.activeElement);
+          index = index < 0 ? (e.key === "ArrowDown" ? 0 : rows.length - 1) : (index + (e.key === "ArrowDown" ? 1 : -1) + rows.length) % rows.length;
+          rows.forEach(function (row, i) { row.classList.toggle("active", index === i); });
+          rows[index].focus();
+          if (rows[index].scrollIntoView) rows[index].scrollIntoView({ block: "nearest", inline: "nearest" });
+        } else if (e.key === "Enter" && rows.length) {
+          if (document.activeElement === search) { e.preventDefault(); rows[0].click(); }
+          else if (inSources || results.contains(document.activeElement)) { e.preventDefault(); document.activeElement.click(); }
+        }
+      });
+      closeBtn.addEventListener("click", close);
+      var pressStarted = false; // see storePickerPressStarted
+      overlay.addEventListener("mousedown", function (e) { pressStarted = e.target === overlay; });
+      overlay.addEventListener("click", function (e) { var shouldClose = pressStarted && e.target === overlay; pressStarted = false; if (shouldClose) close(); });
+      aiModelListeners.push({ node: overlay, refresh: render });
+      render();
+      var selectedRow = results.querySelector('[aria-selected="true"]');
+      if (selectedRow && selectedRow.scrollIntoView) selectedRow.scrollIntoView({ block: "nearest" });
+      search.focus(); aiRefreshModels(false);
+    });
+    return host;
+  }
+
+  function aiSaveConfig(key, value, feedback) {
+    return api("config.set", { path: "ai." + key, value: value }).then(function (data) {
+      aiConfig()[key] = value;
+      if (feedback) feedback("");
+      else showToast(t(data && data.applies === "applied immediately" ? "settings.savedLive" : "settings.savedNextStart"), "success");
+      aiNotifyModels(); refreshAiHints();
+      return true;
+    }, function (err) { if (feedback) feedback(err.message); else showToast("config.set ai." + key + ": " + err.message, "error"); return false; });
+  }
+  function aiPatchProvider(id, key, value) {
+    aiProviderWrite = aiProviderWrite.then(function () {
+      return aiSaveConfig("providers", aiProviders().map(function (p) { return p.id === id ? withField(p, key, value) : p; }));
+    });
+    return aiProviderWrite;
+  }
+  function aiRenderRoomStatus(card, p) {
+    if (card._refreshProvider) card._refreshProvider();
+  }
+  var aiStatusClose;
+  function buildAiProviderStatus(card, p) {
+    var button = el("button", { type: "button", class: "ai-provider-status", "aria-expanded": "false", "aria-haspopup": "dialog" });
+    button.appendChild(el("span", { class: "ai-provider-status-dot", "aria-hidden": "true" }));
+    var text = el("span", { class: aiIsRoom(p) ? "ai-provider-status-text ai-room-status" : "ai-provider-status-text ai-provider-count", role: "status" });
+    button.appendChild(text);
+    var popover = el("div", { class: "ai-status-popover", role: "dialog", hidden: "", id: genAiEntryId("ai-status", []) });
+    button.setAttribute("aria-controls", popover.id);
+    var opened = false, pressStarted = false, pressing = false, leaveTimer;
+    function refresh() {
+      p = aiProvider(p.id) || p;
+      var room = aiIsRoom(p), fetch = aiModelFetchStates[p.id];
+      var status = ((state.ai && state.ai.rooms) || []).filter(function (r) { return r.provider_id === p.id; })[0];
+      var peers = status ? (Array.isArray(status.peers) ? status.peers.length : status.peers || 0) : 0;
+      var disabled = p.enabled === false, providing = !disabled && !!(status && status.providing);
+      var error = !disabled && (fetch && fetch.error || status && status.error);
+      var connection = disabled ? "offline" : error ? "error" : room ? status && status.joined ? peers ? "connected" : "searching" : "offline" :
+        fetch && fetch.state === "fetching" ? "searching" : fetch && fetch.state === "ok" ? "connected" : "offline";
+      var label = room ? aiConnectionRoomStatus(p) : aiModelFetchLabel(p);
+      text.textContent = !room && error ? t("ai.provider.error") : label;
+      text.dataset.state = button.dataset.state = disabled ? "disabled" : fetch ? fetch.state : "cache";
+      button.dataset.connectionState = connection; button.dataset.providing = String(providing);
+      var details = [!room && error ? t("ai.provider.error") : label];
+      if (room && disabled) details.push(t("ai.room.peers", { count: peers }));
+      if (room) details.push(t(providing ? "ai.providing" : "ai.sharing.paused"));
+      var updated = Math.max(Date.parse(p.models_fetched_at) || 0, fetch && fetch.succeededAt || 0);
+      if (updated) details.push(t("profile.updatedAt") + ": " + new Date(updated).toLocaleString());
+      if (error) details.push(String(error));
+      text.title = error || details.join("\n");
+      button.setAttribute("aria-label", (p.label || p.id) + ": " + details.join("; "));
+      popover.setAttribute("aria-label", p.label || p.id);
+      popover.replaceChildren(el("strong", { text: p.label || p.id }));
+      details.forEach(function (detail, i) { popover.appendChild(el("div", { class: error && i === details.length - 1 ? "ai-status-error" : "", text: detail })); });
+      if (opened) { if (!card.isConnected) close(false); else position(); }
+    }
+    function position() {
+      var rect = button.getBoundingClientRect(), height = popover.getBoundingClientRect().height;
+      var above = innerHeight - rect.bottom < height + 8 && rect.top > height + 8;
+      popover.dataset.side = above ? "above" : "below";
+      popover.style.left = Math.max(16, Math.min(innerWidth - popover.getBoundingClientRect().width - 16, rect.right - popover.getBoundingClientRect().width)) + "px";
+      popover.style.top = Math.max(16, Math.min(innerHeight - height - 16, above ? rect.top - height - 8 : rect.bottom + 8)) + "px";
+    }
+    function startPress(e) { pressing = true; clearTimeout(leaveTimer); pressStarted = !button.contains(e.target) && !popover.contains(e.target); }
+    function endPress() { pressing = false; }
+    function outside(e) { var shouldClose = pressStarted && !button.contains(e.target) && !popover.contains(e.target); pressStarted = false; if (shouldClose) close(false); }
+    function escape(e) { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close(true); } }
+    function close(focus) {
+      if (!opened) return;
+      opened = false; clearTimeout(leaveTimer); button.setAttribute("aria-expanded", "false");
+      document.removeEventListener("pointerdown", startPress, true); document.removeEventListener("mousedown", startPress, true);
+      document.removeEventListener("pointerup", endPress, true); document.removeEventListener("mouseup", endPress, true);
+      document.removeEventListener("click", outside, true); document.removeEventListener("keydown", escape, true);
+      window.removeEventListener("resize", position); window.removeEventListener("scroll", position, true);
+      if (aiStatusClose === close) aiStatusClose = null;
+      aiAnimate(popover, [{ opacity: 1 }, { opacity: 0 }], true, function () { popover.hidden = true; popover.remove(); });
+      if (focus) button.focus();
+    }
+    function open() {
+      clearTimeout(leaveTimer);
+      if (opened) return;
+      if (aiStatusClose) aiStatusClose(false);
+      aiStatusClose = close; opened = true; pressStarted = pressing = false;
+      document.body.appendChild(popover); popover.hidden = false; button.setAttribute("aria-expanded", "true"); refresh();
+      document.addEventListener("pointerdown", startPress, true); document.addEventListener("mousedown", startPress, true);
+      document.addEventListener("pointerup", endPress, true); document.addEventListener("mouseup", endPress, true);
+      document.addEventListener("click", outside, true); document.addEventListener("keydown", escape, true);
+      window.addEventListener("resize", position); window.addEventListener("scroll", position, true);
+      aiAnimate(popover, [{ opacity: 0, transform: "translateY(" + (popover.dataset.side === "above" ? "-4" : "4") + "px) scale(.98)" }, { opacity: 1, transform: "none" }]);
+    }
+    button.addEventListener("click", function (e) { e.stopPropagation(); if (opened) close(false); else open(); });
+    button.addEventListener("pointerenter", function () { if (window.matchMedia("(min-width: 481px) and (hover: hover)").matches) open(); });
+    function leave() { if (!pressing && window.matchMedia("(min-width: 481px) and (hover: hover)").matches) leaveTimer = setTimeout(function () { close(false); }, 200); }
+    button.addEventListener("pointerleave", leave);
+    popover.addEventListener("pointerenter", function () { clearTimeout(leaveTimer); });
+    popover.addEventListener("pointerleave", leave);
+    popover.addEventListener("click", function (e) { e.stopPropagation(); });
+    button._refresh = refresh; card._closeStatus = function () { close(false); };
+    refresh(); return button;
+  }
+  function aiConnectionRoomStatus(p) {
+    var status = ((state.ai && state.ai.rooms) || []).filter(function (r) { return r.provider_id === p.id; })[0];
+    return p.enabled === false ? t("ai.model.disabled") :
+      t(status && status.joined ? "ai.room.joined" : "ai.room.idle") + " \u00b7 " + t("ai.room.peers", { count: status ? (Array.isArray(status.peers) ? status.peers.length : status.peers || 0) : 0 });
+  }
+  function aiSharingRoomStatus(p) {
+    var status = ((state.ai && state.ai.rooms) || []).filter(function (r) { return r.provider_id === p.id; })[0];
+    return t(status && status.providing ? "ai.providing" : status && status.joined ? "ai.sharing.paused" : "ai.room.idle") + " \u00b7 " +
+      t("ai.room.peers", { count: status ? (Array.isArray(status.peers) ? status.peers.length : status.peers || 0) : 0 });
+  }
+  function aiRefreshRoomStatuses() {
+    ((state.ai && state.ai.rooms) || []).forEach(function (room) {
+      var p = aiProvider(room.provider_id);
+      if (!p || p.enabled === false || !room.joined || room.room !== p.base_url.slice(15) || !Array.isArray(room.models)) return;
+      var list = aiModelLists[p.id];
+      if (list && list.live && JSON.stringify(list.models) === JSON.stringify(room.models)) return;
+      p.models = room.models.slice();
+      aiModelLists[p.id] = { models: room.models.slice(), live: true, base_url: p.base_url };
+      aiModelFetchStates[p.id] = { signature: JSON.stringify([p.base_url, p.api_key]), state: "ok", succeededAt: Date.now() };
+      aiNotifyModels();
+    });
+    document.querySelectorAll(".ai-provider-card[data-provider-id]").forEach(function (card) {
+      var p = aiProvider(card.getAttribute("data-provider-id"));
+      if (p && aiIsRoom(p)) aiRenderRoomStatus(card, p);
+    });
+    document.querySelectorAll(".ai-sharing-rooms [data-room-provide]").forEach(function (chip) {
+      var p = aiProvider(chip.getAttribute("data-room-provide"));
+      if (p) chip.querySelector(".ai-room-status").textContent = aiSharingRoomStatus(p);
+    });
+    aiModelListeners.forEach(function (entry) {
+      if (entry.node.isConnected && entry.node.classList.contains("ai-model-overlay")) entry.refresh();
+    });
+  }
   function withField(obj, key, value) {
     var out = {};
-    for (var k in obj) {
-      if (Object.prototype.hasOwnProperty.call(obj, k)) out[k] = obj[k];
-    }
+    for (var k in obj) { if (Object.prototype.hasOwnProperty.call(obj, k)) out[k] = obj[k]; }
     out[key] = value;
     return out;
   }
-
   function genAiEntryId(prefix, existingIds) {
     var id;
+    do { id = prefix + "-" + Math.random().toString(36).slice(2, 8); } while (existingIds.indexOf(id) !== -1);
+    return id;
+  }
+  function genAiRoomId() {
+    var id;
     do {
-      id = prefix + "-" + Math.random().toString(36).slice(2, 8);
-    } while (existingIds.indexOf(id) !== -1);
+      var bytes = new Uint8Array(10); crypto.getRandomValues(bytes);
+      id = Array.prototype.map.call(bytes, function (b) { return b.toString(16).padStart(2, "0"); }).join("");
+    } while (aiProviders().some(function (p) { return p.base_url === "mist-network://" + id; }));
     return id;
   }
 
-  // Best-effort "host" for a card's secondary line -- falls back to the raw
-  // string for anything that doesn't parse (empty, partially-typed, etc.),
-  // so this never throws while a provider's base_url is mid-edit elsewhere.
-  function aiUrlHost(url) {
-    if (!url) return "";
-    try {
-      var host = new URL(url).host;
-      return host || url;
-    } catch (e) {
-      return url;
+  function buildAiConnectionPopup(roomOnly, owner) {
+    var overlay = el("div", { class: "ai-connection-overlay", hidden: "" });
+    var form = el("form", { class: "ai-connection-popup" + (roomOnly ? " ai-add-room" : ""), role: "dialog", "aria-modal": "true",
+      "aria-label": t(roomOnly ? "ai.provider.addRoom" : "ai.connection.add"), id: genAiEntryId("ai-connection", []), hidden: "", novalidate: "" });
+    overlay.appendChild(form); owner.appendChild(overlay);
+    var kind = "http", trigger, saving = false, pressStarted = false, duplicate;
+    var title = el("strong", { text: t(roomOnly ? "ai.provider.addRoom" : "ai.connection.add") }); form.appendChild(title);
+    var toggle = el("div", { class: "ai-connection-kind", role: "group", "aria-label": t("ai.connection.kind") });
+    var httpButton = el("button", { type: "button", "data-connection-kind": "http", text: "HTTP" });
+    var roomButton = el("button", { type: "button", "data-connection-kind": "room", text: t("ai.connection.room") });
+    toggle.appendChild(httpButton); toggle.appendChild(roomButton); if (!roomOnly) form.appendChild(toggle);
+    var existingRow = el("div", { class: "row" }); if (roomOnly) form.appendChild(existingRow);
+    function field(key, input, parent) {
+      var label = el("label", { text: t(key) }); label.appendChild(input); parent.appendChild(label); return input;
     }
+    var existing = field("ai.sharing.existingRoom", el("select", { "data-add-room-existing": "" }), existingRow);
+    var use = el("button", { type: "button", "data-add-room-use": "", text: t("ai.sharing.useRoom") }); existingRow.appendChild(use);
+    var name = field("ai.connection.name", el("input", { type: "text", "data-connection-name": "", "data-add-room-label": "", autocomplete: "off" }), form);
+    var fields = el("div", { class: "ai-connection-fields" }); form.appendChild(fields);
+    var httpFields = el("div", { class: "ai-connection-fields" }); fields.appendChild(httpFields);
+    var url = field("ai.connection.url", el("input", { type: "text", inputmode: "url", required: "", "data-connection-url": "", placeholder: "https://example.com/v1", autocomplete: "off" }), httpFields);
+    var urlError = el("div", { class: "ai-connection-error", role: "alert", hidden: "", id: form.id + "-url-error" }); httpFields.appendChild(urlError);
+    url.setAttribute("aria-describedby", urlError.id);
+    var key = field("settings.ai.providers.keyPlaceholder", el("input", { type: "password", "data-connection-key": "", autocomplete: "new-password" }), httpFields);
+    var roomFields = el("div", { class: "ai-connection-fields" }); fields.appendChild(roomFields);
+    var idRow = el("div", { class: "row" }); roomFields.appendChild(idRow);
+    var roomId = field("ai.room.id", el("input", { type: "text", required: "", "data-add-room-id": "", autocomplete: "off" }), idRow);
+    var random = el("button", { type: "button", "data-add-room-random": "", text: t("ai.sharing.randomRoomId") }); idRow.appendChild(random);
+    var roomError = el("div", { class: "ai-connection-error", role: "alert", hidden: "", id: form.id + "-room-error" }); roomFields.appendChild(roomError);
+    roomId.setAttribute("aria-describedby", roomError.id);
+    var reuse = el("button", { type: "button", "data-connection-reuse": "", text: t("ai.connection.useExisting"), hidden: "" }); roomFields.appendChild(reuse);
+    var footer = el("div", { class: "row ai-connection-footer" }); form.appendChild(footer);
+    var cancel = el("button", { type: "button", text: t("ai.connection.cancel") }); footer.appendChild(cancel);
+    var create = el("button", { type: "submit", class: "primary", text: t("ai.connection.submit") }); footer.appendChild(create);
+    function position() {
+      if (overlay.hidden || !trigger) return;
+      var anchor = trigger.getBoundingClientRect(), size = form.getBoundingClientRect();
+      var above = innerHeight - anchor.bottom - 16 < size.height && anchor.top > innerHeight - anchor.bottom;
+      form.dataset.side = above ? "above" : "below";
+      form.style.transformOrigin = above ? "bottom right" : "top right";
+      form.style.left = Math.max(16, Math.min(anchor.right - size.width, innerWidth - size.width - 16)) + "px";
+      form.style.top = Math.max(16, Math.min(above ? anchor.top - size.height - 8 : anchor.bottom + 8, innerHeight - size.height - 16)) + "px";
+    }
+    function setKind(next, animate) {
+      if (saving) return;
+      var oldHeight = fields.getBoundingClientRect().height;
+      kind = next; toggle.dataset.kind = kind;
+      httpButton.setAttribute("aria-pressed", String(kind === "http")); roomButton.setAttribute("aria-pressed", String(kind === "room"));
+      httpFields.hidden = kind !== "http"; roomFields.hidden = kind !== "room";
+      url.disabled = key.disabled = kind !== "http"; roomId.disabled = random.disabled = kind !== "room";
+      if (!roomOnly) { try { localStorage.setItem("mistl-last-connection-kind", kind); } catch (_) {} }
+      if (animate) aiAnimate(fields, [{ height: oldHeight + "px", opacity: .4, overflow: "hidden" }, { height: fields.getBoundingClientRect().height + "px", opacity: 1, overflow: "hidden" }], false, position);
+      position();
+    }
+    function refresh() {
+      var previous = existing.value; existing.innerHTML = "";
+      aiProviders().filter(function (p) { return aiIsRoom(p) && p.enabled !== false && !p.provide; }).forEach(function (p) {
+        existing.appendChild(el("option", { value: p.id, text: (p.label || p.id) + " \u00b7 " + p.base_url.slice(15) }));
+      });
+      if (!existing.options.length) existing.appendChild(el("option", { value: "", text: t("ai.sharing.noExistingRooms") }));
+      if (Array.prototype.some.call(existing.options, function (option) { return option.value === previous; })) existing.value = previous;
+      existing.disabled = use.disabled = !existing.value || saving;
+    }
+    function close() {
+      if (overlay.hidden || overlay.inert) return;
+      overlay.inert = true;
+      if (trigger) trigger.setAttribute("aria-expanded", "false");
+      window.removeEventListener("resize", position); window.removeEventListener("scroll", position, true);
+      aiAnimate(form, [{ opacity: 1 }, { opacity: 0 }], true);
+      aiAnimate(overlay, [{ opacity: 1 }, { opacity: 0 }], true, function () { overlay.hidden = form.hidden = true; owner.appendChild(overlay); });
+      var target = trigger && trigger.isConnected ? trigger : document.querySelector(roomOnly ? "[data-add-room]" : "[data-add-connection]");
+      if (target) target.focus();
+    }
+    function focusProvider(p) {
+      var card = Array.prototype.find.call(document.querySelectorAll(".ai-provider-card[data-provider-id]"), function (node) { return node.dataset.providerId === p.id; });
+      var chip = roomOnly && Array.prototype.find.call(document.querySelectorAll("[data-room-provide]"), function (node) { return node.dataset.roomProvide === p.id; });
+      var target = chip || card;
+      if (target) {
+        if (target.scrollIntoView) target.scrollIntoView({ block: "nearest", behavior: aiReducedMotion.matches ? "instant" : "smooth" });
+        (chip || card.querySelector("button")).focus({ preventScroll: true });
+      }
+    }
+    function save(providerId) {
+      if (saving) return;
+      var address = (kind === "room" ? roomId : url).value.trim(), label = name.value.trim(), apiKey = key.value, selected;
+      urlError.hidden = roomError.hidden = reuse.hidden = true;
+      url.removeAttribute("aria-invalid"); roomId.removeAttribute("aria-invalid");
+      if (!providerId) {
+        var valid = !!address;
+        if (kind === "http") { try { var parsed = new URL(address); valid = /^https?:\/\//i.test(address) && /^https?:$/.test(parsed.protocol) && !!parsed.hostname; } catch (_) { valid = false; } }
+        if (!valid) {
+          var error = kind === "http" ? urlError : roomError, input = kind === "http" ? url : roomId;
+          error.textContent = t(kind === "http" ? "ai.connection.invalidUrl" : "ai.connection.requiredRoom"); error.hidden = false;
+          input.setAttribute("aria-invalid", "true"); input.focus(); position(); return;
+        }
+      }
+      saving = true; create.disabled = reuse.disabled = use.disabled = true;
+      // Resolve duplicates against the latest config inside the provider write queue.
+      aiProviderWrite = aiProviderWrite.then(function () {
+        var providers = aiProviders();
+        selected = providerId ? aiProvider(providerId) : kind === "room" && providers.find(function (p) { return p.base_url === "mist-network://" + address; });
+        if (selected && !providerId) {
+          duplicate = selected.id; roomError.textContent = t("ai.connection.duplicateRoom"); roomError.hidden = reuse.hidden = false;
+          roomId.setAttribute("aria-invalid", "true"); return false;
+        }
+        if (providerId) {
+          if (!selected || !aiIsRoom(selected)) return false;
+          selected = withField(selected, "enabled", true); if (roomOnly) selected.provide = true;
+          return aiSaveConfig("providers", providers.map(function (p) { return p.id === selected.id ? selected : p; }));
+        }
+        selected = { id: genAiEntryId(kind === "room" ? "room" : "http", providers.map(function (p) { return p.id; })), label: label || address,
+          base_url: kind === "room" ? "mist-network://" + address : address, api_key: kind === "room" ? "" : apiKey, enabled: true, models: [] };
+        if (kind === "room") { selected.provide = roomOnly; selected.shared = []; }
+        return aiSaveConfig("providers", providers.concat([selected]));
+      });
+      aiProviderWrite.then(function (saved) {
+        saving = false; create.disabled = reuse.disabled = false; refresh();
+        if (saved) { close(); form.reset(); focusProvider(selected); aiFetchModels(aiProvider(selected.id), true); }
+        else position();
+      });
+    }
+    httpButton.addEventListener("click", function () { setKind("http", true); });
+    roomButton.addEventListener("click", function () { setKind("room", true); });
+    random.addEventListener("click", function () { roomId.value = genAiRoomId(); roomId.focus(); roomError.hidden = reuse.hidden = true; roomId.removeAttribute("aria-invalid"); });
+    roomId.addEventListener("input", function () { roomError.hidden = reuse.hidden = true; roomId.removeAttribute("aria-invalid"); });
+    url.addEventListener("input", function () { urlError.hidden = true; url.removeAttribute("aria-invalid"); });
+    use.addEventListener("click", function () { if (existing.value) save(existing.value); });
+    reuse.addEventListener("click", function () { if (duplicate) save(duplicate); });
+    cancel.addEventListener("click", close);
+    form.addEventListener("submit", function (e) { e.preventDefault(); save(); });
+    form.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close(); }
+      if (e.key === "Enter" && e.target.tagName === "INPUT") { e.preventDefault(); save(); }
+      if (e.key === "Tab") {
+        var focusable = Array.prototype.filter.call(form.querySelectorAll("button,input,select"), function (node) { return !node.disabled && !node.closest("[hidden]"); });
+        var first = focusable[0], last = focusable[focusable.length - 1];
+        if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+      }
+    });
+    function startPress(e) { pressStarted = e.target === overlay; }
+    overlay.addEventListener("pointerdown", startPress); overlay.addEventListener("mousedown", startPress);
+    overlay.addEventListener("click", function (e) { var shouldClose = pressStarted && e.target === overlay; pressStarted = false; if (shouldClose) close(); });
+    return { form: form, refresh: refresh, open: function (button) {
+      trigger = button; pressStarted = false; document.body.appendChild(overlay);
+      if (overlay._aiMotion) overlay._aiMotion(false); if (form._aiMotion) form._aiMotion(false);
+      overlay.hidden = form.hidden = overlay.inert = false;
+      trigger.setAttribute("aria-expanded", "true"); trigger.setAttribute("aria-controls", form.id);
+      var last; try { last = localStorage.getItem("mistl-last-connection-kind"); } catch (_) {}
+      setKind(roomOnly ? "room" : last === "room" ? "room" : "http", false); refresh(); position();
+      window.addEventListener("resize", position); window.addEventListener("scroll", position, true);
+      aiAnimate(overlay, [{ opacity: 0 }, { opacity: 1 }]);
+      aiAnimate(form, [{ opacity: 0, transform: "translateY(" + (form.dataset.side === "above" ? "-4" : "4") + "px) scale(.98)" }, { opacity: 1, transform: "none" }]);
+      name.focus();
+    } };
   }
 
-  function buildAiProvidersPresetsField(sectionCfg) {
+  function buildAiSharingField() {
+    var wrap = el("div", { class: "ai-sharing-section" });
+    var roomChips = el("div", { class: "ai-sharing-rooms" }); wrap.appendChild(roomChips);
+    var popup = buildAiConnectionPopup(true, wrap);
+    var add, renderedRooms = null;
+    var search = el("input", { type: "search", class: "ai-model-search", placeholder: t("ai.model.search"), "aria-label": t("ai.model.search") }); wrap.appendChild(search);
+    var results = el("div", { class: "ai-sharing-results" }); wrap.appendChild(results);
+    function shared(ref) {
+      return aiProviders().some(function (p) { return aiIsRoom(p) && (p.shared || []).some(function (r) { return aiSameRef(r, ref); }); });
+    }
+    function render() {
+      var active = document.activeElement;
+      var focusRoom = wrap.contains(active) && active.getAttribute("data-room-id");
+      var focusProvider = focusRoom && active.getAttribute("data-provider-id");
+      var focusModel = focusRoom && active.getAttribute("data-model");
+      var scroll = results.scrollTop;
+      var rooms = aiProviders().filter(function (p) { return p.enabled !== false && aiIsRoom(p); });
+      var http = aiProviders().filter(function (p) { return p.enabled !== false && !aiIsRoom(p); });
+      var oldGroups = {};
+      roomChips.querySelectorAll(".ai-sharing-room[data-room-group]").forEach(function (group) { oldGroups[group.dataset.roomGroup] = group; });
+      roomChips.querySelectorAll(":scope > button, :scope > .muted").forEach(function (node) { node.remove(); });
+      results.innerHTML = "";
+      rooms.forEach(function (room) {
+        var retained = oldGroups[room.id];
+        if (retained) {
+          retained.dataset.providing = room.provide ? "true" : "false";
+          var retainedChip = retained.querySelector(".ai-room-chip");
+          retainedChip.disabled = false; retainedChip.setAttribute("aria-pressed", room.provide ? "true" : "false");
+          retainedChip.setAttribute("aria-label", t("ai.room.provide") + ": " + (room.label || room.id));
+          retainedChip.firstChild.textContent = (room.label || room.id) + (room.provide ? " \u2713" : "");
+          retainedChip.querySelector(".ai-room-status").textContent = aiSharingRoomStatus(room);
+          var retainedCopy = retained.querySelector(".ai-room-copy"); retainedCopy.title = t("ai.sharing.copyRoomId") + ": " + room.base_url.slice(15);
+          if (!retainedCopy.dataset.copied) retainedCopy.setAttribute("aria-label", t("ai.sharing.copyRoomId") + ": " + room.base_url.slice(15));
+          delete oldGroups[room.id]; return;
+        }
+        var group = el("div", { class: "ai-sharing-room", "data-room-group": room.id, "data-providing": room.provide ? "true" : "false" });
+        var chip = el("button", { type: "button", class: "ai-room-chip", "data-room-provide": room.id, "data-room-id": room.id, "aria-pressed": room.provide ? "true" : "false", "aria-label": t("ai.room.provide") + ": " + (room.label || room.id) });
+        chip.appendChild(el("span", { text: (room.label || room.id) + (room.provide ? " \u2713" : "") }));
+        chip.appendChild(el("span", { class: "ai-room-status", text: aiSharingRoomStatus(room) }));
+        chip.addEventListener("click", function () {
+          chip.disabled = true;
+          aiPatchProvider(room.id, "provide", !aiProvider(room.id).provide).then(render);
+        });
+        group.appendChild(chip);
+        var copy = el("button", { type: "button", class: "ai-room-copy", "data-copy-room-id": room.id, "aria-label": t("ai.sharing.copyRoomId") + ": " + room.base_url.slice(15), title: t("ai.sharing.copyRoomId") + ": " + room.base_url.slice(15) });
+        copy.appendChild(el("span", { class: "ai-copy-icon", "aria-hidden": "true" }));
+        var copyTimer;
+        copy.addEventListener("click", function (e) { e.stopPropagation(); copyToClipboard(aiProvider(room.id).base_url.slice(15), function () {
+          clearTimeout(copyTimer); copy.dataset.copied = "true";
+          copy.setAttribute("aria-label", t("common.copied"));
+          copyTimer = setTimeout(function () { delete copy.dataset.copied; var current = aiProvider(room.id); copy.setAttribute("aria-label", t("ai.sharing.copyRoomId") + ": " + (current || room).base_url.slice(15)); }, 1200);
+        }); }); group.appendChild(copy);
+        roomChips.appendChild(group);
+        if (renderedRooms && renderedRooms.indexOf(room.id) < 0) aiEnter(group);
+      });
+      Object.keys(oldGroups).forEach(function (id) {
+        var group = oldGroups[id]; group.removeAttribute("data-room-group"); group.inert = true;
+        aiAnimate(group, [{ opacity: 1 }, { opacity: 0 }], true, function () { group.remove(); });
+      });
+      renderedRooms = rooms.map(function (room) { return room.id; });
+      if (!rooms.length) roomChips.appendChild(el("div", { class: "muted", text: t("ai.sharing.noRooms") }));
+      add = el("button", { type: "button", "data-add-room": "", text: t("ai.provider.addRoom"), "aria-expanded": "false" });
+      add.addEventListener("click", function () { popup.open(add); }); roomChips.appendChild(add);
+      popup.refresh();
+      if (!http.length) results.appendChild(el("div", { class: "muted", text: t("ai.sharing.noHttp") }));
+      var count = 0;
+      http.forEach(function (p) {
+        var entries = aiModelEntries(p);
+        aiProviders().filter(aiIsRoom).forEach(function (room) {
+          (room.shared || []).forEach(function (ref) {
+            if (ref.provider_id === p.id && !entries.some(function (entry) { return aiSameRef(entry.ref, ref); })) entries.push({ ref: ref });
+          });
+        });
+        entries = entries.filter(function (entry) { return aiModelMatches(search.value, entry.ref, p); });
+        entries.sort(function (a, b) { return Number(shared(b.ref)) - Number(shared(a.ref)); });
+        var group = el("div", { class: "ai-sharing-group", "data-provider-id": p.id });
+        var fetch = aiModelFetchStates[p.id];
+        group.appendChild(el("div", { class: "ai-model-group ai-provider-count", "data-state": fetch ? fetch.state : "cache", text: (p.label || p.id) + " \u00b7 HTTP \u00b7 " + aiModelFetchLabel(p), title: fetch && fetch.error || "" }));
+        entries.forEach(function (entry) {
+          var ref = entry.ref;
+          var row = el("div", { class: "ai-sharing-row", "data-provider-id": ref.provider_id, "data-model": ref.model });
+          row.appendChild(el("span", { class: "ai-sharing-model", text: ref.model }));
+          var chips = el("div", { class: "ai-sharing-chips" });
+          rooms.forEach(function (room) {
+            var selected = (room.shared || []).some(function (r) { return aiSameRef(r, ref); });
+            var chip = el("button", { type: "button", class: "ai-room-chip", "data-room-id": room.id, "data-provider-id": ref.provider_id, "data-model": ref.model, "aria-pressed": selected ? "true" : "false", "aria-label": t("ai.sharing.toggle", { model: ref.model, room: room.label || room.id }), text: (room.label || room.id) + (selected ? " \u2713" : "") });
+            chip.addEventListener("click", function () {
+              var css = getComputedStyle(chip), fromColor = { backgroundColor: css.backgroundColor, borderColor: css.borderColor };
+              chip.disabled = true;
+              // Read refs inside the write queue so rapid edits to one room compose.
+              aiProviderWrite = aiProviderWrite.then(function () {
+                var current = aiProvider(room.id);
+                if (!current || current.enabled === false) return false;
+                var refs = current.shared || [];
+                var next = selected ? refs.filter(function (r) { return !aiSameRef(r, ref); }) : refs.concat(refs.some(function (r) { return aiSameRef(r, ref); }) ? [] : [ref]);
+                return aiSaveConfig("providers", aiProviders().map(function (p) { return p.id === room.id ? withField(p, "shared", next) : p; }));
+              });
+              aiProviderWrite.then(function () {
+                render();
+                var next = Array.prototype.find.call(results.querySelectorAll("button[data-room-id]"), function (node) {
+                  return node.dataset.roomId === room.id && node.dataset.providerId === ref.provider_id && node.dataset.model === ref.model;
+                });
+                if (next) { var css = getComputedStyle(next); aiAnimate(next, [fromColor, { backgroundColor: css.backgroundColor, borderColor: css.borderColor }], true); }
+              });
+            });
+            chips.appendChild(chip);
+          });
+          row.appendChild(chips); group.appendChild(row); count++;
+        });
+        results.appendChild(group);
+      });
+      if (http.length && !count) results.appendChild(el("div", { class: "muted", text: t("ai.model.empty") }));
+      results.scrollTop = scroll;
+      if (focusRoom) {
+        var target = Array.prototype.find.call(wrap.querySelectorAll("button[data-room-id]"), function (chip) {
+          return chip.getAttribute("data-room-id") === focusRoom && chip.getAttribute("data-provider-id") === focusProvider && chip.getAttribute("data-model") === focusModel;
+        });
+        if (target) target.focus(); else search.focus();
+      }
+    }
+    search.addEventListener("input", function () { results.scrollTop = 0; render(); });
+    search.addEventListener("focus", function () { aiRefreshModels(false); });
+    aiModelListeners.push({ node: wrap, refresh: render }); render();
+    return wrap;
+  }
+
+  function buildAiProvidersField() {
     var wrap = el("div", { class: "ai-connection-section" });
-
-    // Cache of fetched upstream model lists, keyed by provider_id. Survives
-    // renderAll() re-renders (which happen after every save) for the
-    // lifetime of this settings screen instance; cleared implicitly when the
-    // settings screen is rebuilt from scratch.
-    var modelListByProvider = {};
-    // Per-provider fetch status ("loading" | "failed"). A "failed" marker
-    // stops renderAll()'s auto-fetch from retrying in a loop; the manual
-    // refresh button clears it for an explicit retry.
-    var modelFetchState = {};
-
-    // Which single card (if any) currently has its inline editor open --
-    // { kind: "provider"|"preset", id: <entry id> | null (null = the "add
-    // new" tile), draft: <captured-but-unsaved field values, or null> }.
-    // Only one editor is open at a time across both grids.
-    var editing = null;
-    // The currently-mounted .ai-card.ai-card-editing DOM node (if editing is
-    // set), so an unrelated renderAll() (e.g. a background model-list fetch
-    // settling for a *different* provider) can capture its in-progress,
-    // not-yet-saved field values before the grid it lives in gets rebuilt.
-    var currentEditorForm = null;
-
-    function providers() { return Array.isArray(sectionCfg.providers) ? sectionCfg.providers : []; }
-    function presets() { return Array.isArray(sectionCfg.presets) ? sectionCfg.presets : []; }
-
-    function openEditor(kind, id) {
-      editing = { kind: kind, id: id, draft: null };
-      renderAll();
+    var header = el("div", { class: "ai-connection-header" }); wrap.appendChild(header);
+    header.appendChild(el("div", { class: "desc", text: t("settings.ai.providers.desc") }));
+    var add = el("button", { type: "button", "data-add-connection": "", text: t("ai.connection.add"), "aria-expanded": "false" }); header.appendChild(add);
+    var popup = buildAiConnectionPopup(false, wrap);
+    add.addEventListener("click", function () { popup.open(add); });
+    var grid = el("div", { class: "ai-provider-grid" });
+    wrap.appendChild(grid);
+    var renderedProviders = null;
+    function render() {
+      var oldCards = {};
+      grid.querySelectorAll(".ai-provider-card[data-provider-id]").forEach(function (card) { oldCards[card.dataset.providerId] = card; });
+      aiProviders().forEach(function (p) {
+        if (oldCards[p.id]) { var retained = oldCards[p.id]; retained._refreshProvider(); delete oldCards[p.id]; return; }
+        var room = aiIsRoom(p);
+        var card = el("div", { class: "ai-provider-card", "data-provider-id": p.id });
+        var head = el("div", { class: "ai-provider-head" });
+        var enabledLabel = el("label", { class: "toggle-switch" });
+        var enabled = el("input", { type: "checkbox", "aria-label": t("ai.provider.enabled", { provider: p.label || p.id }) });
+        enabled.checked = p.enabled !== false;
+        enabledLabel.appendChild(enabled); enabledLabel.appendChild(el("span", { class: "slider" }));
+        enabled.addEventListener("change", function () {
+          enabled.disabled = true;
+          aiPatchProvider(p.id, "enabled", enabled.checked).then(function (saved) {
+            if (saved) { refreshStatus(); if (enabled.checked) aiFetchModels(aiProvider(p.id), true); }
+            else { enabled.checked = p.enabled !== false; enabled.disabled = false; }
+          });
+        });
+        head.appendChild(enabledLabel);
+        var summary = el("button", { type: "button", class: "ai-provider-summary", "aria-expanded": "false" });
+        summary.appendChild(el("span", { class: "ai-provider-kind", text: room ? t("ai.connection.room") : "HTTP" }));
+        var identity = el("span", { class: "ai-provider-identity" }); summary.appendChild(identity);
+        identity.appendChild(el("strong", { class: "ai-provider-name", text: p.label || p.id, title: p.label || p.id }));
+        identity.appendChild(el("span", { class: "ai-provider-address", text: room ? p.base_url.slice(15) : p.base_url, title: p.base_url }));
+        aiChevron(summary); head.appendChild(summary); card.appendChild(head);
+        summary.addEventListener("click", function () { editor(p, room, card, summary); });
+        summary.addEventListener("keydown", function (e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); summary.click(); } });
+        // Ignore nested controls when clicking empty space in the heading.
+        head.addEventListener("click", function (e) { if (e.target === head) summary.click(); });
+        var status = buildAiProviderStatus(card, p);
+        head.appendChild(status);
+        function refreshStatus() {
+          var current = aiProvider(p.id);
+          if (!current) return;
+          p = current; enabled.checked = p.enabled !== false; enabled.disabled = false;
+          card.dataset.disabled = String(p.enabled === false);
+          enabled.setAttribute("aria-label", t("ai.provider.enabled", { provider: p.label || p.id }));
+          card.querySelector(".ai-provider-name").textContent = p.label || p.id;
+          card.querySelector(".ai-provider-name").title = p.label || p.id;
+          card.querySelector(".ai-provider-address").textContent = room ? p.base_url.slice(15) : p.base_url;
+          card.querySelector(".ai-provider-address").title = p.base_url;
+          status._refresh();
+        }
+        aiModelListeners.push({ node: card, refresh: refreshStatus });
+        card._refreshProvider = refreshStatus;
+        refreshStatus();
+        grid.appendChild(card);
+        if (renderedProviders && renderedProviders.indexOf(p.id) < 0) aiEnter(card);
+      });
+      Object.keys(oldCards).forEach(function (id) {
+        var card = oldCards[id]; card._closeStatus(); card.removeAttribute("data-provider-id"); card.inert = true;
+        aiAnimate(card, [{ opacity: 1 }, { opacity: 0 }], true, function () { card.remove(); });
+      });
+      renderedProviders = aiProviders().map(function (p) { return p.id; });
     }
-    function closeEditor() {
-      editing = null;
-      currentEditorForm = null;
-      renderAll();
-    }
-
-    /* ---- providers ---- */
-    var provField = el("div", { class: "settings-field" });
-    var provLabel = el("label", { class: "ai-eyebrow", text: t("settings.ai.providers.title") });
-    provField.appendChild(provLabel);
-    var provDesc = el("div", { class: "desc", text: t("settings.ai.providers.desc") });
-    provField.appendChild(provDesc);
-    var provGrid = el("div", { class: "ai-cardgrid" });
-    provField.appendChild(provGrid);
-    var provBadge = el("button", { type: "button", class: "badge restart" });
-    provBadge.textContent = t("settings.restartBadge");
-    provBadge.title = t("settings.restartBadgeTitle");
-    provBadge.style.display = "none";
-    provBadge.addEventListener("click", function () { restartDaemon(provBadge); });
-    provField.appendChild(provBadge);
-    wrap.appendChild(provField);
-
-    /* ---- presets ---- */
-    var presetField = el("div", { class: "settings-field" });
-    var presetLabel = el("label", { class: "ai-eyebrow", text: t("settings.ai.presets.title") });
-    presetField.appendChild(presetLabel);
-    var presetDesc = el("div", { class: "desc", text: t("settings.ai.presets.desc") });
-    presetField.appendChild(presetDesc);
-    var presetGrid = el("div", { class: "ai-cardgrid" });
-    presetField.appendChild(presetGrid);
-    var presetBadge = el("button", { type: "button", class: "badge restart" });
-    presetBadge.textContent = t("settings.restartBadge");
-    presetBadge.title = t("settings.restartBadgeTitle");
-    presetBadge.style.display = "none";
-    presetBadge.addEventListener("click", function () { restartDaemon(presetBadge); });
-    presetField.appendChild(presetBadge);
-    wrap.appendChild(presetField);
-
-    /* ---- default preset ---- */
-    var defField = el("div", { class: "settings-field" });
-    var defLabel = el("label", { class: "ai-eyebrow", for: "settings-ai-default_preset_id", text: t("settings.ai.defaultPreset.label") });
-    defField.appendChild(defLabel);
-    var defDesc = el("div", { class: "desc", text: t("settings.ai.defaultPreset.desc") });
-    defField.appendChild(defDesc);
-    var defRow = el("div", { class: "settings-row" });
-    var defSelect = el("select", { id: "settings-ai-default_preset_id" });
-    var defBadge = el("button", { type: "button", class: "badge restart" });
-    defBadge.textContent = t("settings.restartBadge");
-    defBadge.title = t("settings.restartBadgeTitle");
-    defBadge.style.display = "none";
-    defBadge.addEventListener("click", function () { restartDaemon(defBadge); });
-    defSelect.addEventListener("change", function () {
-      saveSetting("ai.default_preset_id", defSelect.value, sectionCfg, "default_preset_id", defBadge);
-    });
-    defRow.appendChild(defSelect);
-    defRow.appendChild(defBadge);
-    defField.appendChild(defRow);
-    wrap.appendChild(defField);
-
-    /* ---- save + (re)render ---- */
-
-    function saveProviders(next) {
-      var prev = providers();
-      return saveSetting("ai.providers", next, sectionCfg, "providers", provBadge).then(function () {
-        // Connection details may have changed; drop stale model lists so
-        // renderAll()'s auto-fetch pulls a fresh list for the changed
-        // (or removed) provider.
-        prev.forEach(function (p) {
-          var np = null;
-          for (var i = 0; i < next.length; i++) { if (next[i].id === p.id) np = next[i]; }
-          if (!np || np.base_url !== p.base_url || np.api_key !== p.api_key) {
-            delete modelListByProvider[p.id];
-            delete modelFetchState[p.id];
+    function editor(p, room, parent, trigger) {
+      var closing = parent.querySelector(".ai-provider-editor[inert]");
+      if (closing) { trigger.setAttribute("aria-expanded", "true"); aiDisclosure(closing, true); return; }
+      var existing = parent.querySelector(".ai-provider-editor:not([inert])");
+      if (existing) { existing._close(); return; }
+      var form = el("div", { class: "ai-provider-editor", hidden: "", id: genAiEntryId("ai-editor", []) });
+      trigger.setAttribute("aria-expanded", "true"); trigger.setAttribute("aria-controls", form.id);
+      form._close = function () { trigger.setAttribute("aria-expanded", "false"); aiDisclosure(form, false, function () { form.remove(); }); };
+      var pendingUrl = null, duplicate = null;
+      function field(name, configKey, type) {
+        var row = el("div", { class: "ai-provider-field" }); form.appendChild(row);
+        var id = form.id + "-" + configKey;
+        row.appendChild(el("label", { for: id, text: t(name) }));
+        var control = el("div", { class: "ai-provider-field-control" }); row.appendChild(control);
+        var input = el("input", { id: id, type: type || "text", "data-provider-field": configKey, autocomplete: type === "password" ? "new-password" : "off" }); control.appendChild(input);
+        var feedback = el("div", { class: "ai-provider-field-feedback", "aria-live": "polite", id: id + "-feedback" }); control.appendChild(feedback);
+        input.setAttribute("aria-describedby", feedback.id);
+        function current() { var value = (aiProvider(p.id) || p)[configKey] || ""; return room && configKey === "base_url" ? value.slice(15) : value; }
+        input.value = current();
+        function report(message, error) { feedback.textContent = message; feedback.dataset.state = error ? "error" : "saved"; if (error) input.setAttribute("aria-invalid", "true"); else input.removeAttribute("aria-invalid"); }
+        input._report = report;
+        function commit() {
+          var value = configKey === "api_key" ? input.value : input.value.trim();
+          if (configKey === "api_key" && pendingUrl && (!value || value === "***")) return;
+          if (value === current() && !(configKey === "api_key" && pendingUrl)) return;
+          if (input._pendingValue === value) return;
+          if (configKey === "base_url") {
+            reuse.hidden = true; duplicate = null;
+            if (room && !value) { report(t("ai.connection.requiredRoom"), true); return; }
+            if (!room) {
+              try { var parsed = new URL(value); if (!/^https?:$/.test(parsed.protocol)) throw new Error(); }
+              catch (_) { report(t("ai.connection.invalidUrl"), true); return; }
+            }
+          }
+          input._pendingValue = value;
+          aiProviderWrite = aiProviderWrite.then(function () {
+            var currentProvider = aiProvider(p.id); if (!currentProvider) return false;
+            var patch = {}; patch[configKey] = room && configKey === "base_url" ? "mist-network://" + value : value;
+            if (room && configKey === "base_url") {
+              duplicate = aiProviders().find(function (item) { return item.id !== p.id && item.base_url === patch.base_url; });
+              if (duplicate) { report(t("ai.connection.duplicateRoom"), true); reuse.hidden = false; return false; }
+            }
+            // Match the daemon's scheme + authority comparison (including explicit ports).
+            function origin(url) { var parts = url.trim().split("://"), scheme = parts.shift(); return (scheme + "://" + parts.join("://").split(/[/?#]/)[0].split("@").pop()).toLowerCase(); }
+            if (!room && configKey === "base_url") {
+              if (currentProvider.api_key === "***" && origin(value) !== origin(currentProvider.base_url)) {
+                pendingUrl = value; note.hidden = false; report("", false); key.focus(); return false;
+              }
+              pendingUrl = null; note.hidden = true;
+            }
+            if (configKey === "api_key" && pendingUrl) {
+              if (!value || value === "***") { note.hidden = false; return false; }
+              patch.base_url = pendingUrl;
+            }
+            report(t("ai.provider.saving"), false);
+            var next = Object.assign({}, currentProvider, patch);
+            return aiSaveConfig("providers", aiProviders().map(function (item) { return item.id === p.id ? next : item; }), function (error) {
+              report(error || t("ai.provider.saved"), !!error);
+            }).then(function (saved) {
+              if (!saved) return false;
+              if (input.value.trim() === value && configKey !== "api_key") input.value = value;
+              if (patch.base_url && configKey === "api_key") { pendingUrl = null; note.hidden = true; address._report(t("ai.provider.saved"), false); }
+              if (patch.base_url || configKey === "api_key") aiFetchModels(aiProvider(p.id), true);
+              return true;
+            });
+          });
+          aiProviderWrite.then(function () { input._pendingValue = undefined; });
+        }
+        input.addEventListener("blur", commit);
+        input.addEventListener("input", function () {
+          report("", false);
+          if (configKey === "base_url") { pendingUrl = null; note.hidden = true; duplicate = null; reuse.hidden = true; }
+        });
+        input.addEventListener("keydown", function (e) {
+          if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); commit(); }
+          if (e.key === "Escape") {
+            e.preventDefault(); e.stopPropagation(); input.value = current(); report("", false);
+            if (configKey === "base_url") { pendingUrl = null; note.hidden = true; reuse.hidden = true; duplicate = null; }
           }
         });
-        renderAll();
-      });
-    }
-    function savePresets(next) {
-      return saveSetting("ai.presets", next, sectionCfg, "presets", presetBadge).then(renderAll);
-    }
-
-    function fetchModelsFor(providerId, toastOnError) {
-      modelFetchState[providerId] = "loading";
-      api("ai.upstream_models", { provider_id: providerId }).then(
-        function (data) {
-          delete modelFetchState[providerId];
-          modelListByProvider[providerId] = (data && data.models) || [];
-          refreshModelFields();
-        },
-        function (err) {
-          modelFetchState[providerId] = "failed";
-          if (toastOnError) {
-            showToast(t("settings.ai.presets.fetchModelsError") + ": " + err.message, "error");
-          }
-          refreshModelFields();
-        }
-      );
-    }
-
-    // Fetch every configured provider's model list automatically (silently)
-    // so the preset model field is a select without any manual step. Guarded
-    // by the cache and the loading/failed markers, so the renderAll() each
-    // fetch triggers can't cascade into repeated requests.
-    function autoFetchModels() {
-      providers().forEach(function (p) {
-        if (!p.base_url) return;
-        if (Object.prototype.hasOwnProperty.call(modelListByProvider, p.id)) return;
-        if (modelFetchState[p.id]) return;
-        fetchModelsFor(p.id, false);
-      });
-    }
-
-    // Called when a model list arrives/fails (not when providers/presets
-    // actually change) -- only refreshes the open preset editor's model
-    // field in place, via the closure it registered on its form node.
-    // Deliberately NOT a full renderAll(): providers()/presets() haven't
-    // changed, so card faces need no update, and a full rebuild would tear
-    // down and rebuild whatever editor is currently open, discarding any
-    // in-progress (unsaved) typing in its other fields.
-    function refreshModelFields() {
-      if (editing && editing.kind === "preset" && currentEditorForm && currentEditorForm._rebuildModelField) {
-        currentEditorForm._rebuildModelField();
+        return input;
       }
-    }
-
-    function buildAddTile(label, onClick) {
-      var tile = el("button", { type: "button", class: "ai-card ai-add-tile" });
-      tile.appendChild(el("span", { class: "ai-add-tile-icon", "aria-hidden": "true", text: "+" }));
-      tile.appendChild(el("span", { text: label }));
-      tile.addEventListener("click", onClick);
-      return tile;
-    }
-
-    // One .field (optionally labeled) for an editor row -- mirrors the
-    // app-wide .field convention used e.g. by the chat prompt form
-    // (label + input stacked, flex-sized by the surrounding row). labelKey
-    // omitted/null renders a bare, unlabeled field (used for the api_key,
-    // provider, and reasoning_effort controls, which have no dedicated
-    // label key in the i18n table -- same as the original row-based editor,
-    // which never labeled those either).
-    function editorField(labelKey, inputEl) {
-      var field = el("div", { class: "field" });
-      if (labelKey) field.appendChild(el("label", { text: t(labelKey) }));
-      field.appendChild(inputEl);
-      return field;
-    }
-
-    // One .ai-card-editor-row (flex, wraps) holding one or more .field /
-    // bare-button children, in the given order.
-    function editorRow() {
-      var row = el("div", { class: "ai-card-editor-row" });
-      for (var i = 0; i < arguments.length; i++) row.appendChild(arguments[i]);
-      return row;
-    }
-
-    function buildProviderCard(provider) {
-      var card = el("div", { class: "ai-card", tabindex: "0", role: "button" });
-      var labelWrap = el("div", { class: "ai-card-label", text: provider.label || provider.id });
-      card.appendChild(labelWrap);
-      var host = aiUrlHost(provider.base_url);
-      card.appendChild(el("div", { class: "ai-card-sub", text: host || t("settings.ai.providers.baseUrlPlaceholder") }));
-
-      // Removing a provider that presets still reference leaves those
-      // presets pointing at a nonexistent provider_id (resolve_preset then
-      // can't resolve them) -- warn via the same confirm() idiom already
-      // used for the other destructive actions in this file (daemon stop,
-      // update apply, sandbox delete) rather than silently breaking presets
-      // or forbidding removal outright.
-      var rm = el("button", { type: "button", class: "ai-card-remove", "aria-label": t("settings.ai.providers.removeBtn"), title: t("settings.ai.providers.removeBtn") });
-      rm.textContent = "×";
-      rm.addEventListener("click", function (e) {
-        e.stopPropagation();
-        var refs = aiProviderRefCount(presets(), provider.id);
-        if (refs > 0 && !confirm(t("settings.ai.providers.removeConfirm", { count: refs }))) return;
-        saveProviders(providers().filter(function (p) { return p.id !== provider.id; }));
+      field("ai.connection.name", "label");
+      var address = field(room ? "ai.room.id" : "ai.connection.url", "base_url");
+      var reuse = el("button", { type: "button", "data-provider-reuse": "", text: t("ai.connection.useExisting"), hidden: "" }); address.parentNode.appendChild(reuse);
+      reuse.addEventListener("click", function () {
+        if (!duplicate) return;
+        var id = duplicate.id;
+        aiPatchProvider(id, "enabled", true).then(function (saved) {
+          if (!saved) return;
+          address.value = (aiProvider(p.id) || p).base_url.slice(15); address._report("", false); reuse.hidden = true;
+          var card = Array.prototype.find.call(grid.querySelectorAll(".ai-provider-card[data-provider-id]"), function (node) { return node.dataset.providerId === id; });
+          if (card) { var summary = card.querySelector(".ai-provider-summary"); if (summary.getAttribute("aria-expanded") !== "true") summary.click(); summary.focus(); if (card.scrollIntoView) card.scrollIntoView({ block: "nearest", behavior: aiReducedMotion.matches ? "instant" : "smooth" }); }
+          aiFetchModels(aiProvider(id), true);
+        });
       });
-      card.appendChild(rm);
-
-      card.addEventListener("click", function () { openEditor("provider", provider.id); });
-      card.addEventListener("keydown", function (e) {
-        if (e.key !== "Enter" && e.key !== " " && e.key !== "Spacebar") return;
-        if (e.key !== "Enter") e.preventDefault();
-        openEditor("provider", provider.id);
+      var key = !room && field("settings.ai.providers.keyPlaceholder", "api_key", "password");
+      var note = el("div", { class: "ai-provider-key-note", "data-provider-key-note": "", hidden: "", text: t("ai.provider.keyHostChange"), id: form.id + "-key-note", "aria-live": "polite" });
+      if (key) { key.parentNode.appendChild(note); key.setAttribute("aria-describedby", key.getAttribute("aria-describedby") + " " + note.id); }
+      var footer = el("div", { class: "ai-provider-actions" }); form.appendChild(footer);
+      var remove = el("button", { type: "button", class: "danger", text: t("settings.ai.providers.removeBtn") }); footer.appendChild(remove);
+      remove.addEventListener("click", function () {
+        if (!confirm(t("settings.ai.providers.removeConfirm"))) return;
+        remove.disabled = true;
+        aiProviderWrite = aiProviderWrite.then(function () { return aiSaveConfig("providers", aiProviders().filter(function (item) { return item.id !== p.id; })); });
+        aiProviderWrite.then(function (saved) { if (saved) render(); else remove.disabled = false; });
       });
-      return card;
+      parent.appendChild(form); aiDisclosure(form, true);
     }
+    aiModelListeners.push({ node: wrap, refresh: function () {
+      var shown = Array.prototype.map.call(grid.querySelectorAll(".ai-provider-card"), function (card) { return card.dataset.providerId; });
+      if (JSON.stringify(shown) !== JSON.stringify(aiProviders().map(function (p) { return p.id; }))) render();
+    } });
+    render();
+    return wrap;
+  }
 
-    function buildPresetCard(preset) {
-      var card = el("div", { class: "ai-card", tabindex: "0", role: "button" });
-      var labelWrap = el("div", { class: "ai-card-label" });
-      labelWrap.appendChild(el("span", { text: preset.label || preset.id }));
-      if (sectionCfg.default_preset_id === preset.id) {
-        labelWrap.appendChild(el("span", { class: "badge ai-default-badge", text: t("ai.editor.defaultBadge") }));
+  function buildAiTasksField() {
+    var wrap = el("div", { class: "ai-task-settings" });
+    ["default_ref", "tts", "stt"].forEach(function (key) {
+      var row = el("div", { class: "settings-field ai-task-row" });
+      var id = "settings-ai-" + key;
+      var label = el("label", { class: "settings-label", text: t("ai.task." + key), for: id + "-trigger" }); row.appendChild(label);
+      var host = buildAiModelPicker(el("div", { id: id }), aiConfig()[key], { voice: key !== "default_ref" });
+      host.querySelector("button").id = id + "-trigger";
+      row.appendChild(host); wrap.appendChild(row);
+      host.addEventListener("change", function () {
+        var previous = aiConfig()[key] || null;
+        var next = host._ref ? withField(previous || {}, "provider_id", host._ref.provider_id) : null;
+        if (next) next.model = host._ref.model;
+        aiSaveConfig(key, next).then(function (saved) { if (!saved) host._setRef(previous); if (key === "tts") voice.disabled = !aiConfig().tts; });
+      });
+      if (key === "tts") {
+        var voice = el("input", { type: "text", id: "settings-ai-tts-voice", placeholder: t("ai.model.voice") });
+        var voiceLabel = el("label", { for: voice.id, class: "settings-label", text: t("ai.model.voice") }); row.appendChild(voiceLabel);
+        voice.value = (aiConfig().tts && aiConfig().tts.voice) || ""; voice.disabled = !aiConfig().tts;
+        voice.addEventListener("change", function () {
+          if (aiConfig().tts) aiSaveConfig("tts", withField(aiConfig().tts, "voice", voice.value.trim())).then(function (saved) { if (!saved) voice.value = aiConfig().tts.voice || ""; });
+        }); row.appendChild(voice);
       }
-      if (preset.kind === "tts") {
-        labelWrap.appendChild(el("span", { class: "badge", text: t("ai.net.provideTts") }));
-      } else if (preset.kind === "stt") {
-        labelWrap.appendChild(el("span", { class: "badge", text: t("ai.net.provideStt") }));
-      }
-      card.appendChild(labelWrap);
-      card.appendChild(el("div", { class: "ai-card-sub", text: preset.model || t("settings.ai.presets.modelPlaceholder") }));
-
-      var rm = el("button", { type: "button", class: "ai-card-remove", "aria-label": t("settings.ai.presets.removeBtn"), title: t("settings.ai.presets.removeBtn") });
-      rm.textContent = "×";
-      rm.addEventListener("click", function (e) {
-        e.stopPropagation();
-        savePresets(presets().filter(function (p) { return p.id !== preset.id; }));
-      });
-      card.appendChild(rm);
-
-      card.addEventListener("click", function () { openEditor("preset", preset.id); });
-      card.addEventListener("keydown", function (e) {
-        if (e.key !== "Enter" && e.key !== " " && e.key !== "Spacebar") return;
-        if (e.key !== "Enter") e.preventDefault();
-        openEditor("preset", preset.id);
-      });
-      return card;
-    }
-
-    function buildProviderEditor(provider, draft) {
-      var isNew = !provider;
-      var card = el("div", { class: "ai-card ai-card-editing" });
-      var form = el("div", { class: "ai-card-editor" });
-      card.appendChild(form);
-
-      var labelInput = el("input", { type: "text", autocomplete: "off", placeholder: t("settings.ai.providers.labelPlaceholder") });
-      labelInput.value = draft ? draft.label : (isNew ? "" : (provider.label || ""));
-      form.appendChild(editorRow(editorField("settings.ai.providers.labelPlaceholder", labelInput)));
-
-      var urlInput = el("input", { type: "text", autocomplete: "off", placeholder: t("settings.ai.providers.baseUrlPlaceholder") });
-      urlInput.value = draft ? draft.base_url : (isNew ? "" : (provider.base_url || ""));
-      form.appendChild(editorRow(editorField("settings.ai.providers.baseUrlPlaceholder", urlInput)));
-
-      // Same "***" placeholder pattern as the flat password field type in
-      // buildSettingsField -- config.show masks a set api_key as "***",
-      // set_by_path substitutes it back server-side as long as this
-      // provider's id round-trips unchanged (see
-      // substitute_masked_provider_keys). Leaving the field untouched keeps
-      // whatever api_key value the entry already had (including "***",
-      // which the server resolves); Clear explicitly stages an empty key.
-      // No dedicated i18n label key exists for "API key" (grepped -- the
-      // original row-based editor never labeled this field either), so this
-      // is left as a bare, unlabeled field relying on the placeholder alone.
-      var keyCleared = draft ? draft.keyCleared : false;
-      var keyInput = el("input", { type: "password", autocomplete: "off" });
-      keyInput.value = draft ? draft.apiKeyValue : "";
-      keyInput.placeholder = (!isNew && provider.api_key === "***" && !keyCleared) ? t("settings.passwordSetPlaceholder") : t("settings.passwordNotSet");
-      keyInput.addEventListener("input", function () { keyCleared = false; });
-      var keyClearBtn = el("button", { type: "button" });
-      keyClearBtn.textContent = t("settings.clear");
-      keyClearBtn.addEventListener("click", function () {
-        keyInput.value = "";
-        keyCleared = true;
-        keyInput.placeholder = t("settings.passwordNotSet");
-      });
-      form.appendChild(editorRow(editorField(null, keyInput), keyClearBtn));
-
-      var footer = el("div", { class: "ai-card-editor-actions" });
-      var saveBtn = el("button", { type: "button", class: "primary" });
-      saveBtn.textContent = t("ai.editor.save");
-      saveBtn.addEventListener("click", function () {
-        var base = isNew
-          ? { id: genAiEntryId("p", providers().map(function (p) { return p.id; })), label: "", base_url: "", api_key: "" }
-          : provider;
-        var next = withField(base, "label", labelInput.value);
-        next = withField(next, "base_url", urlInput.value);
-        if (keyInput.value !== "") {
-          next = withField(next, "api_key", keyInput.value);
-        } else if (isNew || keyCleared) {
-          next = withField(next, "api_key", "");
-        }
-        var list = isNew ? providers().concat([next]) : providers().map(function (p) { return p.id === provider.id ? next : p; });
-        editing = null;
-        currentEditorForm = null;
-        saveProviders(list);
-      });
-      footer.appendChild(saveBtn);
-      var cancelBtn = el("button", { type: "button" });
-      cancelBtn.textContent = t("ai.editor.cancel");
-      cancelBtn.addEventListener("click", closeEditor);
-      footer.appendChild(cancelBtn);
-      form.appendChild(footer);
-
-      card._captureDraft = function () {
-        return { label: labelInput.value, base_url: urlInput.value, apiKeyValue: keyInput.value, keyCleared: keyCleared };
-      };
-      return card;
-    }
-
-    function buildPresetEditor(preset, draft) {
-      var isNew = !preset;
-      var card = el("div", { class: "ai-card ai-card-editing" });
-      var form = el("div", { class: "ai-card-editor" });
-      card.appendChild(form);
-
-      var labelInput = el("input", { type: "text", autocomplete: "off", placeholder: t("settings.ai.presets.labelPlaceholder") });
-      labelInput.value = draft ? draft.label : (isNew ? "" : (preset.label || ""));
-      form.appendChild(editorRow(editorField("settings.ai.presets.labelPlaceholder", labelInput)));
-
-      // Which single checkbox this preset gets in the AI Network tab's
-      // "what to provide" checklist (see renderProvideChecklist), and which
-      // config path toggling it writes to -- ai.advertised_models /
-      // ai.tts_preset_id / ai.stt_preset_id. Purely a UI categorization; the
-      // daemon's actual request routing only ever looks at those three
-      // fields directly, never at this one.
-      var kindSelect = el("select", {});
-      [["chat", "ai.net.provideChat"], ["tts", "ai.net.provideTts"], ["stt", "ai.net.provideStt"]].forEach(function (opt) {
-        kindSelect.appendChild(el("option", { value: opt[0], text: t(opt[1]) }));
-      });
-      kindSelect.value = draft ? draft.kind : (isNew ? "chat" : (preset.kind || "chat"));
-      form.appendChild(editorRow(editorField("ai.editor.kindLabel", kindSelect)));
-
-      // No dedicated i18n label key exists for "Provider" (the original
-      // row-based editor never labeled this select either), so it's a bare,
-      // unlabeled field like api_key/reasoning_effort above.
-      var providerSelect = el("select", {});
-      providers().forEach(function (provider) {
-        providerSelect.appendChild(el("option", { value: provider.id, text: provider.label || provider.id }));
-      });
-      providerSelect.value = draft ? draft.provider_id : (isNew ? (providers()[0] ? providers()[0].id : "") : (preset.provider_id || ""));
-      form.appendChild(editorRow(editorField(null, providerSelect)));
-
-      // The model list is fetched automatically per provider (see
-      // autoFetchModels; browsers never see api_key, so the daemon does the
-      // fetch), so the model field is a select as soon as a list is cached
-      // for the selected provider, and falls back to a free-text input
-      // otherwise -- mirrors tc-mistllm's settings screen. Rebuilt (a) when
-      // the provider select changes, and (b) externally via
-      // _rebuildModelField when a fetch settles (refreshModelFields above),
-      // without touching this form's other fields.
-      var modelRow = editorRow();
-      form.appendChild(modelRow);
-      var modelEl = null;
-
-      function rebuildModelField(resetValue) {
-        var keepValue = resetValue !== undefined
-          ? resetValue
-          : (modelEl ? modelEl.value : (draft ? draft.model : (isNew ? "" : (preset.model || ""))));
-        modelRow.innerHTML = "";
-        var providerId = providerSelect.value;
-        var cachedModels = modelListByProvider[providerId];
-        if (Array.isArray(cachedModels) && cachedModels.length > 0) {
-          modelEl = el("select", {});
-          var modelOptions = cachedModels.slice();
-          // Never silently drop the currently-typed/saved model even if
-          // it's not in the fetched list (e.g. hand-entered, or the
-          // upstream since removed it).
-          if (keepValue && modelOptions.indexOf(keepValue) === -1) {
-            modelOptions = [keepValue].concat(modelOptions);
-          }
-          modelOptions.forEach(function (m) { modelEl.appendChild(el("option", { value: m, text: m })); });
-          modelEl.value = keepValue;
-        } else {
-          modelEl = el("input", { type: "text", autocomplete: "off", placeholder: t("settings.ai.presets.modelPlaceholder") });
-          modelEl.value = keepValue;
-        }
-        modelRow.appendChild(editorField("settings.ai.presets.modelPlaceholder", modelEl));
-      }
-      rebuildModelField();
-      // Switching provider mid-edit starts the model field over (against
-      // the new provider's cache/blank) rather than trying to preserve a
-      // value that belonged to a different provider's model list.
-      providerSelect.addEventListener("change", function () { rebuildModelField(""); });
-      form._rebuildModelField = function () { rebuildModelField(); };
-
-      var tempInput = el("input", { type: "text", inputmode: "decimal", placeholder: t("settings.ai.presets.temperaturePlaceholder") });
-      // New presets start at temperature 0.7 (the README's documented
-      // example default) rather than blank; clearing the field still means
-      // "omit the parameter".
-      tempInput.value = draft ? draft.temperature : (isNew ? "0.7" : ((preset.temperature === null || preset.temperature === undefined) ? "" : String(preset.temperature)));
-
-      // No dedicated i18n label key exists for "Reasoning effort" (the
-      // original row-based editor never labeled this select either), so
-      // it's a bare, unlabeled field -- paired with temperature in the same
-      // row since both are short, secondary preset knobs.
-      var effortSelect = el("select", {});
-      [["", "settings.optionDefault", true], ["none", "none"], ["minimal", "minimal"], ["low", "low"], ["medium", "medium"], ["high", "high"]].forEach(function (opt) {
-        effortSelect.appendChild(el("option", { value: opt[0], text: opt[2] ? t(opt[1]) : opt[1] }));
-      });
-      effortSelect.value = draft ? draft.reasoning_effort : (isNew ? "" : (preset.reasoning_effort || ""));
-      form.appendChild(editorRow(editorField("settings.ai.presets.temperaturePlaceholder", tempInput), editorField(null, effortSelect)));
-
-      var footer = el("div", { class: "ai-card-editor-actions" });
-      var saveBtn = el("button", { type: "button", class: "primary" });
-      saveBtn.textContent = t("ai.editor.save");
-      saveBtn.addEventListener("click", function () {
-        var tempVal = tempInput.value.trim();
-        var tempNum = null;
-        if (tempVal !== "") {
-          tempNum = Number(tempVal);
-          if (!isFinite(tempNum)) {
-            showToast(t("settings.enterNumber", { label: t("settings.ai.presets.temperaturePlaceholder") }), "error");
-            return;
-          }
-        }
-        var base = isNew
-          ? { id: genAiEntryId("preset", presets().map(function (p) { return p.id; })), label: "", provider_id: providerSelect.value, model: "", temperature: null, reasoning_effort: null, kind: "chat" }
-          : preset;
-        var next = withField(base, "label", labelInput.value);
-        next = withField(next, "provider_id", providerSelect.value);
-        next = withField(next, "model", modelEl.value);
-        next = withField(next, "temperature", tempNum);
-        next = withField(next, "reasoning_effort", effortSelect.value === "" ? null : effortSelect.value);
-        next = withField(next, "kind", kindSelect.value);
-        var list = isNew ? presets().concat([next]) : presets().map(function (p) { return p.id === preset.id ? next : p; });
-        editing = null;
-        currentEditorForm = null;
-        savePresets(list);
-      });
-      footer.appendChild(saveBtn);
-      var cancelBtn = el("button", { type: "button" });
-      cancelBtn.textContent = t("ai.editor.cancel");
-      cancelBtn.addEventListener("click", closeEditor);
-      footer.appendChild(cancelBtn);
-      form.appendChild(footer);
-
-      card._captureDraft = function () {
-        return {
-          label: labelInput.value, provider_id: providerSelect.value, model: modelEl.value,
-          temperature: tempInput.value, reasoning_effort: effortSelect.value, kind: kindSelect.value
-        };
-      };
-      card._rebuildModelField = form._rebuildModelField;
-      return card;
-    }
-
-    function renderProviderGrid() {
-      if (editing && editing.kind === "provider" && currentEditorForm && currentEditorForm._captureDraft) {
-        editing.draft = currentEditorForm._captureDraft();
-      }
-      provGrid.innerHTML = "";
-      providers().forEach(function (provider) {
-        if (editing && editing.kind === "provider" && editing.id === provider.id) {
-          currentEditorForm = buildProviderEditor(provider, editing.draft);
-          provGrid.appendChild(currentEditorForm);
-        } else {
-          provGrid.appendChild(buildProviderCard(provider));
-        }
-      });
-      if (editing && editing.kind === "provider" && editing.id === null) {
-        currentEditorForm = buildProviderEditor(null, editing.draft);
-        provGrid.appendChild(currentEditorForm);
-      } else {
-        provGrid.appendChild(buildAddTile(t("settings.ai.providers.addBtn"), function () { openEditor("provider", null); }));
-      }
-    }
-
-    function renderPresetGrid() {
-      if (editing && editing.kind === "preset" && currentEditorForm && currentEditorForm._captureDraft) {
-        editing.draft = currentEditorForm._captureDraft();
-      }
-      presetGrid.innerHTML = "";
-      presets().forEach(function (preset) {
-        if (editing && editing.kind === "preset" && editing.id === preset.id) {
-          currentEditorForm = buildPresetEditor(preset, editing.draft);
-          presetGrid.appendChild(currentEditorForm);
-        } else {
-          presetGrid.appendChild(buildPresetCard(preset));
-        }
-      });
-      if (editing && editing.kind === "preset" && editing.id === null) {
-        currentEditorForm = buildPresetEditor(null, editing.draft);
-        presetGrid.appendChild(currentEditorForm);
-      } else {
-        var addTile = buildAddTile(t("settings.ai.presets.addBtn"), function () { openEditor("preset", null); });
-        if (providers().length === 0) {
-          addTile.disabled = true;
-          addTile.title = t("settings.ai.presets.needProvider");
-        }
-        presetGrid.appendChild(addTile);
-      }
-    }
-
-    function renderAll() {
-      renderProviderGrid();
-      renderPresetGrid();
-
-      defSelect.innerHTML = "";
-      defSelect.appendChild(el("option", { value: "", text: t("settings.optionDefault") }));
-      presets().forEach(function (preset) {
-        defSelect.appendChild(el("option", { value: preset.id, text: preset.label || preset.id }));
-      });
-      var wantDefault = sectionCfg.default_preset_id || "";
-      defSelect.value = presets().some(function (p) { return p.id === wantDefault; }) ? wantDefault : "";
-
-      renderProvideChecklist();
-      autoFetchModels();
-    }
-
-    /* ---- AI Network tab: what to provide -------------------------------
-       One row per configured preset, one checkbox: provide it or not (see
-       ai.editor.kindLabel on the preset editor -- a preset's `kind`
-       ("chat"|"tts"|"stt") is decided once, there, not here). Checking the
-       box writes to whichever single config field that kind maps to:
-       chat -> add/remove the preset's id in ai.advertised_models
-       (provider_hello.models, multi-select); tts/stt -> assign/clear
-       ai.tts_preset_id/stt_preset_id to this preset's id (single-select --
-       checking one tts-kind row and re-rendering naturally unchecks any
-       other tts-kind row, since both read the same ai.tts_preset_id).
-       Mounted into the "Provide to the network" role card's #ai-models slot
-       (replaces the old read-only model-badges renderAi() used to put
-       there). */
-    function renderProvideChecklist() {
-      if (!aiModelsBox) return;
-      aiModelsBox.innerHTML = "";
-      var list = presets();
-      if (list.length === 0) {
-        aiModelsBox.appendChild(el("div", { class: "muted", text: t("ai.net.provideNoPresets") }));
-        return;
-      }
-
-      // saveSetting always wants a badge element to toggle, but these paths
-      // (ai.tts_preset_id/stt_preset_id/advertised_models) always resolve to
-      // "applied immediately" (config.rs's applies_when), never "daemon
-      // restart" -- so this one is a detached, never-shown placeholder, not
-      // a real restart affordance like provBadge/presetBadge above.
-      var provideBadge = el("span", {});
-      provideBadge.style.display = "none";
-
-      var checklist = el("div", { class: "ai-provide-checklist" });
-      list.forEach(function (preset) {
-        var kind = preset.kind || "chat";
-        var row = el("div", { class: "ai-provide-row" });
-        var label = el("div", { class: "ai-provide-row-label" });
-        label.appendChild(document.createTextNode(preset.label || preset.id));
-        if (preset.model) label.appendChild(el("span", { class: "ai-provide-row-model", text: preset.model }));
-        row.appendChild(label);
-        row.appendChild(el("span", {
-          class: "badge",
-          text: kind === "tts" ? t("ai.net.provideTts") : kind === "stt" ? t("ai.net.provideStt") : t("ai.net.provideChat")
-        }));
-
-        var checked, onChange;
-        if (kind === "tts") {
-          checked = sectionCfg.tts_preset_id === preset.id;
-          onChange = function (isChecked) {
-            saveSetting("ai.tts_preset_id", isChecked ? preset.id : "", sectionCfg, "tts_preset_id", provideBadge).then(renderProvideChecklist);
-          };
-        } else if (kind === "stt") {
-          checked = sectionCfg.stt_preset_id === preset.id;
-          onChange = function (isChecked) {
-            saveSetting("ai.stt_preset_id", isChecked ? preset.id : "", sectionCfg, "stt_preset_id", provideBadge).then(renderProvideChecklist);
-          };
-        } else {
-          var advertised = Array.isArray(sectionCfg.advertised_models) ? sectionCfg.advertised_models : [];
-          checked = advertised.indexOf(preset.id) !== -1;
-          onChange = function (isChecked) {
-            var next = isChecked
-              ? (advertised.indexOf(preset.id) === -1 ? advertised.concat([preset.id]) : advertised)
-              : advertised.filter(function (m) { return m !== preset.id; });
-            saveSetting("ai.advertised_models", next, sectionCfg, "advertised_models", provideBadge).then(renderProvideChecklist);
-          };
-        }
-
-        var checkLabel = el("label", { class: "ai-provide-check" });
-        var cb = el("input", { type: "checkbox" });
-        cb.checked = checked;
-        cb.addEventListener("change", function () { onChange(cb.checked); });
-        checkLabel.appendChild(cb);
-        checkLabel.appendChild(document.createTextNode(t("ai.net.provideCheckbox")));
-        row.appendChild(checkLabel);
-
-        checklist.appendChild(row);
-      });
-      aiModelsBox.appendChild(checklist);
-    }
-
-    renderAll();
+    });
     return wrap;
   }
 
@@ -10712,7 +10972,13 @@
         var aiConnectionEditor = document.getElementById("ai-connection-editor");
         if (aiConnectionEditor) {
           aiConnectionEditor.innerHTML = "";
-          aiConnectionEditor.appendChild(buildAiProvidersPresetsField(sectionCfg));
+          aiConnectionEditor.appendChild(buildAiProvidersField());
+          var tasks = document.getElementById("ai-task-editor");
+          tasks.innerHTML = "";
+          tasks.appendChild(buildAiTasksField());
+          var sharing = document.getElementById("ai-sharing-editor");
+          sharing.innerHTML = "";
+          sharing.appendChild(buildAiSharingField());
         }
       }
       var advancedFields = [];
@@ -10733,7 +10999,9 @@
       }
       container.appendChild(sec);
     });
+    aiNotifyModels();
     refreshAiHints();
+    if (document.getElementById("panel-ai").classList.contains("active") || document.getElementById("panel-settings").classList.contains("active")) aiRefreshModels(false);
   }
 
   function pollConfig() {
@@ -11120,6 +11388,7 @@
   }
 
   function showPanel(id) {
+    if (id === "panel-ai" || id === "panel-settings") aiRefreshModels(false);
     /* poll-driven DOM renders defer until the entrance animation finishes;
        450ms = --dur 340ms + margin */
     window.__mistlViewSwitchUntil = performance.now() + 450;
@@ -11197,8 +11466,34 @@
       var pages = Array.prototype.slice.call(panel.querySelectorAll("[data-subtab]"));
       if (!tabs.length || !pages.length) return;
       var storeKey = "mistl-subtab-" + panel.id;
+      var content = panel.querySelector(".ai-subtab-content");
+      var motion = content && window.matchMedia("(prefers-reduced-motion: reduce)");
+      var heightAnimation = null, heightTimer = null, activeName = null;
+      var highlight = content && el("span", { class: "ai-tab-highlight", "aria-hidden": "true" });
+      if (highlight) list.prepend(highlight);
+      function moveHighlight(animate) {
+        if (!highlight) return;
+        var selected = tabs.find(function (tab) { return tab.classList.contains("active"); });
+        if (!selected) return;
+        var css = getComputedStyle(highlight), from = { transform: css.transform, width: css.width, height: css.height };
+        var to = { transform: "translate(" + selected.offsetLeft + "px," + selected.offsetTop + "px)", width: selected.offsetWidth + "px", height: selected.offsetHeight + "px" };
+        Object.assign(highlight.style, to);
+        if (animate) aiAnimate(highlight, [from, to]);
+        else if (highlight._aiMotion) highlight._aiMotion(false);
+      }
+      if (highlight && window.ResizeObserver) new ResizeObserver(function () { moveHighlight(false); }).observe(list);
+      function finishHeight() {
+        clearTimeout(heightTimer); heightTimer = null;
+        var previous = heightAnimation; heightAnimation = null;
+        if (previous) previous.cancel();
+      }
+      if (motion) motion.addEventListener("change", function () { if (motion.matches) finishHeight(); });
 
       function activate(name) {
+        // Capture the currently displayed height before cancelling an interrupted switch.
+        var from = content && content.getBoundingClientRect().height;
+        var changed = activeName && activeName !== name;
+        finishHeight();
         tabs.forEach(function (b) {
           var on = b.getAttribute("data-subtab-target") === name;
           b.classList.toggle("active", on);
@@ -11208,6 +11503,25 @@
         pages.forEach(function (pg) {
           pg.classList.toggle("active", pg.getAttribute("data-subtab") === name);
         });
+        moveHighlight(!!changed && panel.classList.contains("active"));
+        activeName = name;
+        if (content && changed && panel.classList.contains("active") && !motion.matches && content.animate) {
+          var to = content.getBoundingClientRect().height;
+          if (from > 0 && to > 0 && from !== to) {
+            // No persistent height/overflow styles: completion always returns to natural layout.
+            var animation = content.animate([{ height: from + "px", overflow: "hidden" }, { height: to + "px", overflow: "hidden" }], aiMotionOptions(content));
+            heightAnimation = animation;
+            var done = function () { if (heightAnimation === animation) finishHeight(); };
+            animation.onfinish = done; animation.oncancel = done;
+            function fallback() {
+              if (heightAnimation !== animation) return;
+              if (animation.playState === "paused") heightTimer = setTimeout(fallback, 260);
+              else done();
+            }
+            heightTimer = setTimeout(fallback, 260);
+          }
+        }
+        if (panel.id === "panel-ai" && name === "sharing" && panel.classList.contains("active")) aiRefreshModels(false);
         try { localStorage.setItem(storeKey, name); } catch (e) { /* ignore */ }
       }
       subtabActivate[panel.id] = activate;

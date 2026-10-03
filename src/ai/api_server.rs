@@ -34,7 +34,7 @@
 //!   response_format?, speed?, lang?}`. Responds `200` with the **raw
 //!   audio** and the format's MIME type, not JSON -- the upstream returns
 //!   bytes and so does this. `model`/`voice` omitted or empty means "use the
-//!   TTS preset's", resolved through the same chain the wire path uses (see
+//!   TTS configuration's", resolved through the same chain the wire path uses (see
 //!   `super::resolve_tts_voice`), so both doors mean the same thing by the
 //!   voices they advertise. `lang` is a **mistl extension** over OpenAI's
 //!   schema: the BCP-47 hint `tts_request.lang` carries, which an OpenAI
@@ -51,11 +51,8 @@
 //!   the HTTP chunked body cleanly (without a success `[DONE]` event).
 //! - Anything else -> `404`.
 //!
-//! Both audio endpoints are answered **only from this node's own
-//! `tts_preset_id`/`stt_preset_id`**. Unlike chat, there is no p2p
-//! fallback: sending `tts_request`/`stt_request` as a *consumer* is still
-//! unimplemented, so a node with no voice preset of its own says so rather
-//! than waiting on a peer it has no way to ask.
+//! Audio endpoints resolve ai.tts/ai.stt directly. HTTP references call their
+//! endpoint; Room references use the room's advertised voice service.
 //!
 //! ## HTTP parsing (keep it minimal but correct)
 //!
@@ -825,7 +822,7 @@ async fn handle_audio_speech(stream: &mut TcpStream, body: &[u8], call: &TtsFn) 
     }
 
     let params = tts::TtsParams {
-        // Empty means "whatever the preset says" -- resolved in
+        // Empty means "whatever ai.tts says" -- resolved in
         // `AiService::synthesize`, not here, so the wire path and this one
         // fill in defaults the same way.
         model: req
@@ -848,7 +845,7 @@ async fn handle_audio_speech(stream: &mut TcpStream, body: &[u8], call: &TtsFn) 
 
     // `lang` is a mistl extension, not part of OpenAI's schema: it is the
     // same BCP-47 hint `tts_request.lang` carries over the wire, and an
-    // OpenAI client that never sends it simply gets the preset's own voice.
+    // OpenAI client that never sends it simply gets the configuration's own voice.
     let lang = req.get("lang").and_then(Value::as_str).map(str::to_string);
 
     match (call)(params, lang).await {

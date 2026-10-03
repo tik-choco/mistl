@@ -2,31 +2,15 @@
 //! wire-compatible with `@tik-choco/mistai` protocol v1 (tc-mistllm /
 //! tc-translate / tc-note peers can share the room).
 //!
-//! Two roles, both optional and combinable:
-//!
-//! - **provide** (`ai provide start`): announce `provider_hello` and
-//!   forward inbound `llm_request`s to the resolved default preset's
-//!   upstream (`[ai] default_preset_id` -> `[[ai.presets]]` ->
-//!   `[[ai.providers]]`, see `crate::config::resolve_preset`), streaming
-//!   deltas back as chunks. TTS/STT are served the same way when
-//!   `[ai] tts_preset_id`/`stt_preset_id` name a preset (independent of the
-//!   chat preset, possibly a different provider) -- otherwise inbound
-//!   `tts_request`/`stt_request`s get an immediate `voice_error` reply
-//!   instead of silently going unanswered (see `provider.rs`).
-//! - **serve** (`ai serve start`): run a local OpenAI-compatible HTTP API
-//!   server; requests go to the local provider when one is running, else
-//!   to the first provider discovered on the network. Point any OpenAI
-//!   client at `http://<api_listen>/v1`.
-//!
-//! `ai chat` is a one-shot version of the same backend selection.
-//!
-//! The AI room falls back to `net::DEFAULT_ROOM` when `[ai] room_id` is
-//! unset. `crate::net` supports multiple simultaneous rooms per process, so
-//! `[ai] room_id` may name any room; the ai protocol coexists with the
-//! daemon's other room protocols by message shape.
+//! HTTP and Room providers use explicit model references. Network providing
+//! advertises raw model ids independently in each enabled room with provide on.
+//! The local OpenAI-compatible server resolves ids from provider caches and
+//! ai.default_ref, including network routing when the selected provider is a room.
 
 mod api_server;
 mod consumer;
+mod model_discovery;
+pub(crate) use model_discovery::{ModelDiscovery, spawn_http_refresh};
 /// Opened to `pub(crate)` so `crate::bot`'s `summarize` transform can reuse
 /// the upstream chat-completion client directly (`UpstreamConfig` +
 /// `stream_chat_completion`) instead of re-implementing an OpenAI-compatible
@@ -40,6 +24,7 @@ mod provider;
 mod serve_state;
 mod stt;
 pub mod tts;
+mod voice_consumer;
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -126,163 +111,370 @@ const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 /// the whole request.
 const VOICE_CATALOG_TIMEOUT: Duration = Duration::from_secs(5);
 
-struct AiService {
+struct AiRoom {
+    cache_lock: std::sync::Mutex<()>,
     room: String,
     node_id: String,
     send: SendFn,
     consumer: Arc<Consumer>,
+    voice: Arc<voice_consumer::VoiceConsumer>,
     provider: RwLock<Option<Arc<Provider>>>,
-    api_server: Mutex<Option<Arc<ApiServer>>>,
-    /// Inactivity timeout for p2p requests (resets per chunk).
-    request_timeout: Duration,
-    /// Bounds concurrently running inbound-message handlers.
     handlers: Arc<tokio::sync::Semaphore>,
-    /// Inbound messages dropped because `handlers` was exhausted.
     dropped_messages: std::sync::atomic::AtomicU64,
 }
 
-/// Max concurrently running inbound-message handlers (each may hold an
-/// upstream LLM call); excess messages are dropped and counted.
-const MAX_INFLIGHT_HANDLERS: usize = 64;
+struct AiService {
+    state: Arc<AppState>,
+    rooms: RwLock<HashMap<String, Arc<AiRoom>>>,
+    on_demand: RwLock<HashSet<String>>,
+    sync: Mutex<()>,
+    api_server: Mutex<Option<Arc<ApiServer>>>,
+}
 
+const MAX_INFLIGHT_HANDLERS: usize = 64;
 static SERVICE: OnceCell<Arc<AiService>> = OnceCell::const_new();
 
 async fn ensure_started(state: &Arc<AppState>) -> Result<Arc<AiService>> {
     let service = SERVICE
-        .get_or_try_init(|| async { init_service(state).await })
-        .await?;
-    Ok(service.clone())
-}
-
-async fn init_service(state: &Arc<AppState>) -> Result<Arc<AiService>> {
-    let config = state.config();
-    let room = config
-        .ai
-        .room_id
-        .clone()
-        .unwrap_or_else(|| crate::net::DEFAULT_ROOM.to_string());
-    let transport = crate::net::ensure_started(state, room)
-        .await
-        .context("ai: starting p2p transport")?;
-
-    // Single-writer send queue: preserves cross-request send order.
-    // Bounded: a slow/stalled transport must not let remote-driven replies
-    // pile up without limit; on overflow new replies are dropped.
-    let (send_tx, mut send_rx) =
-        tokio::sync::mpsc::channel::<(String, ProtocolMessage)>(SEND_QUEUE_CAPACITY);
-    let ai_room = transport.room.clone();
-    tokio::spawn(async move {
-        while let Some((to, msg)) = send_rx.recv().await {
-            if let Err(err) = crate::net::send_direct(&ai_room, &to, protocol::encode(&msg)).await {
-                debug!(%err, to = %to, "ai: send failed");
-            }
-        }
-    });
-    let send: SendFn = Arc::new(move |to: &str, msg: ProtocolMessage| {
-        if send_tx.try_send((to.to_string(), msg)).is_err() {
-            debug!(to = %to, "ai: send queue full or closed; dropping message");
-        }
-    });
-
-    let service = Arc::new(AiService {
-        room: transport.room.clone(),
-        node_id: transport.node_id.clone(),
-        send: send.clone(),
-        consumer: Consumer::new(send),
-        provider: RwLock::new(None),
-        api_server: Mutex::new(None),
-        request_timeout: Duration::from_secs(config.ai.request_timeout_secs.max(1)),
-        handlers: Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT_HANDLERS)),
-        dropped_messages: std::sync::atomic::AtomicU64::new(0),
-    });
-    service
-        .consumer
-        .set_trusted_providers(config.ai.trusted_providers.clone());
-
-    {
-        let service = service.clone();
-        let rt = tokio::runtime::Handle::current();
-        crate::net::register_handler(move |event_type, from, data| match event_type {
-            crate::net::EVENT_RAW => {
-                let Some(msg) = protocol::decode(data) else {
-                    return; // Not an ai protocol message; ignore.
-                };
-                let Ok(permit) = service.handlers.clone().try_acquire_owned() else {
-                    let n = service
-                        .dropped_messages
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                        + 1;
-                    if n.is_power_of_two() {
-                        warn!(
-                            dropped = n,
-                            "ai: handler pool exhausted; dropping inbound message"
-                        );
-                    }
+        .get_or_init(|| async {
+            let service = Arc::new(AiService {
+                state: state.clone(),
+                rooms: RwLock::new(HashMap::new()),
+                on_demand: RwLock::new(HashSet::new()),
+                sync: Mutex::new(()),
+                api_server: Mutex::new(None),
+            });
+            let weak = Arc::downgrade(&service);
+            let rt = tokio::runtime::Handle::current();
+            crate::net::register_room_handler(move |event, room, from, data| {
+                let Some(service) = weak.upgrade() else {
                     return;
                 };
-                let from = from.to_string();
-                let service = service.clone();
-                rt.spawn(async move {
-                    let _permit = permit;
-                    service.consumer.handle_message(&from, &msg);
-                    let provider = service.provider.read().expect("ai provider lock").clone();
-                    if let Some(provider) = provider {
-                        provider.handle_message(from, msg).await;
+                let session = service
+                    .rooms
+                    .read()
+                    .expect("ai rooms lock")
+                    .get(room)
+                    .cloned();
+                let Some(session) = session else {
+                    return;
+                };
+                match event {
+                    crate::net::EVENT_RAW => {
+                        if data.len() > 2 * 1024 * 1024 {
+                            return;
+                        }
+                        let Some(msg) = protocol::decode(data) else {
+                            return;
+                        };
+                        let catalog_changed = session.consumer.handle_message(from, &msg);
+                        session.voice.handle_message(from, &msg);
+                        let Ok(permit) = session.handlers.clone().try_acquire_owned() else {
+                            session
+                                .dropped_messages
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if catalog_changed {
+                                service.cache_room_models(&session);
+                            }
+                            return;
+                        };
+                        let from = from.to_string();
+                        rt.spawn(async move {
+                            let _permit = permit;
+                            if catalog_changed {
+                                service.cache_room_models(&session);
+                            }
+                            if let Some(provider) = session.local_provider() {
+                                provider.handle_message(from, msg).await;
+                            }
+                        });
                     }
-                });
-            }
-            crate::net::EVENT_JOIN => {
-                // Announce both roles to the new peer, mirroring mistai's
-                // per-peer hello behavior.
-                let from = from.to_string();
-                let service = service.clone();
-                rt.spawn(async move {
-                    (service.send)(&from, ProtocolMessage::ConsumerHello);
-                    let provider = service.provider.read().expect("ai provider lock").clone();
-                    if let Some(provider) = provider {
-                        (service.send)(&from, provider.hello());
+                    crate::net::EVENT_JOIN => {
+                        (session.send)(from, ProtocolMessage::ConsumerHello);
+                        if let Some(provider) = session.local_provider() {
+                            (session.send)(from, provider.hello());
+                        }
                     }
-                });
-            }
-            crate::net::EVENT_LEAVE => {
-                service.consumer.on_peer_disconnected(from);
-                if let Some(provider) = service.local_provider() {
-                    provider.on_peer_left(from);
+                    crate::net::EVENT_LEAVE => {
+                        session.consumer.on_peer_disconnected(from);
+                        session.voice.on_peer_left(from);
+                        if let Some(provider) = session.local_provider() {
+                            provider.on_peer_left(from);
+                        }
+                    }
+                    _ => {}
                 }
-            }
-            _ => {}
-        });
-    }
-
-    // Announce ourselves to anyone already connected.
-    {
-        let service = service.clone();
-        tokio::spawn(async move {
-            service.broadcast(ProtocolMessage::ConsumerHello).await;
-        });
-    }
-
+            });
+            service
+        })
+        .await
+        .clone();
+    service.reconcile(false).await?;
     Ok(service)
 }
 
-impl AiService {
-    /// Send `msg` to every currently-connected peer (mistlib native has no
-    /// room broadcast; peers == room members).
-    async fn broadcast(&self, msg: ProtocolMessage) {
-        for node in crate::net::connected_nodes().await {
-            (self.send)(&node, msg.clone());
-        }
-    }
-
+impl AiRoom {
     fn local_provider(&self) -> Option<Arc<Provider>> {
         self.provider.read().expect("ai provider lock").clone()
     }
+    async fn broadcast(&self, msg: ProtocolMessage) {
+        let _ = crate::net::send_broadcast(&self.room, protocol::encode(&msg)).await;
+    }
+}
 
-    /// Backend selection shared by `ai chat` and the API server: local
-    /// provider first, else the first provider discovered on the network.
-    /// Returns `(output, via, remote_provider_id)`. A request using tools
-    /// against a remote provider without the `"tools"` service fails with
-    /// [`ToolsUnsupported`]; the local provider always supports tools.
+fn providing_room(provider: &crate::config::AiProviderConfig) -> bool {
+    provider.enabled && provider.provide && provider.room().is_some()
+}
+
+/// CLI commands edit the same flags as the dashboard, preserving all other settings.
+pub(crate) fn set_provide_flags(ai: &mut crate::config::AiConfig, start: bool) -> Vec<String> {
+    let mut rooms = Vec::new();
+    for provider in &mut ai.providers {
+        let Some(room) = provider.room().map(String::from) else {
+            continue;
+        };
+        if start {
+            if provider.enabled && !provider.shared.is_empty() {
+                provider.provide = true;
+                rooms.push(room);
+            }
+        } else {
+            if provider.provide {
+                rooms.push(room);
+            }
+            provider.provide = false;
+        }
+    }
+    rooms
+}
+
+/// Enabled rooms used by tasks/voice/default or configured to provide stay joined.
+fn referenced_rooms(config: &crate::config::Config) -> HashSet<String> {
+    let mut ids = HashSet::new();
+    if let Some(reference) = &config.ai.default_ref {
+        ids.insert(reference.provider_id.clone());
+    }
+    if let Some(voice) = &config.ai.tts {
+        ids.insert(voice.provider_id.clone());
+    }
+    if let Some(reference) = &config.ai.stt {
+        ids.insert(reference.provider_id.clone());
+    }
+    for pipeline in &config.bot.pipelines {
+        for transform in &pipeline.transforms {
+            let reference = match transform {
+                crate::config::TransformConfig::Summarize { model, .. }
+                | crate::config::TransformConfig::Translate { model, .. }
+                | crate::config::TransformConfig::Tts { model, .. } => model,
+            };
+            if let Some(reference) = reference {
+                ids.insert(reference.provider_id.clone());
+            }
+        }
+    }
+    config
+        .ai
+        .providers
+        .iter()
+        .filter(|p| p.enabled && (p.provide || ids.contains(&p.id)))
+        .filter_map(|p| p.room().map(String::from))
+        .collect()
+}
+
+impl AiService {
+    fn cache_room_models(&self, session: &AiRoom) {
+        let _guard = session.cache_lock.lock().expect("ai room cache lock");
+        let models = session.consumer.models();
+        for provider in self
+            .state
+            .config()
+            .ai
+            .providers
+            .iter()
+            .filter(|p| p.enabled && p.room() == Some(session.room.as_str()))
+        {
+            if let Err(err) = self.state.cache_ai_models(provider, &models) {
+                warn!(%err, "ai: failed to persist room model cache");
+            }
+        }
+    }
+
+    async fn join_locked(&self, room: &str) -> Result<Arc<AiRoom>> {
+        if let Some(session) = self.rooms.read().expect("ai rooms lock").get(room).cloned() {
+            return Ok(session);
+        }
+        let transport = crate::net::ensure_started(&self.state, room.to_string()).await?;
+        let (tx, mut rx) =
+            tokio::sync::mpsc::channel::<(String, ProtocolMessage)>(SEND_QUEUE_CAPACITY);
+        let send_room = room.to_string();
+        tokio::spawn(async move {
+            while let Some((to, msg)) = rx.recv().await {
+                if let Err(err) =
+                    crate::net::send_direct(&send_room, &to, protocol::encode(&msg)).await
+                {
+                    debug!(%err, "ai: send failed");
+                }
+            }
+        });
+        let send: SendFn = Arc::new(move |to, msg| {
+            if tx.try_send((to.to_string(), msg)).is_err() {
+                debug!("ai: send queue full or closed");
+            }
+        });
+        let session = Arc::new(AiRoom {
+            cache_lock: std::sync::Mutex::new(()),
+            room: transport.room.clone(),
+            node_id: transport.node_id.clone(),
+            consumer: Consumer::new(send.clone()),
+            voice: voice_consumer::VoiceConsumer::new(send.clone()),
+            send,
+            provider: RwLock::new(None),
+            handlers: Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT_HANDLERS)),
+            dropped_messages: std::sync::atomic::AtomicU64::new(0),
+        });
+        session
+            .consumer
+            .set_trusted_providers(self.state.config().ai.trusted_providers);
+        session.consumer.set_room(room.to_string());
+        self.rooms
+            .write()
+            .expect("ai rooms lock")
+            .insert(room.to_string(), session.clone());
+        session.broadcast(ProtocolMessage::ConsumerHello).await;
+        Ok(session)
+    }
+
+    async fn room(&self, room: &str) -> Result<Arc<AiRoom>> {
+        let _guard = self.sync.lock().await;
+        self.on_demand
+            .write()
+            .expect("ai demand lock")
+            .insert(room.to_string());
+        self.join_locked(room).await
+    }
+
+    async fn reconcile(&self, reload: bool) -> Result<()> {
+        let _guard = self.sync.lock().await;
+        let config = self.state.config();
+        let sessions = self.rooms.read().expect("ai rooms lock").clone();
+        let mut withdrawn = Vec::new();
+        // Withdraw before joins or upstream discovery can fail. Consumer references
+        // may keep a room connected after its local provider has stopped.
+        for session in sessions.values() {
+            let providing = config
+                .ai
+                .providers
+                .iter()
+                .any(|p| providing_room(p) && p.room() == Some(session.room.as_str()));
+            if (reload || !providing)
+                && session
+                    .provider
+                    .write()
+                    .expect("ai provider lock")
+                    .take()
+                    .is_some()
+            {
+                if !providing {
+                    self.on_demand
+                        .write()
+                        .expect("ai demand lock")
+                        .remove(&session.room);
+                    withdrawn.push(session.clone());
+                }
+            }
+        }
+        for session in withdrawn {
+            session
+                .broadcast(ProtocolMessage::ProviderHello {
+                    models: Some(Vec::new()),
+                    services: Some(Vec::new()),
+                    voices: None,
+                })
+                .await;
+        }
+        let mut wanted = referenced_rooms(&config);
+        self.on_demand
+            .write()
+            .expect("ai demand lock")
+            .retain(|room| {
+                config
+                    .ai
+                    .providers
+                    .iter()
+                    .any(|p| p.enabled && p.room() == Some(room.as_str()))
+            });
+        wanted.extend(
+            self.on_demand
+                .read()
+                .expect("ai demand lock")
+                .iter()
+                .cloned(),
+        );
+        let removed: Vec<_> = self
+            .rooms
+            .read()
+            .expect("ai rooms lock")
+            .keys()
+            .filter(|r| !wanted.contains(*r))
+            .cloned()
+            .collect();
+        for room in removed {
+            let session = self.rooms.write().expect("ai rooms lock").remove(&room);
+            if let Some(session) = session {
+                *session.provider.write().expect("ai provider lock") = None;
+                session.consumer.reject_all("AI room disabled or removed");
+                session.voice.reject_all();
+                crate::net::leave_room(&room).await?;
+            }
+        }
+        for room in wanted {
+            self.join_locked(&room).await?;
+        }
+        let sessions = self.rooms.read().expect("ai rooms lock").clone();
+        for session in sessions.values() {
+            if session.local_provider().is_some() {
+                continue;
+            }
+            if let Some(room_config) = config
+                .ai
+                .providers
+                .iter()
+                .find(|p| providing_room(p) && p.room() == Some(session.room.as_str()))
+            {
+                let built = build_provider(session, &config.ai, room_config).await?;
+                *session.provider.write().expect("ai provider lock") = Some(built.clone());
+                session.broadcast(built.hello()).await;
+            }
+        }
+        Ok(())
+    }
+
+    fn model_list(&self) -> Vec<String> {
+        let config = self.state.config();
+        let rooms = self.rooms.read().expect("ai rooms lock");
+        let mut models = Vec::new();
+        for provider in config.ai.providers.iter().filter(|p| p.enabled) {
+            let available = provider
+                .room()
+                .and_then(|room| rooms.get(room))
+                .map(|session| session.consumer.models())
+                .unwrap_or_else(|| provider.models.clone());
+            for model in available {
+                if !models.contains(&model) {
+                    models.push(model);
+                }
+            }
+        }
+        if let Some(reference) = &config.ai.default_ref
+            && crate::config::resolve_ref_exact(&config.ai, reference).is_some()
+            && reference.model != "network-auto"
+            && !models.contains(&reference.model)
+        {
+            models.push(reference.model.clone());
+        }
+        models
+    }
+
     async fn chat(
         &self,
         messages: Vec<ChatMessage>,
@@ -290,117 +482,135 @@ impl AiService {
         model: Option<String>,
         delta_tx: Option<UnboundedSender<String>>,
     ) -> Result<(ChatOutput, &'static str, Option<String>)> {
-        if let Some(provider) = self.local_provider() {
-            let output = provider
-                .call_upstream(messages, tools, model, delta_tx)
-                .await?;
-            return Ok((output, "local", None));
-        }
-
-        let info = match self.consumer.provider() {
-            Some(info) => info,
-            None => {
-                // Nudge providers to announce, then wait.
-                self.broadcast(ProtocolMessage::ConsumerHello).await;
-                self.consumer
-                    .wait_for_provider(DISCOVERY_TIMEOUT)
-                    .await
-                    .context("ai: no provider found on the network")?
-            }
-        };
-        let output = self
-            .consumer
-            .request_tools(
-                &info.node_id,
-                messages,
-                tools,
-                model,
-                self.request_timeout,
-                delta_tx,
-            )
-            .await?;
-        Ok((output, "p2p", Some(info.node_id)))
+        let config = self.state.config();
+        let reference = resolve_api_ref(&config.ai, model.as_deref(), &self.live_models())?;
+        self.chat_ref(&reference, None, messages, tools, delta_tx)
+            .await
     }
 
-    /// Synthesize speech from this node's configured TTS preset.
-    ///
-    /// The voice counterpart of [`AiService::chat`], and deliberately only
-    /// half of it: this resolves the **local** `ai.tts_preset_id` and calls
-    /// its upstream. There is no p2p fallback yet — sending `tts_request`
-    /// as a *consumer* is still unimplemented (the provider half has been
-    /// there since the voice extension landed), so a node with no TTS
-    /// preset of its own has nothing to fall back to and says so rather
-    /// than hanging waiting for a peer it can't ask.
+    fn live_models(&self) -> HashMap<String, Vec<String>> {
+        self.rooms
+            .read()
+            .expect("ai rooms lock")
+            .iter()
+            .map(|(room, session)| (room.clone(), session.consumer.models()))
+            .collect()
+    }
+
+    async fn chat_ref(
+        &self,
+        reference: &crate::config::ModelRef,
+        effort: Option<String>,
+        messages: Vec<ChatMessage>,
+        tools: ToolOptions,
+        delta_tx: Option<UnboundedSender<String>>,
+    ) -> Result<(ChatOutput, &'static str, Option<String>)> {
+        let config = self.state.config();
+        let resolved = crate::config::resolve_ref(&config.ai, Some(reference))
+            .context("ai: model reference is unavailable; check ai.providers and ai.default_ref")?;
+        if let Some(room) = resolved.base_url.strip_prefix("mist-network://") {
+            let session = self.room(room).await?;
+            let requested = (resolved.model != "network-auto").then_some(resolved.model.clone());
+            let info = match session.consumer.provider_for_model(requested.as_deref()) {
+                Some(info) => info,
+                None => {
+                    session.broadcast(ProtocolMessage::ConsumerHello).await;
+                    session
+                        .consumer
+                        .wait_for_model(requested.as_deref(), DISCOVERY_TIMEOUT)
+                        .await?
+                }
+            };
+            let output = session
+                .consumer
+                .request_tools(
+                    &info.node_id,
+                    messages,
+                    tools,
+                    requested,
+                    Duration::from_secs(config.ai.request_timeout_secs.max(1)),
+                    delta_tx,
+                )
+                .await?;
+            return Ok((output, "p2p", Some(info.node_id)));
+        }
+        let upstream = UpstreamConfig {
+            base_url: resolved.base_url,
+            api_key: resolved.api_key,
+            model: Some(resolved.model),
+            reasoning_effort: effort,
+        };
+        let output =
+            openai::stream_chat_completion_tools(&upstream, &messages, None, &tools, delta_tx)
+                .await?;
+        Ok((output, "local", None))
+    }
+
     async fn synthesize(
         &self,
         state: &Arc<AppState>,
         req: tts::TtsParams,
         lang: Option<String>,
     ) -> Result<tts::TtsAudio> {
-        let cfg = state.config().ai.clone();
-        let resolved = voice_preset_provider(&cfg, &cfg.tts_preset_id).context(
-            "ai: no TTS preset configured (set `ai.tts_preset_id` to a preset id; \
-             see `mistl config show`)",
-        )?;
-        let (provider, preset) = resolved.clone();
-
-        // The request's own model/voice win when given, exactly as they do
-        // over the wire (mistllm-wire's "provider voice/model respect
-        // rules"): a caller that names a voice gets that voice, and the
-        // preset only fills in what wasn't asked for.
-        //
-        // Voice specifically goes through `resolve_tts_voice` — the same
-        // chain the wire path uses — rather than reading `preset.voice`
-        // directly. Both doors advertise the same voices, so they have to
-        // mean the same thing by them: a local caller must not get "tts
-        // requires a voice" for a request the wire would have answered from
-        // `lang_voices` or from the catalog.
+        let cfg = state.config().ai;
+        let resolved_ref = crate::config::resolve_voice(&cfg, cfg.tts.as_ref())
+            .context("ai: no usable ai.tts configured")?;
+        if let Some(room) = resolved_ref.base_url.strip_prefix("mist-network://") {
+            let session = self.room(room).await?;
+            session.broadcast(ProtocolMessage::ConsumerHello).await;
+            let info = session
+                .consumer
+                .wait_for_service(protocol::SERVICE_TTS, DISCOVERY_TIMEOUT)
+                .await?;
+            let req = tts::TtsParams {
+                model: if req.model.trim().is_empty() {
+                    resolved_ref.model
+                } else {
+                    req.model
+                },
+                voice: if req.voice.trim().is_empty() {
+                    resolved_ref.voice.unwrap_or_default()
+                } else {
+                    req.voice
+                },
+                ..req
+            };
+            return session
+                .voice
+                .synthesize(
+                    &info.node_id,
+                    req,
+                    lang,
+                    Duration::from_secs(cfg.request_timeout_secs.max(1)),
+                )
+                .await;
+        }
+        let resolved = voice_ref_provider(&cfg, cfg.tts.as_ref())
+            .context("ai: no usable ai.tts configured")?;
+        let (provider, voice_config) = resolved.clone();
         let request_voice = (!req.voice.trim().is_empty()).then(|| req.voice.clone());
-
-        // The catalog is consulted by only two *fallback* steps of that
-        // chain (the kokoro-shaped `lang` guess, and the last-resort first
-        // entry), and fetching it costs an upstream round trip. The wire
-        // path pays that once, when the provider is built; paying it here
-        // would mean paying it on every single synthesis — and, worse,
-        // hanging the request whenever that endpoint doesn't answer. So it
-        // is fetched only when one of those two steps can actually be
-        // reached, and never when the answer is already decided.
-        let needs_catalog = request_voice.is_none() && (lang.is_some() || preset.voice.is_none());
-        let catalog = if needs_catalog {
-            // Bounded: being configured against a TTS upstream with no
-            // voice-listing endpoint is a normal thing, and "no catalog" is
-            // a fine answer — waiting forever is not.
-            match tokio::time::timeout(
+        let catalog = if request_voice.is_none() && (lang.is_some() || voice_config.voice.is_none())
+        {
+            tokio::time::timeout(
                 VOICE_CATALOG_TIMEOUT,
                 resolve_advertised_voices(Some(&resolved)),
             )
             .await
-            {
-                Ok(voices) => voices,
-                Err(_) => {
-                    tracing::warn!(
-                        timeout_secs = VOICE_CATALOG_TIMEOUT.as_secs(),
-                        "ai: timed out listing upstream voices; continuing without a catalog"
-                    );
-                    Vec::new()
-                }
-            }
+            .unwrap_or_default()
         } else {
             Vec::new()
         };
-
         let voice = resolve_tts_voice(
             request_voice,
             lang.as_deref(),
-            &preset.lang_voices,
+            &voice_config.lang_voices,
             &catalog,
-            &preset.voice,
+            &voice_config.voice,
         )
         .unwrap_or_default();
-
         let req = tts::TtsParams {
             model: if req.model.trim().is_empty() {
-                preset.model.clone()
+                voice_config.model
             } else {
                 req.model
             },
@@ -410,17 +620,42 @@ impl AiService {
         tts::synthesize(&provider, req).await
     }
 
-    /// Transcribe audio with this node's configured STT preset. Same
-    /// local-only shape, and the same reason, as [`AiService::synthesize`].
     async fn transcribe(&self, state: &Arc<AppState>, req: stt::SttParams) -> Result<String> {
-        let cfg = state.config().ai.clone();
-        let (provider, preset) = voice_preset_provider(&cfg, &cfg.stt_preset_id).context(
-            "ai: no STT preset configured (set `ai.stt_preset_id` to a preset id; \
-             see `mistl config show`)",
-        )?;
+        let cfg = state.config().ai;
+        let resolved_ref = cfg
+            .stt
+            .as_ref()
+            .and_then(|r| crate::config::resolve_ref(&cfg, Some(r)))
+            .context("ai: no usable ai.stt configured")?;
+        if let Some(room) = resolved_ref.base_url.strip_prefix("mist-network://") {
+            let session = self.room(room).await?;
+            session.broadcast(ProtocolMessage::ConsumerHello).await;
+            let info = session
+                .consumer
+                .wait_for_service(protocol::SERVICE_STT, DISCOVERY_TIMEOUT)
+                .await?;
+            let req = stt::SttParams {
+                model: if req.model.trim().is_empty() {
+                    resolved_ref.model
+                } else {
+                    req.model
+                },
+                ..req
+            };
+            return session
+                .voice
+                .transcribe(
+                    &info.node_id,
+                    req,
+                    Duration::from_secs(cfg.request_timeout_secs.max(1)),
+                )
+                .await;
+        }
+        let (provider, resolved) = model_ref_provider(&cfg, cfg.stt.as_ref())
+            .context("ai: no usable ai.stt configured")?;
         let req = stt::SttParams {
             model: if req.model.trim().is_empty() {
-                preset.model.clone()
+                resolved.model
             } else {
                 req.model
             },
@@ -430,94 +665,159 @@ impl AiService {
     }
 }
 
-/// Looks up `provider_id` in `ai.providers` and builds an [`UpstreamConfig`]
-/// for a one-off request against it directly -- no preset/model resolution
-/// involved, unlike `crate::config::resolve_preset`. Returns an actionable
-/// error if the provider isn't configured.
-fn provider_upstream(ai: &crate::config::AiConfig, provider_id: &str) -> Result<UpstreamConfig> {
-    let provider = ai
-        .providers
-        .iter()
-        .find(|p| p.id == provider_id)
-        .with_context(|| {
-            format!(
-                "ai: provider {provider_id:?} not found in ai.providers; add it with \
-                 `mistl config set ai.providers <json>` (see `mistl config show`)"
-            )
-        })?;
-    Ok(UpstreamConfig {
-        base_url: provider.base_url.clone(),
-        api_key: provider.api_key.clone(),
-        model: None,
-        temperature: None,
-        reasoning_effort: None,
-    })
+/// Explicit raw ids use the default when it names the id, then enabled caches.
+/// A room default can resolve an uncached model through live network discovery.
+fn resolve_api_ref(
+    ai: &crate::config::AiConfig,
+    model: Option<&str>,
+    live: &HashMap<String, Vec<String>>,
+) -> Result<crate::config::ModelRef> {
+    use crate::config::{ModelRef, resolve_ref_exact};
+    let default = ai
+        .default_ref
+        .as_ref()
+        .filter(|r| resolve_ref_exact(ai, r).is_some());
+    let Some(model) = model.filter(|m| !m.trim().is_empty()) else {
+        return default
+            .cloned()
+            .context("ai: no usable ai.default_ref configured");
+    };
+    if let Some(default) = default.filter(|r| r.model == model) {
+        return Ok(default.clone());
+    }
+    for provider in ai.providers.iter().filter(|p| p.enabled) {
+        let models = provider
+            .room()
+            .and_then(|room| live.get(room))
+            .unwrap_or(&provider.models);
+        if models.iter().any(|m| m == model) {
+            return Ok(ModelRef {
+                provider_id: provider.id.clone(),
+                model: model.to_string(),
+            });
+        }
+    }
+    if let Some(default) = default
+        && ai
+            .providers
+            .iter()
+            .any(|p| p.id == default.provider_id && p.room().is_some())
+    {
+        return Ok(ModelRef {
+            provider_id: default.provider_id.clone(),
+            model: model.to_string(),
+        });
+    }
+    bail!("ai: model {model:?} not found in enabled ai.providers models caches or ai.default_ref")
 }
 
-/// IPC entry point for all `ai.*` commands.
-pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Value> {
-    if cmd == "ai.status" && SERVICE.get().is_none() {
-        return Ok(json!({"room":state.config().ai.room_id, "node_id":null,
-            "connected_peers":0, "providing":false, "models":[], "services":[],
-            "recent_requests":[], "serving":null, "remote_provider":null}));
+pub(crate) async fn chat_model(
+    state: &Arc<AppState>,
+    reference: Option<&crate::config::ModelRef>,
+    effort: Option<String>,
+    messages: Vec<ChatMessage>,
+) -> Result<String> {
+    let service = ensure_started(state).await?;
+    let config = state.config();
+    let reference = reference
+        .or(config.ai.default_ref.as_ref())
+        .context("ai.default_ref is not set")?;
+    Ok(service
+        .chat_ref(reference, effort, messages, ToolOptions::default(), None)
+        .await?
+        .0
+        .content)
+}
+
+pub(crate) async fn synthesize_model(
+    state: &Arc<AppState>,
+    reference: &crate::config::ModelRef,
+    req: tts::TtsParams,
+) -> Result<tts::TtsAudio> {
+    let service = ensure_started(state).await?;
+    let cfg = state.config().ai;
+    let resolved = crate::config::resolve_ref(&cfg, Some(reference))
+        .context("ai: TTS model reference unavailable")?;
+    if let Some(room) = resolved.base_url.strip_prefix("mist-network://") {
+        let session = service.room(room).await?;
+        session.broadcast(ProtocolMessage::ConsumerHello).await;
+        let info = session
+            .consumer
+            .wait_for_service(protocol::SERVICE_TTS, DISCOVERY_TIMEOUT)
+            .await?;
+        session
+            .voice
+            .synthesize(
+                &info.node_id,
+                req,
+                None,
+                Duration::from_secs(cfg.request_timeout_secs.max(1)),
+            )
+            .await
+    } else {
+        let provider = crate::config::AiProviderConfig {
+            base_url: resolved.base_url,
+            api_key: resolved.api_key,
+            ..Default::default()
+        };
+        tts::synthesize(&provider, req).await
     }
-    // Listing a provider's upstream models is a plain HTTP GET against its
-    // configured `base_url` -- it doesn't touch the p2p AI network, so this
-    // is handled before `ensure_started` (which joins the network room).
+}
+
+pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Value> {
+    if cmd == "ai.status" {
+        return status(state).await;
+    }
     if cmd == "ai.upstream_models" {
-        let provider_id = args
+        let id = args
             .get("provider_id")
             .and_then(Value::as_str)
-            .context("ai.upstream_models requires `provider_id`")?;
-        let upstream = provider_upstream(&state.config().ai, provider_id)?;
-        let models = openai::fetch_models(&upstream).await?;
-        return Ok(json!({ "provider_id": provider_id, "models": models }));
+            .context("ai.upstream_models requires provider_id")?;
+        return state.ai_model_discovery.fetch(state, id).await;
     }
-
+    if matches!(cmd, "ai.provide.start" | "ai.provide.stop") {
+        let start = cmd == "ai.provide.start";
+        let was_running = status(state).await?["providing"].as_bool().unwrap_or(false);
+        let rooms = state.set_ai_provide(start)?;
+        if state.network.permitted() {
+            reload_provider_if_running(state).await?;
+        }
+        let providing = status(state).await?["providing"].as_bool().unwrap_or(false);
+        return Ok(if start {
+            json!({ "providing": providing, "already_running": was_running, "rooms": rooms,
+                "models": SERVICE.get().map(|s| s.model_list()).unwrap_or_default() })
+        } else {
+            json!({ "providing": providing, "was_running": was_running, "rooms": rooms })
+        });
+    }
     let service = ensure_started(state).await?;
     match cmd {
-        "ai.status" => status(&service).await,
         "ai.chat" => {
             let prompt = args
                 .get("prompt")
                 .and_then(Value::as_str)
-                .context("ai.chat requires `prompt`")?;
+                .context("ai.chat requires prompt")?;
             let model = args.get("model").and_then(Value::as_str).map(String::from);
-            let messages = vec![ChatMessage::new("user", prompt)];
             let (output, via, provider) = service
-                .chat(messages, ToolOptions::default(), model, None)
+                .chat(
+                    vec![ChatMessage::new("user", prompt)],
+                    ToolOptions::default(),
+                    model,
+                    None,
+                )
                 .await?;
             Ok(json!({ "content": output.content, "via": via, "provider": provider }))
         }
-        "ai.models" => models(&service).await,
-        "ai.provide.start" => provide_start(&service, state).await,
-        "ai.provide.stop" => {
-            let stopped = service
-                .provider
-                .write()
-                .expect("ai provider lock")
-                .take()
-                .is_some();
-            // Explicit stop always clears the persisted intent, regardless
-            // of `stopped` (idempotent: calling stop when already stopped
-            // still means "don't auto-resume next time"). See
-            // `provide_state`'s module doc for why this lives in its own
-            // state file rather than `config.toml`.
-            persist_provide_state(false);
-            Ok(json!({ "providing": false, "was_running": stopped }))
-        }
+        "ai.models" => Ok(json!({ "via": "configured", "models": service.model_list() })),
         "ai.serve.start" => serve_start(&service, state).await,
         "ai.serve.stop" => {
-            let mut guard = service.api_server.lock().await;
-            let stopped = match guard.take() {
-                Some(server) => {
-                    server.stop();
-                    true
-                }
-                None => false,
-            };
-            // An explicit, idempotent stop also clears the intent restored at
-            // daemon startup, even if the listener was already absent.
+            let stopped = service
+                .api_server
+                .lock()
+                .await
+                .take()
+                .map(|server| server.stop())
+                .is_some();
             persist_serve_state(false);
             Ok(json!({ "serving": false, "was_running": stopped }))
         }
@@ -525,168 +825,295 @@ pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Val
     }
 }
 
-async fn status(service: &Arc<AiService>) -> Result<Value> {
-    let provider = service.local_provider();
-    let serving = service
-        .api_server
-        .lock()
+async fn discover_models(
+    state: &Arc<AppState>,
+    provider: &crate::config::AiProviderConfig,
+) -> Result<Value> {
+    if !provider.enabled {
+        return Ok(json!({ "models": provider.models, "live": false }));
+    }
+    let result = if let Some(room) = provider.room() {
+        match ensure_started(state).await {
+            Ok(service) => match service.room(room).await {
+                Ok(session) => {
+                    if session.consumer.wait_for_catalog(DISCOVERY_TIMEOUT).await {
+                        Ok(session.consumer.models())
+                    } else {
+                        Err(anyhow::anyhow!(
+                            "No model advertisement received from this room"
+                        ))
+                    }
+                }
+                Err(err) => Err(err),
+            },
+            Err(err) => Err(err),
+        }
+    } else {
+        openai::fetch_models(&UpstreamConfig {
+            base_url: provider.base_url.clone(),
+            api_key: provider.api_key.clone(),
+            model: None,
+            reasoning_effort: None,
+        })
         .await
+    };
+    match result {
+        Ok(models) => {
+            state.cache_ai_models(provider, &models)?;
+            Ok(json!({ "models": models, "live": true }))
+        }
+        Err(err) => {
+            Ok(json!({ "models": provider.models, "live": false, "error": format!("{err:#}") }))
+        }
+    }
+}
+
+async fn status(state: &Arc<AppState>) -> Result<Value> {
+    status_with_service(state, SERVICE.get()).await
+}
+
+async fn status_with_service(
+    state: &Arc<AppState>,
+    service: Option<&Arc<AiService>>,
+) -> Result<Value> {
+    let config = state.config();
+    let sessions = service
+        .map(|s| s.rooms.read().expect("ai rooms lock").clone())
+        .unwrap_or_default();
+    let connections = if sessions.is_empty() {
+        Vec::new()
+    } else {
+        crate::net::room_connections().await
+    };
+    let mut rooms = Vec::new();
+    for provider in config.ai.providers.iter().filter(|p| p.room().is_some()) {
+        let room = provider.room().unwrap();
+        let session = sessions.get(room);
+        let peers = connections
+            .iter()
+            .find(|(r, _)| r == room)
+            .map(|(_, peers)| peers.len())
+            .unwrap_or(0);
+        rooms.push(json!({ "provider_id": provider.id, "room": room, "enabled": provider.enabled,
+            "models": session.filter(|s| s.consumer.has_catalog()).map(|s| s.consumer.models()),
+            "joined": provider.enabled && session.is_some(), "providing": provider.enabled && provider.provide && session.is_some_and(|s| s.local_provider().is_some()), "peers": peers }));
+    }
+    let first = config
+        .ai
+        .providers
+        .iter()
+        .filter_map(|p| p.room())
+        .find_map(|room| sessions.get(room));
+    let providers: Vec<_> = sessions
+        .values()
+        .filter_map(|s| s.local_provider())
+        .collect();
+    let models: std::collections::BTreeSet<_> = providers.iter().flat_map(|p| p.models()).collect();
+    let services: std::collections::BTreeSet<_> =
+        providers.iter().flat_map(|p| p.services()).collect();
+    let mut logs: Vec<_> = providers.iter().flat_map(|p| p.logs()).collect();
+    logs.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    logs.truncate(5);
+    let remote = first.and_then(|s| s.consumer.provider()).map(|info| json!({ "node_id": info.node_id,
+        "models": info.models, "services": info.services, "provider_trusted": info.trusted, "provider_did": info.did }));
+    let serving = if let Some(service) = service {
+        service
+            .api_server
+            .lock()
+            .await
+            .as_ref()
+            .map(|s| s.addr().to_string())
+    } else {
+        None
+    };
+    Ok(
+        json!({ "room": first.map(|s| &s.room), "node_id": first.map(|s| &s.node_id),
+        "connected_peers": connections.iter().flat_map(|(_, p)| p.iter().map(|(node, _)| node)).collect::<HashSet<_>>().len(),
+        "providing": rooms.iter().any(|r| r["providing"] == true),
+        "models": models,
+        "services": services,
+        "recent_requests": logs,
+        "serving": serving, "remote_provider": remote, "rooms": rooms,
+        "dropped_messages": sessions.values().map(|s| s.dropped_messages.load(std::sync::atomic::Ordering::Relaxed)).sum::<u64>(),
+        "trusted_providers_configured": first.map(|s| !s.consumer.trusted_providers().is_empty()).unwrap_or(!config.ai.trusted_providers.is_empty()) }),
+    )
+}
+
+/// Apply room flags even when no AI command has initialized the service yet.
+pub async fn reload_provider_if_running(state: &Arc<AppState>) -> Result<()> {
+    if let Some(service) = SERVICE.get() {
+        service.reconcile(true).await
+    } else {
+        ensure_started(state).await.map(|_| ())
+    }
+}
+pub fn apply_trusted_providers(state: &Arc<AppState>) {
+    if let Some(service) = SERVICE.get() {
+        for session in service.rooms.read().expect("ai rooms lock").values() {
+            session
+                .consumer
+                .set_trusted_providers(state.config().ai.trusted_providers.clone());
+        }
+    }
+}
+
+pub fn spawn_room_connections(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        if let Err(err) = ensure_started(&state).await {
+            warn!(%err, "ai: room connections failed to start");
+        }
+    });
+}
+
+fn resolve_advertised_models(
+    cfg: &crate::config::AiConfig,
+    room: &crate::config::AiProviderConfig,
+) -> (Vec<String>, HashMap<String, crate::config::ResolvedModel>) {
+    let mut models = Vec::new();
+    let mut advertised = HashMap::new();
+    for reference in &room.shared {
+        let Some(resolved) = crate::config::resolve_ref_exact(cfg, reference) else {
+            continue;
+        };
+        if resolved.base_url.starts_with("mist-network://")
+            || advertised.contains_key(&reference.model)
+        {
+            continue;
+        }
+        models.push(reference.model.clone());
+        advertised.insert(reference.model.clone(), resolved);
+    }
+    (models, advertised)
+}
+
+async fn build_provider(
+    session: &Arc<AiRoom>,
+    cfg: &crate::config::AiConfig,
+    room: &crate::config::AiProviderConfig,
+) -> Result<Arc<Provider>> {
+    let (models, advertised) = resolve_advertised_models(cfg, room);
+    let default = cfg
+        .default_ref
         .as_ref()
-        .map(|server| server.addr().to_string());
-    let remote = service.consumer.provider().map(|info| {
-        json!({
-            "node_id": info.node_id,
-            "models": info.models,
-            "services": info.services,
-            // False = pinned by first-hello-wins (no `ai.trusted_providers`
-            // match); the dashboard should warn.
-            "provider_trusted": info.trusted,
-            "provider_did": info.did,
+        .and_then(|r| crate::config::resolve_ref_exact(cfg, r))
+        .filter(|r| !r.base_url.starts_with("mist-network://"))
+        .or_else(|| models.first().and_then(|m| advertised.get(m)).cloned());
+    let call: LlmCallFn = Arc::new(move |messages, tools, _, delta_tx| {
+        let default = default.clone();
+        Box::pin(async move {
+            let default =
+                default.context("ai: no enabled HTTP ai.default_ref or usable shared ref")?;
+            let upstream = UpstreamConfig {
+                base_url: default.base_url,
+                api_key: default.api_key,
+                model: Some(default.model),
+                reasoning_effort: None,
+            };
+            openai::stream_chat_completion_tools(&upstream, &messages, None, &tools, delta_tx).await
         })
     });
-    Ok(json!({
-        "room": service.room,
-        "node_id": service.node_id,
-        "connected_peers": crate::net::connected_nodes().await.len(),
-        "providing": provider.is_some(),
-        "models": provider.as_ref().map(|p| p.models()),
-        "services": provider.as_ref().map(|p| p.services()),
-        "recent_requests": provider.as_ref().map(|p| {
-            p.logs().into_iter().take(5).collect::<Vec<_>>()
-        }),
-        "serving": serving,
-        "remote_provider": remote,
-        "dropped_messages": service
-            .dropped_messages
-            .load(std::sync::atomic::Ordering::Relaxed),
-        "trusted_providers_configured": !service
-            .consumer
-            .trusted_providers()
-            .is_empty(),
-    }))
-}
-
-async fn models(service: &Arc<AiService>) -> Result<Value> {
-    if let Some(provider) = service.local_provider() {
-        return Ok(json!({ "via": "local", "models": provider.models() }));
-    }
-    let info = match service.consumer.provider() {
-        Some(info) => info,
-        None => {
-            service.broadcast(ProtocolMessage::ConsumerHello).await;
-            service
-                .consumer
-                .wait_for_provider(DISCOVERY_TIMEOUT)
-                .await
-                .context("ai: no provider found on the network")?
-        }
-    };
-    Ok(json!({
-        "via": "p2p",
-        "provider": info.node_id,
-        "models": info.models,
-        "services": info.services,
-    }))
-}
-
-async fn provide_start(service: &Arc<AiService>, state: &Arc<AppState>) -> Result<Value> {
-    if let Some(provider) = service.local_provider() {
-        return Ok(json!({
-            "providing": true,
-            "already_running": true,
-            "models": provider.models(),
-        }));
-    }
-
-    let cfg = state.config().ai;
-    let built = build_provider(service, &cfg).await?;
-    *service.provider.write().expect("ai provider lock") = Some(built.provider.clone());
-    service.broadcast(built.provider.hello()).await;
-
-    // Only persisted on a successful start -- a failed `?` above (e.g. no
-    // default preset configured yet) leaves the previous persisted intent
-    // untouched, exactly like the manual command that failed didn't change
-    // anything either.
-    persist_provide_state(true);
-
-    Ok(json!({
-        "providing": true,
-        "upstream": built.upstream_base_url,
-        "models": built.models,
-    }))
-}
-
-/// Writes `enabled` to `<data_dir>/ai-provide-state.json` (see
-/// `provide_state`'s module doc), logging a `warn!` instead of failing the
-/// caller if the write itself fails (e.g. disk full, permissions) -- losing
-/// the persisted intent is a real problem (the daemon won't auto-resume/
-/// auto-stay-stopped correctly next restart) but it must never turn a
-/// successful `ai provide start`/`stop` into a failed IPC call over a
-/// bookkeeping write.
-fn persist_provide_state(enabled: bool) {
-    let result = crate::config::data_dir()
-        .context("ai: resolving the data directory")
-        .and_then(|dir| provide_state::write_state(&dir, provide_state::ProvideState { enabled }));
-    if let Err(err) = result {
-        warn!(%err, enabled, "ai: failed to persist the provide-enabled state; a daemon restart will not correctly auto-resume/stay-stopped");
-    }
-}
-
-/// Auto-resumes network `provide` at daemon startup if it was left enabled
-/// on a previous run (persisted by [`persist_provide_state`] from
-/// `provide_start`/`ai.provide.stop`, including via the dashboard toggle --
-/// both go through the same `ai.provide.start`/`ai.provide.stop` IPC
-/// commands, see `provide_state`'s module doc). Spawned eagerly from
-/// `daemon::daemon_main`, the same way as `chat_relay`'s and
-/// `storage::folder_owner`'s background tasks, rather than waited on lazily
-/// like the rest of the `ai` service (which only starts on the first
-/// `ai.*` IPC call) -- the whole point is providing coming back up without
-/// any client ever having to ask.
-///
-/// Never fails daemon startup: any problem here (data dir unreadable,
-/// corrupt state file, network room join failure, or a config problem such
-/// as a dangling preset caught by [`build_provider`]) is logged via `warn!`
-/// and simply leaves providing off, exactly as if `ai provide start` had
-/// been run by hand and failed -- the daemon keeps running either way.
-/// Success is always logged via `info!` so "is it providing after a
-/// restart, and why (not)" has a concrete answer in the log without having
-/// to poll `ai.status`.
-pub fn spawn_provide_autoresume(state: Arc<AppState>) {
-    tokio::spawn(async move {
-        let data_dir = match crate::config::data_dir() {
-            Ok(dir) => dir,
-            Err(err) => {
-                warn!(%err, "ai: provide auto-resume skipped -- could not resolve the data directory");
-                return;
-            }
-        };
-        let persisted = match provide_state::read_state(&data_dir) {
-            Ok(state) => state,
-            Err(err) => {
-                warn!(%err, "ai: provide auto-resume skipped -- could not read the persisted provide state");
-                return;
-            }
-        };
-        if !persisted.enabled {
-            debug!("ai: provide was not left enabled on the previous run; not auto-resuming");
-            return;
-        }
-        let service = match ensure_started(&state).await {
-            Ok(service) => service,
-            Err(err) => {
-                warn!(%err, "ai: provide was left enabled on the previous run, but the ai network service failed to start; providing is off until `ai provide start` succeeds");
-                return;
-            }
-        };
-        match provide_start(&service, &state).await {
-            Ok(result) => info!(%result, "ai: provide auto-resumed from persisted state"),
-            Err(err) => {
-                warn!(%err, "ai: provide was left enabled on the previous run, but auto-resume failed (likely an incomplete ai config, e.g. a dangling preset); providing is off until `ai provide start` succeeds")
-            }
-        }
+    let tts_ref = voice_ref_provider(cfg, cfg.tts.as_ref());
+    let voices = tokio::time::timeout(
+        VOICE_CATALOG_TIMEOUT,
+        resolve_advertised_voices(tts_ref.as_ref()),
+    )
+    .await
+    .unwrap_or_default();
+    let tts_call = tts_ref.map(|(provider, resolved)| {
+        let catalog = voices.clone();
+        let call: TtsCallFn = Arc::new(move |text, model, voice, lang| {
+            let provider = provider.clone();
+            let voice = resolve_tts_voice(
+                voice,
+                lang.as_deref(),
+                &resolved.lang_voices,
+                &catalog,
+                &resolved.voice,
+            )
+            .unwrap_or_default();
+            let req = tts::TtsParams {
+                model: resolve_voice_call_model(model, &resolved.model, "tts"),
+                voice,
+                input: text,
+                format: None,
+                speed: None,
+            };
+            Box::pin(async move { tts::synthesize(&provider, req).await })
+        });
+        call
     });
+    let stt_call = model_ref_provider(cfg, cfg.stt.as_ref()).map(|(provider, resolved)| {
+        let call: SttCallFn = Arc::new(move |audio, mime, model, file_name| {
+            let provider = provider.clone();
+            let req = stt::SttParams {
+                model: resolve_voice_call_model(model, &resolved.model, "stt"),
+                audio,
+                mime,
+                file_name,
+            };
+            Box::pin(async move { stt::transcribe(&provider, req).await })
+        });
+        call
+    });
+    let provider = Provider::new(
+        session.send.clone(),
+        call,
+        models,
+        advertised,
+        tts_call,
+        stt_call,
+        voices,
+    );
+    provider.set_shared_restricted(!room.shared.is_empty());
+    Ok(provider)
 }
 
+fn voice_ref_provider(
+    cfg: &crate::config::AiConfig,
+    voice: Option<&crate::config::VoiceConfig>,
+) -> Option<(
+    crate::config::AiProviderConfig,
+    crate::config::ResolvedModel,
+)> {
+    let resolved = crate::config::resolve_voice(cfg, voice)?;
+    if resolved.base_url.starts_with("mist-network://") {
+        return None;
+    }
+    let provider = crate::config::AiProviderConfig {
+        base_url: resolved.base_url.clone(),
+        api_key: resolved.api_key.clone(),
+        ..Default::default()
+    };
+    Some((provider, resolved))
+}
+
+fn model_ref_provider(
+    cfg: &crate::config::AiConfig,
+    reference: Option<&crate::config::ModelRef>,
+) -> Option<(
+    crate::config::AiProviderConfig,
+    crate::config::ResolvedModel,
+)> {
+    let resolved = crate::config::resolve_ref(cfg, Some(reference?))?;
+    if resolved.base_url.starts_with("mist-network://") {
+        return None;
+    }
+    let provider = crate::config::AiProviderConfig {
+        base_url: resolved.base_url.clone(),
+        api_key: resolved.api_key.clone(),
+        ..Default::default()
+    };
+    Some((provider, resolved))
+}
+
+/// Discard the retired global switch regardless of its value or JSON validity.
+/// Room configuration is the sole providing intent, including on offline starts.
+pub fn migrate_provide_state() {
+    let result = crate::config::data_dir().and_then(|dir| provide_state::migrate(&dir));
+    if let Err(err) = result {
+        warn!(%err, "ai: failed to remove legacy provide state; its flag is ignored");
+    }
+}
 fn persist_serve_state(enabled: bool) {
     let result = crate::config::data_dir()
         .context("ai: resolving the data directory")
@@ -733,296 +1160,17 @@ pub fn spawn_serve_autoresume(state: Arc<AppState>) {
     });
 }
 
-/// Silently rebuilds the running provider from the *current* config and
-/// re-broadcasts `provider_hello` (same connections, no leave/rejoin), so
-/// dashboard/CLI edits to `ai.providers`/`ai.presets`/`ai.default_preset_id`/
-/// `ai.tts_preset_id`/`ai.stt_preset_id`/`ai.advertised_models` take effect
-/// live -- the user never needs to stop/start providing, let alone restart
-/// the daemon, for a preset/model change to apply. A no-op if the `ai`
-/// service was never started, or isn't currently providing (nothing to
-/// reload). Called fire-and-forget from `daemon::handle`'s `config.set`
-/// after a matching path saves successfully; failures are logged and leave
-/// the previous (still-valid) provider running rather than tearing it down.
-pub async fn reload_provider_if_running(state: &Arc<AppState>) {
-    let Some(service) = SERVICE.get() else {
-        return;
-    };
-    if service.local_provider().is_none() {
-        return;
-    }
-    let cfg = state.config().ai;
-    match build_provider(service, &cfg).await {
-        Ok(built) => {
-            *service.provider.write().expect("ai provider lock") = Some(built.provider.clone());
-            service.broadcast(built.provider.hello()).await;
-        }
-        Err(err) => {
-            warn!(%err, "ai: failed to reload provider after a config change; the previous provider keeps running");
-        }
-    }
-}
-
-/// Applies `ai.trusted_providers` to a running consumer (no-op before the AI
-/// service starts; `init_service` reads it then). Called from `config.set`.
-pub fn apply_trusted_providers(state: &Arc<AppState>) {
-    if let Some(service) = SERVICE.get() {
-        service
-            .consumer
-            .set_trusted_providers(state.config().ai.trusted_providers);
-    }
-}
-
-struct BuiltProvider {
-    provider: Arc<Provider>,
-    upstream_base_url: String,
-    models: Vec<String>,
-}
-
-/// Builds `(models, advertised)` for [`build_provider`]/[`Provider::hello`]
-/// from `cfg.advertised_models` (a set of **preset ids**, see that field's
-/// doc comment on `AiConfig`) and `cfg.presets`:
-///
-/// - Iterates `cfg.presets` in their *configured* order (not
-///   `advertised_models`'s own order, which the dashboard's "what to
-///   provide" checklist can reorder independent of preset definition
-///   order -- see `renderProvideChecklist` in `web/assets/index.html`),
-///   filtering down to those whose `id` appears in `advertised_models`.
-/// - Each selected preset's advertised *name* is `label.trim()` when
-///   non-empty, else `model` -- mistllm-wire's "advertised name = preset
-///   label" contract.
-/// - Two selected presets that resolve to the same advertised name: the
-///   first configured one wins the name; the rest are dropped entirely,
-///   from both `models` and `advertised` (a known v1 limitation -- an
-///   `llm_request` naming that model can only ever reach the first
-///   preset).
-/// - A selected preset whose `provider_id` doesn't resolve to a configured
-///   provider is skipped with a `warn!` (dangling reference, same
-///   defensive posture as `voice_preset_provider`).
-///
-/// `cfg.advertised_models` empty -> both returned collections are empty:
-/// per mistllm-wire this means `provider_hello` omits `models` entirely
-/// (`Provider::hello`) -- the previous fallback of fetching and advertising
-/// every upstream `GET /models` result has been removed, since an inbound
-/// `model` is no longer name-checked against anything in that mode (see
-/// `Provider::resolve_llm_call`) and blanket-advertising an unchecked
-/// upstream catalog was never actually meaningful under that contract.
-fn resolve_advertised_models(
-    cfg: &crate::config::AiConfig,
-) -> (
-    Vec<String>,
-    HashMap<String, crate::config::ResolvedAiPreset>,
-) {
-    let mut models = Vec::new();
-    let mut advertised: HashMap<String, crate::config::ResolvedAiPreset> = HashMap::new();
-    if cfg.advertised_models.is_empty() {
-        return (models, advertised);
-    }
-    let wanted: HashSet<&str> = cfg.advertised_models.iter().map(String::as_str).collect();
-    for preset in cfg
-        .presets
-        .iter()
-        .filter(|p| wanted.contains(p.id.as_str()))
-    {
-        let label = preset.label.trim();
-        let name = if !label.is_empty() {
-            label.to_string()
-        } else {
-            preset.model.clone()
-        };
-        if advertised.contains_key(&name) {
-            continue;
-        }
-        let Some(resolved) = crate::config::resolve_preset(cfg, Some(&preset.id)) else {
-            warn!(
-                preset_id = %preset.id,
-                "ai: advertised preset's provider is not configured; skipping it"
-            );
-            continue;
-        };
-        models.push(name.clone());
-        advertised.insert(name, resolved);
-    }
-    (models, advertised)
-}
-
-/// Resolves `cfg`'s default/tts/stt presets and constructs a fresh
-/// [`Provider`] from them -- the shared core of [`provide_start`] (first
-/// build) and [`reload_provider_if_running`] (rebuild after a config
-/// change). Does not touch `service.provider`; callers install the result.
-async fn build_provider(
-    service: &Arc<AiService>,
-    cfg: &crate::config::AiConfig,
-) -> Result<BuiltProvider> {
-    let resolved = crate::config::resolve_preset(cfg, None).context(
-        "ai: no default LLM preset configured; set it up in the dashboard's \
-         Settings panel, or with `mistl config set ai.providers <json>`, \
-         `ai.presets <json>`, and `ai.default_preset_id <id>`",
-    )?;
-    let mut upstream = UpstreamConfig {
-        base_url: resolved.base_url,
-        api_key: resolved.api_key,
-        model: (!resolved.model.is_empty()).then_some(resolved.model),
-        temperature: resolved.temperature,
-        reasoning_effort: resolved.reasoning_effort,
-    };
-
-    let (models, advertised) = resolve_advertised_models(cfg);
-    // Requests without an explicit model fall back to the first advertised
-    // preset's own resolved model (mirrors the pre-advertised-name-contract
-    // "models.first()" fallback, just resolved against the preset table
-    // instead of a flat raw-model-id list -- see
-    // `resolve_advertised_models`'s doc comment). Empty `advertised_models`
-    // (or a default preset with its own non-blank `model`, the common
-    // case) leaves this `None`, unchanged from before.
-    if upstream.model.is_none() {
-        upstream.model = models
-            .first()
-            .and_then(|name| advertised.get(name))
-            .map(|resolved| resolved.model.clone());
-    }
-
-    let call: LlmCallFn = {
-        let upstream = upstream.clone();
-        Arc::new(move |messages, tools, model, delta_tx| {
-            let upstream = upstream.clone();
-            Box::pin(async move {
-                openai::stream_chat_completion_tools(
-                    &upstream,
-                    &messages,
-                    model.as_deref(),
-                    &tools,
-                    delta_tx,
-                )
-                .await
-            })
-        })
-    };
-
-    let tts_preset = voice_preset_provider(cfg, &cfg.tts_preset_id);
-    let advertised_voices = resolve_advertised_voices(tts_preset.as_ref()).await;
-    log_voice_preset_diagnostics(
-        cfg,
-        "tts",
-        &cfg.tts_preset_id,
-        tts_preset.as_ref().map(|(_, resolved)| resolved),
-    );
-    let tts_call = tts_preset.map(|(provider, resolved)| {
-        let catalog = advertised_voices.clone();
-        let call: TtsCallFn = Arc::new(move |text, model, voice, lang| {
-            let provider = provider.clone();
-            let effective_voice = resolve_tts_voice(
-                voice,
-                lang.as_deref(),
-                &resolved.lang_voices,
-                &catalog,
-                &resolved.voice,
-            );
-            let req = tts::TtsParams {
-                model: resolve_voice_call_model(model, &resolved.model, "tts"),
-                voice: effective_voice.unwrap_or_default(),
-                input: text,
-                format: None,
-                speed: None,
-            };
-            Box::pin(async move { tts::synthesize(&provider, req).await })
-        });
-        call
-    });
-    let stt_preset = voice_preset_provider(cfg, &cfg.stt_preset_id);
-    log_voice_preset_diagnostics(
-        cfg,
-        "stt",
-        &cfg.stt_preset_id,
-        stt_preset.as_ref().map(|(_, resolved)| resolved),
-    );
-    let stt_call = stt_preset.map(|(provider, resolved)| {
-        let call: SttCallFn = Arc::new(move |audio, mime, model, file_name| {
-            let provider = provider.clone();
-            let req = stt::SttParams {
-                model: resolve_voice_call_model(model, &resolved.model, "stt"),
-                audio,
-                mime,
-                file_name,
-            };
-            Box::pin(async move { stt::transcribe(&provider, req).await })
-        });
-        call
-    });
-
-    let provider = Provider::new(
-        service.send.clone(),
-        call,
-        models.clone(),
-        advertised,
-        tts_call,
-        stt_call,
-        advertised_voices,
-    );
-    Ok(BuiltProvider {
-        provider,
-        upstream_base_url: upstream.base_url,
-        models,
-    })
-}
-
-/// Resolves `preset_id` (an `ai.tts_preset_id`/`ai.stt_preset_id` value)
-/// into an ad hoc `AiProviderConfig` (base_url/api_key only -- built from
-/// `resolve_preset`, not looked up by provider id) plus the full resolved
-/// preset (for its `model`/`voice` defaults). Returns `None` when
-/// `preset_id` is blank ("not configured") or when it doesn't resolve to a
-/// known preset/provider -- unlike `resolve_preset` itself, a blank id is
-/// *not* defaulted to `ai.default_preset_id` here: an explicitly empty
-/// tts/stt preset id means "don't offer this service", and silently
-/// borrowing the chat preset would opt a node into serving voice it never
-/// configured.
-fn voice_preset_provider(
-    cfg: &crate::config::AiConfig,
-    preset_id: &str,
-) -> Option<(
-    crate::config::AiProviderConfig,
-    crate::config::ResolvedAiPreset,
-)> {
-    let preset_id = preset_id.trim();
-    if preset_id.is_empty() {
-        return None;
-    }
-    // `resolve_preset` falls back to `ai.default_preset_id` whenever
-    // `preset_id` doesn't name a *known* preset (see its own doc comment --
-    // that's the correct, intentional behavior for chat resolution, mirrored
-    // from the shared LLM config contract's `resolvePreset`). For tts/stt
-    // that fallback would be actively harmful: a dangling `tts_preset_id`
-    // (its preset got deleted/renamed after being assigned -- nothing here
-    // or in the dashboard clears the reference when a preset is removed)
-    // must never silently start serving the room's *chat* default preset as
-    // TTS. That's exactly the confusing failure this function's own doc
-    // comment above already calls out for the blank-id case; a dangling
-    // non-blank id hits the same trap through `resolve_preset`'s fallback,
-    // so it's guarded the same way here: require an exact, still-existing
-    // preset id before ever calling `resolve_preset`.
-    if !cfg.presets.iter().any(|p| p.id == preset_id) {
-        return None;
-    }
-    let resolved = crate::config::resolve_preset(cfg, Some(preset_id))?;
-    let provider = crate::config::AiProviderConfig {
-        id: String::new(),
-        label: String::new(),
-        base_url: resolved.base_url.clone(),
-        api_key: resolved.api_key.clone(),
-    };
-    Some((provider, resolved))
-}
-
 /// Builds the voice catalog to advertise in `provider_hello.voices`
 /// (tts-voice-selection-v1 §2.1/§2.5), given the already-resolved tts
 /// preset/provider (or `None` when tts isn't configured at all). Fallback
 /// order:
 ///
-/// 1. the tts preset's own upstream catalog, via [`openai::fetch_voices`]
+/// 1. the tts config's own upstream catalog, via [`openai::fetch_voices`]
 ///    (`GET {base_url}/audio/voices` -> `GET {base_url}/voices` -> `[]`,
 ///    matching mistai's web providers' discovery so mistl advertises the
 ///    same voices a tc-translate/tc-lingo provider on the same upstream
 ///    would);
-/// 2. the resolved preset's single configured `voice`, only when (1) came
+/// 2. the resolved configuration's single configured `voice`, only when (1) came
 ///    back empty (unreachable upstream, no such endpoint, or a genuinely
 ///    empty catalog);
 /// 3. otherwise `[]` -- `hello()` then omits the `voices` field entirely.
@@ -1032,12 +1180,12 @@ fn voice_preset_provider(
 /// fallback order can be unit-tested against a mock upstream without
 /// standing up a full `AiService`.
 async fn resolve_advertised_voices(
-    tts_preset: Option<&(
+    tts_config: Option<&(
         crate::config::AiProviderConfig,
-        crate::config::ResolvedAiPreset,
+        crate::config::ResolvedModel,
     )>,
 ) -> Vec<String> {
-    let Some((provider, resolved)) = tts_preset else {
+    let Some((provider, resolved)) = tts_config else {
         return Vec::new();
     };
     let fetched = openai::fetch_voices(&provider.base_url, &provider.api_key).await;
@@ -1064,7 +1212,7 @@ fn lang_primary_subtag(lang: &str) -> String {
 
 /// Case-insensitive `lang_voices` lookup by primary subtag (mistllm-wire
 /// tts-lang-hint-v1): config authors are asked to use lowercase keys (see
-/// `AiPresetConfig::lang_voices`'s doc comment and the README example), but
+/// `VoiceConfig::lang_voices`'s doc comment and the README example), but
 /// this looks up case-insensitively anyway so a stray uppercase key in a
 /// hand-edited `config.toml` still works rather than silently never
 /// matching.
@@ -1118,7 +1266,7 @@ fn is_kokoro_style_voice(voice: &str) -> bool {
 /// `None` (never guesses) when the catalog is empty, isn't uniformly
 /// kokoro-shaped, `primary` has no known kokoro prefix, or no catalog entry
 /// actually starts with one of that language's prefix letters -- callers
-/// then fall through to the preset/catalog-first fallback, same as if no
+/// then fall through to the configuration/catalog-first fallback, same as if no
 /// `lang` had been given at all.
 fn kokoro_style_lang_voice(primary: &str, catalog: &[String]) -> Option<String> {
     if catalog.is_empty() || !catalog.iter().all(|v| is_kokoro_style_voice(v)) {
@@ -1136,7 +1284,7 @@ fn kokoro_style_lang_voice(primary: &str, catalog: &[String]) -> Option<String> 
 ///
 /// 1. the request's own `voice` -- always wins unconditionally; `lang`
 ///    never overrides an explicit `voice`.
-/// 2. if `lang` is present: [`lookup_lang_voice`] against the tts preset's
+/// 2. if `lang` is present: [`lookup_lang_voice`] against the tts config's
 ///    `lang_voices` map, by primary subtag ([`lang_primary_subtag`],
 ///    case-insensitive).
 /// 3. if `lang` is present and step 2 found nothing:
@@ -1145,7 +1293,7 @@ fn kokoro_style_lang_voice(primary: &str, catalog: &[String]) -> Option<String> 
 ///    heuristic (see its own doc comment); logged via `info!` when it
 ///    fires, since it's a guess rather than something the operator
 ///    configured.
-/// 4. the tts preset's configured `voice`.
+/// 4. the tts config's configured `voice`.
 /// 5. (previously a `tts_request` with neither would error immediately)
 ///    the first entry of the advertised voice catalog built by
 ///    [`resolve_advertised_voices`], logged via `info!` since it means
@@ -1161,7 +1309,7 @@ fn resolve_tts_voice(
     lang: Option<&str>,
     lang_voices: &HashMap<String, String>,
     catalog: &[String],
-    preset_voice: &Option<String>,
+    config_voice: &Option<String>,
 ) -> Option<String> {
     if let Some(voice) = request_voice {
         return Some(voice);
@@ -1181,27 +1329,27 @@ fn resolve_tts_voice(
             return Some(voice);
         }
     }
-    if let Some(voice) = preset_voice.clone() {
+    if let Some(voice) = config_voice.clone() {
         return Some(voice);
     }
     let voice = catalog.first().cloned()?;
     info!(
         %voice,
-        "ai: tts_request had no voice and the tts preset has none configured; \
+        "ai: tts_request had no voice and the tts config has none configured; \
          using the first voice from the advertised catalog"
     );
     Some(voice)
 }
 
 /// Resolves the effective `model` for one `tts_request`/`stt_request`
-/// against `preset_model` (the tts/stt preset's own configured model), per
+/// against `preset_model` (the tts/stt configuration's own configured model), per
 /// mistllm-wire's "provider の voice/model 尊重規則": unlike `voice`, the
 /// request's `model` is only ever honored when it *exactly matches*
 /// `preset_model` -- otherwise (mismatch, or omitted entirely) this
 /// provider's own configured model is used instead. This is a fallback, not
 /// a rejection: a mismatched model never fails the request, it's silently
 /// replaced. The mismatch case matters because consumers may echo back an
-/// advertised *label* (e.g. a chat preset's display name such as `"TTS"`)
+/// advertised *label* (e.g. a chat configuration's display name such as `"TTS"`)
 /// as `model` rather than a real upstream model id -- sending that straight
 /// to `/audio/speech`/`/audio/transcriptions` would otherwise fail upstream
 /// (see `tc-translate`'s `useNetworkProvider.ts`:
@@ -1229,143 +1377,6 @@ fn resolve_voice_call_model(
     }
 }
 
-/// Pure classification behind [`log_voice_preset_diagnostics`] -- split out
-/// so the dangling-id and kind-mismatch detection (shared byte-for-byte
-/// between `ai.tts_preset_id` and `ai.stt_preset_id`, see
-/// [`voice_preset_provider`]'s doc comment) is unit-testable directly,
-/// rather than only observable via `tracing` log output.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum VoicePresetDiagnostic {
-    /// The preset id is blank: this service isn't offered at all, which is
-    /// expected/quiet, not a warning.
-    Unconfigured,
-    /// The preset id is set but doesn't resolve to a live preset+provider
-    /// (deleted/renamed preset, or its provider was removed).
-    Dangling,
-    /// Resolves fine, but the preset's own "Provides" `kind` (dashboard
-    /// categorization, see `AiPresetConfig::kind`) doesn't match the
-    /// service it's wired up as (e.g. a "chat"-kind preset assigned to
-    /// `stt_preset_id`) -- a strong signal of an accidental assignment.
-    /// Carries the mismatched kind actually found, for the log message.
-    KindMismatch { actual: String },
-    /// Resolves fine and its `kind` matches (or the preset predates `kind`
-    /// entirely, which defaults to `"chat"` -- see that field's doc).
-    Ok,
-}
-
-/// Classifies `preset_id` (an `ai.tts_preset_id`/`ai.stt_preset_id` value,
-/// already resolved by the caller via [`voice_preset_provider`] into
-/// `resolved`) against `expected_kind` (`"tts"`|`"stt"`). Pure: no I/O, no
-/// logging -- see [`log_voice_preset_diagnostics`] for the logging wrapper
-/// callers actually use.
-fn diagnose_voice_preset(
-    cfg: &crate::config::AiConfig,
-    preset_id: &str,
-    resolved: Option<&crate::config::ResolvedAiPreset>,
-    expected_kind: &str,
-) -> VoicePresetDiagnostic {
-    let preset_id = preset_id.trim();
-    if preset_id.is_empty() {
-        return VoicePresetDiagnostic::Unconfigured;
-    }
-    if resolved.is_none() {
-        return VoicePresetDiagnostic::Dangling;
-    }
-    let kind = cfg
-        .presets
-        .iter()
-        .find(|p| p.id == preset_id)
-        .map(|p| {
-            if p.kind.is_empty() {
-                "chat"
-            } else {
-                p.kind.as_str()
-            }
-        })
-        .unwrap_or("chat");
-    if kind == expected_kind {
-        VoicePresetDiagnostic::Ok
-    } else {
-        VoicePresetDiagnostic::KindMismatch {
-            actual: kind.to_string(),
-        }
-    }
-}
-
-/// Logs the resolved state of `ai.tts_preset_id`/`ai.stt_preset_id`
-/// (`kind` selects which -- `"tts"` or `"stt"`) at every provider
-/// (re)build (`provide start`, and every live config reload -- see
-/// `reload_provider_if_running`), so an operator debugging "TTS/STT isn't
-/// working"/"no voices advertised" on a real device has something concrete
-/// to check in `mistl`'s own logs before ever reproducing a failing
-/// request. Built on [`diagnose_voice_preset`]'s three failure-relevant
-/// cases (`Unconfigured`/`Dangling`/`KindMismatch`, each logged once and
-/// clearly) plus one kind-specific note logged only when it resolves
-/// (`Ok` or `KindMismatch` both still resolved to a real preset+provider):
-/// for `"tts"`, whether a fallback `voice` is configured (mirrors the
-/// pre-refactor TTS-only diagnostics exactly); for `"stt"`, a plain
-/// confirmation that inbound `stt_request`s will be forwarded upstream
-/// (STT has no `voice` concept to report on).
-fn log_voice_preset_diagnostics(
-    cfg: &crate::config::AiConfig,
-    kind: &'static str,
-    preset_id: &str,
-    resolved: Option<&crate::config::ResolvedAiPreset>,
-) {
-    let trimmed = preset_id.trim();
-    match diagnose_voice_preset(cfg, preset_id, resolved, kind) {
-        VoicePresetDiagnostic::Unconfigured => {
-            debug!(
-                kind,
-                "ai: preset id for this service is unset - this provider will not offer it (request gets an immediate error reply instead of silently going unanswered)"
-            );
-            return;
-        }
-        VoicePresetDiagnostic::Dangling => {
-            warn!(
-                preset_id = trimmed,
-                kind,
-                "ai: preset id does not resolve to a configured preset+provider (deleted/renamed preset, or its provider was removed) - this provider will NOT offer this service, it does not fall back to the default preset"
-            );
-            return;
-        }
-        VoicePresetDiagnostic::KindMismatch { actual } => {
-            warn!(
-                preset_id = trimmed,
-                expected_kind = kind,
-                actual_kind = %actual,
-                "ai: preset id points at a preset whose dashboard \"Provides\" kind does not match this service - likely assigned by mistake (its model/provider probably don't speak the matching endpoint); double-check the preset's \"Provides\" dropdown, or reassign the preset id"
-            );
-        }
-        VoicePresetDiagnostic::Ok => {}
-    }
-    let Some(resolved) = resolved else {
-        return;
-    };
-    if kind == "tts" {
-        // The preset's own `voice` (if set) is only the *fallback* default
-        // now -- the catalog actually advertised in `provider_hello.voices`
-        // is built in `build_provider` from the upstream `fetch_voices`
-        // result first, this `voice` second (see that function's comment);
-        // this just logs whether that fallback exists, not the final
-        // advertised list.
-        match resolved.voice.as_deref() {
-            Some(voice) => {
-                debug!(preset_id = trimmed, %voice, "ai: tts preset resolved; falls back to this voice if upstream voice discovery returns nothing")
-            }
-            None => debug!(
-                preset_id = trimmed,
-                "ai: tts preset resolved but has no \"voice\" set - if upstream voice discovery also returns nothing, provider_hello will omit the voices catalog entirely"
-            ),
-        }
-    } else {
-        debug!(
-            preset_id = trimmed,
-            "ai: stt preset resolved; inbound stt_requests will be forwarded to its upstream transcription endpoint"
-        );
-    }
-}
-
 async fn serve_start(service: &Arc<AiService>, state: &Arc<AppState>) -> Result<Value> {
     let mut guard = service.api_server.lock().await;
     if let Some(server) = guard.as_ref() {
@@ -1390,17 +1401,7 @@ async fn serve_start(service: &Arc<AiService>, state: &Arc<AppState>) -> Result<
     };
     let models_fn: ModelsFn = {
         let service = service.clone();
-        Arc::new(move || {
-            if let Some(provider) = service.local_provider() {
-                provider.models()
-            } else {
-                service
-                    .consumer
-                    .provider()
-                    .map(|info| info.models)
-                    .unwrap_or_default()
-            }
-        })
+        Arc::new(move || service.model_list())
     };
 
     let tts_fn: TtsFn = {
@@ -1443,331 +1444,515 @@ async fn serve_start(service: &Arc<AiService>, state: &Arc<AppState>) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AiConfig, AiPresetConfig, AiProviderConfig, resolve_preset};
-    use std::collections::HashMap;
+    use crate::config::{AiConfig, AiProviderConfig, ModelRef};
+
+    fn sample_config() -> AiConfig {
+        AiConfig {
+            providers: vec![
+                AiProviderConfig {
+                    id: "http".into(),
+                    base_url: "http://127.0.0.1/v1".into(),
+                    models: vec!["raw".into()],
+                    ..Default::default()
+                },
+                AiProviderConfig {
+                    id: "room".into(),
+                    base_url: "mist-network://test".into(),
+                    shared: vec![ModelRef {
+                        provider_id: "http".into(),
+                        model: "raw".into(),
+                    }],
+                    ..Default::default()
+                },
+            ],
+            default_ref: Some(ModelRef {
+                provider_id: "http".into(),
+                model: "raw".into(),
+            }),
+            ..Default::default()
+        }
+    }
 
     #[test]
-    fn provider_upstream_maps_base_url_and_api_key_for_a_known_provider() {
-        let mut ai = AiConfig::default();
+    fn advertisements_use_raw_ids_and_skip_disabled_or_room_refs() {
+        let mut ai = sample_config();
+        ai.providers[1].shared.push(ModelRef {
+            provider_id: "room".into(),
+            model: "loop".into(),
+        });
+        ai.providers[1].shared.push(ModelRef {
+            provider_id: "http".into(),
+            model: "raw".into(),
+        });
+        let (models, refs) = resolve_advertised_models(&ai, &ai.providers[1]);
+        assert_eq!(models, vec!["raw"]);
+        assert_eq!(refs.len(), 1);
+        ai.providers[0].enabled = false;
+        assert!(
+            resolve_advertised_models(&ai, &ai.providers[1])
+                .0
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn duplicate_raw_ids_keep_shared_list_order() {
+        let mut ai = sample_config();
         ai.providers.push(AiProviderConfig {
-            id: "openai".to_string(),
-            label: "OpenAI".to_string(),
-            base_url: "https://api.openai.com/v1".to_string(),
-            api_key: "sk-test".to_string(),
+            id: "second".into(),
+            base_url: "http://second/v1".into(),
+            ..Default::default()
         });
-
-        let upstream = provider_upstream(&ai, "openai").unwrap();
-        assert_eq!(upstream.base_url, "https://api.openai.com/v1");
-        assert_eq!(upstream.api_key, "sk-test");
-        assert_eq!(upstream.model, None);
-        assert_eq!(upstream.temperature, None);
-        assert_eq!(upstream.reasoning_effort, None);
+        ai.providers[1].shared.insert(
+            0,
+            ModelRef {
+                provider_id: "second".into(),
+                model: "raw".into(),
+            },
+        );
+        let (_, refs) = resolve_advertised_models(&ai, &ai.providers[1]);
+        assert_eq!(refs["raw"].base_url, "http://second/v1");
     }
 
     #[test]
-    fn provider_upstream_errors_for_an_unknown_provider() {
-        let ai = AiConfig::default();
-        let err = provider_upstream(&ai, "missing").unwrap_err();
-        assert!(err.to_string().contains("missing"));
-        assert!(err.to_string().contains("ai.providers"));
-    }
-
-    fn ai_with_chat_default_and_tts_preset() -> AiConfig {
-        let mut ai = AiConfig::default();
-        ai.providers.push(AiProviderConfig {
-            id: "p1".to_string(),
-            label: "Provider".to_string(),
-            base_url: "https://chat.example/v1".to_string(),
-            api_key: "sk-chat".to_string(),
-        });
-        ai.providers.push(AiProviderConfig {
-            id: "p2".to_string(),
-            label: "TTS provider".to_string(),
-            base_url: "https://tts.example/v1".to_string(),
-            api_key: "sk-tts".to_string(),
-        });
-        ai.presets.push(AiPresetConfig {
-            id: "chat-default".to_string(),
-            label: "Chat".to_string(),
-            provider_id: "p1".to_string(),
-            model: "gpt-4o".to_string(),
-            temperature: None,
-            reasoning_effort: None,
-            voice: None,
-            lang_voices: HashMap::new(),
-            kind: "chat".to_string(),
-        });
-        ai.presets.push(AiPresetConfig {
-            id: "tts-real".to_string(),
-            label: "Voice".to_string(),
-            provider_id: "p2".to_string(),
-            model: "tts-1".to_string(),
-            temperature: None,
-            reasoning_effort: None,
-            voice: Some("alloy".to_string()),
-            lang_voices: HashMap::new(),
-            kind: "tts".to_string(),
-        });
-        ai.default_preset_id = "chat-default".to_string();
-        ai
-    }
-
-    #[test]
-    fn voice_preset_provider_none_for_blank_id() {
-        let ai = ai_with_chat_default_and_tts_preset();
-        assert!(voice_preset_provider(&ai, "").is_none());
-        assert!(voice_preset_provider(&ai, "   ").is_none());
-    }
-
-    #[test]
-    fn voice_preset_provider_resolves_a_real_tts_preset() {
-        let ai = ai_with_chat_default_and_tts_preset();
-        let (provider, resolved) = voice_preset_provider(&ai, "tts-real").unwrap();
-        assert_eq!(provider.base_url, "https://tts.example/v1");
-        assert_eq!(resolved.model, "tts-1");
-        assert_eq!(resolved.voice.as_deref(), Some("alloy"));
-    }
-
-    #[test]
-    fn resolve_advertised_models_empty_when_no_ids_configured() {
-        let ai = ai_with_chat_default_and_tts_preset();
-        let (models, advertised) = resolve_advertised_models(&ai);
-        assert!(models.is_empty());
-        assert!(advertised.is_empty());
-    }
-
-    #[test]
-    fn resolve_advertised_models_uses_label_when_non_blank_else_model() {
-        let mut ai = ai_with_chat_default_and_tts_preset();
-        ai.presets.push(AiPresetConfig {
-            id: "unlabeled".to_string(),
-            label: "   ".to_string(), // blank once trimmed
-            provider_id: "p1".to_string(),
-            model: "raw-model-id".to_string(),
-            temperature: None,
-            reasoning_effort: None,
-            voice: None,
-            lang_voices: HashMap::new(),
-            kind: "chat".to_string(),
-        });
-        ai.advertised_models = vec!["chat-default".to_string(), "unlabeled".to_string()];
-
-        let (models, advertised) = resolve_advertised_models(&ai);
-        assert_eq!(models, vec!["Chat".to_string(), "raw-model-id".to_string()]);
-        assert_eq!(advertised.get("Chat").unwrap().model, "gpt-4o");
+    fn api_resolution_uses_default_and_enabled_caches_without_guessing() {
+        let mut ai = sample_config();
+        let live = HashMap::new();
         assert_eq!(
-            advertised.get("raw-model-id").unwrap().model,
-            "raw-model-id"
+            resolve_api_ref(&ai, Some("raw"), &live)
+                .unwrap()
+                .provider_id,
+            "http"
+        );
+        assert!(resolve_api_ref(&ai, Some("unknown"), &live).is_err());
+        ai.providers[0].enabled = false;
+        assert!(resolve_api_ref(&ai, None, &live).is_err());
+        ai.default_ref = Some(ModelRef {
+            provider_id: "room".into(),
+            model: "raw".into(),
+        });
+        assert_eq!(
+            resolve_api_ref(&ai, Some("unknown"), &live)
+                .unwrap()
+                .provider_id,
+            "room"
         );
     }
 
     #[test]
-    fn resolve_advertised_models_orders_by_preset_config_order_not_advertised_list_order() {
-        let mut ai = ai_with_chat_default_and_tts_preset();
-        ai.presets.push(AiPresetConfig {
-            id: "chat-second".to_string(),
-            label: "Second".to_string(),
-            provider_id: "p1".to_string(),
-            model: "gpt-4o-mini".to_string(),
-            temperature: None,
-            reasoning_effort: None,
-            voice: None,
-            lang_voices: HashMap::new(),
-            kind: "chat".to_string(),
+    fn live_room_catalog_replaces_stale_cache() {
+        let mut ai = sample_config();
+        ai.providers[1].models = vec!["old".into()];
+        let live = HashMap::from([("test".into(), vec!["new".into()])]);
+        assert!(resolve_api_ref(&ai, Some("old"), &live).is_err());
+        assert_eq!(
+            resolve_api_ref(&ai, Some("new"), &live)
+                .unwrap()
+                .provider_id,
+            "room"
+        );
+    }
+
+    #[test]
+    fn room_join_policy_uses_references_and_provide_flag() {
+        let mut config = crate::config::Config::default();
+        config.ai = sample_config();
+        assert!(referenced_rooms(&config).is_empty());
+        config.ai.providers[1].provide = true;
+        assert_eq!(referenced_rooms(&config), HashSet::from(["test".into()]));
+        config.ai.providers[1].enabled = false;
+        assert!(referenced_rooms(&config).is_empty());
+        config.ai.providers[1].enabled = true;
+        config.ai.providers[1].provide = false;
+        config.ai.default_ref = Some(ModelRef {
+            provider_id: "room".into(),
+            model: "raw".into(),
         });
-        // Listed in reverse of `ai.presets`'s own order.
-        ai.advertised_models = vec!["chat-second".to_string(), "chat-default".to_string()];
-
-        let (models, _advertised) = resolve_advertised_models(&ai);
-        assert_eq!(models, vec!["Chat".to_string(), "Second".to_string()]);
+        assert!(referenced_rooms(&config).contains("test"));
     }
 
     #[test]
-    fn resolve_advertised_models_dedups_same_name_first_configured_preset_wins() {
-        let mut ai = ai_with_chat_default_and_tts_preset();
-        ai.presets.push(AiPresetConfig {
-            id: "chat-duplicate-name".to_string(),
-            label: "Chat".to_string(), // same advertised name as chat-default
-            provider_id: "p2".to_string(),
-            model: "other-model".to_string(),
-            temperature: None,
-            reasoning_effort: None,
-            voice: None,
-            lang_voices: HashMap::new(),
-            kind: "chat".to_string(),
+    fn providing_decision_requires_enabled_room_flag_but_not_shared_models() {
+        let mut ai = sample_config();
+        assert!(!ai.providers.iter().any(providing_room));
+        ai.providers[0].provide = true;
+        assert!(
+            !ai.providers.iter().any(providing_room),
+            "HTTP flags do not provide"
+        );
+        ai.providers[1].provide = true;
+        ai.providers[1].shared.clear();
+        assert!(
+            ai.providers.iter().any(providing_room),
+            "empty sharing still provides"
+        );
+        ai.providers[1].enabled = false;
+        assert!(!ai.providers.iter().any(providing_room));
+        ai.providers[1].enabled = true;
+        ai.providers[1].provide = false;
+        assert!(!ai.providers.iter().any(providing_room));
+    }
+
+    #[test]
+    fn cli_provide_flags_map_start_and_stop_without_changing_other_settings() {
+        let mut ai = sample_config();
+        let mut empty = ai.providers[1].clone();
+        empty.id = "empty".into();
+        empty.base_url = "mist-network://empty".into();
+        empty.shared.clear();
+        ai.providers.push(empty.clone());
+        empty.id = "empty-on".into();
+        empty.base_url = "mist-network://empty-on".into();
+        empty.provide = true;
+        ai.providers.push(empty);
+        let mut disabled = ai.providers[1].clone();
+        disabled.id = "disabled".into();
+        disabled.base_url = "mist-network://disabled".into();
+        disabled.enabled = false;
+        ai.providers.push(disabled.clone());
+        disabled.id = "disabled-on".into();
+        disabled.base_url = "mist-network://disabled-on".into();
+        disabled.provide = true;
+        ai.providers.push(disabled);
+        ai.providers[0].provide = true;
+        let original = ai.clone();
+        assert_eq!(set_provide_flags(&mut ai, true), ["test"]);
+        assert_eq!(
+            ai.providers.iter().map(|p| p.provide).collect::<Vec<_>>(),
+            [true, true, false, true, false, true]
+        );
+        assert_eq!(
+            set_provide_flags(&mut ai, true),
+            ["test"],
+            "start is idempotent"
+        );
+        assert_eq!(
+            set_provide_flags(&mut ai, false),
+            ["test", "empty-on", "disabled-on"]
+        );
+        assert_eq!(
+            ai.providers.iter().map(|p| p.provide).collect::<Vec<_>>(),
+            [true, false, false, false, false, false]
+        );
+        assert!(set_provide_flags(&mut ai, false).is_empty());
+        for (provider, old) in ai.providers.iter_mut().zip(&original.providers) {
+            provider.provide = old.provide;
+        }
+        assert_eq!(
+            serde_json::to_value(ai).unwrap(),
+            serde_json::to_value(original).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_starts_from_flags_reloads_and_stops_without_global_state() {
+        let state = AppState::for_test();
+        let mut config = state.config();
+        config.ai = sample_config();
+        config.ai.providers[1].provide = true;
+        // A consumer reference keeps the mocked transport joined after stopping.
+        config.ai.default_ref = Some(ModelRef {
+            provider_id: "room".into(),
+            model: "raw".into(),
         });
-        ai.advertised_models = vec![
-            "chat-default".to_string(),
-            "chat-duplicate-name".to_string(),
-        ];
-
-        let (models, advertised) = resolve_advertised_models(&ai);
-        assert_eq!(
-            models,
-            vec!["Chat".to_string()],
-            "the duplicate name is dropped entirely"
-        );
-        assert_eq!(
-            advertised.get("Chat").unwrap().model,
-            "gpt-4o",
-            "the first-configured preset wins the shared name"
-        );
-    }
-
-    #[test]
-    fn resolve_advertised_models_skips_a_preset_whose_provider_is_not_configured() {
-        let mut ai = ai_with_chat_default_and_tts_preset();
-        ai.presets.push(AiPresetConfig {
-            id: "dangling".to_string(),
-            label: "Dangling".to_string(),
-            provider_id: "no-such-provider".to_string(),
-            model: "whatever".to_string(),
-            temperature: None,
-            reasoning_effort: None,
-            voice: None,
-            lang_voices: HashMap::new(),
-            kind: "chat".to_string(),
+        state.set_config(config);
+        let session = test_session("test");
+        let service = Arc::new(AiService {
+            state: state.clone(),
+            rooms: RwLock::new(HashMap::from([("test".into(), session.clone())])),
+            on_demand: RwLock::new(HashSet::new()),
+            sync: Mutex::new(()),
+            api_server: Mutex::new(None),
         });
-        ai.advertised_models = vec!["chat-default".to_string(), "dangling".to_string()];
+        service.reconcile(false).await.unwrap();
+        let first = session.local_provider().unwrap();
+        assert_eq!(first.models(), ["raw"]);
+        let status = status_with_service(&state, Some(&service)).await.unwrap();
+        assert_eq!(status["providing"], true);
+        assert_eq!(status["rooms"][0]["providing"], true);
+        service.reconcile(false).await.unwrap();
+        assert!(
+            Arc::ptr_eq(&first, &session.local_provider().unwrap()),
+            "ordinary calls preserve the provider"
+        );
 
-        let (models, advertised) = resolve_advertised_models(&ai);
-        assert_eq!(models, vec!["Chat".to_string()]);
-        assert!(!advertised.contains_key("Dangling"));
+        let mut config = state.config();
+        config.ai.providers[1].shared.clear();
+        state.set_config(config);
+        service.reconcile(true).await.unwrap();
+        assert!(session.local_provider().unwrap().models().is_empty());
+        assert_eq!(
+            status_with_service(&state, Some(&service)).await.unwrap()["providing"],
+            true
+        );
+
+        let mut config = state.config();
+        config.ai.providers[1].provide = false;
+        state.set_config(config);
+        service.reconcile(true).await.unwrap();
+        assert!(session.local_provider().is_none());
+        let status = status_with_service(&state, Some(&service)).await.unwrap();
+        assert_eq!(status["providing"], false);
+        assert_eq!(status["rooms"][0]["providing"], false);
+        assert_eq!(status["rooms"][0]["joined"], true);
+
+        let mut config = state.config();
+        config.ai.providers[1].provide = true;
+        state.set_config(config);
+        service.reconcile(true).await.unwrap();
+        assert!(session.local_provider().is_some());
+        let mut config = state.config();
+        config.ai.providers[1].enabled = false;
+        state.set_config(config);
+        service.reconcile(true).await.unwrap();
+        assert!(session.local_provider().is_none());
+        assert!(service.rooms.read().unwrap().is_empty());
+        assert_eq!(
+            status_with_service(&state, Some(&service)).await.unwrap()["providing"],
+            false
+        );
     }
 
-    /// The critical regression test: a dangling `tts_preset_id` (its preset
-    /// was deleted/renamed after being assigned -- nothing clears the
-    /// reference automatically) must NOT silently fall back to
-    /// `ai.default_preset_id` the way plain `resolve_preset` does for chat.
-    /// That fallback would silently start serving the room's *chat* default
-    /// preset (here: "chat-default", provider p1, no voice) as "tts",
-    /// exactly the confusing real-device failure this module's diagnostics
-    /// exist to catch (see `log_voice_preset_diagnostics`).
     #[test]
-    fn voice_preset_provider_does_not_fall_back_to_default_preset_for_a_dangling_id() {
-        let ai = ai_with_chat_default_and_tts_preset();
-        assert!(voice_preset_provider(&ai, "deleted-preset-id").is_none());
+    fn unset_or_missing_voice_ref_does_not_adopt_chat_default() {
+        let ai = sample_config();
+        assert!(voice_ref_provider(&ai, None).is_none());
+        let voice = crate::config::VoiceConfig {
+            provider_id: "missing".into(),
+            model: "speech".into(),
+            ..Default::default()
+        };
+        assert!(voice_ref_provider(&ai, Some(&voice)).is_none());
     }
 
-    #[test]
-    fn voice_preset_provider_none_when_the_resolved_preset_has_no_provider() {
-        let mut ai = ai_with_chat_default_and_tts_preset();
-        ai.presets.push(AiPresetConfig {
-            id: "orphaned".to_string(),
-            label: "Orphaned".to_string(),
-            provider_id: "no-such-provider".to_string(),
-            model: "tts-1".to_string(),
-            temperature: None,
-            reasoning_effort: None,
-            voice: Some("alloy".to_string()),
-            lang_voices: HashMap::new(),
-            kind: "tts".to_string(),
+    #[tokio::test]
+    async fn status_rooms_contract_includes_disabled_rooms_without_joining() {
+        let state = AppState::for_test();
+        let mut config = crate::config::Config::default();
+        config.ai.providers.push(AiProviderConfig {
+            id: "disabled-room".into(),
+            base_url: "mist-network://disabled-test".into(),
+            enabled: false,
+            provide: true,
+            ..Default::default()
         });
-        assert!(voice_preset_provider(&ai, "orphaned").is_none());
-    }
-
-    // -- diagnose_voice_preset: pure tts/stt diagnostic classification ----
-
-    #[test]
-    fn diagnose_voice_preset_unconfigured_for_a_blank_id() {
-        let ai = ai_with_chat_default_and_tts_preset();
+        state.set_config(config);
+        let status = handle("ai.status", json!({}), &state).await.unwrap();
         assert_eq!(
-            diagnose_voice_preset(&ai, "", None, "tts"),
-            VoicePresetDiagnostic::Unconfigured
-        );
-        assert_eq!(
-            diagnose_voice_preset(&ai, "   ", None, "stt"),
-            VoicePresetDiagnostic::Unconfigured
+            status["rooms"],
+            json!([{ "provider_id": "disabled-room", "room": "disabled-test", "enabled": false,
+            "joined": false, "providing": false, "peers": 0, "models": null }])
         );
     }
 
-    #[test]
-    fn diagnose_voice_preset_dangling_for_a_nonblank_id_that_did_not_resolve() {
-        // `resolved: None` here stands in for what `voice_preset_provider`
-        // returns for a dangling/orphaned id -- `diagnose_voice_preset`
-        // itself never re-resolves, it just classifies what the caller
-        // already found (or didn't).
-        let ai = ai_with_chat_default_and_tts_preset();
-        assert_eq!(
-            diagnose_voice_preset(&ai, "deleted-preset-id", None, "tts"),
-            VoicePresetDiagnostic::Dangling
+    fn test_session(room: &str) -> Arc<AiRoom> {
+        let send: SendFn = Arc::new(|_, _| {});
+        Arc::new(AiRoom {
+            cache_lock: std::sync::Mutex::new(()),
+            room: room.into(),
+            node_id: "node".into(),
+            consumer: Consumer::new(send.clone()),
+            voice: voice_consumer::VoiceConsumer::new(send.clone()),
+            send,
+            provider: RwLock::new(None),
+            handlers: Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT_HANDLERS)),
+            dropped_messages: std::sync::atomic::AtomicU64::new(0),
+        })
+    }
+
+    #[tokio::test]
+    async fn received_hellos_replace_room_cache_and_withdrawals_clear_it() {
+        let state = AppState::for_test();
+        let mut config = state.config();
+        config.ai = sample_config();
+        state.set_config(config);
+        let session = test_session("test");
+        let service = AiService {
+            state: state.clone(),
+            rooms: RwLock::new(HashMap::new()),
+            on_demand: RwLock::new(HashSet::new()),
+            sync: Mutex::new(()),
+            api_server: Mutex::new(None),
+        };
+        let hello = |models| ProtocolMessage::ProviderHello {
+            models: Some(models),
+            services: None,
+            voices: None,
+        };
+        assert!(
+            session
+                .consumer
+                .handle_message("peer-a", &hello(vec!["first".into()]))
         );
-        assert_eq!(
-            diagnose_voice_preset(&ai, "deleted-preset-id", None, "stt"),
-            VoicePresetDiagnostic::Dangling
+        service.cache_room_models(&session);
+        assert_eq!(state.config().ai.providers[1].models, ["first"]);
+        assert!(state.config().ai.providers[1].models_fetched_at.is_some());
+        assert!(
+            session
+                .consumer
+                .handle_message("peer-a", &hello(vec!["changed".into()]))
+        );
+        service.cache_room_models(&session);
+        assert_eq!(state.config().ai.providers[1].models, ["changed"]);
+        assert!(
+            session
+                .consumer
+                .handle_message("peer-b", &hello(vec!["other".into()]))
+        );
+        service.cache_room_models(&session);
+        assert_eq!(state.config().ai.providers[1].models, ["changed", "other"]);
+        assert!(
+            !session
+                .consumer
+                .handle_message("oversized", &hello(vec!["x".into(); 257]))
+        );
+        assert_eq!(state.config().ai.providers[1].models, ["changed", "other"]);
+        let withdrawal = ProtocolMessage::ProviderHello {
+            models: Some(Vec::new()),
+            services: Some(Vec::new()),
+            voices: None,
+        };
+        session.consumer.handle_message("peer-a", &withdrawal);
+        session.consumer.handle_message("peer-b", &withdrawal);
+        service.cache_room_models(&session);
+        assert!(state.config().ai.providers[1].models.is_empty());
+        assert!(
+            session
+                .consumer
+                .wait_for_catalog(Duration::from_millis(10))
+                .await
         );
     }
 
-    #[test]
-    fn diagnose_voice_preset_ok_when_resolved_and_kind_matches() {
-        let ai = ai_with_chat_default_and_tts_preset();
-        let resolved = resolve_preset(&ai, Some("tts-real")).unwrap();
-        assert_eq!(
-            diagnose_voice_preset(&ai, "tts-real", Some(&resolved), "tts"),
-            VoicePresetDiagnostic::Ok
+    #[tokio::test]
+    async fn provider_hello_is_scoped_to_each_rooms_shared_refs() {
+        let mut ai = sample_config();
+        let second = AiProviderConfig {
+            id: "room2".into(),
+            base_url: "mist-network://second".into(),
+            shared: vec![ModelRef {
+                provider_id: "http".into(),
+                model: "other".into(),
+            }],
+            ..Default::default()
+        };
+        let first = build_provider(&test_session("test"), &ai, &ai.providers[1])
+            .await
+            .unwrap();
+        let second = build_provider(&test_session("second"), &ai, &second)
+            .await
+            .unwrap();
+        assert_eq!(first.models(), vec!["raw"]);
+        assert_eq!(second.models(), vec!["other"]);
+        let hello: Value = serde_json::from_slice(&protocol::encode(&first.hello())).unwrap();
+        assert_eq!(hello["models"], json!(["raw"]));
+        ai.providers[0].enabled = false;
+        let first = build_provider(&test_session("test"), &ai, &ai.providers[1])
+            .await
+            .unwrap();
+        assert!(first.models().is_empty());
+        assert!(
+            first
+                .call_upstream(vec![], ToolOptions::default(), Some("raw".into()), None)
+                .await
+                .is_err()
         );
     }
 
-    #[test]
-    fn diagnose_voice_preset_kind_mismatch_when_resolved_preset_is_labeled_differently() {
-        // "chat-default" is kind "chat" but is being checked against "stt" --
-        // the exact real-device failure mode `ai.stt_preset_id`/`ai.tts_preset_id`
-        // diagnostics exist to flag (see `log_voice_preset_diagnostics`).
-        let ai = ai_with_chat_default_and_tts_preset();
-        let resolved = resolve_preset(&ai, Some("chat-default")).unwrap();
+    #[tokio::test]
+    async fn empty_inbound_model_prefers_enabled_http_default_over_first_shared() {
+        let (base_url, requested_model) = mock_chat_server("default").await;
+        let mut ai = sample_config();
+        ai.providers[0].base_url = base_url;
+        ai.providers[1].shared = vec![ModelRef {
+            provider_id: "http".into(),
+            model: "shared".into(),
+        }];
+        let provider = build_provider(&test_session("test"), &ai, &ai.providers[1])
+            .await
+            .unwrap();
         assert_eq!(
-            diagnose_voice_preset(&ai, "chat-default", Some(&resolved), "stt"),
-            VoicePresetDiagnostic::KindMismatch {
-                actual: "chat".to_string()
+            provider
+                .call_upstream(
+                    vec![ChatMessage::new("user", "test")],
+                    ToolOptions::default(),
+                    None,
+                    None
+                )
+                .await
+                .unwrap()
+                .content,
+            "default"
+        );
+        assert_eq!(requested_model.await.unwrap(), "raw");
+    }
+
+    #[tokio::test]
+    async fn room_default_uses_first_http_shared_ref_for_inbound_requests() {
+        let (base_url, requested_model) = mock_chat_server("shared").await;
+        let mut ai = sample_config();
+        ai.providers[0].base_url = base_url;
+        ai.default_ref = Some(ModelRef {
+            provider_id: "room".into(),
+            model: "remote".into(),
+        });
+        let provider = build_provider(&test_session("test"), &ai, &ai.providers[1])
+            .await
+            .unwrap();
+        assert_eq!(
+            provider
+                .call_upstream(
+                    vec![ChatMessage::new("user", "test")],
+                    ToolOptions::default(),
+                    Some(String::new()),
+                    None
+                )
+                .await
+                .unwrap()
+                .content,
+            "shared"
+        );
+        assert_eq!(requested_model.await.unwrap(), "raw");
+    }
+
+    async fn mock_chat_server(content: &str) -> (String, tokio::sync::oneshot::Receiver<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = json!({ "choices": [{ "message": { "content": content } }] }).to_string();
+        let response = ok_json(&body);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0; 4096];
+            loop {
+                let n = socket.read(&mut buf).await.unwrap();
+                assert!(n > 0);
+                request.extend_from_slice(&buf[..n]);
+                if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&request[..end]);
+                    let len: usize = head
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().parse().unwrap())
+                        })
+                        .unwrap();
+                    if request.len() >= end + 4 + len {
+                        let body: Value =
+                            serde_json::from_slice(&request[end + 4..end + 4 + len]).unwrap();
+                        tx.send(body["model"].as_str().unwrap().to_string())
+                            .unwrap();
+                        break;
+                    }
+                }
             }
-        );
-        // Same preset checked against "tts" also mismatches (it's "chat").
-        assert_eq!(
-            diagnose_voice_preset(&ai, "chat-default", Some(&resolved), "tts"),
-            VoicePresetDiagnostic::KindMismatch {
-                actual: "chat".to_string()
-            }
-        );
-        // And a "tts"-kind preset checked against "stt" mismatches too.
-        let tts_resolved = resolve_preset(&ai, Some("tts-real")).unwrap();
-        assert_eq!(
-            diagnose_voice_preset(&ai, "tts-real", Some(&tts_resolved), "stt"),
-            VoicePresetDiagnostic::KindMismatch {
-                actual: "tts".to_string()
-            }
-        );
-    }
-
-    #[test]
-    fn diagnose_voice_preset_treats_an_empty_kind_field_as_chat() {
-        // A preset predating `AiPresetConfig::kind` (old config.toml) has
-        // `kind == ""`, which the doc comment says must behave like "chat".
-        let mut ai = ai_with_chat_default_and_tts_preset();
-        ai.presets.push(AiPresetConfig {
-            id: "legacy".to_string(),
-            label: "Legacy".to_string(),
-            provider_id: "p1".to_string(),
-            model: "gpt-4o".to_string(),
-            temperature: None,
-            reasoning_effort: None,
-            voice: None,
-            lang_voices: HashMap::new(),
-            kind: String::new(),
+            socket.write_all(response.as_bytes()).await.unwrap();
         });
-        let resolved = resolve_preset(&ai, Some("legacy")).unwrap();
-        assert_eq!(
-            diagnose_voice_preset(&ai, "legacy", Some(&resolved), "chat"),
-            VoicePresetDiagnostic::Ok
-        );
-        assert_eq!(
-            diagnose_voice_preset(&ai, "legacy", Some(&resolved), "tts"),
-            VoicePresetDiagnostic::KindMismatch {
-                actual: "chat".to_string()
-            }
-        );
+        (format!("http://{addr}"), rx)
     }
-
-    // -- resolve_tts_voice: pure fallback-order tests -------------------
 
     fn empty_lang_voices() -> HashMap<String, String> {
         HashMap::new()
@@ -1784,21 +1969,21 @@ mod tests {
             None,
             &empty_lang_voices(),
             &no_catalog(),
-            &Some("preset-voice".to_string()),
+            &Some("config-voice".to_string()),
         );
         assert_eq!(voice.as_deref(), Some("request-voice"));
     }
 
     #[test]
-    fn resolve_tts_voice_falls_back_to_the_preset_voice() {
+    fn resolve_tts_voice_falls_back_to_the_config_voice() {
         let voice = resolve_tts_voice(
             None,
             None,
             &empty_lang_voices(),
             &no_catalog(),
-            &Some("preset-voice".to_string()),
+            &Some("config-voice".to_string()),
         );
-        assert_eq!(voice.as_deref(), Some("preset-voice"));
+        assert_eq!(voice.as_deref(), Some("config-voice"));
     }
 
     #[test]
@@ -1837,7 +2022,7 @@ mod tests {
             Some("en"),
             &lang_voices,
             &no_catalog(),
-            &Some("preset-voice".to_string()),
+            &Some("config-voice".to_string()),
         );
         assert_eq!(voice.as_deref(), Some("request-voice"));
     }
@@ -1852,7 +2037,7 @@ mod tests {
             Some("ja"),
             &lang_voices,
             &no_catalog(),
-            &Some("preset-voice".to_string()),
+            &Some("config-voice".to_string()),
         );
         assert_eq!(voice.as_deref(), Some("ja-voice"));
     }
@@ -1875,19 +2060,19 @@ mod tests {
     }
 
     #[test]
-    fn resolve_tts_voice_lang_with_no_lang_voices_entry_falls_back_to_preset_voice() {
+    fn resolve_tts_voice_lang_with_no_lang_voices_entry_falls_back_to_config_voice() {
         let mut lang_voices = empty_lang_voices();
         lang_voices.insert("ja".to_string(), "ja-voice".to_string());
         // Requested "fr" has no entry and the catalog isn't kokoro-shaped
-        // (empty), so this falls all the way through to preset_voice.
+        // (empty), so this falls all the way through to config_voice.
         let voice = resolve_tts_voice(
             None,
             Some("fr"),
             &lang_voices,
             &no_catalog(),
-            &Some("preset-voice".to_string()),
+            &Some("config-voice".to_string()),
         );
-        assert_eq!(voice.as_deref(), Some("preset-voice"));
+        assert_eq!(voice.as_deref(), Some("config-voice"));
     }
 
     // -- resolve_tts_voice: kokoro-style catalog heuristic -----------------
@@ -1948,9 +2133,9 @@ mod tests {
             Some("en"),
             &empty_lang_voices(),
             &catalog,
-            &Some("preset-voice".to_string()),
+            &Some("config-voice".to_string()),
         );
-        assert_eq!(voice.as_deref(), Some("preset-voice"));
+        assert_eq!(voice.as_deref(), Some("config-voice"));
     }
 
     #[test]
@@ -1960,9 +2145,9 @@ mod tests {
             Some("en"),
             &empty_lang_voices(),
             &no_catalog(),
-            &Some("preset-voice".to_string()),
+            &Some("config-voice".to_string()),
         );
-        assert_eq!(voice.as_deref(), Some("preset-voice"));
+        assert_eq!(voice.as_deref(), Some("config-voice"));
     }
 
     #[test]
@@ -1973,9 +2158,9 @@ mod tests {
             Some("de"),
             &empty_lang_voices(),
             &kokoro_catalog(),
-            &Some("preset-voice".to_string()),
+            &Some("config-voice".to_string()),
         );
-        assert_eq!(voice.as_deref(), Some("preset-voice"));
+        assert_eq!(voice.as_deref(), Some("config-voice"));
     }
 
     #[test]
@@ -1988,9 +2173,9 @@ mod tests {
             Some("zh"),
             &empty_lang_voices(),
             &catalog,
-            &Some("preset-voice".to_string()),
+            &Some("config-voice".to_string()),
         );
-        assert_eq!(voice.as_deref(), Some("preset-voice"));
+        assert_eq!(voice.as_deref(), Some("config-voice"));
     }
 
     #[test]
@@ -2074,12 +2259,14 @@ mod tests {
         )
     }
 
-    fn resolved_preset(base_url: String, voice: Option<&str>) -> crate::config::ResolvedAiPreset {
-        crate::config::ResolvedAiPreset {
+    fn resolved_voice_config(
+        base_url: String,
+        voice: Option<&str>,
+    ) -> crate::config::ResolvedModel {
+        crate::config::ResolvedModel {
             base_url,
             api_key: "key".to_string(),
             model: "tts-1".to_string(),
-            temperature: None,
             reasoning_effort: None,
             voice: voice.map(String::from),
             lang_voices: HashMap::new(),
@@ -2087,40 +2274,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_advertised_voices_empty_when_no_tts_preset_configured() {
+    async fn resolve_advertised_voices_empty_when_no_tts_config_configured() {
         assert_eq!(resolve_advertised_voices(None).await, Vec::<String>::new());
     }
 
     #[tokio::test]
     async fn resolve_advertised_voices_prefers_the_fetched_upstream_catalog() {
-        // Fetch succeeds *and* the preset has its own `voice` set -- the
+        // Fetch succeeds *and* the configuration has its own `voice` set -- the
         // fetched catalog wins (fallback order step 1 beats step 2).
         let base_url = mock_voices_server(&ok_json(r#"{"voices":["nova","shimmer"]}"#)).await;
-        let resolved = resolved_preset(base_url.clone(), Some("alloy"));
+        let resolved = resolved_voice_config(base_url.clone(), Some("alloy"));
         let provider = crate::config::AiProviderConfig {
             id: String::new(),
             label: String::new(),
             base_url,
             api_key: "key".to_string(),
+            ..Default::default()
         };
         let voices = resolve_advertised_voices(Some(&(provider, resolved))).await;
         assert_eq!(voices, vec!["nova".to_string(), "shimmer".to_string()]);
     }
 
     #[tokio::test]
-    async fn resolve_advertised_voices_falls_back_to_preset_voice_when_fetch_is_empty() {
+    async fn resolve_advertised_voices_falls_back_to_config_voice_when_fetch_is_empty() {
         // Both /audio/voices and /voices need to be tried and fail for
         // fetch_voices to return []; a single 404 response closes the
         // connection after the first candidate, so the second candidate
         // request hits a closed/refused socket and also fails -- exercising
         // the "upstream has no voices endpoint at all" case end to end.
         let base_url = mock_voices_server(&not_found()).await;
-        let resolved = resolved_preset(base_url.clone(), Some("alloy"));
+        let resolved = resolved_voice_config(base_url.clone(), Some("alloy"));
         let provider = crate::config::AiProviderConfig {
             id: String::new(),
             label: String::new(),
             base_url,
             api_key: "key".to_string(),
+            ..Default::default()
         };
         let voices = resolve_advertised_voices(Some(&(provider, resolved))).await;
         assert_eq!(voices, vec!["alloy".to_string()]);
@@ -2129,12 +2318,13 @@ mod tests {
     #[tokio::test]
     async fn resolve_advertised_voices_empty_when_fetch_fails_and_preset_has_no_voice() {
         let base_url = mock_voices_server(&not_found()).await;
-        let resolved = resolved_preset(base_url.clone(), None);
+        let resolved = resolved_voice_config(base_url.clone(), None);
         let provider = crate::config::AiProviderConfig {
             id: String::new(),
             label: String::new(),
             base_url,
             api_key: "key".to_string(),
+            ..Default::default()
         };
         let voices = resolve_advertised_voices(Some(&(provider, resolved))).await;
         assert_eq!(voices, Vec::<String>::new());
