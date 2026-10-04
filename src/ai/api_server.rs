@@ -79,6 +79,32 @@ use super::openai::{ChatOutput, ToolOptions};
 use super::protocol::ChatMessage;
 use super::{LlmCallFn, ModelsFn, SttFn, ToolsUnsupported, TtsFn, stt, tts};
 
+pub(super) type OaiFn = Arc<
+    dyn Fn(
+            Value,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<super::oai_tunnel::TunnelResponse>> + Send>,
+        > + Send
+        + Sync,
+>;
+
+pub(super) struct RoomRoutes {
+    pub call: LlmCallFn,
+    pub models: ModelsFn,
+    pub tts: TtsFn,
+    pub stt: SttFn,
+    pub oai: OaiFn,
+}
+
+pub(super) type RoomsFn = Arc<
+    dyn Fn(
+            String,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Option<RoomRoutes>>> + Send>,
+        > + Send
+        + Sync,
+>;
+
 /// Header section size cap (request-line + headers), matches doc.
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 /// Body size cap for `/v1/audio/transcriptions` (multipart audio upload).
@@ -108,12 +134,24 @@ pub struct ApiServer {
 impl ApiServer {
     /// Bind `listen` (e.g. "127.0.0.1:6478") and start serving; resolves
     /// once the socket is listening.
+    #[cfg(test)]
     pub async fn start(
         listen: &str,
         call: LlmCallFn,
         models: ModelsFn,
         tts_call: TtsFn,
         stt_call: SttFn,
+    ) -> Result<Arc<ApiServer>> {
+        Self::start_with_rooms(listen, call, models, tts_call, stt_call, None).await
+    }
+
+    pub async fn start_with_rooms(
+        listen: &str,
+        call: LlmCallFn,
+        models: ModelsFn,
+        tts_call: TtsFn,
+        stt_call: SttFn,
+        rooms: Option<RoomsFn>,
     ) -> Result<Arc<ApiServer>> {
         let listener = TcpListener::bind(listen)
             .await
@@ -143,10 +181,11 @@ impl ApiServer {
                 let models = models.clone();
                 let tts_call = tts_call.clone();
                 let stt_call = stt_call.clone();
+                let rooms = rooms.clone();
                 let handle = tokio::spawn(async move {
                     let _permit = permit;
                     if let Err(error) =
-                        handle_connection(socket, call, models, tts_call, stt_call).await
+                        handle_connection(socket, call, models, tts_call, stt_call, rooms).await
                     {
                         warn!(%error, "api_server connection ended with error");
                     }
@@ -504,6 +543,8 @@ struct ApiMessage {
 #[derive(serde::Deserialize)]
 struct ChatRequestBody {
     #[serde(default)]
+    reasoning_effort: Option<String>,
+    #[serde(default)]
     model: Option<String>,
     messages: Vec<ApiMessage>,
     #[serde(default)]
@@ -592,7 +633,11 @@ fn parse_chat_request(body: &[u8]) -> std::result::Result<ParsedChat, String> {
     Ok(ParsedChat {
         model: req.model,
         messages,
-        tools: ToolOptions { tools, tool_choice },
+        tools: ToolOptions {
+            tools,
+            tool_choice,
+            reasoning_effort: req.reasoning_effort,
+        },
         stream: req.stream,
     })
 }
@@ -670,6 +715,7 @@ async fn handle_connection(
     models: ModelsFn,
     tts_call: TtsFn,
     stt_call: SttFn,
+    rooms: Option<RoomsFn>,
 ) -> Result<()> {
     let local_addr = stream.local_addr().context("reading local address")?;
     // Same rule as the dashboard: while external connections are OFF, only
@@ -719,7 +765,50 @@ async fn handle_connection(
 
     let is_post = head.method.eq_ignore_ascii_case("POST");
     let is_get = head.method.eq_ignore_ascii_case("GET");
-    let path = head.path.split('?').next().unwrap_or("").to_string();
+    let mut path = head.path.split('?').next().unwrap_or("").to_string();
+    let (call, models, tts_call, stt_call, oai) = if path.starts_with("/v1/rooms/") {
+        let Some((room, endpoint)) = room_route(&path) else {
+            write_error(&mut stream, 404, "Not Found", "invalid room route").await?;
+            return Ok(());
+        };
+        let Some(rooms) = rooms else {
+            write_error(
+                &mut stream,
+                404,
+                "Not Found",
+                "room is not an enabled Room provider in ai.providers",
+            )
+            .await?;
+            return Ok(());
+        };
+        let routes = match rooms(room).await {
+            Ok(Some(routes)) => routes,
+            Ok(None) => {
+                write_error(
+                    &mut stream,
+                    404,
+                    "Not Found",
+                    "room is not an enabled Room provider in ai.providers",
+                )
+                .await?;
+                return Ok(());
+            }
+            Err(err) => {
+                write_backend_failure(&mut stream, &err).await;
+                return Ok(());
+            }
+        };
+        path = format!("/v1/{endpoint}");
+        (
+            routes.call,
+            routes.models,
+            routes.tts,
+            routes.stt,
+            Some(routes.oai),
+        )
+    } else {
+        (call, models, tts_call, stt_call, None)
+    };
 
     let body: Vec<u8> = if is_post {
         let content_length: usize = match head.header("content-length") {
@@ -784,7 +873,7 @@ async fn handle_connection(
         let body = models_response(&models);
         let _ = write_json_response(&mut stream, 200, "OK", &body).await;
     } else if is_post && path == "/v1/chat/completions" {
-        handle_chat_completions(&mut stream, &body, &call).await?;
+        handle_chat_completions_with_oai(&mut stream, &body, &call, oai.as_ref()).await?;
     } else if is_post && path == "/v1/audio/speech" {
         handle_audio_speech(&mut stream, &body, &tts_call).await?;
     } else if is_post && path == "/v1/audio/transcriptions" {
@@ -795,6 +884,34 @@ async fn handle_connection(
     }
 
     Ok(())
+}
+
+/// Split before percent decoding, so encoded slashes belong to the room id.
+fn room_route(path: &str) -> Option<(String, String)> {
+    let rest = path.strip_prefix("/v1/rooms/")?;
+    let (encoded, endpoint) = rest.split_once('/')?;
+    if !matches!(
+        endpoint,
+        "models" | "chat/completions" | "audio/speech" | "audio/transcriptions"
+    ) {
+        return None;
+    }
+    let mut decoded = Vec::new();
+    let mut bytes = encoded.bytes();
+    while let Some(b) = bytes.next() {
+        if b == b'%' {
+            let hi = (bytes.next()? as char).to_digit(16)?;
+            let lo = (bytes.next()? as char).to_digit(16)?;
+            decoded.push((hi * 16 + lo) as u8);
+        } else {
+            decoded.push(b);
+        }
+    }
+    let room = String::from_utf8(decoded).ok()?;
+    if room.is_empty() {
+        return None;
+    }
+    Some((room, endpoint.into()))
 }
 
 /// `POST /v1/audio/speech`: OpenAI's shape -- `{model, input, voice,
@@ -1056,11 +1173,106 @@ fn split_on<'a>(haystack: &'a [u8], needle: &[u8]) -> Vec<&'a [u8]> {
     out
 }
 
-async fn handle_chat_completions(
+async fn handle_chat_completions_with_oai(
     stream: &mut TcpStream,
     body: &[u8],
     call: &LlmCallFn,
+    oai: Option<&OaiFn>,
 ) -> Result<()> {
+    // Validate the ordinary fields using the text parser; only image content
+    // parts take the non-streaming tunnel, and SSE is adapted locally below.
+    let vision = match vision_request(body) {
+        Ok(value) => value,
+        Err(message) => {
+            write_error(stream, 400, "Bad Request", &message).await?;
+            return Ok(());
+        }
+    };
+    let mut vision_call: Option<LlmCallFn> = None;
+    let normalized;
+    let body = if let Some((mut raw, text_body)) = vision {
+        let req = match parse_chat_request(&text_body) {
+            Ok(req) => req,
+            Err(message) => {
+                write_error(stream, 400, "Bad Request", &message).await?;
+                return Ok(());
+            }
+        };
+        let Some(oai) = oai else {
+            write_error(
+                stream,
+                400,
+                "Bad Request",
+                "image content requires a room-scoped route and an oai provider",
+            )
+            .await?;
+            return Ok(());
+        };
+        raw["stream"] = json!(false);
+        raw.as_object_mut()
+            .expect("validated chat body")
+            .remove("temperature");
+        let response = match oai(raw).await {
+            Ok(response) => response,
+            Err(err) => {
+                write_backend_failure(stream, &err).await;
+                return Ok(());
+            }
+        };
+        if !req.stream || !(200..300).contains(&response.status) {
+            let content_type = if response.content_type.contains(['\r', '\n']) {
+                "application/json"
+            } else {
+                &response.content_type
+            };
+            let reason = if (200..300).contains(&response.status) {
+                "OK"
+            } else {
+                "Upstream Error"
+            };
+            let head = format!(
+                "HTTP/1.1 {} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                response.status,
+                response.body.len()
+            );
+            stream.write_all(head.as_bytes()).await?;
+            stream.write_all(&response.body).await?;
+            return Ok(());
+        }
+        let value: Value = match serde_json::from_slice(&response.body) {
+            Ok(value) => value,
+            Err(_) => {
+                write_error(stream, 502, "Bad Gateway", BACKEND_ERROR_MESSAGE).await?;
+                return Ok(());
+            }
+        };
+        let Some(message) = value.pointer("/choices/0/message") else {
+            write_error(stream, 502, "Bad Gateway", BACKEND_ERROR_MESSAGE).await?;
+            return Ok(());
+        };
+        let output = ChatOutput {
+            content: message
+                .get("content")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .into(),
+            tool_calls: message.get("tool_calls").filter(|v| v.is_array()).cloned(),
+        };
+        vision_call = Some(Arc::new(move |_, _, _, tx| {
+            let output = output.clone();
+            Box::pin(async move {
+                if let Some(tx) = tx {
+                    let _ = tx.send(output.content.clone());
+                }
+                Ok(output)
+            })
+        }));
+        normalized = text_body;
+        normalized.as_slice()
+    } else {
+        body
+    };
+    let call = vision_call.as_ref().unwrap_or(call);
     let req = match parse_chat_request(body) {
         Ok(req) => req,
         Err(message) => {
@@ -1219,8 +1431,263 @@ async fn handle_chat_completions(
     Ok(())
 }
 
+fn vision_request(body: &[u8]) -> std::result::Result<Option<(Value, Vec<u8>)>, String> {
+    let raw: Value =
+        serde_json::from_slice(body).map_err(|e| format!("invalid request body: {e}"))?;
+    let has_image = raw
+        .get("messages")
+        .and_then(Value::as_array)
+        .is_some_and(|messages| {
+            messages.iter().any(|m| {
+                m.get("content")
+                    .and_then(Value::as_array)
+                    .is_some_and(|parts| {
+                        parts
+                            .iter()
+                            .any(|p| p.get("type").and_then(Value::as_str) == Some("image_url"))
+                    })
+            })
+        });
+    if !has_image {
+        return Ok(None);
+    }
+    let mut text = raw.clone();
+    for message in text["messages"]
+        .as_array_mut()
+        .ok_or("messages must be an array")?
+    {
+        if let Some(parts) = message.get("content").and_then(Value::as_array) {
+            let mut content = String::new();
+            for part in parts {
+                match part.get("type").and_then(Value::as_str) {
+                    Some("text") => content.push_str(
+                        part.get("text")
+                            .and_then(Value::as_str)
+                            .ok_or("text part requires text")?,
+                    ),
+                    Some("image_url")
+                        if part
+                            .pointer("/image_url/url")
+                            .and_then(Value::as_str)
+                            .is_some_and(|s| !s.is_empty()) => {}
+                    _ => return Err("invalid image content part".into()),
+                }
+            }
+            message["content"] = Value::String(content);
+        }
+    }
+    Ok(Some((
+        raw,
+        serde_json::to_vec(&text).map_err(|e| e.to_string())?,
+    )))
+}
+
 #[cfg(test)]
 mod tests {
+    async fn room_test_server() -> (Arc<ApiServer>, Arc<Mutex<Vec<Value>>>) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let default_seen = seen.clone();
+        let call: LlmCallFn = Arc::new(move |_, options, _, _| {
+            default_seen
+                .lock()
+                .unwrap()
+                .push(json!({"route":"default","effort":options.reasoning_effort}));
+            Box::pin(async { Ok("default".to_string().into()) })
+        });
+        let records = seen.clone();
+        let rooms: RoomsFn = Arc::new(move |room| {
+            let records = records.clone();
+            Box::pin(async move {
+                if room != "team/one" {
+                    return Ok(None);
+                }
+                let chat_records = records.clone();
+                let call: LlmCallFn = Arc::new(move |_, options, model, tx| {
+                    chat_records.lock().unwrap().push(
+                        json!({"route":"room","effort":options.reasoning_effort,"model":model}),
+                    );
+                    Box::pin(async move {
+                        if let Some(tx) = tx {
+                            let _ = tx.send("room".into());
+                        }
+                        Ok("room".to_string().into())
+                    })
+                });
+                let oai: OaiFn = Arc::new(move |body| {
+                    records
+                        .lock()
+                        .unwrap()
+                        .push(json!({"route":"oai","body":body}));
+                    Box::pin(async {
+                        Ok(super::super::oai_tunnel::TunnelResponse {
+                            status: 200,
+                            content_type: "application/json".into(),
+                            body: serde_json::to_vec(
+                                &json!({"choices":[{"message":{"content":"image answer"}}]}),
+                            )
+                            .unwrap(),
+                        })
+                    })
+                });
+                let tts: TtsFn = Arc::new(|_, _| {
+                    Box::pin(async {
+                        Ok(tts::TtsAudio {
+                            bytes: b"room audio".to_vec(),
+                            mime: "audio/mpeg".into(),
+                        })
+                    })
+                });
+                let stt: SttFn = Arc::new(|_| Box::pin(async { Ok("room transcript".into()) }));
+                Ok(Some(RoomRoutes {
+                    call,
+                    models: Arc::new(|| vec!["room-raw".into()]),
+                    tts,
+                    stt,
+                    oai,
+                }))
+            })
+        });
+        let server = ApiServer::start_with_rooms(
+            "127.0.0.1:0",
+            call,
+            fake_models(),
+            fake_tts(),
+            fake_stt(),
+            Some(rooms),
+        )
+        .await
+        .unwrap();
+        (server, seen)
+    }
+
+    async fn post_json(server: &ApiServer, path: &str, value: Value) -> Vec<u8> {
+        let body = value.to_string();
+        send_request(server.addr(), &format!("POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len())).await
+    }
+
+    #[test]
+    fn room_route_decodes_only_the_room_segment() {
+        assert_eq!(
+            room_route("/v1/rooms/team%2Fone/chat/completions"),
+            Some(("team/one".into(), "chat/completions".into()))
+        );
+        assert_eq!(
+            room_route("/v1/rooms/%E6%97%A5%E6%9C%AC/models").unwrap().0,
+            "\u{65e5}\u{672c}"
+        );
+        assert_eq!(room_route("/v1/rooms/a+b/models").unwrap().0, "a+b");
+        for path in [
+            "/v1/rooms/%FF/models",
+            "/v1/rooms/%2/models",
+            "/v1/rooms//models",
+            "/v1/rooms/x/embeddings",
+        ] {
+            assert!(room_route(path).is_none(), "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn default_and_room_chat_pass_effort_with_both_response_modes() {
+        let (server, seen) = room_test_server().await;
+        for path in [
+            "/v1/chat/completions",
+            "/v1/rooms/team%2Fone/chat/completions",
+        ] {
+            for stream in [false, true] {
+                let raw = post_json(&server, path, json!({"model":"raw","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"none","stream":stream})).await;
+                let (head, body) = split_response(&raw);
+                assert_eq!(status_code(&head), 200);
+                if stream {
+                    assert!(
+                        String::from_utf8(de_chunk(body))
+                            .unwrap()
+                            .contains("[DONE]")
+                    );
+                }
+                assert_eq!(seen.lock().unwrap().last().unwrap()["effort"], "none");
+                assert_eq!(
+                    seen.lock().unwrap().last().unwrap()["route"],
+                    if path.contains("rooms") {
+                        "room"
+                    } else {
+                        "default"
+                    }
+                );
+            }
+        }
+        server.stop();
+    }
+
+    #[tokio::test]
+    async fn room_models_voice_routes_and_missing_rooms_are_isolated() {
+        let (server, _) = room_test_server().await;
+        let raw = send_request(
+            server.addr(),
+            "GET /v1/rooms/team%2Fone/models HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+        )
+        .await;
+        let (head, body) = split_response(&raw);
+        assert_eq!(status_code(&head), 200);
+        assert_eq!(
+            serde_json::from_slice::<Value>(body).unwrap()["data"][0]["id"],
+            "room-raw"
+        );
+        let raw = post_json(
+            &server,
+            "/v1/rooms/team%2Fone/audio/speech",
+            json!({"input":"hi"}),
+        )
+        .await;
+        let (head, body) = split_response(&raw);
+        assert_eq!(status_code(&head), 200);
+        assert_eq!(body, b"room audio");
+        let multipart = "--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"clip.wav\"\r\nContent-Type: audio/wav\r\n\r\nRIFF\r\n--b--\r\n";
+        let raw = send_request(server.addr(), &format!("POST /v1/rooms/team%2Fone/audio/transcriptions HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: multipart/form-data; boundary=b\r\nContent-Length: {}\r\n\r\n{multipart}", multipart.len())).await;
+        let (head, body) = split_response(&raw);
+        assert_eq!(status_code(&head), 200);
+        assert_eq!(
+            serde_json::from_slice::<Value>(body).unwrap()["text"],
+            "room transcript"
+        );
+        let raw = send_request(
+            server.addr(),
+            "GET /v1/rooms/missing/models HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+        )
+        .await;
+        let (head, body) = split_response(&raw);
+        assert_eq!(status_code(&head), 404);
+        assert!(String::from_utf8_lossy(body).contains("enabled Room provider"));
+        server.stop();
+    }
+
+    #[tokio::test]
+    async fn room_image_requests_use_oai_and_adapt_buffered_responses_to_sse() {
+        let (server, seen) = room_test_server().await;
+        for stream in [false, true] {
+            let raw = post_json(&server, "/v1/rooms/team%2Fone/chat/completions", json!({"model":"raw","reasoning_effort":"high","temperature":0.4,"stream":stream,
+                "messages":[{"role":"user","content":[{"type":"text","text":"describe"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}]}]})).await;
+            let (head, body) = split_response(&raw);
+            assert_eq!(status_code(&head), 200);
+            let payload = if stream {
+                de_chunk(body)
+            } else {
+                body.to_vec()
+            };
+            assert!(String::from_utf8_lossy(&payload).contains("image answer"));
+            let records = seen.lock().unwrap();
+            let sent = records.last().unwrap();
+            assert_eq!(sent["route"], "oai");
+            assert_eq!(sent["body"]["reasoning_effort"], "high");
+            assert_eq!(sent["body"]["stream"], false);
+            assert!(sent["body"].get("temperature").is_none());
+        }
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            2,
+            "image requests never use the plain chat callback"
+        );
+        server.stop();
+    }
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
 

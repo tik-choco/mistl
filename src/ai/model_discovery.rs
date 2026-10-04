@@ -45,14 +45,14 @@ impl ModelDiscovery {
         let requested = Instant::now();
         let slot = {
             let mut requests = self.requests.lock().expect("ai discovery lock");
-            let config = state.config();
+            let config = state.effective_config();
             requests.retain(|id, _| config.ai.providers.iter().any(|p| &p.id == id));
             requests.entry(id.to_string()).or_default().clone()
         };
         let mut fetch = slot.fetch.lock().await;
         let generation = slot.generation.load(std::sync::atomic::Ordering::Relaxed);
         let provider = state
-            .config()
+            .effective_config()
             .ai
             .providers
             .into_iter()
@@ -84,7 +84,7 @@ impl ModelDiscovery {
 
 /// Only connection edits invalidate discovery; labels, shared refs and caches do not.
 pub fn spawn_http_refresh(state: Arc<AppState>, previous: Option<&crate::config::AiConfig>) {
-    for provider in state.config().ai.providers {
+    for provider in state.effective_config().ai.providers {
         if previous.is_some_and(|old| {
             old.providers
                 .iter()

@@ -30,7 +30,17 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer};
 
-fn main() -> Result<()> {
+fn main() -> std::process::ExitCode {
+    match run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("error: {error:#}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> Result<()> {
     let stderr_layer = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
         .with_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "mistl=info".into()));

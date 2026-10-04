@@ -19,6 +19,7 @@ const chatMessages = [{type:'tc-chat:post', id:'message-1', fromId:longId, fromN
 const fixtures = {
   'daemon.status': {pid:123, version:'0.1.0', uptime_secs:10, build, network:{enabled:false, state:'off', saved:true}},
   'stream.status': {running:false},
+  'ai.external.get': {registrations:[]},
   'ai.status': {providing:true, serving:false, rooms:[{provider_id:'home',room:'home-room',enabled:true,joined:true,providing:true,peers:3},{provider_id:'team',room:'team-room',enabled:true,joined:false,providing:false,peers:0}]},
   'topology.status': {self:{node_id:longId, did:longId, display_name:'\u9577\u3044\u540d\u524d\u306e\u30ce\u30fc\u30c9'.repeat(12)}, rooms:[room], peers:[{node_id:'peer-two',state:'connected'}], room_peers:[{room,peers:[{node_id:'peer-two',state:'connected'}]}], modules:{ai:{room:'unrelated-mailbox',joined:false},chat_relay:{rooms:[{room,joined:true}]}, store:{rooms:[]}}, stream:{running:false}},
   'profile.show': {did:longId, display_name:'UI test'},
@@ -68,6 +69,12 @@ window.fetch = async (url, options) => {
     assert.ok(p && p.enabled!==false,'disabled providers are never queried');
     if(modelGates.has(p.id))await modelGates.get(p.id).promise;
     data=modelFailures.has(p.id)?{models:p.models,live:false,error:'models endpoint unavailable'}:modelResults.get(p.id)||{models:p.id==='home'?['gem-small']:p.models,live:p.id!=='team'};
+  }
+  else if (request.cmd === 'ai.external.remove') {
+    const regs=fixtures['ai.external.get'].registrations;
+    const before=regs.length;
+    fixtures['ai.external.get'].registrations=regs.filter(r=>r.owner!==request.args.owner);
+    data={owner:request.args.owner,removed:before!==fixtures['ai.external.get'].registrations.length};
   }
   else if (request.cmd === 'config.set') {
     if(request.args.path===rejectSetting)return {ok:true,json:async()=>({ok:false,error:'setting rejected'})};
@@ -905,6 +912,24 @@ try {
     assert.equal(dialog.querySelector('[data-source=all] .ai-model-source-name').textContent,{en:'All',zh:'\u5168\u90e8',ja:'\u3059\u3079\u3066'}[language]);
     assert.ok(!dialog.textContent.includes('ai.model.'));dialog.querySelector('.modal-close').click();
   }
+  // External contributions are read-only and never sent through config.set.
+  fixtures['ai.external.get'].registrations=[{owner:'tc-npc',label:'NPC <img src=x>',providers:[{id:'http',label:'Managed HTTP',base_url:'http://external.example/v1',api_key:'***',enabled:true}],rooms:[{room:'external-room',consume:true,provide:true,shared:[{provider_id:'http',model:'external-model'}]}],warnings:[],status:{rooms:[{room:'external-room',joined:true,providing:true,peers:2,models:['external-model']}]}}];
+  const poll=intervals.find(i=>i.ms===5000);
+  for (const language of ['en','zh','ja']) {
+    document.getElementById('lang-'+language+'-btn').click();poll.callback();await flush();
+    const external=document.querySelector('[data-external-owner="tc-npc"]');
+    assert.ok(external);assert.ok(external.textContent.includes('tc-npc'));
+    assert.ok(external.textContent.includes('external-model'));assert.ok(!external.querySelector('input,select,textarea'));
+    assert.equal(external.querySelectorAll('button').length,1);assert.ok(!external.querySelector('img'));
+    assert.ok(!external.textContent.includes('ai.external.'));assert.ok(!external.textContent.includes('ai.sharing.'));
+    assert.equal(external.querySelector('button').textContent,{en:'Unregister',zh:'\u53d6\u6d88\u6ce8\u518c',ja:'\u767b\u9332\u3092\u89e3\u9664'}[language]);
+  }
+  const remove=document.querySelector('[data-external-remove="tc-npc"]'),beforeCalls=calls.length;
+  window.confirm=()=>false;remove.click();await flush();assert.equal(calls.length,beforeCalls,'cancel leaves registrations unchanged');
+  window.confirm=()=>true;remove.click();await flush();
+  assert.equal(document.querySelector('[data-external-owner="tc-npc"]'),null);
+  assert.ok(calls.slice(beforeCalls).some(c=>c.cmd==='ai.external.remove' && c.args.owner==='tc-npc'));
+  assert.ok(!calls.slice(beforeCalls).some(c=>c.cmd==='config.set'),'external removal never rewrites user config');
   const oldGet=window.localStorage.getItem.bind(window.localStorage),oldSet=window.localStorage.setItem.bind(window.localStorage);
   window.localStorage.getItem=key=>{if(key==='mistl-recent-models')throw Error('blocked');return oldGet(key);};
   window.localStorage.setItem=(key,value)=>{if(key==='mistl-recent-models')throw Error('blocked');return oldSet(key,value);};

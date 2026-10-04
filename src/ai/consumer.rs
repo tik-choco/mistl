@@ -450,6 +450,15 @@ impl Consumer {
     }
 
     pub async fn wait_for_service(&self, service: &str, timeout: Duration) -> Result<ProviderInfo> {
+        self.wait_for_service_model(service, None, timeout).await
+    }
+
+    pub async fn wait_for_service_model(
+        &self,
+        service: &str,
+        model: Option<&str>,
+        timeout: Duration,
+    ) -> Result<ProviderInfo> {
         tokio::time::timeout(timeout, async {
             loop {
                 let notified = self.catalog_changed.notified();
@@ -460,7 +469,12 @@ impl Consumer {
                     .lock()
                     .expect("catalog lock")
                     .values()
-                    .find(|p| protocol::advertises_service(&p.services, service))
+                    .find(|p| {
+                        protocol::advertises_service(&p.services, service)
+                            && model.is_none_or(|m| {
+                                p.models.is_empty() || p.models.iter().any(|id| id == m)
+                            })
+                    })
                     .cloned();
                 if let Some(info) = info {
                     return info;
@@ -547,7 +561,11 @@ impl Consumer {
                 return Err(anyhow::Error::new(ToolsUnsupported));
             }
         }
-        let ToolOptions { tools, tool_choice } = tools;
+        let ToolOptions {
+            tools,
+            tool_choice,
+            reasoning_effort,
+        } = tools;
         let id = protocol::random_id();
         let (tx, mut rx) = mpsc::unbounded_channel::<Event>();
         self.pending
@@ -580,6 +598,7 @@ impl Consumer {
                 id: id.clone(),
                 messages,
                 model,
+                reasoning_effort,
                 tools,
                 tool_choice,
             },
@@ -715,6 +734,50 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use tokio::time::sleep;
+
+    #[tokio::test]
+    async fn request_sends_effort_without_requiring_tools() {
+        let (consumer, sent) = locked(Some(vec!["chat".into()]));
+        let c = consumer.clone();
+        let task = tokio::spawn(async move {
+            c.request_tools(
+                "provider1",
+                vec![chat("hi")],
+                ToolOptions {
+                    reasoning_effort: Some("none".into()),
+                    ..Default::default()
+                },
+                None,
+                Duration::from_secs(1),
+                None,
+            )
+            .await
+        });
+        let id = loop {
+            if let Some((
+                _,
+                ProtocolMessage::LlmRequest {
+                    id,
+                    reasoning_effort,
+                    ..
+                },
+            )) = sent.lock().unwrap().first()
+            {
+                assert_eq!(reasoning_effort.as_deref(), Some("none"));
+                break id.clone();
+            }
+            tokio::task::yield_now().await;
+        };
+        consumer.handle_message(
+            "provider1",
+            &ProtocolMessage::LlmResponseDone {
+                id,
+                content: Some("ok".into()),
+                tool_calls: None,
+            },
+        );
+        assert_eq!(task.await.unwrap().unwrap().content, "ok");
+    }
 
     #[test]
     fn room_catalog_unions_raw_models_and_prefers_an_explicit_match() {
@@ -1747,6 +1810,7 @@ mod tests {
 
     fn tool_opts() -> ToolOptions {
         ToolOptions {
+            reasoning_effort: None,
             tools: Some(serde_json::json!([{"type":"function","function":{"name":"f"}}])),
             tool_choice: None,
         }

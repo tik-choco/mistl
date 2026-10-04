@@ -15,6 +15,7 @@ use crate::config::{self, Config};
 
 /// Shared state for all daemon services.
 pub struct AppState {
+    pub(crate) ai_external: Mutex<crate::ai::external::Store>,
     pub(crate) ai_model_discovery: crate::ai::ModelDiscovery,
     pub network: crate::network::NetworkControl,
     /// Live configuration. Behind a lock so `config.set` can hot-reload it:
@@ -41,6 +42,15 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Runtime AI snapshot. External registrations never enter the saved config.
+    pub fn effective_config(&self) -> Config {
+        let config = self.config();
+        self.ai_external
+            .lock()
+            .expect("external registrations lock")
+            .merge(config)
+    }
+
     /// Snapshot of the current config (cheap; Config is small and cloned).
     pub fn config(&self) -> Config {
         self.config.read().expect("config lock poisoned").clone()
@@ -72,6 +82,13 @@ impl AppState {
         fetched: &crate::config::AiProviderConfig,
         models: &[String],
     ) -> Result<()> {
+        if fetched.id.starts_with("ext:") {
+            self.ai_external
+                .lock()
+                .expect("external registrations lock")
+                .cache_models(fetched, models);
+            return Ok(());
+        }
         let mut config = self.config.write().expect("config lock poisoned");
         let mut updated = config.clone();
         if let Some(provider) = updated.ai.providers.iter_mut().find(|p| {
@@ -144,6 +161,7 @@ impl AppState {
         // The receiver is dropped immediately: `watch::Sender::send` tolerates
         // having no receivers, so `request_shutdown` stays harmless in tests.
         Arc::new(Self {
+            ai_external: Mutex::new(crate::ai::external::Store::default()),
             ai_model_discovery: crate::ai::ModelDiscovery::default(),
             network: crate::network::NetworkControl::for_test(),
             config: std::sync::RwLock::new(Config::default()),
@@ -184,6 +202,7 @@ async fn daemon_main(host_override: Option<String>) -> Result<()> {
     let config = Config::load()?;
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     let state = Arc::new(AppState {
+        ai_external: Mutex::new(crate::ai::external::Store::load(&config::data_dir()?)?),
         ai_model_discovery: crate::ai::ModelDiscovery::default(),
         network: crate::network::NetworkControl::load(&config::data_dir()?),
         config: std::sync::RwLock::new(config),
@@ -526,10 +545,12 @@ fn remote_config_denied(path: &str) -> bool {
     pathlike || DENIED_EXACT.contains(&path) || DENIED_SECTIONS.iter().any(|p| path.starts_with(p))
 }
 
-/// Rejects commands (or argument shapes) a remote HTTP caller may not use.
-/// Only `Caller::Http { remote: true }` is restricted; the message names the
-/// CLI / a local browser as the way out.
+/// External apply is IPC-only. Other restrictions below apply to remote HTTP
+/// callers; their errors name the CLI / a local browser as the way out.
 fn authorize(caller: Caller, cmd: &str, args: &Value) -> Result<()> {
+    if cmd == "ai.external.apply" && caller != Caller::Ipc {
+        bail!("`ai.external.apply` is available only through the local mistl CLI");
+    }
     if caller != (Caller::Http { remote: true }) {
         return Ok(());
     }
@@ -728,6 +749,23 @@ pub async fn dispatch_as(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn external_apply_is_ipc_only_but_get_and_remove_allow_all_dashboard_callers() {
+        for caller in [
+            Caller::Ipc,
+            Caller::Internal,
+            Caller::Http { remote: false },
+            Caller::Http { remote: true },
+        ] {
+            assert_eq!(
+                authorize(caller, "ai.external.apply", &json!({})).is_ok(),
+                caller == Caller::Ipc
+            );
+            authorize(caller, "ai.external.get", &json!({})).unwrap();
+            authorize(caller, "ai.external.remove", &json!({"owner":"app"})).unwrap();
+        }
+    }
 
     #[tokio::test]
     async fn config_show_masks_provider_keys_and_keeps_current_ai_shape() {
