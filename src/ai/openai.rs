@@ -109,6 +109,8 @@ fn truncate_500(body: &str) -> String {
 /// Optional OpenAI tool-calling request fields, passed through verbatim.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ToolOptions {
+    /// Per-request reasoning effort; overrides the upstream default verbatim.
+    pub reasoning_effort: Option<String>,
     /// OpenAI `tools` array.
     pub tools: Option<Value>,
     /// OpenAI `tool_choice` (string or object).
@@ -297,7 +299,11 @@ pub async fn stream_chat_completion_tools(
     if let Some(tc) = &tools.tool_choice {
         body["tool_choice"] = tc.clone();
     }
-    if let Some(reasoning_effort) = &config.reasoning_effort {
+    if let Some(reasoning_effort) = tools
+        .reasoning_effort
+        .as_ref()
+        .or(config.reasoning_effort.as_ref())
+    {
         body["reasoning_effort"] = json!(reasoning_effort);
     }
 
@@ -561,6 +567,32 @@ mod tests {
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::mpsc::unbounded_channel;
     use tokio::task::JoinHandle;
+
+    #[tokio::test]
+    async fn request_effort_overrides_default_including_none_and_future_values() {
+        for effort in [None, Some("none"), Some("future-effort")] {
+            let body = r#"{"choices":[{"message":{"content":"ok"}}]}"#;
+            let (url, server) = mock_server(json_response(200, "OK", body), Duration::ZERO).await;
+            let mut config = cfg(url, Some("raw"), None);
+            config.reasoning_effort = Some("high".into());
+            let options = ToolOptions {
+                reasoning_effort: effort.map(String::from),
+                ..Default::default()
+            };
+            stream_chat_completion_tools(&config, &one_message(), None, &options, None)
+                .await
+                .unwrap();
+            let raw = server.await.unwrap();
+            let (_, body) = split_request(&raw);
+            let value: Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(value["reasoning_effort"], effort.unwrap_or("high"));
+            assert!(value.get("temperature").is_none());
+            assert!(
+                !options.request_uses_tools(&one_message()),
+                "effort alone does not require tools capability"
+            );
+        }
+    }
 
     /// Reads request headers, then exactly `Content-Length` body bytes (or
     /// nothing extra if absent/zero), returning the raw bytes received.
@@ -1248,6 +1280,7 @@ mod tests {
             mock_server(chunked_sse_response(&parts), Duration::from_millis(5)).await;
         let config = cfg(base_url, Some("m"), None);
         let tools = ToolOptions {
+            reasoning_effort: None,
             tools: Some(json!([{"type":"function","function":{"name":"get_weather"}}])),
             tool_choice: Some(json!("auto")),
         };

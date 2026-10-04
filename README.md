@@ -175,6 +175,9 @@ $ mistl ai serve start        # local OpenAI-compatible API -> http://127.0.0.1:
 $ mistl ai chat "hello" --model mock-echo-1
 $ mistl ai models
 $ mistl ai status
+$ mistl ai external apply --owner my-app < registration.json
+$ mistl ai external get --owner my-app
+$ mistl ai external remove --owner my-app
 ```
 
 With `ai serve` running, OpenAI clients use the configured `ai.default_ref` or
@@ -192,6 +195,23 @@ providers advertise a `tools` service next to `chat`, and the request is execute
 provider's upstream. If the selected network provider does not advertise `tools` (an
 older peer), the API answers `400` with `code: "tools_unsupported"` instead of
 sending the tool fields to it.
+
+Both default and room chat routes forward `reasoning_effort` (including the
+explicit `"none"` value) to the upstream. To select an enabled Room provider
+directly, use `GET /v1/rooms/{room}/models` or
+`POST /v1/rooms/{room}/chat/completions`, `/audio/speech` and
+`/audio/transcriptions` (the audio suffixes follow the same room prefix).
+URL-encode the room id; missing or disabled rooms return 404. Room chat supports
+JSON and SSE. Image content parts use a mistai-compatible `oai` tunnel, with
+buffered responses adapted to SSE when requested. Providers advertise `oai` for
+OpenAI chat, model-list and embedding requests. See
+[AI configuration and room API](docs/ai-config.md) for routes and limits.
+
+Local applications can register HTTP connections and rooms through `ai external`
+instead of editing mistl's configuration. Registrations are private, stored
+separately in `ai-external.json`, and merged live with user settings. A disabled
+user Room stays disabled. `get` masks API keys and reports room status; the
+dashboard shows each owner's contributions read-only and can unregister them.
 
 ### Sharing a tc-chat screen into VRChat
 

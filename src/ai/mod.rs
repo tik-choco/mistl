@@ -9,7 +9,9 @@
 
 mod api_server;
 mod consumer;
+pub(crate) mod external;
 mod model_discovery;
+mod oai_tunnel;
 pub(crate) use model_discovery::{ModelDiscovery, spawn_http_refresh};
 /// Opened to `pub(crate)` so `crate::bot`'s `summarize` transform can reuse
 /// the upstream chat-completion client directly (`UpstreamConfig` +
@@ -118,6 +120,7 @@ struct AiRoom {
     send: SendFn,
     consumer: Arc<Consumer>,
     voice: Arc<voice_consumer::VoiceConsumer>,
+    oai: Arc<oai_tunnel::TunnelConsumer>,
     provider: RwLock<Option<Arc<Provider>>>,
     handlers: Arc<tokio::sync::Semaphore>,
     dropped_messages: std::sync::atomic::AtomicU64,
@@ -150,60 +153,7 @@ async fn ensure_started(state: &Arc<AppState>) -> Result<Arc<AiService>> {
                 let Some(service) = weak.upgrade() else {
                     return;
                 };
-                let session = service
-                    .rooms
-                    .read()
-                    .expect("ai rooms lock")
-                    .get(room)
-                    .cloned();
-                let Some(session) = session else {
-                    return;
-                };
-                match event {
-                    crate::net::EVENT_RAW => {
-                        if data.len() > 2 * 1024 * 1024 {
-                            return;
-                        }
-                        let Some(msg) = protocol::decode(data) else {
-                            return;
-                        };
-                        let catalog_changed = session.consumer.handle_message(from, &msg);
-                        session.voice.handle_message(from, &msg);
-                        let Ok(permit) = session.handlers.clone().try_acquire_owned() else {
-                            session
-                                .dropped_messages
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            if catalog_changed {
-                                service.cache_room_models(&session);
-                            }
-                            return;
-                        };
-                        let from = from.to_string();
-                        rt.spawn(async move {
-                            let _permit = permit;
-                            if catalog_changed {
-                                service.cache_room_models(&session);
-                            }
-                            if let Some(provider) = session.local_provider() {
-                                provider.handle_message(from, msg).await;
-                            }
-                        });
-                    }
-                    crate::net::EVENT_JOIN => {
-                        (session.send)(from, ProtocolMessage::ConsumerHello);
-                        if let Some(provider) = session.local_provider() {
-                            (session.send)(from, provider.hello());
-                        }
-                    }
-                    crate::net::EVENT_LEAVE => {
-                        session.consumer.on_peer_disconnected(from);
-                        session.voice.on_peer_left(from);
-                        if let Some(provider) = session.local_provider() {
-                            provider.on_peer_left(from);
-                        }
-                    }
-                    _ => {}
-                }
+                service.handle_room_event(event, room, from, data, &rt);
             });
             service
         })
@@ -282,12 +232,183 @@ fn referenced_rooms(config: &crate::config::Config) -> HashSet<String> {
 }
 
 impl AiService {
+    fn handle_room_event(
+        self: &Arc<Self>,
+        event: u32,
+        room: &str,
+        from: &str,
+        data: &[u8],
+        rt: &tokio::runtime::Handle,
+    ) {
+        let service = self.clone();
+        let session = service
+            .rooms
+            .read()
+            .expect("ai rooms lock")
+            .get(room)
+            .cloned();
+        let Some(session) = session else {
+            return;
+        };
+        match event {
+            crate::net::EVENT_RAW => {
+                if data.len() > 2 * 1024 * 1024 {
+                    return;
+                }
+                let Some(msg) = protocol::decode(data) else {
+                    return;
+                };
+                let catalog_changed = session.consumer.handle_message(from, &msg);
+                session.voice.handle_message(from, &msg);
+                session.oai.handle_message(from, &msg);
+                let Ok(permit) = session.handlers.clone().try_acquire_owned() else {
+                    session
+                        .dropped_messages
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if catalog_changed {
+                        service.cache_room_models(&session);
+                    }
+                    return;
+                };
+                let from = from.to_string();
+                rt.spawn(async move {
+                    let _permit = permit;
+                    if catalog_changed {
+                        service.cache_room_models(&session);
+                    }
+                    if let Some(provider) = session.local_provider() {
+                        provider.handle_message(from, msg).await;
+                    }
+                });
+            }
+            crate::net::EVENT_JOIN => {
+                (session.send)(from, ProtocolMessage::ConsumerHello);
+                if let Some(provider) = session.local_provider() {
+                    (session.send)(from, provider.hello());
+                }
+            }
+            crate::net::EVENT_LEAVE => {
+                session.consumer.on_peer_disconnected(from);
+                session.voice.on_peer_left(from);
+                session.oai.drop_peer(from);
+                if let Some(provider) = session.local_provider() {
+                    provider.on_peer_left(from);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    async fn api_room(self: Arc<Self>, room: String) -> Result<Option<api_server::RoomRoutes>> {
+        if !enabled_api_room(&self.state.effective_config().ai, &room) {
+            return Ok(None);
+        }
+        let session = self.room(&room).await?;
+        let timeout =
+            Duration::from_secs(self.state.effective_config().ai.request_timeout_secs.max(1));
+        let models: ModelsFn = {
+            let session = session.clone();
+            Arc::new(move || session.consumer.models())
+        };
+        let call: LlmCallFn = {
+            let session = session.clone();
+            Arc::new(move |messages, tools, model, delta_tx| {
+                let session = session.clone();
+                Box::pin(async move {
+                    let model = network_model(model);
+                    session.broadcast(ProtocolMessage::ConsumerHello).await;
+                    let info = session
+                        .consumer
+                        .wait_for_model(model.as_deref(), DISCOVERY_TIMEOUT)
+                        .await?;
+                    session
+                        .consumer
+                        .request_tools(&info.node_id, messages, tools, model, timeout, delta_tx)
+                        .await
+                })
+            })
+        };
+        let tts: TtsFn = {
+            let session = session.clone();
+            Arc::new(move |params, lang| {
+                let session = session.clone();
+                Box::pin(async move {
+                    session.broadcast(ProtocolMessage::ConsumerHello).await;
+                    let info = session
+                        .consumer
+                        .wait_for_service(protocol::SERVICE_TTS, DISCOVERY_TIMEOUT)
+                        .await?;
+                    session
+                        .voice
+                        .synthesize(&info.node_id, params, lang, timeout)
+                        .await
+                })
+            })
+        };
+        let stt: SttFn = {
+            let session = session.clone();
+            Arc::new(move |params| {
+                let session = session.clone();
+                Box::pin(async move {
+                    session.broadcast(ProtocolMessage::ConsumerHello).await;
+                    let info = session
+                        .consumer
+                        .wait_for_service(protocol::SERVICE_STT, DISCOVERY_TIMEOUT)
+                        .await?;
+                    session
+                        .voice
+                        .transcribe(&info.node_id, params, timeout)
+                        .await
+                })
+            })
+        };
+        let oai: api_server::OaiFn = Arc::new(move |mut body| {
+            let session = session.clone();
+            Box::pin(async move {
+                let model =
+                    network_model(body.get("model").and_then(Value::as_str).map(String::from));
+                body["model"] = json!(model.unwrap_or_default());
+                body["stream"] = json!(false);
+                body.as_object_mut()
+                    .context("invalid OAI body")?
+                    .remove("temperature");
+                session.broadcast(ProtocolMessage::ConsumerHello).await;
+                let info = session
+                    .consumer
+                    .wait_for_service_model(
+                        protocol::SERVICE_OAI,
+                        body.get("model")
+                            .and_then(Value::as_str)
+                            .filter(|s| !s.is_empty()),
+                        DISCOVERY_TIMEOUT,
+                    )
+                    .await?;
+                session
+                    .oai
+                    .request(
+                        &info.node_id,
+                        "/chat/completions",
+                        &serde_json::to_vec(&body)?,
+                        timeout,
+                    )
+                    .await
+            })
+        });
+        Ok(Some(api_server::RoomRoutes {
+            call,
+            models,
+            tts,
+            stt,
+            oai,
+        }))
+    }
+
     fn cache_room_models(&self, session: &AiRoom) {
         let _guard = session.cache_lock.lock().expect("ai room cache lock");
         let models = session.consumer.models();
         for provider in self
             .state
-            .config()
+            .effective_config()
             .ai
             .providers
             .iter()
@@ -327,6 +448,7 @@ impl AiService {
             node_id: transport.node_id.clone(),
             consumer: Consumer::new(send.clone()),
             voice: voice_consumer::VoiceConsumer::new(send.clone()),
+            oai: oai_tunnel::TunnelConsumer::new(send.clone()),
             send,
             provider: RwLock::new(None),
             handlers: Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT_HANDLERS)),
@@ -334,7 +456,7 @@ impl AiService {
         });
         session
             .consumer
-            .set_trusted_providers(self.state.config().ai.trusted_providers);
+            .set_trusted_providers(self.state.effective_config().ai.trusted_providers);
         session.consumer.set_room(room.to_string());
         self.rooms
             .write()
@@ -355,7 +477,7 @@ impl AiService {
 
     async fn reconcile(&self, reload: bool) -> Result<()> {
         let _guard = self.sync.lock().await;
-        let config = self.state.config();
+        let config = self.state.effective_config();
         let sessions = self.rooms.read().expect("ai rooms lock").clone();
         let mut withdrawn = Vec::new();
         // Withdraw before joins or upstream discovery can fail. Consumer references
@@ -393,6 +515,13 @@ impl AiService {
                 .await;
         }
         let mut wanted = referenced_rooms(&config);
+        wanted.extend(
+            self.state
+                .ai_external
+                .lock()
+                .expect("external registrations lock")
+                .consuming_rooms(&config.ai),
+        );
         self.on_demand
             .write()
             .expect("ai demand lock")
@@ -424,6 +553,7 @@ impl AiService {
                 *session.provider.write().expect("ai provider lock") = None;
                 session.consumer.reject_all("AI room disabled or removed");
                 session.voice.reject_all();
+                session.oai.reject_all();
                 crate::net::leave_room(&room).await?;
             }
         }
@@ -450,7 +580,7 @@ impl AiService {
     }
 
     fn model_list(&self) -> Vec<String> {
-        let config = self.state.config();
+        let config = self.state.effective_config();
         let rooms = self.rooms.read().expect("ai rooms lock");
         let mut models = Vec::new();
         for provider in config.ai.providers.iter().filter(|p| p.enabled) {
@@ -482,10 +612,16 @@ impl AiService {
         model: Option<String>,
         delta_tx: Option<UnboundedSender<String>>,
     ) -> Result<(ChatOutput, &'static str, Option<String>)> {
-        let config = self.state.config();
+        let config = self.state.effective_config();
         let reference = resolve_api_ref(&config.ai, model.as_deref(), &self.live_models())?;
-        self.chat_ref(&reference, None, messages, tools, delta_tx)
-            .await
+        self.chat_ref(
+            &reference,
+            tools.reasoning_effort.clone(),
+            messages,
+            tools,
+            delta_tx,
+        )
+        .await
     }
 
     fn live_models(&self) -> HashMap<String, Vec<String>> {
@@ -502,10 +638,11 @@ impl AiService {
         reference: &crate::config::ModelRef,
         effort: Option<String>,
         messages: Vec<ChatMessage>,
-        tools: ToolOptions,
+        mut tools: ToolOptions,
         delta_tx: Option<UnboundedSender<String>>,
     ) -> Result<(ChatOutput, &'static str, Option<String>)> {
-        let config = self.state.config();
+        tools.reasoning_effort = effort.clone().or(tools.reasoning_effort);
+        let config = self.state.effective_config();
         let resolved = crate::config::resolve_ref(&config.ai, Some(reference))
             .context("ai: model reference is unavailable; check ai.providers and ai.default_ref")?;
         if let Some(room) = resolved.base_url.strip_prefix("mist-network://") {
@@ -552,7 +689,7 @@ impl AiService {
         req: tts::TtsParams,
         lang: Option<String>,
     ) -> Result<tts::TtsAudio> {
-        let cfg = state.config().ai;
+        let cfg = state.effective_config().ai;
         let resolved_ref = crate::config::resolve_voice(&cfg, cfg.tts.as_ref())
             .context("ai: no usable ai.tts configured")?;
         if let Some(room) = resolved_ref.base_url.strip_prefix("mist-network://") {
@@ -621,7 +758,7 @@ impl AiService {
     }
 
     async fn transcribe(&self, state: &Arc<AppState>, req: stt::SttParams) -> Result<String> {
-        let cfg = state.config().ai;
+        let cfg = state.effective_config().ai;
         let resolved_ref = cfg
             .stt
             .as_ref()
@@ -711,6 +848,16 @@ fn resolve_api_ref(
     bail!("ai: model {model:?} not found in enabled ai.providers models caches or ai.default_ref")
 }
 
+fn enabled_api_room(ai: &crate::config::AiConfig, room: &str) -> bool {
+    ai.providers
+        .iter()
+        .any(|p| p.enabled && p.room() == Some(room))
+}
+
+fn network_model(model: Option<String>) -> Option<String> {
+    model.filter(|m| !m.is_empty() && m != "network-auto")
+}
+
 pub(crate) async fn chat_model(
     state: &Arc<AppState>,
     reference: Option<&crate::config::ModelRef>,
@@ -718,7 +865,7 @@ pub(crate) async fn chat_model(
     messages: Vec<ChatMessage>,
 ) -> Result<String> {
     let service = ensure_started(state).await?;
-    let config = state.config();
+    let config = state.effective_config();
     let reference = reference
         .or(config.ai.default_ref.as_ref())
         .context("ai.default_ref is not set")?;
@@ -735,7 +882,7 @@ pub(crate) async fn synthesize_model(
     req: tts::TtsParams,
 ) -> Result<tts::TtsAudio> {
     let service = ensure_started(state).await?;
-    let cfg = state.config().ai;
+    let cfg = state.effective_config().ai;
     let resolved = crate::config::resolve_ref(&cfg, Some(reference))
         .context("ai: TTS model reference unavailable")?;
     if let Some(room) = resolved.base_url.strip_prefix("mist-network://") {
@@ -765,6 +912,9 @@ pub(crate) async fn synthesize_model(
 }
 
 pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Value> {
+    if cmd.starts_with("ai.external.") {
+        return handle_external(cmd, args, state).await;
+    }
     if cmd == "ai.status" {
         return status(state).await;
     }
@@ -801,7 +951,13 @@ pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Val
             let (output, via, provider) = service
                 .chat(
                     vec![ChatMessage::new("user", prompt)],
-                    ToolOptions::default(),
+                    ToolOptions {
+                        reasoning_effort: args
+                            .get("reasoning_effort")
+                            .and_then(Value::as_str)
+                            .map(String::from),
+                        ..Default::default()
+                    },
                     model,
                     None,
                 )
@@ -872,11 +1028,64 @@ async fn status(state: &Arc<AppState>) -> Result<Value> {
     status_with_service(state, SERVICE.get()).await
 }
 
+async fn handle_external(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Value> {
+    if cmd == "ai.external.get" {
+        let owner = match args.get("owner") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(owner)) => Some(owner.as_str()),
+            _ => bail!("owner must be a string"),
+        };
+        let status = status(state).await?;
+        return state
+            .ai_external
+            .lock()
+            .expect("external registrations lock")
+            .get(
+                owner,
+                &state.config().ai,
+                status["rooms"].as_array().unwrap(),
+            );
+    }
+    let previous = state.effective_config().ai;
+    let owner = args
+        .get("owner")
+        .and_then(Value::as_str)
+        .context("external command requires owner")?
+        .to_string();
+    let changed = match cmd {
+        "ai.external.apply" => state
+            .ai_external
+            .lock()
+            .expect("external registrations lock")
+            .apply(serde_json::from_value(args).context("invalid external registration")?)?,
+        "ai.external.remove" => state
+            .ai_external
+            .lock()
+            .expect("external registrations lock")
+            .remove(&owner)?,
+        _ => bail!("unknown command: {cmd}"),
+    };
+    if changed && state.network.permitted() {
+        spawn_http_refresh(state.clone(), Some(&previous));
+        reload_provider_if_running(state).await?;
+    }
+    if cmd == "ai.external.remove" {
+        Ok(json!({"owner":owner,"removed":changed}))
+    } else {
+        let warnings = state
+            .ai_external
+            .lock()
+            .expect("external registrations lock")
+            .warnings(&owner, &state.config().ai);
+        Ok(json!({"owner":owner,"applied":true,"warnings":warnings}))
+    }
+}
+
 async fn status_with_service(
     state: &Arc<AppState>,
     service: Option<&Arc<AiService>>,
 ) -> Result<Value> {
-    let config = state.config();
+    let config = state.effective_config();
     let sessions = service
         .map(|s| s.rooms.read().expect("ai rooms lock").clone())
         .unwrap_or_default();
@@ -895,6 +1104,7 @@ async fn status_with_service(
             .map(|(_, peers)| peers.len())
             .unwrap_or(0);
         rooms.push(json!({ "provider_id": provider.id, "room": room, "enabled": provider.enabled,
+            "owners": state.ai_external.lock().expect("external registrations lock").owners(room),
             "models": session.filter(|s| s.consumer.has_catalog()).map(|s| s.consumer.models()),
             "joined": provider.enabled && session.is_some(), "providing": provider.enabled && provider.provide && session.is_some_and(|s| s.local_provider().is_some()), "peers": peers }));
     }
@@ -952,7 +1162,7 @@ pub fn apply_trusted_providers(state: &Arc<AppState>) {
         for session in service.rooms.read().expect("ai rooms lock").values() {
             session
                 .consumer
-                .set_trusted_providers(state.config().ai.trusted_providers.clone());
+                .set_trusted_providers(state.effective_config().ai.trusted_providers.clone());
         }
     }
 }
@@ -998,6 +1208,7 @@ async fn build_provider(
         .and_then(|r| crate::config::resolve_ref_exact(cfg, r))
         .filter(|r| !r.base_url.starts_with("mist-network://"))
         .or_else(|| models.first().and_then(|m| advertised.get(m)).cloned());
+    let oai_default = default.clone();
     let call: LlmCallFn = Arc::new(move |messages, tools, _, delta_tx| {
         let default = default.clone();
         Box::pin(async move {
@@ -1007,7 +1218,7 @@ async fn build_provider(
                 base_url: default.base_url,
                 api_key: default.api_key,
                 model: Some(default.model),
-                reasoning_effort: None,
+                reasoning_effort: default.reasoning_effort,
             };
             openai::stream_chat_completion_tools(&upstream, &messages, None, &tools, delta_tx).await
         })
@@ -1065,7 +1276,35 @@ async fn build_provider(
         voices,
     );
     provider.set_shared_restricted(!room.shared.is_empty());
+    // Providing rooms support the tunnel even if their upstream is unavailable;
+    // the resolver rejects those requests without hiding the wire capability.
+    let (_, shared) = resolve_advertised_models(cfg, room);
+    let restricted = !room.shared.is_empty();
+    provider.set_oai(oai_tunnel::TunnelProvider::new(
+        session.send.clone(),
+        Arc::new(move |_path, body| {
+            let model = body.get("model").and_then(Value::as_str).unwrap_or("");
+            resolve_oai_model(&shared, &oai_default, restricted, model)
+        }),
+    ));
     Ok(provider)
+}
+
+fn resolve_oai_model(
+    shared: &HashMap<String, crate::config::ResolvedModel>,
+    default: &Option<crate::config::ResolvedModel>,
+    restricted: bool,
+    model: &str,
+) -> Result<Option<crate::config::ResolvedModel>> {
+    if !model.is_empty() {
+        if let Some(target) = shared.get(model) {
+            return Ok(Some(target.clone()));
+        }
+        if restricted {
+            bail!("model_not_shared");
+        }
+    }
+    Ok(default.clone())
 }
 
 fn voice_ref_provider(
@@ -1423,10 +1662,15 @@ async fn serve_start(service: &Arc<AiService>, state: &Arc<AppState>) -> Result<
         })
     };
 
-    let api_listen = state.config().ai.api_listen;
-    let server = ApiServer::start(&api_listen, call, models_fn, tts_fn, stt_fn)
-        .await
-        .with_context(|| format!("ai: binding API server on {api_listen}"))?;
+    let api_listen = state.effective_config().ai.api_listen;
+    let rooms: api_server::RoomsFn = {
+        let service = service.clone();
+        Arc::new(move |room| Box::pin(service.clone().api_room(room)))
+    };
+    let server =
+        ApiServer::start_with_rooms(&api_listen, call, models_fn, tts_fn, stt_fn, Some(rooms))
+            .await
+            .with_context(|| format!("ai: binding API server on {api_listen}"))?;
     let addr = server.addr();
     *guard = Some(server);
 
@@ -1445,6 +1689,84 @@ async fn serve_start(service: &Arc<AiService>, state: &Arc<AppState>) -> Result<
 mod tests {
     use super::*;
     use crate::config::{AiConfig, AiProviderConfig, ModelRef};
+
+    #[test]
+    fn oai_models_use_room_shares_and_same_empty_model_rules_as_chat() {
+        let mut ai = sample_config();
+        ai.providers.insert(
+            0,
+            AiProviderConfig {
+                id: "other".into(),
+                base_url: "http://other/v1".into(),
+                ..Default::default()
+            },
+        );
+        ai.providers[2].shared.push(ModelRef {
+            provider_id: "other".into(),
+            model: "raw".into(),
+        });
+        let (_, shared) = resolve_advertised_models(&ai, &ai.providers[2]);
+        let default = ai
+            .default_ref
+            .as_ref()
+            .and_then(|r| crate::config::resolve_ref_exact(&ai, r));
+        assert_eq!(
+            resolve_oai_model(&shared, &default, true, "raw")
+                .unwrap()
+                .unwrap()
+                .base_url,
+            "http://127.0.0.1/v1"
+        );
+        assert_eq!(
+            resolve_oai_model(&shared, &default, true, "")
+                .unwrap()
+                .unwrap()
+                .model,
+            "raw"
+        );
+        assert_eq!(
+            resolve_oai_model(&shared, &default, true, "unshared")
+                .unwrap_err()
+                .to_string(),
+            "model_not_shared"
+        );
+        assert!(
+            resolve_oai_model(&HashMap::new(), &default, true, "raw").is_err(),
+            "unavailable shares still restrict named requests"
+        );
+        assert_eq!(
+            resolve_oai_model(&HashMap::new(), &default, false, "unknown")
+                .unwrap()
+                .unwrap()
+                .model,
+            "raw"
+        );
+    }
+
+    #[tokio::test]
+    async fn built_room_provider_advertises_oai_even_when_targets_are_unavailable() {
+        let ai = sample_config();
+        let provider = build_provider(&test_session("test"), &ai, &ai.providers[1])
+            .await
+            .unwrap();
+        assert!(provider.services().iter().any(|s| s == "oai"));
+        let mut ai = ai;
+        ai.providers[0].enabled = false;
+        let provider = build_provider(&test_session("test"), &ai, &ai.providers[1])
+            .await
+            .unwrap();
+        assert!(provider.services().iter().any(|s| s == "oai"));
+    }
+    #[test]
+    fn scoped_api_requires_an_enabled_exact_room_and_normalizes_auto_model() {
+        let mut ai = sample_config();
+        assert!(enabled_api_room(&ai, "test"));
+        assert!(!enabled_api_room(&ai, "missing"));
+        ai.providers[1].enabled = false;
+        assert!(!enabled_api_room(&ai, "test"));
+        assert_eq!(network_model(Some("network-auto".into())), None);
+        assert_eq!(network_model(Some("raw".into())), Some("raw".into()));
+    }
 
     fn sample_config() -> AiConfig {
         AiConfig {
@@ -1713,6 +2035,71 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn external_rooms_reconcile_live_and_are_available_to_room_api_and_status() {
+        let state = AppState::for_test();
+        let before = serde_json::to_value(state.config()).unwrap();
+        let payload = json!({"owner":"app","providers":[{"id":"http","label":"Local","base_url":"http://127.0.0.1:1/v1","api_key":"secret","enabled":true}],
+            "rooms":[{"room":"test","consume":true,"provide":true,"shared":[{"provider_id":"http","model":"external-model"}]}]});
+        state
+            .ai_external
+            .lock()
+            .unwrap()
+            .apply(serde_json::from_value(payload.clone()).unwrap())
+            .unwrap();
+        let session = test_session("test");
+        let service = Arc::new(AiService {
+            state: state.clone(),
+            rooms: RwLock::new(HashMap::from([("test".into(), session.clone())])),
+            on_demand: RwLock::new(HashSet::new()),
+            sync: Mutex::new(()),
+            api_server: Mutex::new(None),
+        });
+        service.reconcile(true).await.unwrap();
+        assert_eq!(
+            session.local_provider().unwrap().models(),
+            ["external-model"]
+        );
+        assert!(enabled_api_room(&state.effective_config().ai, "test"));
+        assert!(
+            service
+                .clone()
+                .api_room("test".into())
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let status = status_with_service(&state, Some(&service)).await.unwrap();
+        assert_eq!(status["rooms"][0]["owners"], json!(["app"]));
+        assert_eq!(status["rooms"][0]["providing"], true);
+        let mut changed = payload;
+        changed["rooms"][0]["shared"][0]["model"] = json!("changed-model");
+        state
+            .ai_external
+            .lock()
+            .unwrap()
+            .apply(serde_json::from_value(changed).unwrap())
+            .unwrap();
+        service.reconcile(true).await.unwrap();
+        assert_eq!(
+            session.local_provider().unwrap().models(),
+            ["changed-model"]
+        );
+        state.ai_external.lock().unwrap().remove("app").unwrap();
+        service.reconcile(true).await.unwrap();
+        assert!(session.local_provider().is_none());
+        assert!(service.rooms.read().unwrap().is_empty());
+        assert!(
+            service
+                .clone()
+                .api_room("test".into())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(serde_json::to_value(state.config()).unwrap(), before);
+    }
+
     #[test]
     fn unset_or_missing_voice_ref_does_not_adopt_chat_default() {
         let ai = sample_config();
@@ -1741,23 +2128,169 @@ mod tests {
         assert_eq!(
             status["rooms"],
             json!([{ "provider_id": "disabled-room", "room": "disabled-test", "enabled": false,
-            "joined": false, "providing": false, "peers": 0, "models": null }])
+            "joined": false, "providing": false, "peers": 0, "models": null, "owners": [] }])
         );
     }
 
     fn test_session(room: &str) -> Arc<AiRoom> {
-        let send: SendFn = Arc::new(|_, _| {});
+        test_session_with_send(room, Arc::new(|_, _| {}))
+    }
+
+    fn test_session_with_send(room: &str, send: SendFn) -> Arc<AiRoom> {
         Arc::new(AiRoom {
             cache_lock: std::sync::Mutex::new(()),
             room: room.into(),
             node_id: "node".into(),
             consumer: Consumer::new(send.clone()),
             voice: voice_consumer::VoiceConsumer::new(send.clone()),
+            oai: oai_tunnel::TunnelConsumer::new(send.clone()),
             send,
             provider: RwLock::new(None),
             handlers: Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT_HANDLERS)),
             dropped_messages: std::sync::atomic::AtomicU64::new(0),
         })
+    }
+
+    #[tokio::test]
+    async fn external_and_config_room_events_reply_with_scoped_models_and_services() {
+        for restart in [false, true] {
+            let state = AppState::for_test();
+            let mut config = state.config();
+            config.ai = sample_config();
+            config.ai.providers[1].provide = true;
+            state.set_config(config);
+            let saved = serde_json::to_value(state.config()).unwrap();
+            let (base_url, request) = mock_chat_server_capture("external reply").await;
+            let payload = json!({"owner":"app","providers":[{"id":"up","label":"Upstream","base_url":base_url,"api_key":"","enabled":true}],
+                "rooms":[{"room":"external-only","consume":false,"provide":true,"shared":[{"provider_id":"up","model":"external-model"}]}]});
+            let dir = std::env::temp_dir()
+                .join(format!("mistl-room-events-{:016x}", rand::random::<u64>()));
+            let mut store = external::Store::load(&dir).unwrap();
+            store
+                .apply(serde_json::from_value(payload.clone()).unwrap())
+                .unwrap();
+            *state.ai_external.lock().unwrap() = if restart {
+                external::Store::load(&dir).unwrap()
+            } else {
+                store
+            };
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut sessions = HashMap::new();
+            for room in ["test", "external-only"] {
+                let tx = tx.clone();
+                let send: SendFn = Arc::new(move |to, msg| {
+                    tx.send((room, to.to_string(), protocol::encode(&msg)))
+                        .unwrap();
+                });
+                sessions.insert(room.to_string(), test_session_with_send(room, send));
+            }
+            let service = Arc::new(AiService {
+                state: state.clone(),
+                rooms: RwLock::new(sessions),
+                on_demand: RwLock::new(HashSet::new()),
+                sync: Mutex::new(()),
+                api_server: Mutex::new(None),
+            });
+            service.reconcile(true).await.unwrap();
+            let rt = tokio::runtime::Handle::current();
+            for (room, model) in [("test", "raw"), ("external-only", "external-model")] {
+                service.handle_room_event(
+                    crate::net::EVENT_RAW,
+                    room,
+                    "consumer",
+                    &protocol::encode(&ProtocolMessage::ConsumerHello),
+                    &rt,
+                );
+                let (sent_room, to, bytes) =
+                    tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                let hello: Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(sent_room, room);
+                assert_eq!(to, "consumer");
+                assert_eq!(hello["type"], "provider_hello");
+                assert_eq!(hello["models"], json!([model]));
+                assert_eq!(hello["services"], json!(["chat", "tools", "oai"]));
+                let local = service.rooms.read().unwrap()[room]
+                    .local_provider()
+                    .unwrap();
+                assert_eq!(hello["services"], json!(local.services()));
+                service.handle_room_event(crate::net::EVENT_JOIN, room, "new-consumer", &[], &rt);
+                assert_eq!(
+                    protocol::decode(&rx.recv().await.unwrap().2),
+                    Some(ProtocolMessage::ConsumerHello)
+                );
+                let join_hello: Value =
+                    serde_json::from_slice(&rx.recv().await.unwrap().2).unwrap();
+                assert_eq!(join_hello, hello);
+            }
+            let chat = ProtocolMessage::LlmRequest {
+                id: "request".into(),
+                messages: vec![ChatMessage {
+                    role: "user".into(),
+                    content: "probe".into(),
+                    tool_calls: None,
+                    tool_call_id: None,
+                }],
+                model: Some("external-model".into()),
+                reasoning_effort: Some("high".into()),
+                tools: None,
+                tool_choice: None,
+            };
+            service.handle_room_event(
+                crate::net::EVENT_RAW,
+                "external-only",
+                "consumer",
+                &protocol::encode(&chat),
+                &rt,
+            );
+            let request = tokio::time::timeout(Duration::from_secs(2), request)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(request["model"], "external-model");
+            assert_eq!(request["reasoning_effort"], "high");
+            assert!(request.get("temperature").is_none());
+            loop {
+                let (room, to, bytes) = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(room, "external-only");
+                assert_eq!(to, "consumer");
+                if let Some(ProtocolMessage::LlmResponseDone { content, .. }) =
+                    protocol::decode(&bytes)
+                {
+                    assert_eq!(content.as_deref(), Some("external reply"));
+                    break;
+                }
+            }
+            service.handle_room_event(
+                crate::net::EVENT_RAW,
+                "test",
+                "consumer",
+                &protocol::encode(&chat),
+                &rt,
+            );
+            let reply = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                matches!(protocol::decode(&reply.2), Some(ProtocolMessage::LlmError { code: Some(code), .. }) if code == "model_not_shared")
+            );
+            service.handle_room_event(
+                crate::net::EVENT_RAW,
+                "unjoined",
+                "consumer",
+                &protocol::encode(&ProtocolMessage::ConsumerHello),
+                &rt,
+            );
+            assert!(rx.try_recv().is_err());
+            assert_eq!(serde_json::to_value(state.config()).unwrap(), saved);
+            std::fs::remove_dir_all(dir).unwrap();
+        }
     }
 
     #[tokio::test]
@@ -1916,6 +2449,18 @@ mod tests {
     }
 
     async fn mock_chat_server(content: &str) -> (String, tokio::sync::oneshot::Receiver<String>) {
+        let (url, request) = mock_chat_server_capture(content).await;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let body = request.await.unwrap();
+            let _ = tx.send(body["model"].as_str().unwrap().to_string());
+        });
+        (url, rx)
+    }
+
+    async fn mock_chat_server_capture(
+        content: &str,
+    ) -> (String, tokio::sync::oneshot::Receiver<Value>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1943,8 +2488,7 @@ mod tests {
                     if request.len() >= end + 4 + len {
                         let body: Value =
                             serde_json::from_slice(&request[end + 4..end + 4 + len]).unwrap();
-                        tx.send(body["model"].as_str().unwrap().to_string())
-                            .unwrap();
+                        tx.send(body).unwrap();
                         break;
                     }
                 }

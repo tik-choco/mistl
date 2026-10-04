@@ -139,20 +139,43 @@ pub async fn ensure_started(state: &Arc<AppState>, room: String) -> Result<Arc<T
 
     {
         let mut rooms = ROOMS.lock().await;
-        let count = rooms.entry(room.clone()).or_insert(0);
-        if *count == 0 {
+        let count = rooms.get(&room).copied().unwrap_or(0);
+        if count == 0 {
             let to_join = room.clone();
             tokio::task::spawn_blocking(move || mistlib::app::join_room(to_join))
                 .await
                 .context("net: joining room")?;
+            // join_room only schedules creation on mistlib's runtime. Do not
+            // publish a joined transport or send hellos before it exists.
+            wait_for_join(&room, NET_TIMEOUT, || async {
+                mistlib::app::get_room_connections_async()
+                    .await
+                    .iter()
+                    .any(|(joined, _)| joined == &room)
+            })
+            .await?;
         }
-        *count += 1;
+        rooms.insert(room.clone(), count + 1);
     }
 
     Ok(Arc::new(Transport {
         node_id: engine.node_id.clone(),
         room,
     }))
+}
+
+async fn wait_for_join<F, Fut>(room: &str, timeout: Duration, mut ready: F) -> Result<()>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    tokio::time::timeout(timeout, async {
+        while !ready().await {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .with_context(|| format!("net: joining room {room:?} timed out"))
 }
 
 /// Release this process's interest in `room`, taken out by an earlier
@@ -592,6 +615,29 @@ pub async fn send_broadcast(room: &str, bytes: Vec<u8>) -> Result<()> {
 #[cfg(test)]
 mod activity_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn join_waits_for_the_native_session_before_returning() {
+        let mut probes = 0;
+        wait_for_join("external-only", Duration::from_secs(1), || {
+            probes += 1;
+            std::future::ready(probes >= 3)
+        })
+        .await
+        .unwrap();
+        assert_eq!(probes, 3);
+    }
+
+    #[tokio::test]
+    async fn missing_native_session_is_a_join_error() {
+        let err = wait_for_join("external-only", Duration::from_millis(30), || {
+            std::future::ready(false)
+        })
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("external-only"));
+        assert!(err.to_string().contains("timed out"));
+    }
 
     #[test]
     fn activity_table_is_capped_and_evicts_the_least_recent_entry() {

@@ -134,10 +134,33 @@ pub enum ProtocolMessage {
         voices: Option<Vec<String>>,
     },
     ConsumerHello,
+    OaiRequest {
+        id: String,
+        seq: u64,
+        last: bool,
+        data: String,
+        path: Option<String>,
+        method: Option<String>,
+        content_type: Option<String>,
+    },
+    OaiResponse {
+        id: String,
+        seq: u64,
+        last: bool,
+        data: String,
+        status: Option<u16>,
+        content_type: Option<String>,
+    },
+    OaiError {
+        id: String,
+        message: String,
+        code: Option<String>,
+    },
     LlmRequest {
         id: String,
         messages: Vec<ChatMessage>,
         model: Option<String>,
+        reasoning_effort: Option<String>,
         /// OpenAI `tools` array, verbatim ("tools" extension).
         tools: Option<serde_json::Value>,
         /// OpenAI `tool_choice` (string or object), verbatim.
@@ -206,6 +229,7 @@ pub enum ProtocolMessage {
 /// a `provider_hello` means "chat only" per the wire spec (see
 /// [`advertises_service`]).
 pub const SERVICE_CHAT: &str = "chat";
+pub const SERVICE_OAI: &str = "oai";
 
 /// Known `services` value for tool calling (`tools` / `tool_choice` /
 /// `tool_calls` on chat). Providers advertise it alongside `"chat"`;
@@ -267,10 +291,58 @@ pub fn encode(msg: &ProtocolMessage) -> Vec<u8> {
         ProtocolMessage::ConsumerHello => {
             json!({"v": 1, "type": "consumer_hello"})
         }
+        ProtocolMessage::OaiRequest {
+            id,
+            seq,
+            last,
+            data,
+            path,
+            method,
+            content_type,
+        } => {
+            let mut value =
+                json!({"v":1,"type":"oai_request","id":id,"seq":seq,"last":last,"data":data});
+            if let Some(path) = path {
+                value["path"] = json!(path);
+            }
+            if let Some(method) = method {
+                value["method"] = json!(method);
+            }
+            if let Some(content_type) = content_type {
+                value["contentType"] = json!(content_type);
+            }
+            value
+        }
+        ProtocolMessage::OaiResponse {
+            id,
+            seq,
+            last,
+            data,
+            status,
+            content_type,
+        } => {
+            let mut value =
+                json!({"v":1,"type":"oai_response","id":id,"seq":seq,"last":last,"data":data});
+            if let Some(status) = status {
+                value["status"] = json!(status);
+            }
+            if let Some(content_type) = content_type {
+                value["contentType"] = json!(content_type);
+            }
+            value
+        }
+        ProtocolMessage::OaiError { id, message, code } => {
+            let mut value = json!({"v":1,"type":"oai_error","id":id,"message":message});
+            if let Some(code) = code {
+                value["code"] = json!(code);
+            }
+            value
+        }
         ProtocolMessage::LlmRequest {
             id,
             messages,
             model,
+            reasoning_effort,
             tools,
             tool_choice,
         } => {
@@ -279,6 +351,9 @@ pub fn encode(msg: &ProtocolMessage) -> Vec<u8> {
             map.insert("type".into(), json!("llm_request"));
             map.insert("id".into(), json!(id));
             map.insert("messages".into(), json!(messages));
+            if let Some(effort) = reasoning_effort {
+                map.insert("reasoning_effort".into(), json!(effort));
+            }
             if let Some(model) = model {
                 map.insert("model".into(), json!(model));
             }
@@ -514,6 +589,31 @@ pub fn decode(bytes: &[u8]) -> Option<ProtocolMessage> {
             })
         }
         "consumer_hello" => Some(ProtocolMessage::ConsumerHello),
+        "oai_request" => Some(ProtocolMessage::OaiRequest {
+            id: non_empty_str(obj, "id")?,
+            seq: as_u64_strict(obj.get("seq")?)?,
+            last: obj.get("last")?.as_bool()?,
+            data: any_str(obj, "data")?,
+            path: opt_str(obj, "path")?,
+            method: opt_str(obj, "method")?,
+            content_type: opt_str(obj, "contentType")?,
+        }),
+        "oai_response" => Some(ProtocolMessage::OaiResponse {
+            id: non_empty_str(obj, "id")?,
+            seq: as_u64_strict(obj.get("seq")?)?,
+            last: obj.get("last")?.as_bool()?,
+            data: any_str(obj, "data")?,
+            status: match obj.get("status") {
+                None => None,
+                Some(v) => Some(u16::try_from(as_u64_strict(v)?).ok()?),
+            },
+            content_type: opt_str(obj, "contentType")?,
+        }),
+        "oai_error" => Some(ProtocolMessage::OaiError {
+            id: non_empty_str(obj, "id")?,
+            message: any_str(obj, "message")?,
+            code: opt_str(obj, "code")?,
+        }),
         "llm_request" => {
             let id = non_empty_str(obj, "id")?;
             let raw_messages = obj.get("messages")?.as_array()?;
@@ -559,6 +659,7 @@ pub fn decode(bytes: &[u8]) -> Option<ProtocolMessage> {
                 id,
                 messages,
                 model,
+                reasoning_effort: opt_str(obj, "reasoning_effort")?,
                 tools,
                 tool_choice,
             })
@@ -692,6 +793,54 @@ mod tests {
     use serde_json::{Value, json};
     use std::collections::BTreeSet;
 
+    #[test]
+    fn reasoning_effort_is_optional_strict_and_preserves_unknown_strings() {
+        for effort in [None, Some("none"), Some("max"), Some("future-effort")] {
+            let msg = ProtocolMessage::LlmRequest {
+                id: "effort".into(),
+                messages: vec![ChatMessage::new("user", "hello")],
+                model: None,
+                reasoning_effort: effort.map(String::from),
+                tools: None,
+                tool_choice: None,
+            };
+            let encoded = encode(&msg);
+            let value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+            assert_eq!(
+                value.get("reasoning_effort").and_then(|v| v.as_str()),
+                effort
+            );
+            assert_eq!(decode(&encoded), Some(msg));
+        }
+        assert!(decode(br#"{"v":1,"type":"llm_request","id":"e","messages":[{"role":"user","content":"hi"}],"reasoning_effort":false}"#).is_none());
+    }
+
+    #[test]
+    fn oai_decode_validates_required_fields_and_uses_camel_case_metadata() {
+        let valid = serde_json::json!({"v":1,"type":"oai_request","id":"o","seq":0,"last":true,"data":"","path":"/models","method":"GET","contentType":"application/json"});
+        let message = decode(&serde_json::to_vec(&valid).unwrap()).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&encode(&message)).unwrap(),
+            valid
+        );
+        for (key, value) in [
+            ("seq", serde_json::json!(-1)),
+            ("last", serde_json::json!(1)),
+            ("data", serde_json::json!(null)),
+            ("contentType", serde_json::json!(false)),
+        ] {
+            let mut bad = valid.clone();
+            bad[key] = value;
+            assert!(decode(&serde_json::to_vec(&bad).unwrap()).is_none());
+        }
+        let error = ProtocolMessage::OaiError {
+            id: "o".into(),
+            message: "rejected".into(),
+            code: Some("model_not_shared".into()),
+        };
+        assert_eq!(decode(&encode(&error)), Some(error));
+    }
+
     fn keys(bytes: &[u8]) -> BTreeSet<String> {
         let v: Value = serde_json::from_slice(bytes).unwrap();
         v.as_object()
@@ -781,6 +930,7 @@ mod tests {
     #[test]
     fn encode_llm_request_with_model() {
         let bytes = encode(&ProtocolMessage::LlmRequest {
+            reasoning_effort: None,
             tools: None,
             tool_choice: None,
             id: "a1".into(),
@@ -809,6 +959,7 @@ mod tests {
     #[test]
     fn encode_llm_request_without_model_omits_field() {
         let bytes = encode(&ProtocolMessage::LlmRequest {
+            reasoning_effort: None,
             tools: None,
             tool_choice: None,
             id: "a1".into(),
@@ -1133,6 +1284,7 @@ mod tests {
         assert_eq!(
             decode(bytes),
             Some(ProtocolMessage::LlmRequest {
+                reasoning_effort: None,
                 tools: None,
                 tool_choice: None,
                 id: "a1".into(),
@@ -1258,6 +1410,7 @@ mod tests {
         });
         assert_roundtrip(ProtocolMessage::ConsumerHello);
         assert_roundtrip(ProtocolMessage::LlmRequest {
+            reasoning_effort: None,
             tools: None,
             tool_choice: None,
             id: "id1".into(),
@@ -1278,6 +1431,7 @@ mod tests {
             model: Some("gpt-4o".into()),
         });
         assert_roundtrip(ProtocolMessage::LlmRequest {
+            reasoning_effort: None,
             tools: None,
             tool_choice: None,
             id: "id1".into(),
@@ -1676,6 +1830,7 @@ mod tests {
     #[test]
     fn tools_roundtrip_request_and_done() {
         assert_roundtrip(ProtocolMessage::LlmRequest {
+            reasoning_effort: None,
             id: "t1".into(),
             messages: vec![
                 ChatMessage::new("user", "weather?"),
@@ -1699,6 +1854,7 @@ mod tests {
             ),
         });
         assert_roundtrip(ProtocolMessage::LlmRequest {
+            reasoning_effort: None,
             id: "t2".into(),
             messages: vec![ChatMessage::new("user", "x")],
             model: None,
@@ -1718,6 +1874,7 @@ mod tests {
         assert_eq!(
             decode(old),
             Some(ProtocolMessage::LlmRequest {
+                reasoning_effort: None,
                 id: "a1".into(),
                 messages: vec![ChatMessage::new("user", "hi")],
                 model: Some("gpt-4o".into()),
@@ -1739,6 +1896,7 @@ mod tests {
     #[test]
     fn encode_omits_absent_tool_fields_byte_for_byte() {
         let bytes = encode(&ProtocolMessage::LlmRequest {
+            reasoning_effort: None,
             id: "a1".into(),
             messages: vec![ChatMessage::new("user", "hi")],
             model: Some("gpt-4o".into()),

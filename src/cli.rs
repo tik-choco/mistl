@@ -505,6 +505,11 @@ pub enum ChatAction {
 
 #[derive(Subcommand)]
 pub enum AiAction {
+    /// Register AI connections and rooms for another local application
+    External {
+        #[command(subcommand)]
+        action: AiExternalAction,
+    },
     /// One-shot chat completion (local provider or first p2p provider)
     Chat {
         /// The user prompt
@@ -536,6 +541,76 @@ pub enum AiToggleAction {
     Start,
     /// Stop the service
     Stop,
+}
+
+#[derive(Subcommand)]
+pub enum AiExternalAction {
+    /// Replace this owner's registration with JSON read from stdin
+    Apply {
+        #[arg(long)]
+        owner: String,
+    },
+    /// Remove this owner's registration
+    Remove {
+        #[arg(long)]
+        owner: String,
+    },
+    /// Get masked registrations and live room status as JSON
+    Get {
+        #[arg(long)]
+        owner: Option<String>,
+    },
+}
+
+#[cfg(test)]
+mod external_cli_tests {
+    use super::*;
+
+    #[test]
+    fn external_commands_preserve_global_instance_and_state_dir_options() {
+        for action in ["apply", "remove", "get"] {
+            let parsed = Cli::try_parse_from([
+                "mistl",
+                "--instance",
+                "npc",
+                "--state-dir",
+                "state",
+                "ai",
+                "external",
+                action,
+                "--owner",
+                "tc-npc",
+            ])
+            .unwrap();
+            assert_eq!(parsed.instance.as_deref(), Some("npc"));
+            assert_eq!(parsed.state_dir, Some(std::path::PathBuf::from("state")));
+            let Some(Command::Ai {
+                action:
+                    AiAction::External {
+                        action: parsed_action,
+                    },
+            }) = parsed.command
+            else {
+                panic!("expected external command");
+            };
+            let owner = match parsed_action {
+                AiExternalAction::Apply { owner } | AiExternalAction::Remove { owner } => {
+                    Some(owner)
+                }
+                AiExternalAction::Get { owner } => owner,
+            };
+            assert_eq!(owner.as_deref(), Some("tc-npc"));
+        }
+        let parsed = Cli::try_parse_from(["mistl", "ai", "external", "get"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Some(Command::Ai {
+                action: AiAction::External {
+                    action: AiExternalAction::Get { owner: None }
+                }
+            })
+        ));
+    }
 }
 
 #[derive(Subcommand)]
@@ -1031,6 +1106,22 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             }
         },
         Command::Ai { action } => match action {
+            AiAction::External { action } => match action {
+                AiExternalAction::Apply { owner } => {
+                    let value: Value = serde_json::from_reader(std::io::stdin().lock())
+                        .context("reading external apply JSON from stdin")?;
+                    client_call(
+                        "ai.external.apply",
+                        crate::ai::external::stdin_payload(&owner, value)?,
+                    )
+                }
+                AiExternalAction::Remove { owner } => {
+                    client_call("ai.external.remove", json!({"owner": owner}))
+                }
+                AiExternalAction::Get { owner } => {
+                    client_call("ai.external.get", json!({"owner": owner}))
+                }
+            },
             AiAction::Chat { prompt, model } => {
                 client_call("ai.chat", json!({ "prompt": prompt, "model": model }))
             }

@@ -1707,6 +1707,11 @@
   .ai-sharing-section { display: flex; flex-direction: column; gap: 12px; }
   .ai-sharing-rooms, .ai-sharing-chips { display: flex; flex-wrap: wrap; gap: 6px; }
   .ai-sharing-room { position: relative; display: flex; min-width: 0; max-width: 100%; padding-right: 34px; border: 1px solid var(--panel-border); border-radius: var(--radius); transition: background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out); }
+  .ai-external-registrations .ai-connection-header { padding: 10px; flex-wrap: wrap; }
+  .ai-external-registrations .ai-provider-head { padding: 8px 12px; flex-wrap: wrap; }
+  .ai-external-registrations .ai-provider-address { flex: 1; min-width: 0; }
+  .ai-external-registrations .desc { padding: 4px 12px; overflow-wrap: anywhere; }
+  .ai-external-registrations .ai-provider-name { max-width: 100%; }
   .ai-sharing-room[data-providing="true"] { border-color: var(--accent); background: var(--accent-dim); }
   .ai-sharing-room > .ai-room-chip { min-width: 0; border: 0; background: transparent; }
   .ai-sharing-room > .ai-room-copy { position: absolute; right: 4px; top: 50%; margin-top: -14px; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 6px; background: transparent; flex-shrink: 0; }
@@ -2998,6 +3003,12 @@
       "ai.title": "AI",
       "ai.openSettings": "Open AI settings",
       "ai.endpointLabel": "OpenAI-compatible endpoint",
+      "ai.external.title": "External registrations",
+      "ai.external.owner": "Managed by {owner}",
+      "ai.external.readonly": "Read-only",
+      "ai.external.remove": "Unregister",
+      "ai.external.confirm": "Unregister {owner}? Its connections and room contributions will be removed.",
+      "ai.external.disabled": "This room is disabled in your settings.",
       "ai.statusLabel": "status",
       "ai.room": "room",
       "ai.nodeId": "node id",
@@ -3767,6 +3778,12 @@
       "ai.title": "AI",
       "ai.openSettings": "AI設定を開く",
       "ai.endpointLabel": "OpenAI互換エンドポイント",
+      "ai.external.title": "外部登録",
+      "ai.external.owner": "{owner} 管理",
+      "ai.external.readonly": "読み取り専用",
+      "ai.external.remove": "登録を解除",
+      "ai.external.confirm": "{owner} の登録を解除しますか？このアプリの接続先とルームへの登録内容が削除されます。",
+      "ai.external.disabled": "このルームは設定で無効になっています。",
       "ai.statusLabel": "状態",
       "ai.room": "ルーム",
       "ai.nodeId": "ノードID",
@@ -4531,6 +4548,12 @@
       "ai.title": "AI",
       "ai.openSettings": "打开 AI 设置",
       "ai.endpointLabel": "OpenAI 兼容端点",
+      "ai.external.title": "外部注册",
+      "ai.external.owner": "由 {owner} 管理",
+      "ai.external.readonly": "只读",
+      "ai.external.remove": "取消注册",
+      "ai.external.confirm": "取消 {owner} 的注册？将移除此应用的连接和房间共享配置。",
+      "ai.external.disabled": "此房间已在设置中禁用。",
       "ai.statusLabel": "状态",
       "ai.room": "房间",
       "ai.nodeId": "节点 ID",
@@ -7241,6 +7264,7 @@
     return api("ai.status", {}).then(function (data) {
       state.ai = data;
       renderAi();
+      return pollAiExternal();
     }, function () {
       state.ai = null;
       renderAi();
@@ -10020,6 +10044,7 @@
   function aiEnter(node) { aiAnimate(node, [{ opacity: 0, transform: "translateY(4px)" }, { opacity: 1, transform: "none" }]); }
   function aiChevron(button) { button.appendChild(el("span", { class: "ai-chevron", "aria-hidden": "true" })); }
 
+  var aiExternalRegistrations = [];
   function aiConfig() { return (state.config && state.config.ai) || {}; }
   function aiProviders() { return aiConfig().providers || []; }
   function aiIsRoom(p) { return (p.base_url || "").indexOf("mist-network://") === 0; }
@@ -10742,6 +10767,60 @@
     return wrap;
   }
 
+  function pollAiExternal() {
+    return api("ai.external.get", {}).then(function (data) {
+      aiExternalRegistrations = (data && data.registrations) || [];
+      renderAiExternal();
+    }, function () { /* Keep the last successful snapshot. */ });
+  }
+  function renderAiExternal() {
+    document.querySelectorAll(".ai-external-registrations").forEach(function (root) {
+      root.replaceChildren();
+      if (!aiExternalRegistrations.length) return;
+      root.appendChild(el("h3", { text: t("ai.external.title") }));
+      aiExternalRegistrations.forEach(function (reg) {
+        var group = el("div", { class: "ai-provider-card", "data-external-owner": reg.owner });
+        var head = el("div", { class: "ai-connection-header" });
+        head.appendChild(el("strong", { text: reg.label || reg.owner }));
+        head.appendChild(el("span", { class: "ai-provider-kind", text: t("ai.external.owner", { owner: reg.owner }) }));
+        var remove = el("button", { type: "button", class: "danger", "data-external-remove": reg.owner, text: t("ai.external.remove") });
+        head.appendChild(remove); group.appendChild(head);
+        remove.addEventListener("click", function () {
+          if (!window.confirm(t("ai.external.confirm", { owner: reg.label || reg.owner }))) return;
+          remove.disabled = true;
+          api("ai.external.remove", { owner: reg.owner }).then(function () { return pollAiStatus(); }, function (err) {
+            remove.disabled = false; showToast(err.message, "error");
+          });
+        });
+        reg.providers.forEach(function (p) {
+          var card = el("div", { class: "ai-provider-head", "data-external-provider": p.id });
+          card.appendChild(el("span", { class: "ai-provider-kind", text: "HTTP" }));
+          card.appendChild(el("strong", { class: "ai-provider-name", text: p.label || p.id }));
+          card.appendChild(el("span", { class: "ai-provider-address", text: p.base_url, title: p.base_url }));
+          card.appendChild(el("span", { class: "desc", text: t(p.enabled === false ? "ai.model.disabled" : "ai.external.readonly") }));
+          group.appendChild(card);
+        });
+        reg.rooms.forEach(function (r) {
+          var card = el("div", { class: "ai-provider-head", "data-external-room": r.room });
+          var status = (reg.status.rooms || []).find(function (s) { return s.room === r.room; }) || {};
+          card.appendChild(el("span", { class: "ai-provider-kind", text: t("ai.connection.room") }));
+          card.appendChild(el("strong", { class: "ai-provider-name", text: r.room }));
+          card.appendChild(el("span", { class: "desc", text: t("ai.external.readonly") }));
+          card.appendChild(el("span", { class: "desc", text: t(status.providing ? "ai.providing" : status.joined ? "ai.sharing.paused" : "ai.room.idle") }));
+          group.appendChild(card);
+          if (r.shared.length) group.appendChild(el("div", { class: "desc", text: r.shared.map(function (ref) {
+            var p = reg.providers.find(function (p) { return p.id === ref.provider_id; });
+            return ref.model + " \u00b7 " + (p ? p.label : ref.provider_id);
+          }).join(", ") }));
+          if ((reg.warnings || []).some(function (warning) { return warning === "room " + r.room + " is disabled by the user"; })) {
+            group.appendChild(el("div", { class: "desc", text: t("ai.external.disabled") }));
+          }
+        });
+        root.appendChild(group);
+      });
+    });
+  }
+
   function buildAiProvidersField() {
     var wrap = el("div", { class: "ai-connection-section" });
     var header = el("div", { class: "ai-connection-header" }); wrap.appendChild(header);
@@ -10751,6 +10830,8 @@
     add.addEventListener("click", function () { popup.open(add); });
     var grid = el("div", { class: "ai-provider-grid" });
     wrap.appendChild(grid);
+    wrap.appendChild(el("div", { class: "ai-external-registrations" }));
+    renderAiExternal();
     var renderedProviders = null;
     function render() {
       var oldCards = {};
@@ -10999,6 +11080,7 @@
       }
       container.appendChild(sec);
     });
+    renderAiExternal();
     aiNotifyModels();
     refreshAiHints();
     if (document.getElementById("panel-ai").classList.contains("active") || document.getElementById("panel-settings").classList.contains("active")) aiRefreshModels(false);

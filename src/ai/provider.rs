@@ -182,12 +182,12 @@ fn peer_safe_error(err: &anyhow::Error) -> String {
 
 /// Limits remote-driven work: a global semaphore plus a per-peer in-flight
 /// count. Permits are released when the returned [`JobGuard`] drops.
-struct JobLimiter {
+pub(super) struct JobLimiter {
     global: Arc<tokio::sync::Semaphore>,
     per_peer: Arc<Mutex<HashMap<String, usize>>>,
 }
 
-struct JobGuard {
+pub(super) struct JobGuard {
     _permit: tokio::sync::OwnedSemaphorePermit,
     per_peer: Arc<Mutex<HashMap<String, usize>>>,
     peer: String,
@@ -206,14 +206,14 @@ impl Drop for JobGuard {
 }
 
 impl JobLimiter {
-    fn new(global: usize) -> Self {
+    pub(super) fn new(global: usize) -> Self {
         Self {
             global: Arc::new(tokio::sync::Semaphore::new(global)),
             per_peer: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    fn try_acquire(&self, peer: &str, per_peer_max: usize) -> Option<JobGuard> {
+    pub(super) fn try_acquire(&self, peer: &str, per_peer_max: usize) -> Option<JobGuard> {
         let mut map = self.per_peer.lock().expect("ai job limiter lock");
         if map.get(peer).copied().unwrap_or(0) >= per_peer_max {
             return None;
@@ -426,6 +426,7 @@ pub struct Provider {
     /// Last `consumer_hello` reply per peer, so a peer spamming hellos
     /// cannot fill the shared send queue and starve other consumers' chunks.
     hello_replied: Mutex<HashMap<String, Instant>>,
+    oai: std::sync::RwLock<Option<Arc<super::oai_tunnel::TunnelProvider>>>,
 }
 
 /// Minimum spacing between `provider_hello` replies to the same peer.
@@ -479,6 +480,7 @@ impl Provider {
             limiter: JobLimiter::new(MAX_CONCURRENT_REMOTE_JOBS),
             logs: Mutex::new(Vec::new()),
             hello_replied: Mutex::new(HashMap::new()),
+            oai: std::sync::RwLock::new(None),
         })
     }
 
@@ -517,6 +519,9 @@ impl Provider {
             super::protocol::SERVICE_CHAT.to_string(),
             super::protocol::SERVICE_TOOLS.to_string(),
         ];
+        if self.oai.read().expect("ai oai lock").is_some() {
+            services.push(super::protocol::SERVICE_OAI.to_string());
+        }
         if self.tts.is_some() {
             services.push(super::protocol::SERVICE_TTS.to_string());
         }
@@ -566,6 +571,21 @@ impl Provider {
     /// concurrent requests don't block each other).
     pub async fn handle_message(self: Arc<Self>, from: String, msg: ProtocolMessage) {
         match msg {
+            msg @ ProtocolMessage::OaiRequest { .. } => {
+                let tunnel = self.oai.read().expect("ai oai lock").clone();
+                if let Some(tunnel) = tunnel {
+                    tunnel.handle_message(&from, msg).await;
+                } else if let ProtocolMessage::OaiRequest { id, .. } = msg {
+                    (self.send)(
+                        &from,
+                        ProtocolMessage::OaiError {
+                            id,
+                            message: "This provider does not proxy that path.".into(),
+                            code: Some("unsupported_path".into()),
+                        },
+                    );
+                }
+            }
             ProtocolMessage::ConsumerHello => {
                 if self.hello_reply_allowed(&from) {
                     (self.send)(&from, self.hello());
@@ -575,10 +595,15 @@ impl Provider {
                 id,
                 messages,
                 model,
+                reasoning_effort,
                 tools,
                 tool_choice,
             } => {
-                let tools = ToolOptions { tools, tool_choice };
+                let tools = ToolOptions {
+                    tools,
+                    tool_choice,
+                    reasoning_effort,
+                };
                 self.handle_llm_request(from, id, messages, tools, model)
                     .await;
             }
@@ -811,6 +836,9 @@ impl Provider {
     /// Drops any partially buffered `stt_request` streams of a peer that
     /// left the room.
     pub fn on_peer_left(&self, from: &str) {
+        if let Some(tunnel) = self.oai.read().expect("ai oai lock").as_ref() {
+            tunnel.drop_peer(from);
+        }
         self.stt_buffers
             .lock()
             .expect("ai stt buffer lock")
@@ -821,6 +849,10 @@ impl Provider {
     pub fn set_shared_restricted(&self, restricted: bool) {
         self.shared_restricted
             .store(restricted, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn set_oai(&self, tunnel: Arc<super::oai_tunnel::TunnelProvider>) {
+        *self.oai.write().expect("ai oai lock") = Some(tunnel);
     }
 
     fn resolve_llm_call(&self, model: &Option<String>) -> LlmCallResolution {
@@ -1141,6 +1173,38 @@ mod tests {
     use super::*;
     use crate::ai::protocol::ChatMessage;
 
+    #[tokio::test]
+    async fn inbound_effort_reaches_default_call_verbatim_and_absence_stays_absent() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let copy = seen.clone();
+        let call: LlmCallFn = Arc::new(move |_, options, _, _| {
+            copy.lock().unwrap().push(options.reasoning_effort);
+            Box::pin(async { Ok("ok".to_string().into()) })
+        });
+        let (send, _) = fake_send();
+        let provider = Provider::new_with_voice(send, call, vec![], None, None, vec![]);
+        for effort in [None, Some("none"), Some("future-effort")] {
+            provider
+                .clone()
+                .handle_message(
+                    "peer".into(),
+                    ProtocolMessage::LlmRequest {
+                        id: crate::ai::protocol::random_id(),
+                        messages: messages(),
+                        model: None,
+                        reasoning_effort: effort.map(String::from),
+                        tools: None,
+                        tool_choice: None,
+                    },
+                )
+                .await;
+        }
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![None, Some("none".into()), Some("future-effort".into())]
+        );
+    }
+
     type Sent = Arc<Mutex<Vec<(String, ProtocolMessage)>>>;
 
     fn fake_send() -> (SendFn, Sent) {
@@ -1195,6 +1259,7 @@ mod tests {
             .handle_message(
                 "consumer1".into(),
                 ProtocolMessage::LlmRequest {
+                    reasoning_effort: None,
                     tools: None,
                     tool_choice: None,
                     id: "req1".into(),
@@ -1250,6 +1315,7 @@ mod tests {
             .handle_message(
                 "consumer1".into(),
                 ProtocolMessage::LlmRequest {
+                    reasoning_effort: None,
                     tools: None,
                     tool_choice: None,
                     id: "req1".into(),
@@ -1381,6 +1447,7 @@ mod tests {
             .handle_message(
                 "consumer1".into(),
                 ProtocolMessage::LlmRequest {
+                    reasoning_effort: None,
                     tools: None,
                     tool_choice: None,
                     id: "req1".into(),
@@ -1415,6 +1482,7 @@ mod tests {
                 .handle_message(
                     format!("consumer{i}"),
                     ProtocolMessage::LlmRequest {
+                        reasoning_effort: None,
                         tools: None,
                         tool_choice: None,
                         id: format!("req{i}"),
@@ -1448,6 +1516,7 @@ mod tests {
             .handle_message(
                 "consumer1".into(),
                 ProtocolMessage::LlmRequest {
+                    reasoning_effort: None,
                     tools: None,
                     tool_choice: None,
                     id: "req1".into(),
@@ -1555,6 +1624,7 @@ mod tests {
             .handle_message(
                 "consumer1".into(),
                 ProtocolMessage::LlmRequest {
+                    reasoning_effort: None,
                     tools: None,
                     tool_choice: None,
                     id: "llm-req".into(),
@@ -1787,6 +1857,7 @@ mod tests {
             .handle_message(
                 "consumer1".into(),
                 ProtocolMessage::LlmRequest {
+                    reasoning_effort: None,
                     tools: None,
                     tool_choice: None,
                     id: "req1".into(),
@@ -1884,7 +1955,7 @@ mod tests {
                 base_url: format!("http://{addr}"),
                 api_key: "sk-resolved".to_string(),
                 model: "real-upstream-model".to_string(),
-                reasoning_effort: None,
+                reasoning_effort: Some("high".into()),
                 voice: None,
                 lang_voices: HashMap::new(),
             },
@@ -1904,6 +1975,7 @@ mod tests {
             .handle_message(
                 "consumer1".into(),
                 ProtocolMessage::LlmRequest {
+                    reasoning_effort: Some("none".into()),
                     tools: None,
                     tool_choice: None,
                     id: "req1".into(),
@@ -1923,6 +1995,10 @@ mod tests {
             !request_text.contains("\"Chat\""),
             "the advertised *label* must never reach the upstream body: {request_text}"
         );
+
+        let body = request_text.split("\r\n\r\n").nth(1).unwrap();
+        let body: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(body["reasoning_effort"], "none");
 
         let sent = sent.lock().unwrap();
         match sent.last().unwrap() {
@@ -2629,6 +2705,7 @@ mod tests {
         use crate::ai::protocol::{MAX_TOOL_CALLS, MAX_TOOLS, MAX_TOOLS_BYTES};
         let ok_tool = serde_json::json!({"type":"function","function":{"name":"f"}});
         let tools = |n: usize| ToolOptions {
+            reasoning_effort: None,
             tools: Some(serde_json::Value::Array(vec![ok_tool.clone(); n])),
             tool_choice: None,
         };
@@ -2637,12 +2714,14 @@ mod tests {
         assert!(validate_llm_messages(&msg, &tools(MAX_TOOLS + 1)).is_err());
         // Within the entry cap but over the byte cap.
         let fat = ToolOptions {
+            reasoning_effort: None,
             tools: Some(serde_json::json!([{"description": "x".repeat(MAX_TOOLS_BYTES)}])),
             tool_choice: None,
         };
         assert!(validate_llm_messages(&msg, &fat).is_err());
         // Not an array at all.
         let bad = ToolOptions {
+            reasoning_effort: None,
             tools: Some(serde_json::json!({})),
             tool_choice: None,
         };
@@ -2710,6 +2789,7 @@ mod tests {
             .handle_message(
                 "consumer1".into(),
                 ProtocolMessage::LlmRequest {
+                    reasoning_effort: None,
                     id: "req1".into(),
                     messages: vec![
                         ChatMessage::new("user", "weather?"),
@@ -2766,6 +2846,7 @@ mod tests {
             .handle_message(
                 "consumer1".into(),
                 ProtocolMessage::LlmRequest {
+                    reasoning_effort: None,
                     id: "req1".into(),
                     messages: messages(),
                     model: None,
