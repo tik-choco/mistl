@@ -76,7 +76,8 @@ can carry their own `reasoning_effort`.
 ```toml
 [ai]
 default_ref = { provider_id = "http", model = "example-model" }
-tts = { provider_id = "http", model = "speech-model", voice = "speaker", lang_voices = { en = "english-speaker" } }
+default_reasoning_effort = "medium"
+tts = { provider_id = "http", model = "speech-model", voice = "speaker", speed = 1.25, lang_voices = { en = "english-speaker" } }
 stt = { provider_id = "http", model = "transcription-model" }
 
 [[ai.providers]]
@@ -147,13 +148,44 @@ The local OpenAI-compatible API uses enabled providers' raw model ids in
 `GET /v1/models`. Chat requests resolve through `default_ref` and the provider
 model caches; Room defaults retain network routing. Voice endpoints use `ai.tts`
 and `ai.stt`; a Room voice model can use `network-auto` to defer model selection
-to a remote voice provider. The voice protocol does not carry output format,
-speed or reasoning effort overrides.
+to a remote voice provider. Speech requests carry optional `speed` and
+`response_format` fields over wire v1. Speed must be a finite number from 0.25
+through 4.0. Formats are `mp3`, `opus`, `aac`, `flac`, `wav` and `pcm`.
+Malformed or unsupported wire hints are ignored without rejecting synthesis.
+An absent speed uses `ai.tts.speed`, or the upstream default when unset.
+Consumers send a format only when the caller explicitly selects one. A backend
+may return a different container; consumers trust `tts_response.mime`, and
+local HTTP responses use the upstream's actual Content-Type (or
+`application/octet-stream` if no type is reported).
+If an upstream explicitly rejects `response_format` with HTTP 400/422,
+mistl retries once without that hint while preserving speed.
 
 Chat requests carry the task's `reasoning_effort` through `llm_request`, including
 bot transforms and the default local API routes. Providers forward a supplied
 string verbatim, overriding their upstream default; absence preserves that
-default. `none` is an explicit override, and unknown future values pass through.
+default. `none` is an explicit override, and unknown future request values pass through.
+The configured default task effort is `ai.default_reasoning_effort`: exactly
+`none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`. Unset sends no
+effort; `none` sends the literal string. Invalid configuration values are
+rejected by `config set` and ignored with a warning on load.
+
+A room provider uses this effort for any incoming `llm_request` that omits
+`reasoning_effort`; a request value always wins, including for shared models.
+The local chat APIs and `mistl ai chat` inherit it when the model is omitted
+or resolves to `ai.default_ref`. Another model gets no configured task effort.
+On room-scoped routes, an explicit model must match the default reference's
+room as well as its raw model id to inherit the effort. An omitted model
+(including `network-auto`) uses the default task effort.
+
+```sh
+mistl config set ai.default_reasoning_effort medium
+mistl config get ai.default_reasoning_effort
+mistl ai chat "Explain this" --reasoning-effort high
+mistl config set ai.tts.speed 1.25
+mistl config get ai.tts.speed
+mistl config set ai.default_reasoning_effort null
+mistl config set ai.tts.speed null
+```
 Ordinary room chat always uses the streaming LLM protocol, even when the local
 HTTP client asks for a non-streaming result.
 
@@ -167,7 +199,7 @@ directly, independently of `ai.default_ref`, `ai.tts` and `ai.stt`:
 | --- | --- | --- |
 | GET | `/rooms/{room}/models` | Currently advertised raw model ids in that room; no cached or other-room models |
 | POST | `/rooms/{room}/chat/completions` | `llm_request` with the body's `reasoning_effort`; supports JSON and SSE responses |
-| POST | `/rooms/{room}/audio/speech` | That room's advertised TTS service |
+| POST | `/rooms/{room}/audio/speech` | That room's advertised TTS service, forwarding body `speed` and `response_format` |
 | POST | `/rooms/{room}/audio/transcriptions` | Multipart upload to that room's advertised STT service |
 
 URL-encode the whole room id as one path segment (for example `team/one` becomes
@@ -242,6 +274,25 @@ for summarize/translate, and optional `voice` for TTS. A missing TTS voice uses
   and `ai.stt`. Null clears either voice setting. Membership and advertisements
   are applied live. Masked `api_key = "***"` values retain the existing secret
   only when the provider id and endpoint origin match.
+- The dashboard reads settings with `POST /api/call`
+  `{"cmd":"config.show","args":{}}`. HTTP replies wrap the command result
+  as `{"ok":true,"data":...}`; errors use `{"ok":false,"error":"..."}`.
+  The dashboard's `api()` helper unwraps `data`. The config result contains
+  `{"ai":{"default_reasoning_effort":"medium","tts":{"provider_id":"http","model":"speech-model","voice":"speaker","lang_voices":{},"speed":1.25}}}`
+  alongside the other fields. Either new optional value is JSON `null` when
+  unset; `ai.tts` itself can also be `null`.
+- Write the default effort with
+  `{"cmd":"config.set","args":{"path":"ai.default_reasoning_effort","value":"high"}}`
+  and speed with
+  `{"cmd":"config.set","args":{"path":"ai.tts.speed","value":1.25}}`.
+  Use `"value":null` to clear either option. Speed requires an existing
+  `ai.tts` configuration and preserves its model, voice and language mappings.
+  Whole-object `ai.tts` writes also accept `speed`. Successful writes return
+  `{"saved":true,"applies":"applied immediately"}` and refresh the provider
+  live. Authenticated dashboard callers can use both keys.
+- `config.get {"path":"ai.default_reasoning_effort"}` or
+  `config.get {"path":"ai.tts.speed"}` returns the scalar value directly.
+  Like `config.show`, it masks secrets before selecting a field.
 - `ai.provide.start` / `ai.provide.stop` edit room flags with the CLI semantics
   above. Their replies include `rooms: string[]` (selected room ids for start;
   previously flagged room ids for stop) and the actual `providing` state.
@@ -266,6 +317,10 @@ for summarize/translate, and optional `voice` for TTS. A missing TTS voice uses
 ids, bot preset ids and `advertised_models` once, then saves the current shape.
 New default/voice/task assignments win. Task reasoning effort is preserved,
 otherwise inherited from the old preset. TTS voice/language settings survive.
+When `ai.default_reasoning_effort` is unset and legacy presets remain, the
+effort of the preset referenced by `default_preset_id` is copied once. An
+existing value (including `none`) wins. Invalid inherited effort is ignored
+with a warning.
 An unresolved legacy bot preset remains an unusable reference so it cannot
 silently become the default.
 

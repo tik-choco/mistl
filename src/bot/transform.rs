@@ -350,8 +350,8 @@ fn truncate_for_tts(text: &str, pipeline_id: &str, article_id: &str) -> String {
 }
 
 /// Maps a synthesized-audio MIME type to a file extension for the blob's
-/// stored name / a chat-post sink's `fileName` -- mirrors
-/// `crate::ai::tts::format_to_mime`'s format list, inverted.
+/// stored name / a chat-post sink's `fileName`, using the actual response
+/// type rather than the requested speech format.
 pub(super) fn extension_for_mime(mime: &str) -> &'static str {
     match mime {
         "audio/mpeg" => "mp3",

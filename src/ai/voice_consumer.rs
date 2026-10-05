@@ -121,6 +121,8 @@ impl VoiceConsumer {
                 model: (!req.model.is_empty() && req.model != "network-auto").then_some(req.model),
                 voice: (!req.voice.is_empty()).then_some(req.voice),
                 lang,
+                speed: req.speed.filter(|v| crate::config::valid_tts_speed(*v)),
+                response_format: req.format.filter(|v| super::protocol::valid_tts_format(v)),
             },
         );
         let mut bytes = Vec::new();
@@ -213,8 +215,8 @@ mod tests {
                             model: "network-auto".into(),
                             voice: String::new(),
                             input: "hello".into(),
-                            format: None,
-                            speed: None,
+                            format: Some("opus".into()),
+                            speed: Some(1.25),
                         },
                         Some("en".into()),
                         Duration::from_secs(1),
@@ -229,6 +231,8 @@ mod tests {
             model,
             voice,
             lang,
+            speed,
+            response_format,
             ..
         } = msg
         else {
@@ -237,6 +241,8 @@ mod tests {
         assert!(model.is_none());
         assert!(voice.is_none());
         assert_eq!(lang.as_deref(), Some("en"));
+        assert_eq!(speed, Some(1.25));
+        assert_eq!(response_format.as_deref(), Some("opus"));
         for (seq, bytes, last) in [(0, "hello", false), (1, " world", true)] {
             consumer.handle_message(
                 "owner",

@@ -484,7 +484,8 @@
     function setting(model,key,label,help) {
       const wrap=el('label','tg-setting'),text=el('span','tg-setting-text'),input=el('input');
       input.type='checkbox';input.checked=!!model.node[key];input.setAttribute('role','switch');
-      text.append(el('strong','',label),el('small','',help));wrap.append(text,input);
+      const control=el('span','toggle-switch');control.append(input,el('span','slider'));
+      text.append(el('strong','',label),el('small','',help));wrap.append(text,control);
       input.addEventListener('change',async()=>{
         const value=input.checked;input.checked=!!model.node[key];
         await perform(()=>command(model,key==='broadcast'?{type:'broadcast',enabled:value}:{type:'lock',locked:value}));
@@ -507,7 +508,8 @@
       const row=el('fieldset','tg-grants');row.append(el('legend','tg-full-id',id));
       const grants={...(snapshot.graph.policy.permissions[id]||{})};
       [['edit_links','links'],['add_forwards','addGrant'],['remove_forwards','removeGrant']].forEach(([key,label])=>{
-        const wrap=el('label'),input=el('input');input.type='checkbox';input.checked=!!grants[key];wrap.append(input,el('span','',t(label)));row.append(wrap);
+        const wrap=el('label','switch-control'),input=el('input');input.type='checkbox';input.setAttribute('role','switch');input.checked=!!grants[key];
+        const control=el('span','toggle-switch');control.append(input,el('span','slider'));wrap.append(el('span','',t(label)),control);row.append(wrap);
         input.addEventListener('change',()=>{const next={edit_links:!!grants.edit_links,add_forwards:!!grants.add_forwards,remove_forwards:!!grants.remove_forwards,[key]:input.checked};input.checked=!!grants[key];perform(async()=>{await command(model,{type:'permission',peer_id:id,permissions:next});Object.assign(grants,next);input.checked=!!next[key];});});
       });pane.append(row);
     }

@@ -47,6 +47,9 @@
 //!   as `code` (present but non-string -> field dropped, message still
 //!   valid): it's a best-effort hint a provider may ignore entirely, so a
 //!   malformed value must not invalidate an otherwise well-formed request.
+//!   Optional `speed` must be finite and within 0.25..=4.0; optional
+//!   `response_format` must be mp3/opus/aac/flac/wav/pcm. Invalid hints
+//!   drop only their field. Neither changes the protocol version.
 //! - `tts_response` / `stt_request`: `id` non-empty; `seq` required
 //!   integer >= 0; `data` string; `last` bool; `mime` non-empty string;
 //!   `stt_request` additionally has optional `model` / `fileName` strings.
@@ -196,6 +199,10 @@ pub enum ProtocolMessage {
         /// BCP-47 language tag hint (mistllm-wire tts-lang-hint-v1). See the
         /// module header's `tts_request` decode rules.
         lang: Option<String>,
+        /// Optional playback speed, finite and within 0.25..=4.0.
+        speed: Option<f64>,
+        /// OpenAI audio format; unknown values are ignored on decode.
+        response_format: Option<String>,
     },
     TtsResponse {
         id: String,
@@ -413,6 +420,8 @@ pub fn encode(msg: &ProtocolMessage) -> Vec<u8> {
             model,
             voice,
             lang,
+            speed,
+            response_format,
         } => {
             let mut map = Map::new();
             map.insert("v".into(), json!(1));
@@ -427,6 +436,12 @@ pub fn encode(msg: &ProtocolMessage) -> Vec<u8> {
             }
             if let Some(lang) = lang {
                 map.insert("lang".into(), json!(lang));
+            }
+            if let Some(speed) = speed.filter(|v| crate::config::valid_tts_speed(*v)) {
+                map.insert("speed".into(), json!(speed));
+            }
+            if let Some(format) = response_format.as_deref().filter(|v| valid_tts_format(v)) {
+                map.insert("response_format".into(), json!(format));
             }
             Value::Object(map)
         }
@@ -715,6 +730,12 @@ pub fn decode(bytes: &[u8]) -> Option<ProtocolMessage> {
                 model,
                 voice,
                 lang,
+                speed: obj
+                    .get("speed")
+                    .and_then(Value::as_f64)
+                    .filter(|v| crate::config::valid_tts_speed(*v)),
+                response_format: dropped_opt_str(obj, "response_format")
+                    .filter(|v| valid_tts_format(v)),
             })
         }
         "tts_response" => {
@@ -764,6 +785,10 @@ pub fn decode(bytes: &[u8]) -> Option<ProtocolMessage> {
     }
 }
 
+pub fn valid_tts_format(value: &str) -> bool {
+    matches!(value, "mp3" | "opus" | "aac" | "flac" | "wav" | "pcm")
+}
+
 /// Random request id: UUID v4 string (lowercase hex, hyphenated), matching
 /// mistai's `randomId()`.
 pub fn random_id() -> String {
@@ -789,6 +814,54 @@ pub fn random_id() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tts_options_roundtrip_and_defensive_decode() {
+        for format in ["mp3", "opus", "aac", "flac", "wav", "pcm"] {
+            for speed in [0.25, 1.0, 4.0] {
+                assert_roundtrip(ProtocolMessage::TtsRequest {
+                    id: "tts".into(),
+                    text: "hi".into(),
+                    model: None,
+                    voice: None,
+                    lang: None,
+                    speed: Some(speed),
+                    response_format: Some(format.into()),
+                });
+            }
+        }
+        for speed in [
+            json!(-1),
+            json!(0.24),
+            json!(4.01),
+            json!("1.0"),
+            json!(null),
+            json!(true),
+        ] {
+            for format in [json!("unknown"), json!("MP3"), json!(42), json!(null)] {
+                let wire = json!({"v":1,"type":"tts_request","id":"tts","text":"hi", "speed":speed,"response_format":format});
+                assert!(matches!(
+                    decode(&serde_json::to_vec(&wire).unwrap()),
+                    Some(ProtocolMessage::TtsRequest {
+                        speed: None,
+                        response_format: None,
+                        ..
+                    })
+                ));
+            }
+        }
+        let wire = encode(&ProtocolMessage::TtsRequest {
+            id: "tts".into(),
+            text: "hi".into(),
+            model: None,
+            voice: None,
+            lang: None,
+            speed: None,
+            response_format: None,
+        });
+        let wire: Value = serde_json::from_slice(&wire).unwrap();
+        assert!(wire.get("speed").is_none());
+        assert!(wire.get("response_format").is_none());
+    }
     use super::*;
     use serde_json::{Value, json};
     use std::collections::BTreeSet;
@@ -1086,6 +1159,8 @@ mod tests {
             model: Some("m".into()),
             voice: Some("v".into()),
             lang: Some("en".into()),
+            speed: None,
+            response_format: None,
         });
         assert_eq!(
             keys(&full),
@@ -1106,6 +1181,8 @@ mod tests {
             model: None,
             voice: None,
             lang: None,
+            speed: None,
+            response_format: None,
         });
         assert_eq!(
             keys(&minimal),
@@ -1323,6 +1400,8 @@ mod tests {
                 model: None,
                 voice: None,
                 lang: Some("ja-JP".into()),
+                speed: None,
+                response_format: None,
             })
         );
     }
@@ -1338,6 +1417,8 @@ mod tests {
                 model: None,
                 voice: None,
                 lang: None,
+                speed: None,
+                response_format: None,
             })
         );
     }
@@ -1356,6 +1437,8 @@ mod tests {
                 model: None,
                 voice: None,
                 lang: None,
+                speed: None,
+                response_format: None,
             })
         );
     }
@@ -1375,6 +1458,8 @@ mod tests {
                 model: None,
                 voice: Some("alloy".into()),
                 lang: Some("en".into()),
+                speed: None,
+                response_format: None,
             })
         );
     }
@@ -1482,6 +1567,8 @@ mod tests {
             model: Some("tts-1".into()),
             voice: Some("alloy".into()),
             lang: Some("en-US".into()),
+            speed: None,
+            response_format: None,
         });
         assert_roundtrip(ProtocolMessage::TtsRequest {
             id: "id1".into(),
@@ -1489,6 +1576,8 @@ mod tests {
             model: None,
             voice: None,
             lang: None,
+            speed: None,
+            response_format: None,
         });
         assert_roundtrip(ProtocolMessage::TtsResponse {
             id: "id1".into(),
