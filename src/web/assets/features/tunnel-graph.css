@@ -90,16 +90,10 @@
 .tg-setting-text { display:flex;flex-direction:column;gap:4px;min-width:0; }
 .tg-setting-text strong { font-size:13px; }
 .tg-setting-text small { font-size:11.5px;line-height:1.55;color:var(--text-dim,#909bad); }
-.tg-setting input { appearance:none;position:relative;flex-shrink:0;width:34px;height:20px;border:1px solid var(--panel-border,#6c7b8d);background:var(--bg-alt,#526074);border-radius:12px;padding:0;margin:0;cursor:pointer; }
-.tg-setting input::before { content:"";position:absolute;left:2px;top:2px;width:14px;height:14px;background:#fff;border-radius:50%;box-shadow:0 1px 2px #0003;transition:transform .12s; }
-.tg-setting input:checked { background:var(--ok,#38876e);border-color:var(--ok,#65c9aa); }
-.tg-setting input:checked::before { transform:translateX(14px); }
-.tg-setting input:focus-visible { outline:2px solid var(--accent,#74d8ba);outline-offset:2px; }
 .tg-full-id { font:12px var(--mono,monospace);overflow-wrap:anywhere; }
 .tg-grant-list { display:flex;flex-direction:column;gap:8px; }
 .tg-grants { margin:0;padding:10px 12px;border:1px solid var(--panel-border,#303747);border-radius:8px;min-width:0; }
 .tg-grants label { display:flex;gap:8px;align-items:center;font-size:12px;line-height:1.5;padding:4px 0; }
-.tg-grants input { appearance:auto;width:16px;height:16px;accent-color:var(--ok,#65c9aa); }
 .tg-grant-add { display:flex;gap:8px; }
 .tg-grant-add input { flex:1;min-width:0;font-family:var(--mono,monospace); }
 

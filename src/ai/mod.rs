@@ -329,8 +329,13 @@ impl AiService {
         };
         let call: LlmCallFn = {
             let session = session.clone();
-            Arc::new(move |messages, tools, model, delta_tx| {
+            let state = self.state.clone();
+            let room = room.clone();
+            Arc::new(move |messages, mut tools, model, delta_tx| {
                 let session = session.clone();
+                let ai = state.effective_config().ai;
+                tools.reasoning_effort =
+                    room_api_effort(&ai, &room, model.as_deref(), tools.reasoning_effort);
                 Box::pin(async move {
                     let model = network_model(model);
                     session
@@ -350,8 +355,12 @@ impl AiService {
         };
         let tts: TtsFn = {
             let session = session.clone();
-            Arc::new(move |params, lang| {
+            let state = self.state.clone();
+            Arc::new(move |mut params, lang| {
                 let session = session.clone();
+                params.speed = params
+                    .speed
+                    .or_else(|| state.effective_config().ai.tts.and_then(|v| v.speed));
                 Box::pin(async move {
                     session
                         .consumer
@@ -388,8 +397,20 @@ impl AiService {
                 })
             })
         };
+        let state = self.state.clone();
         let oai: api_server::OaiFn = Arc::new(move |mut body| {
             let session = session.clone();
+            let effort = room_api_effort(
+                &state.effective_config().ai,
+                &room,
+                body.get("model").and_then(Value::as_str),
+                body.get("reasoning_effort")
+                    .and_then(Value::as_str)
+                    .map(String::from),
+            );
+            if let Some(effort) = effort {
+                body["reasoning_effort"] = json!(effort);
+            }
             Box::pin(async move {
                 let model =
                     network_model(body.get("model").and_then(Value::as_str).map(String::from));
@@ -637,12 +658,14 @@ impl AiService {
     async fn chat(
         &self,
         messages: Vec<ChatMessage>,
-        tools: ToolOptions,
+        mut tools: ToolOptions,
         model: Option<String>,
         delta_tx: Option<UnboundedSender<String>>,
     ) -> Result<(ChatOutput, &'static str, Option<String>)> {
         let config = self.state.effective_config();
         let reference = resolve_api_ref(&config.ai, model.as_deref(), &self.live_models())?;
+        tools.reasoning_effort =
+            default_api_effort(&config.ai, Some(&reference), tools.reasoning_effort);
         if let Some(model) = network_model(model)
             && let Some(room) = config
                 .ai
@@ -728,10 +751,11 @@ impl AiService {
     async fn synthesize(
         &self,
         state: &Arc<AppState>,
-        req: tts::TtsParams,
+        mut req: tts::TtsParams,
         lang: Option<String>,
     ) -> Result<tts::TtsAudio> {
         let cfg = state.effective_config().ai;
+        req.speed = req.speed.or_else(|| cfg.tts.as_ref().and_then(|v| v.speed));
         let resolved_ref = crate::config::resolve_voice(&cfg, cfg.tts.as_ref())
             .context("ai: no usable ai.tts configured")?;
         if let Some(room) = resolved_ref.base_url.strip_prefix("mist-network://") {
@@ -886,6 +910,47 @@ fn resolve_api_ref(
     Err(ModelNotFound(model.to_string()).into())
 }
 
+/// Only the default task inherits the configured effort. Explicit values,
+/// including `none` and future wire values, always win.
+fn default_api_effort(
+    ai: &crate::config::AiConfig,
+    reference: Option<&crate::config::ModelRef>,
+    requested: Option<String>,
+) -> Option<String> {
+    requested.or_else(|| {
+        if reference.is_none() || reference == ai.default_ref.as_ref() {
+            ai.default_reasoning_effort.clone()
+        } else {
+            None
+        }
+    })
+}
+
+fn room_api_effort(
+    ai: &crate::config::AiConfig,
+    room: &str,
+    model: Option<&str>,
+    requested: Option<String>,
+) -> Option<String> {
+    let model = network_model(model.map(String::from));
+    requested.or_else(|| {
+        let uses_default = model.as_ref().is_none_or(|model| {
+            ai.default_ref.as_ref().is_some_and(|default| {
+                &default.model == model
+                    && ai
+                        .providers
+                        .iter()
+                        .any(|p| p.enabled && p.id == default.provider_id && p.room() == Some(room))
+            })
+        });
+        if uses_default {
+            ai.default_reasoning_effort.clone()
+        } else {
+            None
+        }
+    })
+}
+
 fn known_api_ref(
     ai: &crate::config::AiConfig,
     model: &str,
@@ -972,10 +1037,11 @@ pub(crate) async fn chat_model(
 pub(crate) async fn synthesize_model(
     state: &Arc<AppState>,
     reference: &crate::config::ModelRef,
-    req: tts::TtsParams,
+    mut req: tts::TtsParams,
 ) -> Result<tts::TtsAudio> {
     let service = ensure_started(state).await?;
     let cfg = state.effective_config().ai;
+    req.speed = req.speed.or_else(|| cfg.tts.as_ref().and_then(|v| v.speed));
     let resolved = crate::config::resolve_ref(&cfg, Some(reference))
         .context("ai: TTS model reference unavailable")?;
     if let Some(room) = resolved.base_url.strip_prefix("mist-network://") {
@@ -1325,7 +1391,8 @@ async fn build_provider(
     .unwrap_or_default();
     let tts_call = tts_ref.map(|(provider, resolved)| {
         let catalog = voices.clone();
-        let call: TtsCallFn = Arc::new(move |text, model, voice, lang| {
+        let default_speed = cfg.tts.as_ref().and_then(|v| v.speed);
+        let call: TtsCallFn = Arc::new(move |text, model, voice, lang, options| {
             let provider = provider.clone();
             let voice = resolve_tts_voice(
                 voice,
@@ -1339,8 +1406,8 @@ async fn build_provider(
                 model: resolve_voice_call_model(model, &resolved.model, "tts"),
                 voice,
                 input: text,
-                format: None,
-                speed: None,
+                format: options.response_format,
+                speed: options.speed.or(default_speed),
             };
             Box::pin(async move { tts::synthesize(&provider, req).await })
         });
@@ -1369,6 +1436,7 @@ async fn build_provider(
         voices,
     );
     provider.set_shared_restricted(!room.shared.is_empty());
+    provider.set_default_reasoning_effort(cfg.default_reasoning_effort.clone());
     // Providing rooms support the tunnel even if their upstream is unavailable;
     // the resolver rejects those requests without hiding the wire capability.
     let (_, shared) = resolve_advertised_models(cfg, room);
@@ -1783,6 +1851,412 @@ mod tests {
     use super::*;
     use crate::config::{AiConfig, AiProviderConfig, ModelRef};
 
+    #[tokio::test]
+    async fn provider_default_effort_reaches_both_default_and_shared_upstreams() {
+        for model in [None, Some("raw")] {
+            for (default, request, expected) in [
+                (None, None, None),
+                (Some("high"), None, Some("high")),
+                (Some("high"), Some("low"), Some("low")),
+                (Some("high"), Some("none"), Some("none")),
+                (Some("none"), None, Some("none")),
+            ] {
+                let (url, captured) = mock_chat_server_capture("reply").await;
+                let mut ai = sample_config();
+                ai.providers[0].base_url = url;
+                ai.default_reasoning_effort = default.map(String::from);
+                let provider = build_provider(&test_session("test"), &ai, &ai.providers[1])
+                    .await
+                    .unwrap();
+                provider
+                    .handle_message(
+                        "peer".into(),
+                        ProtocolMessage::LlmRequest {
+                            id: "probe".into(),
+                            messages: vec![ChatMessage::new("user", "hi")],
+                            model: model.map(String::from),
+                            reasoning_effort: request.map(String::from),
+                            tools: None,
+                            tool_choice: None,
+                        },
+                    )
+                    .await;
+                let body = captured.await.unwrap();
+                assert_eq!(
+                    body.get("reasoning_effort").and_then(Value::as_str),
+                    expected
+                );
+                assert!(body.get("temperature").is_none());
+            }
+        }
+    }
+
+    async fn network_api_fixture() -> (
+        Arc<AppState>,
+        Arc<AiRoom>,
+        tokio::sync::mpsc::UnboundedReceiver<ProtocolMessage>,
+        Arc<ApiServer>,
+    ) {
+        let state = AppState::for_test();
+        let mut config = state.config();
+        config.ai = sample_config();
+        config.ai.default_ref = Some(ModelRef {
+            provider_id: "room".into(),
+            model: "raw".into(),
+        });
+        config.ai.default_reasoning_effort = Some("high".into());
+        config.ai.tts = Some(crate::config::VoiceConfig {
+            provider_id: "room".into(),
+            model: "network-auto".into(),
+            speed: Some(1.5),
+            ..Default::default()
+        });
+        state.set_config(config);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let session = test_session_with_send(
+            "test",
+            Arc::new(move |_, msg| {
+                tx.send(msg).unwrap();
+            }),
+        );
+        session.consumer.handle_message(
+            "peer",
+            &ProtocolMessage::ProviderHello {
+                models: Some(vec!["raw".into(), "other".into()]),
+                services: Some(vec!["chat".into(), "tts".into()]),
+                voices: None,
+            },
+        );
+        let service = Arc::new(AiService {
+            state: state.clone(),
+            rooms: RwLock::new(HashMap::from([("test".into(), session.clone())])),
+            on_demand: RwLock::new(HashSet::new()),
+            sync: Mutex::new(()),
+            api_server: Mutex::new(None),
+        });
+        let chat_service = service.clone();
+        let call: LlmCallFn = Arc::new(move |messages, tools, model, tx| {
+            let service = chat_service.clone();
+            Box::pin(async move {
+                service
+                    .chat(messages, tools, model, tx)
+                    .await
+                    .map(|(out, _, _)| out)
+            })
+        });
+        let tts_service = service.clone();
+        let tts_state = state.clone();
+        let tts: TtsFn = Arc::new(move |req, lang| {
+            let service = tts_service.clone();
+            let state = tts_state.clone();
+            Box::pin(async move { service.synthesize(&state, req, lang).await })
+        });
+        let rooms: api_server::RoomsFn =
+            Arc::new(move |room| Box::pin(service.clone().api_room(room)));
+        let stt: SttFn = Arc::new(|_| Box::pin(async { bail!("not used") }));
+        let server = ApiServer::start_with_rooms(
+            "127.0.0.1:0",
+            call,
+            Arc::new(Vec::new),
+            tts,
+            stt,
+            Some(rooms),
+        )
+        .await
+        .unwrap();
+        (state, session, rx, server)
+    }
+
+    async fn next_api_request(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<ProtocolMessage>,
+    ) -> ProtocolMessage {
+        loop {
+            let msg = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if !matches!(msg, ProtocolMessage::ConsumerHello) {
+                return msg;
+            }
+        }
+    }
+
+    async fn mock_speech_server_capture(
+        reject_format: bool,
+    ) -> (String, tokio::sync::oneshot::Receiver<Value>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let mut refused = false;
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                let mut buf = [0; 4096];
+                let (end, len) = loop {
+                    let n = socket.read(&mut buf).await.unwrap();
+                    assert!(n > 0);
+                    bytes.extend_from_slice(&buf[..n]);
+                    if let Some(end) = bytes.windows(4).position(|b| b == b"\r\n\r\n") {
+                        let len: usize = String::from_utf8_lossy(&bytes[..end])
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|n| n.trim().parse().unwrap())
+                            })
+                            .unwrap_or(0);
+                        if bytes.len() >= end + 4 + len {
+                            break (end, len);
+                        }
+                    }
+                };
+                if bytes.starts_with(b"GET ") {
+                    socket
+                        .write_all(ok_json(r#"{"voices":["speaker"]}"#).as_bytes())
+                        .await
+                        .unwrap();
+                    continue;
+                }
+                let body: Value = serde_json::from_slice(&bytes[end + 4..end + 4 + len]).unwrap();
+                if reject_format && !refused {
+                    assert_eq!(body["response_format"], "opus");
+                    refused = true;
+                    let error =
+                        r#"{"error":{"param":"response_format","message":"unsupported format"}}"#;
+                    let response = format!(
+                        "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{error}",
+                        error.len()
+                    );
+                    socket.write_all(response.as_bytes()).await.unwrap();
+                    continue;
+                }
+                tx.send(body).unwrap();
+                socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: 5\r\nConnection: close\r\n\r\naudio").await.unwrap();
+                break;
+            }
+        });
+        (format!("http://{addr}"), rx)
+    }
+
+    #[tokio::test]
+    async fn provider_and_http_speech_pass_speed_and_format_to_upstream() {
+        for provider_route in [false, true] {
+            for reject_format in [false, true] {
+                for (default, requested, expected) in [
+                    (None, None, None),
+                    (Some(1.5), None, Some(1.5)),
+                    (Some(1.5), Some(0.75), Some(0.75)),
+                ] {
+                    let (url, captured) = mock_speech_server_capture(reject_format).await;
+                    let mut ai = sample_config();
+                    ai.providers[0].base_url = url;
+                    ai.tts = Some(crate::config::VoiceConfig {
+                        provider_id: "http".into(),
+                        model: "speech".into(),
+                        voice: Some("speaker".into()),
+                        speed: default,
+                        ..Default::default()
+                    });
+                    if provider_route {
+                        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+                        let session = test_session_with_send(
+                            "test",
+                            Arc::new(move |_, msg| {
+                                tx.send(msg).unwrap();
+                            }),
+                        );
+                        let provider = build_provider(&session, &ai, &ai.providers[1])
+                            .await
+                            .unwrap();
+                        provider
+                            .handle_message(
+                                "peer".into(),
+                                ProtocolMessage::TtsRequest {
+                                    id: "tts".into(),
+                                    text: "hi".into(),
+                                    model: None,
+                                    voice: None,
+                                    lang: None,
+                                    speed: requested,
+                                    response_format: Some("opus".into()),
+                                },
+                            )
+                            .await;
+                        assert!(
+                            matches!(rx.recv().await, Some(ProtocolMessage::TtsResponse {mime,..}) if mime == "audio/wav")
+                        );
+                    } else {
+                        let state = AppState::for_test();
+                        let mut config = state.config();
+                        config.ai = ai;
+                        state.set_config(config);
+                        let service = AiService {
+                            state: state.clone(),
+                            rooms: RwLock::new(HashMap::new()),
+                            on_demand: RwLock::new(HashSet::new()),
+                            sync: Mutex::new(()),
+                            api_server: Mutex::new(None),
+                        };
+                        let audio = service
+                            .synthesize(
+                                &state,
+                                tts::TtsParams {
+                                    model: String::new(),
+                                    voice: "speaker".into(),
+                                    input: "hi".into(),
+                                    speed: requested,
+                                    format: Some("opus".into()),
+                                },
+                                None,
+                            )
+                            .await
+                            .unwrap();
+                        assert_eq!(audio.bytes, b"audio");
+                        assert_eq!(audio.mime, "audio/wav");
+                    }
+                    let body = captured.await.unwrap();
+                    assert_eq!(body.get("speed").and_then(Value::as_f64), expected);
+                    if reject_format {
+                        assert!(body.get("response_format").is_none());
+                    } else {
+                        assert_eq!(body["response_format"], "opus");
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn local_chat_routes_apply_effort_only_to_default_model() {
+        let (state, session, mut rx, server) = network_api_fixture().await;
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(3))
+            .build()
+            .unwrap();
+        for default in [Some("high"), None, Some("none")] {
+            let mut config = state.config();
+            config.ai.default_reasoning_effort = default.map(String::from);
+            state.set_config(config);
+            for path in ["/v1/chat/completions", "/v1/rooms/test/chat/completions"] {
+                for stream in [false, true] {
+                    for (model, request) in [
+                        (None, None),
+                        (Some("raw"), None),
+                        (Some("other"), None),
+                        (Some("raw"), Some("none")),
+                        (Some("other"), Some("low")),
+                    ] {
+                        let mut body =
+                            json!({"messages":[{"role":"user","content":"hi"}],"stream":stream});
+                        if let Some(model) = model {
+                            body["model"] = json!(model);
+                        }
+                        if let Some(effort) = request {
+                            body["reasoning_effort"] = json!(effort);
+                        }
+                        let http = client
+                            .post(format!("http://{}{path}", server.addr()))
+                            .json(&body);
+                        let response = tokio::spawn(async move {
+                            http.send().await.unwrap().text().await.unwrap()
+                        });
+                        let ProtocolMessage::LlmRequest {
+                            id,
+                            reasoning_effort,
+                            ..
+                        } = next_api_request(&mut rx).await
+                        else {
+                            panic!("chat request");
+                        };
+                        let expected = request.or(if model == Some("other") {
+                            None
+                        } else {
+                            default
+                        });
+                        assert_eq!(reasoning_effort.as_deref(), expected, "{path} {body}");
+                        session.consumer.handle_message(
+                            "peer",
+                            &ProtocolMessage::LlmResponseChunk {
+                                id: id.clone(),
+                                delta: "reply".into(),
+                                seq: Some(0),
+                            },
+                        );
+                        session.consumer.handle_message(
+                            "peer",
+                            &ProtocolMessage::LlmResponseDone {
+                                id,
+                                content: Some("reply".into()),
+                                tool_calls: None,
+                            },
+                        );
+                        assert!(response.await.unwrap().contains("reply"));
+                    }
+                }
+            }
+        }
+        server.stop();
+    }
+
+    #[tokio::test]
+    async fn local_speech_routes_forward_options_and_use_response_mime() {
+        use base64::Engine as _;
+        let (state, session, mut rx, server) = network_api_fixture().await;
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(3))
+            .build()
+            .unwrap();
+        for default in [Some(1.5), None] {
+            let mut config = state.config();
+            config.ai.tts.as_mut().unwrap().speed = default;
+            state.set_config(config);
+            for path in ["/v1/audio/speech", "/v1/rooms/test/audio/speech"] {
+                for (speed, format, expected_speed, expected_format) in [
+                    (Value::Null, Value::Null, default, None),
+                    (json!(0.75), json!("opus"), Some(0.75), Some("opus")),
+                    (json!(4.1), json!("invalid"), default, None),
+                    (json!("fast"), json!(3), default, None),
+                ] {
+                    let body = json!({"input":"hi","speed":speed,"response_format":format});
+                    let http = client
+                        .post(format!("http://{}{path}", server.addr()))
+                        .json(&body);
+                    let response = tokio::spawn(async move { http.send().await.unwrap() });
+                    let ProtocolMessage::TtsRequest {
+                        id,
+                        speed,
+                        response_format,
+                        ..
+                    } = next_api_request(&mut rx).await
+                    else {
+                        panic!("speech request");
+                    };
+                    assert_eq!(speed, expected_speed);
+                    assert_eq!(response_format.as_deref(), expected_format);
+                    session.voice.handle_message(
+                        "peer",
+                        &ProtocolMessage::TtsResponse {
+                            id,
+                            seq: 0,
+                            data: base64::engine::general_purpose::STANDARD.encode(b"audio"),
+                            last: true,
+                            mime: "audio/wav".into(),
+                        },
+                    );
+                    let response = response.await.unwrap();
+                    assert_eq!(response.status(), 200);
+                    assert_eq!(response.headers()["content-type"], "audio/wav");
+                    assert_eq!(response.bytes().await.unwrap().as_ref(), b"audio");
+                }
+            }
+        }
+        server.stop();
+    }
+
     #[test]
     fn oai_models_use_room_shares_and_same_empty_model_rules_as_chat() {
         let mut ai = sample_config();
@@ -1859,6 +2333,22 @@ mod tests {
         assert!(!enabled_api_room(&ai, "test"));
         assert_eq!(network_model(Some("network-auto".into())), None);
         assert_eq!(network_model(Some("raw".into())), Some("raw".into()));
+        ai.providers[1].enabled = true;
+        ai.providers.push(AiProviderConfig {
+            id: "same-room".into(),
+            base_url: "mist-network://test".into(),
+            ..Default::default()
+        });
+        ai.default_ref = Some(ModelRef {
+            provider_id: "same-room".into(),
+            model: "raw".into(),
+        });
+        ai.default_reasoning_effort = Some("high".into());
+        assert_eq!(
+            room_api_effort(&ai, "test", Some("raw"), None).as_deref(),
+            Some("high")
+        );
+        assert_eq!(room_api_effort(&ai, "other-room", Some("raw"), None), None);
     }
 
     fn sample_config() -> AiConfig {

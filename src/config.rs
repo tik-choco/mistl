@@ -368,6 +368,7 @@ pub struct VoiceConfig {
     pub model: String,
     pub voice: Option<String>,
     pub lang_voices: HashMap<String, String>,
+    pub speed: Option<f64>,
 }
 
 impl VoiceConfig {
@@ -485,6 +486,7 @@ pub fn resolve_voice(ai: &AiConfig, voice: Option<&VoiceConfig>) -> Option<Resol
 #[serde(default)]
 pub struct AiConfig {
     pub default_ref: Option<ModelRef>,
+    pub default_reasoning_effort: Option<String>,
     pub tts: Option<VoiceConfig>,
     pub stt: Option<ModelRef>,
     pub providers: Vec<AiProviderConfig>,
@@ -518,6 +520,7 @@ impl Default for AiConfig {
     fn default() -> Self {
         Self {
             default_ref: None,
+            default_reasoning_effort: None,
             tts: None,
             stt: None,
             providers: Vec::new(),
@@ -534,6 +537,59 @@ impl Default for AiConfig {
             tts_preset_id: String::new(),
             stt_preset_id: String::new(),
             presets: Vec::new(),
+        }
+    }
+}
+
+pub fn valid_reasoning_effort(value: &str) -> bool {
+    matches!(
+        value,
+        "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+    )
+}
+
+pub fn valid_tts_speed(value: f64) -> bool {
+    value.is_finite() && (0.25..=4.0).contains(&value)
+}
+
+impl AiConfig {
+    fn validate(&self) -> Result<()> {
+        if self
+            .default_reasoning_effort
+            .as_deref()
+            .is_some_and(|v| !valid_reasoning_effort(v))
+        {
+            anyhow::bail!(
+                "ai.default_reasoning_effort must be none, minimal, low, medium, high, xhigh or max (null clears it)"
+            );
+        }
+        if self
+            .tts
+            .as_ref()
+            .and_then(|v| v.speed)
+            .is_some_and(|v| !valid_tts_speed(v))
+        {
+            anyhow::bail!(
+                "ai.tts.speed must be a finite number between 0.25 and 4.0 (null clears it)"
+            );
+        }
+        Ok(())
+    }
+
+    fn discard_invalid_options(&mut self) {
+        if self
+            .default_reasoning_effort
+            .as_deref()
+            .is_some_and(|v| !valid_reasoning_effort(v))
+        {
+            tracing::warn!("ai: ignoring invalid ai.default_reasoning_effort");
+            self.default_reasoning_effort = None;
+        }
+        if let Some(tts) = &mut self.tts
+            && tts.speed.is_some_and(|v| !valid_tts_speed(v))
+        {
+            tracing::warn!("ai: ignoring invalid ai.tts.speed");
+            tts.speed = None;
         }
     }
 }
@@ -1042,6 +1098,24 @@ fn substitute_masked_webhook_secrets(
 /// through serde so types are validated against the real Config shape;
 /// `null` clears optional fields.
 pub fn set_by_path(config: &Config, path: &str, value: serde_json::Value) -> Result<Config> {
+    // Only this nested setting is writable; whole-section writes remain forbidden.
+    if path == "ai.tts.speed" {
+        if !value.is_null() && !value.as_f64().is_some_and(valid_tts_speed) {
+            anyhow::bail!(
+                "ai.tts.speed must be a finite number between 0.25 and 4.0 (null clears it)"
+            );
+        }
+        let mut updated = config.clone();
+        let voice = updated
+            .ai
+            .tts
+            .as_mut()
+            .context("configure ai.tts before setting ai.tts.speed")?;
+        voice.speed = value.as_f64();
+        updated.ai.validate()?;
+        updated.network.validate()?;
+        return Ok(updated);
+    }
     // `ai.providers` gets special handling for masked api_keys before the
     // generic "***" rejection below -- see `substitute_masked_provider_keys`.
     let value = if path == "ai.providers" {
@@ -1093,6 +1167,7 @@ pub fn set_by_path(config: &Config, path: &str, value: serde_json::Value) -> Res
     let updated: Config = serde_json::from_value(tree)
         .with_context(|| format!("invalid value for {section}.{field}"))?;
     updated.network.validate()?;
+    updated.ai.validate()?;
     Ok(updated)
 }
 
@@ -1141,7 +1216,12 @@ pub fn applies_when(path: &str) -> &'static str {
         // below, which need an explicit stop/start of *something* -- there
         // is nothing left for the user to do at all.
         "network.membership_allowlist" | "ai.trusted_providers" => "applied immediately",
-        "ai.providers" | "ai.default_ref" | "ai.tts" | "ai.stt" => "applied immediately",
+        "ai.providers"
+        | "ai.default_ref"
+        | "ai.default_reasoning_effort"
+        | "ai.tts"
+        | "ai.tts.speed"
+        | "ai.stt" => "applied immediately",
         _ => "next service start",
     }
 }
@@ -1181,12 +1261,41 @@ impl Config {
         crate::statefile::restrict_existing(&path);
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
-        let mut config: Self =
-            toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-        if config.migrate_legacy() {
+        let (config, migrated) =
+            Self::parse_loaded(&text).with_context(|| format!("parsing {}", path.display()))?;
+        if migrated {
             config.save()?;
         }
         Ok(config)
+    }
+
+    fn parse_loaded(text: &str) -> Result<(Self, bool)> {
+        let mut tree: toml::Value = toml::from_str(text)?;
+        if let Some(ai) = tree.get_mut("ai").and_then(toml::Value::as_table_mut) {
+            // Wrong scalar types must not prevent the rest of the config loading.
+            // Value validation also runs after migration so inherited options
+            // receive the same checks as the current configuration.
+            if ai
+                .get("default_reasoning_effort")
+                .is_some_and(|v| v.as_str().is_none())
+            {
+                tracing::warn!("ai: ignoring invalid ai.default_reasoning_effort");
+                ai.remove("default_reasoning_effort");
+            }
+            if let Some(tts) = ai.get_mut("tts").and_then(toml::Value::as_table_mut)
+                && tts
+                    .get("speed")
+                    .is_some_and(|v| v.as_float().is_none() && v.as_integer().is_none())
+            {
+                tracing::warn!("ai: ignoring invalid ai.tts.speed");
+                tts.remove("speed");
+            }
+        }
+        let mut config: Self = tree.try_into()?;
+        config.ai.discard_invalid_options();
+        let migrated = config.migrate_legacy();
+        config.ai.discard_invalid_options();
+        Ok((config, migrated))
     }
 
     pub fn save(&self) -> Result<()> {
@@ -1318,6 +1427,13 @@ impl Config {
             provider_id: p.provider_id.clone(),
             model: p.model.clone(),
         };
+        if ai.default_reasoning_effort.is_none() {
+            ai.default_reasoning_effort = ai
+                .presets
+                .iter()
+                .find(|p| p.id == ai.default_preset_id)
+                .and_then(|p| p.reasoning_effort.clone());
+        }
         if ai.default_ref.is_none() {
             ai.default_ref = ai
                 .presets
@@ -1335,6 +1451,7 @@ impl Config {
                     model: p.model.clone(),
                     voice: p.voice.clone(),
                     lang_voices: p.lang_voices.clone(),
+                    speed: None,
                 });
         }
         if ai.stt.is_none() {
@@ -1478,6 +1595,152 @@ impl Config {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn ai_effort_and_speed_config_roundtrip_and_validation() {
+        let mut config = Config::default();
+        config = set_by_path(&config, "ai.tts", serde_json::json!({
+            "provider_id":"http", "model":"speech", "voice":"speaker", "lang_voices":{"ja":"ja-speaker"}
+        })).unwrap();
+        for effort in ["none", "minimal", "low", "medium", "high", "xhigh", "max"] {
+            config = set_by_path(
+                &config,
+                "ai.default_reasoning_effort",
+                serde_json::json!(effort),
+            )
+            .unwrap();
+            for speed in [0.25, 1.25, 4.0] {
+                config = set_by_path(&config, "ai.tts.speed", serde_json::json!(speed)).unwrap();
+                let loaded: Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+                assert_eq!(loaded.ai.default_reasoning_effort.as_deref(), Some(effort));
+                assert_eq!(loaded.ai.tts.as_ref().unwrap().speed, Some(speed));
+                let json = serde_json::to_value(loaded).unwrap();
+                assert_eq!(json["ai"]["default_reasoning_effort"], effort);
+                assert_eq!(json["ai"]["tts"]["speed"], speed);
+                assert_eq!(json["ai"]["tts"]["voice"], "speaker");
+                assert_eq!(json["ai"]["tts"]["lang_voices"]["ja"], "ja-speaker");
+            }
+        }
+        for effort in [
+            serde_json::json!("invalid"),
+            serde_json::json!("HIGH"),
+            serde_json::json!(1),
+        ] {
+            assert!(set_by_path(&config, "ai.default_reasoning_effort", effort).is_err());
+        }
+        for speed in [
+            serde_json::json!(0.24),
+            serde_json::json!(4.01),
+            serde_json::json!("1.0"),
+        ] {
+            assert!(set_by_path(&config, "ai.tts.speed", speed.clone()).is_err());
+            assert!(
+                set_by_path(
+                    &config,
+                    "ai.tts",
+                    serde_json::json!({"provider_id":"http","model":"speech","speed":speed})
+                )
+                .is_err()
+            );
+        }
+        config = set_by_path(
+            &config,
+            "ai.default_reasoning_effort",
+            serde_json::Value::Null,
+        )
+        .unwrap();
+        config = set_by_path(&config, "ai.tts.speed", serde_json::Value::Null).unwrap();
+        assert!(config.ai.default_reasoning_effort.is_none());
+        assert!(config.ai.tts.unwrap().speed.is_none());
+        let ai: AiConfig = toml::from_str("").unwrap();
+        assert!(ai.default_reasoning_effort.is_none());
+        assert!(
+            toml::from_str::<VoiceConfig>("provider_id = 'http'\nmodel = 'speech'")
+                .unwrap()
+                .speed
+                .is_none()
+        );
+        assert!(set_by_path(&Config::default(), "ai.tts.speed", serde_json::json!(1)).is_err());
+    }
+
+    #[test]
+    fn default_preset_effort_migrates_once_and_new_value_wins() {
+        for (new, expected) in [(None, "high"), (Some("none"), "none")] {
+            let mut config: Config = toml::from_str(
+                r#"
+                [ai]
+                default_preset_id = "chat"
+                [[ai.presets]]
+                id = "other"
+                reasoning_effort = "low"
+                [[ai.presets]]
+                id = "chat"
+                provider_id = "http"
+                model = "raw"
+                reasoning_effort = "high"
+            "#,
+            )
+            .unwrap();
+            config.ai.default_reasoning_effort = new.map(String::from);
+            assert!(config.migrate_legacy());
+            assert_eq!(
+                config.ai.default_reasoning_effort.as_deref(),
+                Some(expected)
+            );
+            assert!(!config.migrate_legacy());
+            let loaded: Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+            assert_eq!(
+                loaded.ai.default_reasoning_effort.as_deref(),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_loaded_ai_options_are_ignored_after_migration() {
+        let mut config: Config = toml::from_str(
+            r#"
+            [ai]
+            default_preset_id = "old"
+            tts = {provider_id="http",model="speech",speed=inf}
+            [[ai.presets]]
+            id = "old"
+            reasoning_effort = "future-effort"
+        "#,
+        )
+        .unwrap();
+        config.migrate_legacy();
+        config.ai.discard_invalid_options();
+        assert!(config.ai.default_reasoning_effort.is_none());
+        assert!(config.ai.tts.unwrap().speed.is_none());
+        let mut ai: AiConfig = toml::from_str("default_reasoning_effort = 'bad'").unwrap();
+        ai.discard_invalid_options();
+        assert!(ai.default_reasoning_effort.is_none());
+        let (config, migrated) = Config::parse_loaded(
+            r#"
+            [ai]
+            default_reasoning_effort = 42
+            tts = {provider_id="http",model="speech",speed="fast"}
+        "#,
+        )
+        .unwrap();
+        assert!(!migrated);
+        assert!(config.ai.default_reasoning_effort.is_none());
+        assert!(config.ai.tts.unwrap().speed.is_none());
+        let (config, migrated) = Config::parse_loaded(
+            r#"
+            [ai]
+            default_reasoning_effort = "invalid"
+            default_preset_id = "old"
+            [[ai.presets]]
+            id = "old"
+            reasoning_effort = "low"
+        "#,
+        )
+        .unwrap();
+        assert!(migrated);
+        assert_eq!(config.ai.default_reasoning_effort.as_deref(), Some("low"));
+    }
 
     #[test]
     fn set_by_path_legacy_stream_relay_room_and_share_room_alias_to_room() {
@@ -1819,7 +2082,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&config.ai).unwrap(),
             json!({
-                "default_ref": null, "tts": null, "stt": null,
+                "default_ref": null, "default_reasoning_effort": null, "tts": null, "stt": null,
                 "providers": [{ "id": "http", "label": "", "base_url": "http://local/v1", "api_key": "",
                     "enabled": true, "models": [], "models_fetched_at": null, "provide": false, "shared": [] }],
                 "api_listen": "127.0.0.1:6478", "request_timeout_secs": 120, "trusted_providers": []

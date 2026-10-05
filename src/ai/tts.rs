@@ -85,21 +85,6 @@ fn build_client() -> Result<reqwest::Client> {
         .context("ai: building TTS upstream HTTP client")
 }
 
-/// Maps an OpenAI-style `response_format` value to its MIME type. Unknown
-/// formats fall back to `application/octet-stream` rather than erroring --
-/// upstreams may support formats beyond this list.
-pub fn format_to_mime(format: &str) -> &'static str {
-    match format {
-        "mp3" => "audio/mpeg",
-        "opus" => "audio/ogg",
-        "aac" => "audio/aac",
-        "flac" => "audio/flac",
-        "wav" => "audio/wav",
-        "pcm" => "audio/pcm",
-        _ => "application/octet-stream",
-    }
-}
-
 /// Validates `req` and returns the effective `response_format` (defaulted
 /// to `"mp3"`). Split out from [`synthesize`] so callers -- and tests --
 /// can check a request's shape without making an HTTP call.
@@ -120,6 +105,12 @@ fn validate(req: &TtsParams) -> Result<String> {
              {MAX_INPUT_CHARS}-character limit; split the input before calling \
              synthesize (chunked synthesis is not implemented in v1)"
         );
+    }
+    if req
+        .speed
+        .is_some_and(|v| !crate::config::valid_tts_speed(v))
+    {
+        bail!("ai: tts speed must be a finite number between 0.25 and 4.0");
     }
     Ok(req.format.as_deref().unwrap_or("mp3").to_string())
 }
@@ -144,29 +135,42 @@ fn build_body(req: &TtsParams, format: &str) -> Value {
 /// for the base_url/header/error conventions this follows.
 pub async fn synthesize(provider: &AiProviderConfig, req: TtsParams) -> Result<TtsAudio> {
     let format = validate(&req)?;
-    let body = build_body(&req, &format);
+    let mut body = build_body(&req, &format);
 
     let url = format!("{}/audio/speech", strip_trailing_slash(&provider.base_url));
 
     let client = build_client()?;
-    let response = client
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .header("Authorization", format!("Bearer {}", provider.api_key))
-        .json(&body)
-        .send()
-        .await
-        .with_context(|| format!("TTS API request failed: POST {url}"))?;
-
-    if !response.status().is_success() {
+    let response = loop {
+        let response = client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {}", provider.api_key))
+            .json(&body)
+            .send()
+            .await
+            .with_context(|| format!("TTS API request failed: POST {url}"))?;
+        if response.status().is_success() {
+            break response;
+        }
         let status = response.status();
         let body_text = response.text().await.unwrap_or_default();
+        // A format hint is optional: retry once using the backend's own
+        // container when it explicitly refuses this parameter. Other errors
+        // keep their normal behavior, and speed is preserved on the retry.
+        if matches!(status.as_u16(), 400 | 422)
+            && body_text.to_ascii_lowercase().contains("response_format")
+            && body
+                .as_object_mut()
+                .is_some_and(|fields| fields.remove("response_format").is_some())
+        {
+            continue;
+        }
         return Err(anyhow::Error::new(super::openai::UpstreamHttpError {
             label: "TTS API",
             status: status.as_u16(),
             detail: truncate_500(&body_text),
         }));
-    }
+    };
 
     if response
         .content_length()
@@ -174,6 +178,15 @@ pub async fn synthesize(provider: &AiProviderConfig, req: TtsParams) -> Result<T
     {
         bail!("ai: TTS API response exceeds the maximum audio size");
     }
+    // A backend may ignore the requested container; its response type wins.
+    // Without type metadata, keep the payload opaque instead of guessing.
+    let mime = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or("application/octet-stream")
+        .to_string();
     let mut response = response;
     let mut bytes: Vec<u8> = Vec::new();
     while let Some(chunk) = response
@@ -190,10 +203,7 @@ pub async fn synthesize(provider: &AiProviderConfig, req: TtsParams) -> Result<T
         bail!("ai: TTS API returned an empty audio body");
     }
 
-    Ok(TtsAudio {
-        bytes,
-        mime: format_to_mime(&format).to_string(),
-    })
+    Ok(TtsAudio { bytes, mime })
 }
 
 #[cfg(test)]
@@ -211,8 +221,17 @@ mod tests {
     }
 
     #[test]
-    fn format_to_mime_falls_back_for_unknown_formats() {
-        assert_eq!(format_to_mime("weird"), "application/octet-stream");
+    fn validate_accepts_speed_bounds_and_rejects_nonfinite_or_out_of_range() {
+        for speed in [0.25, 1.0, 4.0] {
+            let mut req = params("hi");
+            req.speed = Some(speed);
+            assert!(validate(&req).is_ok());
+        }
+        for speed in [0.24, 4.01, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut req = params("hi");
+            req.speed = Some(speed);
+            assert!(validate(&req).is_err());
+        }
     }
 
     #[test]

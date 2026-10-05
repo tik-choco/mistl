@@ -1264,18 +1264,26 @@
   .settings-advanced > summary::-webkit-details-marker { display: none; }
   .settings-advanced > summary:hover { color: var(--accent); }
 
-  .toggle-switch { position: relative; display: inline-block; width: 36px; height: 20px; flex: none; }
-  .toggle-switch input { opacity: 0; width: 0; height: 0; position: absolute; }
+  /* Canonical mistai settings-switch geometry and tokens, shared by every panel. */
+  :root { --switch-track: #cdd3dc; --switch-on: #0d9488; --switch-focus-ring: rgba(13,148,136,.2); --switch-shadow: 0 1px 2px rgba(16,24,40,.06), 0 1px 3px rgba(16,24,40,.08); }
+  :root[data-theme="dark"] { --switch-track: #3a3f4a; --switch-on: #2dd4bf; --switch-focus-ring: rgba(45,212,191,.28); --switch-shadow: 0 1px 2px rgba(0,0,0,.4), 0 1px 3px rgba(0,0,0,.3); }
+  .switch-control { display: inline-flex; align-items: center; gap: 10px; cursor: pointer; font-size: 13px; }
+  .toggle-switch { position: relative; display: inline-block; width: 36px; height: 22px; flex: none; padding: 0; border: 0; border-radius: 999px; background: transparent; vertical-align: middle; --ease-out: cubic-bezier(.2,.8,.2,1); }
+  .toggle-switch input { opacity: 0; width: 100%; height: 100%; margin: 0; position: absolute; inset: 0; cursor: pointer; z-index: 1; }
   .toggle-switch .slider {
     position: absolute; inset: 0; cursor: pointer;
-    background: var(--panel-border); border-radius: 999px; transition: background var(--motion-fast) var(--ease-out);
+    background: var(--switch-track); border-radius: 999px; transition: background var(--motion-fast) var(--ease-out);
   }
   .toggle-switch .slider::before {
-    content: ""; position: absolute; width: 14px; height: 14px; left: 3px; top: 3px;
-    background: #fff; border-radius: 50%; transition: transform var(--motion-fast) var(--ease-out);
+    content: ""; position: absolute; width: 16px; height: 16px; left: 3px; top: 3px;
+    background: #fff; border-radius: 50%; box-shadow: var(--switch-shadow); transition: transform var(--motion-base) var(--ease-out);
   }
-  .toggle-switch input:checked + .slider { background: var(--accent); }
-  .toggle-switch input:checked + .slider::before { transform: translateX(16px); }
+  .toggle-switch input:checked + .slider, .toggle-switch[aria-checked="true"] .slider { background: var(--switch-on); }
+  .toggle-switch input:checked + .slider::before, .toggle-switch[aria-checked="true"] .slider::before { transform: translateX(14px); }
+  .toggle-switch input:focus-visible + .slider, .toggle-switch:focus-visible { outline: 2px solid var(--switch-on); outline-offset: 2px; box-shadow: 0 0 0 4px var(--switch-focus-ring); }
+  .toggle-switch input:disabled + .slider, .toggle-switch:disabled { opacity: .5; cursor: not-allowed; }
+  .toggle-switch input:disabled { cursor: not-allowed; }
+  button.toggle-switch:hover:not(:disabled), button.toggle-switch:active:not(:disabled) { background: transparent; transform: none; }
 
   .store-dropzone {
     display: flex;
@@ -1586,6 +1594,35 @@
   .topology-node-clickable:focus-visible .topology-node-box,
   .topology-node-clickable:hover .topology-node-box { stroke: var(--accent); stroke-width: 3; }
   #topology-card .topology-dot { stroke: var(--panel); stroke-width: 2; }
+
+  /* Match LlmSettings tokens while keeping the dashboard shell independent. */
+  #panel-ai, .ai-model-overlay, .ai-connection-overlay, .ai-status-popover, .ai-reasoning-menu, .ai-choice-menu {
+    --panel-border: #e0e4ea; --panel: #fff; --bg-alt: #f4f6f9;
+    --text: #263244; --text-dim: #64748b; --text-faint: #64748b;
+    --accent: #0d9488; --accent-dim: rgba(13,148,136,.1);
+    --ok: #15803d; --warn: #b45309; --err: #dc2626;
+    --shadow-sm: 0 1px 2px rgba(16,24,40,.06), 0 1px 3px rgba(16,24,40,.08);
+    --ease-out: cubic-bezier(.2,.8,.2,1);
+  }
+  :root[data-theme="dark"] :is(#panel-ai, .ai-model-overlay, .ai-connection-overlay, .ai-status-popover, .ai-reasoning-menu, .ai-choice-menu) {
+    --panel-border: #282c34; --panel: #14161b; --bg-alt: #1a1d23;
+    --text: #dfe3ea; --text-dim: #9aa1ad; --text-faint: #9aa1ad;
+    --accent: #2dd4bf; --accent-dim: rgba(45,212,191,.12);
+    --ok: #4ade80; --warn: #fbbf24; --err: #f87171;
+    --shadow-sm: 0 1px 2px rgba(0,0,0,.4), 0 1px 3px rgba(0,0,0,.3);
+  }
+  #panel-ai button { font-family: inherit; }
+  :is(#panel-ai, .ai-connection-overlay, .ai-model-overlay) :is(input[type=text], input[type=password], input[type=number], select, textarea) {
+    height: 40px; padding: 0 12px; border: 1px solid var(--panel-border); border-radius: 8px; background: var(--panel); color: var(--text); font: inherit; font-size: 13px;
+  }
+  :is(#panel-ai, .ai-connection-overlay, .ai-model-overlay) :is(input, select, textarea):focus {
+    outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--switch-focus-ring);
+  }
+  #panel-ai { gap: 18px; }
+  #panel-ai h2 { font-size: 18px; margin: 0; }
+  #panel-ai .ai-connection-header button { background: var(--panel); border-radius: 8px; padding: 9px 12px; font-size: 12px; font-weight: normal; }
+  #panel-ai .ai-model-trigger:focus-visible, :is(.ai-reasoning-menu, .ai-choice-menu) button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; box-shadow: 0 0 0 4px var(--switch-focus-ring); }
+
   /* Provider cards and the shared model picker. */
   .ai-provider-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
   .ai-provider-card { border: 1px solid var(--panel-border); border-radius: var(--radius); background: var(--panel); min-width: 0; }
@@ -1596,10 +1633,10 @@
   .ai-provider-summary:hover { background: transparent; }
   .ai-provider-summary .ai-chevron { flex: 0 0 auto; margin-left: 0; color: var(--text-dim); }
   .ai-provider-identity { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; }
-  .ai-provider-kind { flex-shrink: 0; font-size: 10px; font-weight: 700; border: 1px solid var(--panel-border); border-radius: 5px; padding: 2px 6px; color: var(--text-dim); }
+  .ai-provider-kind { flex-shrink: 0; font-size: 10px; font-weight: normal; border: 1px solid var(--panel-border); border-radius: 5px; padding: 3px 6px; color: var(--text-dim); }
   .ai-provider-name { flex: 0 1 auto; max-width: 160px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
   .ai-provider-address { flex: 1; min-width: 0; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
-  .ai-provider-status { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; max-width: min(35%, 220px); min-width: 0; padding: 5px 7px; border-radius: 20px; font-size: 11px; color: var(--text-dim); }
+  .ai-provider-status { flex: 0 0 auto; display: flex; align-items: center; gap: 7px; max-width: 40%; min-width: 0; min-height: 28px; padding: 5px 8px; border: 1px solid var(--panel-border); background: var(--bg-alt); border-radius: 999px; font-size: 11px; color: var(--text-dim); }
   .ai-provider-status-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .ai-provider-status-dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: var(--text-faint); }
   .ai-provider-status[data-connection-state=connected] .ai-provider-status-dot { background: var(--ok); }
@@ -1616,11 +1653,10 @@
     .ai-provider-identity { display: grid; gap: 3px; }
     .ai-provider-name { max-width: none; }
     .ai-provider-address { display: block; font-size: 11px; }
-    .ai-provider-status { width: 32px; height: 32px; max-width: none; padding: 0; justify-content: center; border-color: transparent; background: transparent; }
+    .ai-provider-status { width: 28px; height: 32px; max-width: none; padding: 0; justify-content: center; border-color: transparent; background: transparent; }
     .ai-provider-status-text { display: none; }
-    .ai-provider-status-dot { width: 10px; height: 10px; }
   }
-  .ai-connection-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+  .ai-connection-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; font-size: 13px; }
   .ai-connection-header .desc { margin: 0; }
   .ai-connection-header button { flex-shrink: 0; }
   .ai-connection-overlay { position: fixed; inset: 0; z-index: 1100; background: transparent; }
@@ -1641,8 +1677,6 @@
   .ai-connection-error { color: var(--err); font-size: 12px; }
   .ai-connection-popup button:active:not(:disabled) { transform: scale(.98); }
   @media (max-width: 519px) {
-    .ai-connection-header { align-items: flex-start; flex-direction: column; }
-    .ai-connection-header button { align-self: flex-end; }
     .ai-connection-overlay { background: rgba(0, 0, 0, .28); }
     .ai-connection-popup { top: 50% !important; left: 50% !important; translate: -50% -50%; }
   }
@@ -1670,54 +1704,68 @@
   .ai-model-search { width: 100%; min-width: 0; flex-shrink: 0; border: 1px solid var(--panel-border); background: var(--bg-alt); color: var(--text); border-radius: 6px; padding: 9px 10px; font: inherit; font-size: 13px; }
   .ai-model-search:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
   .ai-model-picker { min-width: 0; width: 100%; }
-  .ai-model-trigger { text-align: left; width: 100%; overflow-wrap: anywhere; padding: 10px 12px; }
-  .ai-model-trigger::after { content: ' \25be'; color: var(--text-dim); }
+  .ai-model-trigger { display: flex; align-items: center; justify-content: space-between; gap: 10px; text-align: left; width: 100%; height: 40px; padding: 10px 12px; border-radius: 8px; background: var(--panel); font-size: 13px; font-weight: normal; }
+  .ai-model-trigger-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Same as mistai: the source label gives up its width long before the model name does. */
+  .ai-model-trigger-provider { flex: 0 100 auto; min-width: 0; max-width: 40%; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ai-model-trigger::after { content: ""; width: 7px; height: 7px; flex: none; margin: 0 2px 3px 0; border-right: 1.5px solid var(--text-dim); border-bottom: 1.5px solid var(--text-dim); transform: rotate(45deg); }
+  .ai-model-trigger[aria-expanded="true"]::after { transform: rotate(225deg); }
   .ai-model-warning { color: var(--warn); font-size: 12px; margin-top: 4px; }
-  .ai-model-dialog { width: min(640px, calc(100vw - 32px)); max-width: 640px; height: min(420px, calc(100dvh - 32px)); max-height: calc(100dvh - 32px); display: flex; flex-direction: column; gap: 12px; padding: 20px; }
-  .ai-model-dialog .modal-header { flex-shrink: 0; }
+  .ai-model-overlay { display: block; background: transparent; }
+  .ai-model-dialog { width: min(640px, calc(100vw - 32px)); max-width: 640px; height: min(420px, calc(100dvh - 32px)); max-height: calc(100dvh - 32px); position: fixed; display: flex; flex-direction: column; gap: 10px; padding: 12px; border-radius: 8px; }
+  /* The picker is labelled by the dialog; its keyboard close remains available. */
+  .ai-model-dialog .modal-header { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .ai-model-dialog .modal-header:focus-within { width: auto; height: auto; clip-path: none; top: 12px; right: 12px; z-index: 2; background: var(--panel); }
+  .ai-model-dialog .modal-header > span { display: none; }
+  .ai-model-dialog .ai-model-search { height: 40px; background: var(--panel); border-radius: 8px; }
   .ai-model-dialog .modal-close { margin-left: auto; }
   .ai-model-results { overflow-y: auto; min-height: 0; overscroll-behavior: contain; }
-  .ai-model-panes { display: grid; grid-template-columns: 200px minmax(0, 1fr); flex: 1; min-height: 0; gap: 12px; }
+  .ai-model-panes { display: grid; grid-template-columns: 200px minmax(0, 1fr); flex: 1; min-height: 0; gap: 10px; }
   .ai-model-sources { overflow-y: auto; min-height: 0; border-right: 1px solid var(--panel-border); padding-right: 8px; overscroll-behavior: contain; }
-  .ai-model-source { display: flex; flex-direction: column; gap: 3px; width: 100%; min-width: 0; text-align: left; padding: 9px 8px; border: 0; border-radius: 5px; background: transparent; }
+  .ai-model-source { display: flex; flex-direction: column; gap: 6px; width: 100%; min-width: 0; text-align: left; padding: 10px; border: 0; border-radius: 8px; background: transparent; font-weight: normal; line-height: normal; }
+  .ai-model-source:focus-visible { outline: none; box-shadow: inset 0 0 0 1px var(--accent); }
   .ai-model-source-name { display: block; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
   .ai-model-source-detail { color: var(--text-dim); font-size: 11px; }
+  .ai-model-source-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; color: var(--text-dim); font-size: 10px; }
+  .ai-model-source-meta .ai-provider-kind { font-size: 10px; }
+  .ai-model-check { display: flex; width: 14px; flex: none; }
   .ai-model-source:hover, .ai-model-source[aria-selected="true"] { background: var(--accent-dim); }
   .ai-model-source[data-empty="true"] { opacity: .45; }
   .ai-model-option .ai-model-label { display: flex; flex-direction: column; gap: 3px; }
   .ai-model-option .ai-model-provider { color: var(--text-dim); font-size: 11px; }
   @media (max-width: 519px) {
-    .ai-model-dialog { padding: 14px; }
     .ai-model-panes { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); gap: 8px; }
-    .ai-model-sources { display: flex; overflow-x: auto; overflow-y: hidden; border-right: 0; border-bottom: 1px solid var(--panel-border); padding: 0 0 8px; gap: 4px; }
-    .ai-model-source { flex: 0 0 auto; width: auto; max-width: 180px; border: 1px solid var(--panel-border); }
+    .ai-model-sources { display: flex; overflow-x: auto; overflow-y: hidden; border-right: 0; border-bottom: 1px solid var(--panel-border); padding: 0 0 8px; gap: 6px; }
+    .ai-model-source { flex: 0 0 auto; width: 140px; padding: 8px; }
+    .ai-model-source:not(:has(.ai-provider-kind)) { width: auto; min-width: 64px; }
   }
-  .ai-model-group { position: sticky; top: 0; background: var(--panel); padding: 8px; font-size: 11px; color: var(--text-dim); font-weight: 700; border-bottom: 1px solid var(--panel-border); z-index: 1; }
+  .ai-model-group { position: sticky; top: 0; background: var(--bg-alt); padding: 9px 8px; font-size: 11px; color: var(--text-dim); font-weight: 600; border-radius: 4px; z-index: 1; }
   .ai-provider-count[data-state="ok"] { color: var(--ok); }
   .ai-provider-count[data-state="error"] { color: var(--err); }
   .ai-provider-count { overflow-wrap: anywhere; }
-  .ai-model-option { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; background: transparent; border: 0; padding: 9px 8px; border-radius: 4px; overflow-wrap: anywhere; cursor: pointer; font-size: 13px; }
+  .ai-model-option { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; background: transparent; border: 0; padding: 9px 10px; border-radius: 4px; overflow-wrap: anywhere; cursor: pointer; font-size: 13px; font-weight: normal; }
   .ai-model-option span { min-width: 0; }
   .ai-model-option input { flex: 0 0 auto; }
   .ai-model-option:hover, .ai-model-option.active { background: var(--accent-dim); }
-  .toggle-switch input:focus-visible + .slider { outline: 2px solid var(--accent); outline-offset: 3px; }
+  .ai-model-option[aria-selected="true"] { font-weight: 600; }
   .ai-model-cached { opacity: .55; }
   .ai-model-option:disabled { opacity: .7; cursor: default; }
   .ai-model-mark { margin-left: auto; flex-shrink: 0; color: var(--text-dim); font-size: 11px; }
-  .ai-sharing-section { display: flex; flex-direction: column; gap: 12px; }
-  .ai-sharing-rooms, .ai-sharing-chips { display: flex; flex-wrap: wrap; gap: 6px; }
-  .ai-sharing-room { position: relative; display: flex; min-width: 0; max-width: 100%; padding-right: 34px; border: 1px solid var(--panel-border); border-radius: var(--radius); transition: background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out); }
+  .ai-sharing-section { display: flex; flex-direction: column; gap: 14px; }
+  .ai-sharing-rooms, .ai-sharing-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .ai-sharing-room { position: relative; display: flex; min-width: 0; max-width: 100%; padding-right: 32px; border: 1px solid var(--panel-border); border-radius: 8px; transition: background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out); }
   .ai-external-registrations .ai-connection-header { padding: 10px; flex-wrap: wrap; }
   .ai-external-registrations .ai-provider-head { padding: 8px 12px; flex-wrap: wrap; }
   .ai-external-registrations .ai-provider-address { flex: 1; min-width: 0; }
   .ai-external-registrations .desc { padding: 4px 12px; overflow-wrap: anywhere; }
   .ai-external-registrations .ai-provider-name { max-width: 100%; }
   .ai-sharing-room[data-providing="true"] { border-color: var(--accent); background: var(--accent-dim); }
-  .ai-sharing-room > .ai-room-chip { min-width: 0; border: 0; background: transparent; }
+  .ai-sharing-room > .ai-room-chip { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; padding: 8px 12px; border: 0; background: transparent; }
   .ai-sharing-room > .ai-room-copy { position: absolute; right: 4px; top: 50%; margin-top: -14px; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 6px; background: transparent; flex-shrink: 0; }
   .ai-subtab-content { min-width: 0; }
-  #panel-ai .subtabs { position: relative; isolation: isolate; }
-  #panel-ai .subtabs button { position: relative; background: transparent; box-shadow: none; transition: color var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out); }
+  #panel-ai .subtabs { position: relative; isolation: isolate; display: flex; width: 100%; gap: 0; padding: 4px; border: 0; border-radius: 8px; background: var(--bg-alt); margin-bottom: 0; }
+  #panel-ai .subtabs button { flex: 1; padding: 10px; border: 0; color: var(--text-dim); font-size: 13px; font-weight: normal; position: relative; background: transparent; box-shadow: none; transition: color var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out); }
+  #panel-ai .subtabs button.active { color: var(--text); }
   .ai-tab-highlight { position: absolute; top: 0; left: 0; z-index: -1; border-radius: 7px; background: var(--panel); box-shadow: var(--shadow-sm); pointer-events: none; }
   .ai-chevron { display: inline-block; width: 7px; height: 7px; margin: 0 2px 2px 9px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(45deg); transition: transform var(--motion-base) var(--ease-out); }
   [aria-expanded="true"] > .ai-chevron { transform: rotate(225deg); }
@@ -1740,23 +1788,50 @@
   }
   #panel-ai .subtab-page.active { animation: none; }
   #panel-ai.active > *:nth-child(-n+4) { animation: none; }
-  .ai-room-chip { text-align: left; overflow-wrap: anywhere; }
+  .ai-room-chip { text-align: left; overflow-wrap: anywhere; padding: 8px 12px; border-radius: 8px; background: var(--panel); font-size: 12px; font-weight: normal; }
   .ai-room-chip[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-dim); }
-  .ai-room-chip .ai-room-status { display: block; font-size: 11px; font-weight: normal; color: var(--text-dim); }
-  .ai-sharing-results { max-height: 480px; overflow-y: auto; overscroll-behavior: contain; }
-  .ai-sharing-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 8px; border-bottom: 1px solid var(--panel-border); }
+  .ai-room-chip .ai-room-status { display: inline-flex; align-items: center; gap: 8px; font-size: 10px; font-weight: normal; color: var(--text-dim); }
+  .ai-room-chip .ai-room-status::before { content: ""; width: 8px; height: 8px; border: 1px solid currentColor; border-radius: 50%; flex: none; }
+  .ai-sharing-room[data-providing="true"] .ai-room-status::before { background: var(--ok); border-color: var(--ok); }
+  .ai-sharing-rooms > [data-add-room] { border-style: dashed; border-radius: 8px; padding: 8px 12px; background: var(--panel); font-size: 12px; font-weight: normal; }
+  .ai-sharing-section > .ai-model-search { height: 42px; padding: 10px 12px; background: var(--panel); border-radius: 8px; }
+  .ai-sharing-results { max-height: 420px; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--panel-border); border-radius: 8px; }
+  .ai-sharing-group-heading { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 12px; background: var(--bg-alt); font-size: 13px; }
+  .ai-sharing-group-heading .ai-provider-count { margin-left: auto; font-size: 12px; font-weight: normal; }
+  .ai-sharing-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-top: 1px solid var(--panel-border); font-size: 13px; }
   .ai-sharing-model { min-width: 0; overflow-wrap: anywhere; }
-  .ai-sharing-chips { flex-shrink: 0; max-width: 60%; justify-content: flex-end; }
-  @media (max-width: 560px) {
+  .ai-sharing-chips { flex-shrink: 0; max-width: 65%; justify-content: flex-end; }
+  @media (max-width: 600px) {
     .ai-connection-popup .row:not(.ai-connection-footer) { flex-direction: column; align-items: stretch; }
     .ai-connection-popup .row:not(.ai-connection-footer) > button { align-self: flex-start; }
-    .ai-sharing-row { align-items: flex-start; flex-direction: column; gap: 6px; }
+    .ai-sharing-row { align-items: flex-start; flex-direction: column; gap: 8px; }
     .ai-sharing-chips { max-width: 100%; justify-content: flex-start; }
   }
-  .ai-task-settings { max-width: 620px; }
-  .ai-task-row { margin-bottom: 20px; }
-  .ai-task-row > input { width: 100%; }
-  .ai-task-row > .settings-label { display: block; margin: 10px 0 6px; }
+  .ai-task-settings { display: grid; gap: 18px; padding: 4px 0 12px; }
+  .ai-task-row { display: grid; grid-template-columns: 130px minmax(0, 1fr); align-items: start; gap: 12px; }
+  .ai-task-row.with-effort { grid-template-columns: 130px minmax(0, 1fr) 220px; }
+  .ai-task-row > input { width: 100%; min-width: 0; height: 40px; font-size: 13px; border-radius: 8px; background: var(--panel); }
+  .ai-task-row > .settings-label { margin: 0; padding-top: 10px; font-size: 13px; font-weight: normal; color: var(--text); }
+  .ai-reasoning-trigger { width: 220px; gap: 8px; }
+  .ai-choice-trigger::after, .ai-reasoning-trigger::after { display: none; }
+  .ai-picker-chevron { flex: none; color: var(--text-dim); transition: transform var(--motion-base) var(--ease-out); }
+  [aria-expanded="true"] > .ai-picker-chevron { transform: rotate(180deg); }
+  .ai-reasoning-trigger > span:first-child { flex: 1; white-space: nowrap; }
+  .ai-reasoning-level { display: flex; align-items: center; gap: 2px; flex: none; }
+  .ai-reasoning-level i { width: 3px; height: 10px; border-radius: 2px; background: var(--switch-track); }
+  .ai-reasoning-level i.filled { background: var(--accent); }
+  .ai-reasoning-menu, .ai-choice-menu { position: fixed; z-index: 1200; width: 220px; max-width: calc(100vw - 32px); padding: 6px; border: 1px solid var(--panel-border); border-radius: 8px; background: var(--panel); box-shadow: 0 18px 42px rgba(15,23,42,.16); overflow-y: auto; overscroll-behavior: contain; }
+  .ai-choice-picker { min-width: 0; }
+  .ai-reasoning-menu:focus, .ai-choice-menu:focus { outline: none; }
+  .ai-reasoning-option { min-height: 36px; }
+  .ai-reasoning-option .ai-reasoning-check { display: flex; width: 14px; flex: none; }
+  .ai-reasoning-option .ai-reasoning-text { flex: 1; }
+  .ai-reasoning-option[data-active="true"] { background: var(--accent-dim); }
+  .ai-reasoning-option[aria-selected="true"] { font-weight: 600; }
+  @media (max-width: 600px) {
+    .ai-task-row, .ai-task-row.with-effort { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+    .ai-task-row > .settings-label { padding-top: 0; }
+  }
   .bot-form-row-transforms .field { min-width: min(100%, 230px); }
   .bot-form-row-transforms .ai-model-picker { flex: 0 1 auto; }
 </style>
@@ -1786,7 +1861,7 @@
   <div id="build-banner" hidden style="padding:8px 16px;background:#513d05;color:#fff1b8;font:600 13px/1.5 system-ui;overflow-wrap:anywhere" role="status"></div>
   <header>
     <h1>MISTL</h1>
-    <button type="button" id="network-toggle" disabled aria-pressed="false">外部接続: …</button>
+    <span class="switch-control"><span id="network-toggle-label">外部接続: …</span><button type="button" id="network-toggle" class="toggle-switch" role="switch" disabled aria-checked="false" aria-pressed="false" aria-labelledby="network-toggle-label"><span class="slider" aria-hidden="true"></span></button></span>
     <span id="daemon-pill" class="pill"><span class="dot"></span><span data-i18n="daemon.connecting">connecting&hellip;</span></span>
     <div class="identity" id="identity-summary"></div>
     <button type="button" class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">
@@ -1973,7 +2048,7 @@
           </div>
         </div>
         <div class="ai-role-card-body"><div id="ai-serve-callout"></div></div>
-        <div class="ai-role-card-foot"><button id="btn-ai-serve-toggle" class="primary" data-i18n="ai.startServe">Start API server</button></div>
+        <div class="ai-role-card-foot"><span class="switch-control"><span id="ai-serve-toggle-label" data-i18n="ai.net.serveTitle">Local API server</span><button id="btn-ai-serve-toggle" class="toggle-switch" role="switch" aria-checked="false" aria-labelledby="ai-serve-toggle-label"><span class="slider" aria-hidden="true"></span></button></span></div>
       </div>
     </div>
     <div class="subtab-page" data-subtab="sharing">
@@ -2181,7 +2256,7 @@
         <label for="scheduler-command" data-i18n="sched.form.commandLabel">Command</label>
         <input type="text" id="scheduler-command" autocomplete="off">
       </div>
-      <label class="checkline"><input type="checkbox" id="scheduler-enabled-input" checked> <span data-i18n="sched.form.enabledLabel">Enabled</span></label>
+      <label class="switch-control"><span data-i18n="sched.form.enabledLabel">Enabled</span> <span class="toggle-switch"><input type="checkbox" role="switch" id="scheduler-enabled-input" checked><span class="slider" aria-hidden="true"></span></span></label>
       <button type="submit" class="primary" id="btn-scheduler-save" data-i18n="sched.form.addBtn">Add job</button>
       <button type="button" id="btn-scheduler-cancel-edit" hidden data-i18n="sched.form.cancelBtn">Cancel edit</button>
     </form>
@@ -2322,7 +2397,7 @@
           <input type="text" id="bot-schedule" data-i18n-placeholder="bot.form.schedulePlaceholder" placeholder="@hourly" autocomplete="off" hidden>
         </div>
         <div class="field bot-form-checkline-field">
-          <label class="checkline"><input type="checkbox" id="bot-enabled-input" checked> <span data-i18n="bot.form.enabledLabel">Enabled</span></label>
+          <label class="switch-control"><span data-i18n="bot.form.enabledLabel">Enabled</span> <span class="toggle-switch"><input type="checkbox" role="switch" id="bot-enabled-input" checked><span class="slider" aria-hidden="true"></span></span></label>
         </div>
       </div>
 
@@ -2360,13 +2435,13 @@
 
       <div class="bot-form-row bot-form-row-transforms bot-form-row-collapsible">
         <div class="field bot-group" data-bot-group="transform-summarize">
-          <label class="checkline bot-toggle" hidden><input type="checkbox" id="bot-summarize-enabled"> <span data-i18n="bot.form.summarizeLabel">Summarize</span></label>
+          <label class="switch-control bot-toggle" hidden><span data-i18n="bot.form.summarizeLabel">Summarize</span> <span class="toggle-switch"><input type="checkbox" role="switch" id="bot-summarize-enabled"><span class="slider" aria-hidden="true"></span></span></label>
           <label class="bot-group-plain-label" data-i18n="bot.form.summarizeLabel">Summarize</label>
           <div id="bot-summarize-model"></div>
         </div>
 
         <div class="field bot-group" data-bot-group="transform-translate" hidden>
-          <label class="checkline bot-toggle" hidden><input type="checkbox" id="bot-translate-enabled"> <span data-i18n="bot.form.translateLabel">Translate</span></label>
+          <label class="switch-control bot-toggle" hidden><span data-i18n="bot.form.translateLabel">Translate</span> <span class="toggle-switch"><input type="checkbox" role="switch" id="bot-translate-enabled"><span class="slider" aria-hidden="true"></span></span></label>
           <label class="bot-group-plain-label" data-i18n="bot.form.translateLabel">Translate</label>
           <div style="display: flex; gap: 8px; flex-wrap: wrap;">
             <div id="bot-translate-model"></div>
@@ -2385,7 +2460,7 @@
         </div>
 
         <div class="field bot-group" data-bot-group="transform-tts" hidden>
-          <label class="checkline bot-toggle" hidden><input type="checkbox" id="bot-tts-enabled"> <span data-i18n="bot.form.ttsLabel">Text-to-speech</span></label>
+          <label class="switch-control bot-toggle" hidden><span data-i18n="bot.form.ttsLabel">Text-to-speech</span> <span class="toggle-switch"><input type="checkbox" role="switch" id="bot-tts-enabled"><span class="slider" aria-hidden="true"></span></span></label>
           <label class="bot-group-plain-label" data-i18n="bot.form.ttsLabel">Text-to-speech</label>
           <div style="display: flex; gap: 8px; flex-wrap: wrap;">
             <div id="bot-tts-model"></div>
@@ -2406,21 +2481,21 @@
 
       <div class="bot-form-row bot-form-row-sinks bot-form-row-collapsible">
         <div class="field bot-group" data-bot-group="sink-chat-post">
-          <label class="checkline bot-toggle" hidden><input type="checkbox" id="bot-sink-chat-post-enabled"> <span data-i18n="bot.form.sinkChatRoomLabel">Chat room</span></label>
+          <label class="switch-control bot-toggle" hidden><span data-i18n="bot.form.sinkChatRoomLabel">Chat room</span> <span class="toggle-switch"><input type="checkbox" role="switch" id="bot-sink-chat-post-enabled"><span class="slider" aria-hidden="true"></span></span></label>
           <label class="bot-group-plain-label" data-i18n="bot.form.sinkChatRoomLabel">Chat room</label>
           <select id="bot-sink-chat-room-select"></select>
           <input type="text" id="bot-sink-chat-room-custom" autocomplete="off" hidden>
         </div>
 
         <div class="field bot-group" data-bot-group="sink-article-publish" hidden>
-          <label class="checkline bot-toggle" hidden><input type="checkbox" id="bot-sink-article-publish-enabled"> <span data-i18n="bot.form.sinkArticlePublishLabel">Publish as article</span></label>
+          <label class="switch-control bot-toggle" hidden><span data-i18n="bot.form.sinkArticlePublishLabel">Publish as article</span> <span class="toggle-switch"><input type="checkbox" role="switch" id="bot-sink-article-publish-enabled"><span class="slider" aria-hidden="true"></span></span></label>
           <label class="bot-group-plain-label" data-i18n="bot.form.sinkArticlePublishLabel">Publish as article</label>
           <select id="bot-sink-article-room-select"></select>
           <input type="text" id="bot-sink-article-room-custom" autocomplete="off" hidden>
         </div>
 
         <div class="field bot-group" data-bot-group="sink-webhook" hidden>
-          <label class="checkline bot-toggle" hidden><input type="checkbox" id="bot-sink-webhook-enabled"> <span data-i18n="bot.form.sinkWebhookLabel">Webhook</span></label>
+          <label class="switch-control bot-toggle" hidden><span data-i18n="bot.form.sinkWebhookLabel">Webhook</span> <span class="toggle-switch"><input type="checkbox" role="switch" id="bot-sink-webhook-enabled"><span class="slider" aria-hidden="true"></span></span></label>
           <label class="bot-group-plain-label" data-i18n="bot.form.sinkWebhookLabel">Webhook</label>
           <label for="bot-sink-webhook-url" class="muted" style="font-size: 10px;" data-i18n="bot.form.sinkWebhookUrlLabel">Webhook URL</label>
           <input type="text" id="bot-sink-webhook-url" data-i18n-placeholder="bot.form.sinkWebhookUrlPlaceholder" placeholder="https://example.com/webhook" autocomplete="off">
@@ -2430,11 +2505,11 @@
             <option value="PUT">PUT</option>
             <option value="PATCH">PATCH</option>
           </select>
-          <label class="checkline"><input type="checkbox" id="bot-sink-webhook-include-audio"> <span data-i18n="bot.form.sinkWebhookIncludeAudioLabel">Include audio</span></label>
+          <label class="switch-control"><span data-i18n="bot.form.sinkWebhookIncludeAudioLabel">Include audio</span> <span class="toggle-switch"><input type="checkbox" role="switch" id="bot-sink-webhook-include-audio"><span class="slider" aria-hidden="true"></span></span></label>
           <label for="bot-sink-webhook-max-audio-mib" class="muted" style="font-size: 10px;" data-i18n="bot.form.sinkWebhookMaxAudioLabel">Max audio size (MiB)</label>
           <input type="text" id="bot-sink-webhook-max-audio-mib" data-i18n-placeholder="bot.form.sinkWebhookMaxAudioPlaceholder" inputmode="decimal" autocomplete="off">
-          <label class="checkline"><input type="checkbox" id="bot-sink-webhook-sign" checked> <span data-i18n="bot.form.sinkWebhookSignLabel">Sign payload</span></label>
-          <label class="checkline"><input type="checkbox" id="bot-sink-webhook-include-body"> <span data-i18n="bot.form.sinkWebhookIncludeBodyLabel">Include article body</span></label>
+          <label class="switch-control"><span data-i18n="bot.form.sinkWebhookSignLabel">Sign payload</span> <span class="toggle-switch"><input type="checkbox" role="switch" id="bot-sink-webhook-sign" checked><span class="slider" aria-hidden="true"></span></span></label>
+          <label class="switch-control"><span data-i18n="bot.form.sinkWebhookIncludeBodyLabel">Include article body</span> <span class="toggle-switch"><input type="checkbox" role="switch" id="bot-sink-webhook-include-body"><span class="slider" aria-hidden="true"></span></span></label>
           <label class="muted" style="font-size: 10px;" data-i18n="bot.form.sinkWebhookHeadersLabel">Custom headers</label>
           <div class="bot-webhook-headers" id="bot-sink-webhook-headers"></div>
           <button type="button" id="bot-sink-webhook-add-header" data-i18n="bot.form.sinkWebhookAddHeaderBtn">Add header</button>
@@ -2651,7 +2726,7 @@
       <div class="flow-card">
         <h3 data-i18n="update.autostartTitle">Start at login</h3>
         <p data-i18n="update.autostartDesc">Launch the mistl daemon automatically when you sign in.</p>
-        <label class="checkline"><input type="checkbox" id="chk-autostart"> <span data-i18n="update.autostartLabel">Start mistl at login</span></label>
+        <label class="switch-control"><span data-i18n="update.autostartLabel">Start mistl at login</span> <span class="toggle-switch"><input type="checkbox" role="switch" id="chk-autostart"><span class="slider" aria-hidden="true"></span></span></label>
       </div>
     </div>
     <details class="settings-drawer" id="settings-drawer-update">
@@ -2671,7 +2746,7 @@
     <div class="flow-card" id="dev-mode-card">
       <h3 data-i18n="settings.developerTitle">Developer mode</h3>
       <p data-i18n="settings.developerDesc">Shows this daemon's detailed debug logs in real time, docked at the bottom of the dashboard.</p>
-      <label class="checkline"><input type="checkbox" id="chk-dev-mode"> <span data-i18n="settings.developerLabel">Enable developer mode</span></label>
+      <label class="switch-control"><span data-i18n="settings.developerLabel">Enable developer mode</span> <span class="toggle-switch"><input type="checkbox" role="switch" id="chk-dev-mode"><span class="slider" aria-hidden="true"></span></span></label>
     </div>
     <p class="muted" style="font-size: 12px;" data-i18n="settings.movedNote">Stream, AI, tc-chat relay, Storage and Identity settings now live inside their own tabs.</p>
     <hr class="sep">
@@ -2772,7 +2847,7 @@
       "ai.provider.keyHostChange": "Re-enter the API key to change to a different host.",
       "ai.provider.models": "{count} cached models",
       "ai.provider.fetching": "Fetching models\u2026",
-      "ai.provider.ok": "Connected \u00b7 {count} models",
+      "ai.provider.ok": "OK \u00b7 {count} models",
       "ai.provider.error": "Model list unavailable",
       "ai.room.id": "Room ID",
       "ai.room.shared": "Shared HTTP models",
@@ -2781,8 +2856,21 @@
       "ai.room.idle": "Not connected",
       "ai.room.peers": "{count} peers",
       "ai.task.default_ref": "Default model",
-      "ai.task.tts": "Text-to-speech",
-      "ai.task.stt": "Speech-to-text",
+      "ai.task.effort": "Reasoning effort",
+      "ai.reasoning.label": "Reasoning",
+      "ai.effort.unset": "Unset",
+      "ai.effort.none": "None",
+      "ai.effort.minimal": "Minimal",
+      "ai.effort.low": "Low",
+      "ai.effort.medium": "Medium",
+      "ai.effort.high": "High",
+      "ai.effort.xhigh": "Extra high",
+      "ai.effort.max": "Max",
+      "ai.task.ttsSpeed": "TTS speed",
+      "ai.task.ttsVoice": "TTS voice",
+      "ai.task.providerDefault": "Provider default (not specified)",
+      "ai.task.tts": "TTS (text-to-speech)",
+      "ai.task.stt": "STT (speech-to-text)",
       "ai.model.select": "Select a model",
       "ai.model.search": "Search models and connections",
       "ai.model.disabled": "Connection is disabled",
@@ -2793,7 +2881,7 @@
       "ai.model.all": "All",
       "ai.model.live": "Live",
       "ai.model.cache": "Cached list",
-      "ai.model.browser": "Browser default",
+      "ai.model.browser": "Browser built-in (not set)",
       "ai.model.useDefault": "Use default model",
       "ai.model.roomAuto": "Let {provider} choose",
       "ai.model.empty": "No matching models",
@@ -3547,7 +3635,7 @@
       "ai.provider.keyHostChange": "別のホストに変更するには API key を入力し直してください",
       "ai.provider.models": "キャッシュ {count}モデル",
       "ai.provider.fetching": "モデルを取得中\u2026",
-      "ai.provider.ok": "接続成功 \u00b7 {count}モデル",
+      "ai.provider.ok": "成功 \u00b7 {count} 件",
       "ai.provider.error": "モデル一覧の取得失敗",
       "ai.room.id": "ルームID",
       "ai.room.shared": "共有するHTTPモデル",
@@ -3556,8 +3644,21 @@
       "ai.room.idle": "未接続",
       "ai.room.peers": "ピア {count}",
       "ai.task.default_ref": "既定モデル",
-      "ai.task.tts": "音声合成",
-      "ai.task.stt": "音声認識",
+      "ai.task.effort": "推論の強さ",
+      "ai.reasoning.label": "推論",
+      "ai.effort.unset": "未設定",
+      "ai.effort.none": "なし",
+      "ai.effort.minimal": "最小",
+      "ai.effort.low": "低",
+      "ai.effort.medium": "中",
+      "ai.effort.high": "高",
+      "ai.effort.xhigh": "より高",
+      "ai.effort.max": "最大",
+      "ai.task.ttsSpeed": "TTS 速度",
+      "ai.task.ttsVoice": "TTS ボイス",
+      "ai.task.providerDefault": "提供側の既定（未指定）",
+      "ai.task.tts": "TTS（音声合成）",
+      "ai.task.stt": "STT（音声認識）",
       "ai.model.select": "モデルを選択",
       "ai.model.search": "モデル・接続先を検索",
       "ai.model.disabled": "接続先が無効です",
@@ -3568,7 +3669,7 @@
       "ai.model.all": "すべて",
       "ai.model.live": "最新",
       "ai.model.cache": "前回の一覧",
-      "ai.model.browser": "ブラウザ標準",
+      "ai.model.browser": "ブラウザ標準（未設定）",
       "ai.model.useDefault": "既定モデルを使う",
       "ai.model.roomAuto": "{provider}におまかせ",
       "ai.model.empty": "一致するモデルがありません",
@@ -4286,7 +4387,7 @@
       "ai.model.empty": "没有匹配的模型",
       "ai.model.roomAuto": "由{provider}选择",
       "ai.model.useDefault": "使用默认模型",
-      "ai.model.browser": "浏览器默认",
+      "ai.model.browser": "浏览器内置（未设置）",
       "ai.model.cache": "缓存列表",
       "ai.model.live": "最新",
       "ai.model.assigned": "已分配",
@@ -4294,9 +4395,22 @@
       "ai.model.disabled": "连接已禁用",
       "ai.model.search": "搜索模型和连接",
       "ai.model.select": "选择模型",
-      "ai.task.stt": "语音识别",
-      "ai.task.tts": "语音合成",
+      "ai.task.stt": "STT（语音识别）",
+      "ai.task.tts": "TTS（文字转语音）",
       "ai.task.default_ref": "默认模型",
+      "ai.task.effort": "推理强度",
+      "ai.reasoning.label": "推理",
+      "ai.effort.unset": "未设置",
+      "ai.effort.none": "无",
+      "ai.effort.minimal": "最低",
+      "ai.effort.low": "低",
+      "ai.effort.medium": "中",
+      "ai.effort.high": "高",
+      "ai.effort.xhigh": "更高",
+      "ai.effort.max": "最高",
+      "ai.task.ttsSpeed": "TTS 语速",
+      "ai.task.ttsVoice": "TTS 音色",
+      "ai.task.providerDefault": "提供方默认（未指定）",
       "ai.room.peers": "{count}个节点",
       "ai.room.idle": "未连接",
       "ai.room.joined": "已连接",
@@ -4304,7 +4418,7 @@
       "ai.room.shared": "共享的HTTP模型",
       "ai.room.id": "房间ID",
       "ai.provider.error": "无法获取模型列表",
-      "ai.provider.ok": "已连接 · {count}个模型",
+      "ai.provider.ok": "成功 · {count} 个模型",
       "ai.provider.fetching": "正在获取模型…",
       "ai.provider.models": "缓存{count}个模型",
       "ai.provider.enabled": "启用{provider}",
@@ -5316,10 +5430,11 @@
     var network = state && state.daemon && state.daemon.network;
     if (!network) { button.disabled = true; return; }
     var mode = network.state === "restarting" ? (ja ? "切替中…" : "Switching…") : network.state.toUpperCase();
-    button.textContent = (ja ? "外部接続: " : "External connections: ") + mode +
+    document.getElementById("network-toggle-label").textContent = (ja ? "外部接続: " : "External connections: ") + mode +
       (network.saved ? "" : (ja ? "（未保存）" : " (not saved)"));
     button.disabled = network.state === "restarting";
     button.setAttribute("aria-pressed", network.enabled ? "true" : "false");
+    button.setAttribute("aria-checked", network.enabled ? "true" : "false");
     button.title = network.error || (ja ? "外部の端末との接続を切り替えます。設定は自動保存されます。" :
       "Control connections to other devices. Your choice is saved automatically.");
   }
@@ -7213,10 +7328,8 @@
 
   function setAiToggleButton(btn, active, startKey, stopKey) {
     var key = active ? stopKey : startKey;
-    btn.setAttribute("data-i18n", key);
-    btn.textContent = t(key);
-    btn.classList.toggle("primary", !active);
-    btn.classList.toggle("danger", active);
+    btn.setAttribute("aria-checked", active ? "true" : "false");
+    btn.title = t(key);
   }
 
   function renderAiToggleButtons(a) {
@@ -8040,8 +8153,9 @@
 
       var enabledCell = el("td", {});
       var toggleLabel = el("label", { class: "toggle-switch" });
-      var toggleInput = el("input", { type: "checkbox" });
+      var toggleInput = el("input", { type: "checkbox", role: "switch" });
       toggleInput.checked = !!job.enabled;
+      toggleInput.setAttribute("aria-label", t("sched.form.enabledLabel") + ": " + job.name);
       toggleLabel.appendChild(toggleInput);
       toggleLabel.appendChild(el("span", { class: "slider" }));
       toggleInput.addEventListener("change", function () {
@@ -8265,8 +8379,9 @@
          optimistic-update-with-rollback pattern as the scheduler table. */
       var enabledCell = el("td", {});
       var toggleLabel = el("label", { class: "toggle-switch" });
-      var toggleInput = el("input", { type: "checkbox" });
+      var toggleInput = el("input", { type: "checkbox", role: "switch" });
       toggleInput.checked = !!p.enabled;
+      toggleInput.setAttribute("aria-label", t("bot.form.enabledLabel") + ": " + p.name);
       toggleLabel.appendChild(toggleInput);
       toggleLabel.appendChild(el("span", { class: "slider" }));
       toggleInput.addEventListener("change", function () {
@@ -9235,13 +9350,13 @@
         row.peerCell.appendChild(document.createTextNode(" "));
         row.peerCell.appendChild(el("span", { class: "badge deposited", text: t("tunnel.table.unverified"), title: t("tunnel.table.unverifiedHint") }));
       }
-      var rememberLabel = el("label", { class: "checkline" });
-      var rememberInput = el("input", { type: "checkbox" });
+      var rememberLabel = el("label", { class: "switch-control" });
+      var rememberInput = el("input", { type: "checkbox", role: "switch" });
       if (unverified) {
         rememberInput.disabled = true;
         rememberLabel.title = t("tunnel.table.unverifiedHint");
       }
-      rememberLabel.appendChild(rememberInput);
+      rememberLabel.appendChild(el("span", { class: "toggle-switch" }, [rememberInput, el("span", { class: "slider", "aria-hidden": "true" })]));
       rememberLabel.appendChild(el("span", { text: t("tunnel.table.remember") }));
       var args = function () { return { id: item.id, remember: rememberInput.checked }; };
       row.actionCell.appendChild(rememberLabel);
@@ -9862,7 +9977,7 @@
 
     if (f.type === "toggle") {
       var toggleLabel = el("label", { class: "toggle-switch" });
-      input = el("input", { type: "checkbox", id: id });
+      input = el("input", { type: "checkbox", role: "switch", id: id });
       input.checked = !!current;
       toggleLabel.appendChild(input);
       toggleLabel.appendChild(el("span", { class: "slider" }));
@@ -10148,7 +10263,13 @@
     host._ref = ref || null;
     host._refresh = function () {
       var inherited = !host._ref && opts.allowDefault && aiConfig().default_ref;
-      button.textContent = inherited ? aiRefLabel(inherited) + " (" + t("ai.model.useDefault") + ")" : aiRefLabel(host._ref, t(opts.voice ? "ai.model.browser" : opts.allowDefault ? "ai.model.useDefault" : "ai.model.select"));
+      var shown = host._ref || inherited;
+      button.textContent = "";
+      button.appendChild(el("span", { class: "ai-model-trigger-text", text: shown ? (inherited ? t("ai.model.useDefault") + " · " : "") + shown.model : t(opts.voice ? "ai.model.browser" : opts.allowDefault ? "ai.model.useDefault" : "ai.model.select") }));
+      if (shown) {
+        var provider = aiProvider(shown.provider_id);
+        button.appendChild(el("span", { class: "ai-model-trigger-provider", text: "· " + (provider ? provider.label || provider.id : shown.provider_id) }));
+      }
       warning.textContent = aiRefWarning(host._ref || inherited);
       warning.hidden = !warning.textContent;
     };
@@ -10171,6 +10292,16 @@
       panes.appendChild(sources); panes.appendChild(results); panel.appendChild(panes);
       overlay.appendChild(panel);
       document.body.appendChild(overlay);
+      function positionPicker() {
+        var rect = button.getBoundingClientRect();
+        var below = Math.max(0, innerHeight - rect.bottom - 16), above = Math.max(0, rect.top - 16);
+        var up = below < 420 && above > below, height = Math.min(420, up ? above : below);
+        var width = Math.min(innerWidth - 32, Math.max(640, rect.width));
+        panel.style.width = width + "px"; panel.style.maxWidth = width + "px"; panel.style.height = height + "px";
+        panel.style.left = Math.max(16, Math.min(rect.left, innerWidth - width - 16)) + "px";
+        panel.style.top = (up ? rect.top - 8 - height : rect.bottom + 8) + "px";
+      }
+      positionPicker(); window.addEventListener("scroll", positionPicker, true); window.addEventListener("resize", positionPicker);
       aiAnimate(overlay, [{ opacity: 0 }, { opacity: 1 }]);
       aiAnimate(panel, [{ transform: "scale(.98)" }, { transform: "none" }]);
       button.setAttribute("aria-expanded", "true");
@@ -10184,6 +10315,7 @@
       function close() {
         if (closing) return;
         closing = true; overlay.inert = true;
+        window.removeEventListener("scroll", positionPicker, true); window.removeEventListener("resize", positionPicker);
         button.setAttribute("aria-expanded", "false"); button.focus();
         aiAnimate(panel, [{ transform: getComputedStyle(panel).transform }, { transform: "scale(.98)" }], true);
         aiAnimate(overlay, [{ opacity: getComputedStyle(overlay).opacity }, { opacity: 0 }], true, function () { overlay.remove(); });
@@ -10238,9 +10370,9 @@
           return list;
         }
         var groups = providers.map(function (p) { var list = entries(p); return { provider: p, entries: list, matches: list.filter(function (entry) { return aiModelMatches(query, entry.ref, p); }) }; });
-        if (searching) sourceRow("all", t("ai.model.all"), String(groups.reduce(function (count, group) { return count + group.matches.length; }, 0)));
+        if (searching) sourceRow("all", t("ai.model.all"));
         var recentMatches = recent.filter(function (ref) { var p = aiProvider(ref.provider_id); return p && p.enabled !== false && aiModelMatches(query, ref, p); });
-        if (recent.length) sourceRow("recent", t("ai.model.recent"), String(searching ? recentMatches.length : recent.length), !recentMatches.length);
+        if (recent.length) sourceRow("recent", t("ai.model.recent"), "", !recentMatches.length);
         if (opts.voice) sourceRow("browser", t("ai.model.browser"), "", false, true);
         else if (opts.allowDefault) sourceRow("default", t("ai.model.useDefault"), "", false, true);
         groups.forEach(function (group) {
@@ -10249,6 +10381,11 @@
           var stateLabel = aiIsRoom(p) ? aiConnectionRoomStatus(p) : fetch && fetch.state === "error" ? t("ai.provider.error") : fetch && fetch.state === "fetching" ? t("ai.provider.fetching") : "";
           var node = sourceRow(p.id, p.label || p.id, (aiIsRoom(p) ? t("ai.connection.room") : "HTTP") + " \u00b7 " + count + (stateLabel ? " \u00b7 " + stateLabel : ""), !count, false,
             (p.label || p.id) + (fetch && fetch.error ? "\n" + fetch.error : ""), true);
+          node.querySelector(".ai-model-source-detail").remove();
+          var meta = el("span", { class: "ai-model-source-meta" });
+          meta.appendChild(el("span", { class: "ai-provider-kind", text: aiIsRoom(p) ? t("ai.connection.room") : "HTTP" }));
+          meta.appendChild(el("span", { text: String(count) }));
+          if (stateLabel) meta.appendChild(el("span", { text: stateLabel })); node.appendChild(meta);
           node.dataset.count = count;
         });
         var rendered = [];
@@ -10259,7 +10396,7 @@
           var node = el("button", { type: "button", class: "ai-model-option" + (aiRefIsCached(ref) ? " ai-model-cached" : ""), role: "option",
             "data-provider-id": ref.provider_id, "data-model": ref.model, "aria-selected": String(aiSameRef(assigned, ref)) });
           node.disabled = !!warning;
-          if (aiSameRef(assigned, ref)) node.appendChild(el("span", { class: "ai-model-check", text: "\u2713", "aria-hidden": "true" }));
+          node.appendChild(el("span", { class: "ai-model-check", text: aiSameRef(assigned, ref) ? "\u2713" : "", "aria-hidden": "true" }));
           var label = el("span", { class: "ai-model-label" });
           label.appendChild(el("span", { text: ref.model === "network-auto" && p && aiIsRoom(p) ? t("ai.model.roomAuto", { provider: p.label || p.id }) : ref.model }));
           if (searching ? narrowed === "recent" : source === "recent") label.appendChild(el("span", { class: "ai-model-provider", text: p ? p.label || p.id : ref.provider_id }));
@@ -10273,7 +10410,7 @@
           var p = group.provider;
           if (searching ? narrowed && narrowed !== "provider:" + p.id : source !== "provider:" + p.id) return;
           var list = searching ? group.matches : group.entries;
-          if (list.length) results.appendChild(el("div", { class: "ai-model-group", text: (p.label || p.id) + " \u00b7 " + (aiIsRoom(p) ? t("ai.connection.room") : "HTTP") }));
+          if (searching && list.length) results.appendChild(el("div", { class: "ai-model-group", text: (p.label || p.id) + " \u00b7 " + (aiIsRoom(p) ? t("ai.connection.room") : "HTTP") }));
           list.forEach(function (entry) { row(entry.ref); });
         });
         if (!rendered.length) results.appendChild(el("div", { class: "muted", text: t("ai.model.empty") }));
@@ -10336,7 +10473,9 @@
 
   function aiSaveConfig(key, value, feedback) {
     return api("config.set", { path: "ai." + key, value: value }).then(function (data) {
-      aiConfig()[key] = value;
+      var parts = key.split("."), target = aiConfig();
+      parts.slice(0, -1).forEach(function (part) { target = target[part] || (target[part] = {}); });
+      target[parts[parts.length - 1]] = value;
       if (feedback) feedback("");
       else showToast(t(data && data.applies === "applied immediately" ? "settings.savedLive" : "settings.savedNextStart"), "success");
       aiNotifyModels(); refreshAiHints();
@@ -10718,7 +10857,10 @@
         entries.sort(function (a, b) { return Number(shared(b.ref)) - Number(shared(a.ref)); });
         var group = el("div", { class: "ai-sharing-group", "data-provider-id": p.id });
         var fetch = aiModelFetchStates[p.id];
-        group.appendChild(el("div", { class: "ai-model-group ai-provider-count", "data-state": fetch ? fetch.state : "cache", text: (p.label || p.id) + " \u00b7 HTTP \u00b7 " + aiModelFetchLabel(p), title: fetch && fetch.error || "" }));
+        var heading = el("div", { class: "ai-sharing-group-heading" });
+        heading.appendChild(el("strong", { text: p.label || p.id }));
+        heading.appendChild(el("span", { class: "ai-provider-kind", text: "HTTP" }));
+        heading.appendChild(el("span", { class: "ai-provider-count", "data-state": fetch ? fetch.state : "cache", text: aiModelFetchLabel(p), title: fetch && fetch.error || "" })); group.appendChild(heading);
         entries.forEach(function (entry) {
           var ref = entry.ref;
           var row = el("div", { class: "ai-sharing-row", "data-provider-id": ref.provider_id, "data-model": ref.model });
@@ -10726,7 +10868,7 @@
           var chips = el("div", { class: "ai-sharing-chips" });
           rooms.forEach(function (room) {
             var selected = (room.shared || []).some(function (r) { return aiSameRef(r, ref); });
-            var chip = el("button", { type: "button", class: "ai-room-chip", "data-room-id": room.id, "data-provider-id": ref.provider_id, "data-model": ref.model, "aria-pressed": selected ? "true" : "false", "aria-label": t("ai.sharing.toggle", { model: ref.model, room: room.label || room.id }), text: (room.label || room.id) + (selected ? " \u2713" : "") });
+            var chip = el("button", { type: "button", class: "ai-room-chip", "data-room-id": room.id, "data-provider-id": ref.provider_id, "data-model": ref.model, "aria-pressed": selected ? "true" : "false", "aria-label": t("ai.sharing.toggle", { model: ref.model, room: room.label || room.id }), text: (room.label || room.id) + (selected ? " \u2713" : " +") });
             chip.addEventListener("click", function () {
               var css = getComputedStyle(chip), fromColor = { backgroundColor: css.backgroundColor, borderColor: css.borderColor };
               chip.disabled = true;
@@ -10824,7 +10966,7 @@
   function buildAiProvidersField() {
     var wrap = el("div", { class: "ai-connection-section" });
     var header = el("div", { class: "ai-connection-header" }); wrap.appendChild(header);
-    header.appendChild(el("div", { class: "desc", text: t("settings.ai.providers.desc") }));
+    header.appendChild(el("strong", { text: t("ai.tab.connection"), title: t("settings.ai.providers.desc") }));
     var add = el("button", { type: "button", "data-add-connection": "", text: t("ai.connection.add"), "aria-expanded": "false" }); header.appendChild(add);
     var popup = buildAiConnectionPopup(false, wrap);
     add.addEventListener("click", function () { popup.open(add); });
@@ -10842,7 +10984,7 @@
         var card = el("div", { class: "ai-provider-card", "data-provider-id": p.id });
         var head = el("div", { class: "ai-provider-head" });
         var enabledLabel = el("label", { class: "toggle-switch" });
-        var enabled = el("input", { type: "checkbox", "aria-label": t("ai.provider.enabled", { provider: p.label || p.id }) });
+        var enabled = el("input", { type: "checkbox", role: "switch", "aria-label": t("ai.provider.enabled", { provider: p.label || p.id }) });
         enabled.checked = p.enabled !== false;
         enabledLabel.appendChild(enabled); enabledLabel.appendChild(el("span", { class: "slider" }));
         enabled.addEventListener("change", function () {
@@ -11006,28 +11148,151 @@
     return wrap;
   }
 
+  function buildAiReasoningPicker() {
+    return buildAiChoicePicker({
+      id: "settings-ai-default_reasoning_effort", path: "default_reasoning_effort", reasoning: true,
+      label: t("ai.task.effort"), values: function () { return [null, "none", "minimal", "low", "medium", "high", "xhigh", "max"]; },
+      current: function () { return aiConfig().default_reasoning_effort || null; },
+      text: function (value) { return t("ai.effort." + (value === null ? "unset" : value)); }
+    });
+  }
+
+  function buildAiSpeedPicker() {
+    return buildAiChoicePicker({
+      id: "settings-ai-tts-speed", path: "tts.speed", label: t("ai.task.ttsSpeed"),
+      values: function () {
+        var speeds = [.75, 1, 1.25, 1.5, 2], current = aiConfig().tts && aiConfig().tts.speed;
+        if (Number.isFinite(current) && current >= .25 && current <= 4 && speeds.indexOf(current) < 0) speeds.push(current);
+        return [null].concat(speeds.sort(function (a, b) { return a - b; }));
+      },
+      current: function () { var speed = aiConfig().tts && aiConfig().tts.speed; return Number.isFinite(speed) && speed >= .25 && speed <= 4 ? speed : null; },
+      text: function (value) { return value === null ? t("ai.task.providerDefault") : value + "×"; },
+      disabled: function () { return !aiConfig().tts; }
+    });
+  }
+
+  // The same anchored, keyboard-accessible choice list serves effort and speed.
+  function buildAiChoicePicker(opts) {
+    var values = opts.values();
+    var host = el("div", { class: opts.reasoning ? "ai-reasoning-picker" : "ai-choice-picker" });
+    var id = opts.id;
+    var trigger = el("button", { type: "button", id: id, class: "ai-model-trigger" + (opts.reasoning ? " ai-reasoning-trigger" : " ai-choice-trigger"), "aria-label": opts.label, "aria-haspopup": "listbox", "aria-expanded": "false", "aria-controls": id + "-menu" });
+    var menu = null, leavingMenu = null, active = 0;
+    function icon(path, size, className) {
+      var svg = svgEl("svg", { width: size, height: size, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": 2, "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true", class: className || "" });
+      svg.appendChild(svgEl("path", { d: path })); return svg;
+    }
+    function level(value) {
+      var bars = el("span", { class: "ai-reasoning-level", "aria-hidden": "true" });
+      for (var i = 0; i < 6; i++) bars.appendChild(el("i", { class: i < Math.max(0, values.indexOf(value) - 1) ? "filled" : "" }));
+      return bars;
+    }
+    function label(value) { return opts.text(value); }
+    function refresh() {
+      values = opts.values();
+      var value = opts.current();
+      trigger.disabled = !!(opts.disabled && opts.disabled());
+      trigger.textContent = "";
+      trigger.appendChild(el("span", { class: "ai-model-trigger-text", text: (opts.reasoning ? t("ai.reasoning.label") + " · " : "") + label(value) }));
+      if (opts.reasoning) trigger.appendChild(level(value));
+      trigger.appendChild(icon("m6 9 6 6 6-6", 16, "ai-picker-chevron"));
+    }
+    function close(focus) {
+      if (!menu) { if (focus === false && leavingMenu) { if (leavingMenu._aiMotion) leavingMenu._aiMotion(false); leavingMenu.remove(); leavingMenu = null; } return; }
+      var closing = menu; menu = null; trigger.setAttribute("aria-expanded", "false"); closing.inert = true;
+      closing.removeAttribute("id");
+      if (focus === false) { if (closing._aiMotion) closing._aiMotion(false); closing.remove(); }
+      else { leavingMenu = closing; aiAnimate(closing, [{ opacity: getComputedStyle(closing).opacity }, { opacity: 0 }], false, function () { closing.remove(); if (leavingMenu === closing) leavingMenu = null; }); }
+      document.removeEventListener("pointerdown", outside);
+      window.removeEventListener("scroll", position, true); window.removeEventListener("resize", position);
+      if (focus !== false && trigger.isConnected) trigger.focus({ preventScroll: true });
+    }
+    function outside(event) { if (menu && !menu.contains(event.target) && !trigger.contains(event.target)) close(); }
+    function position() {
+      if (!menu) return;
+      if (!host.isConnected) { close(false); return; }
+      var rect = trigger.getBoundingClientRect(), below = innerHeight - rect.bottom - 16, above = rect.top - 16;
+      var up = below < menu.scrollHeight && above > below;
+      menu.style.left = Math.max(16, Math.min(rect.left, innerWidth - menu.getBoundingClientRect().width - 16)) + "px";
+      menu.style.top = (up ? rect.top - 8 : rect.bottom + 8) + "px";
+      menu.dataset.placement = up ? "up" : "down";
+      menu.style.maxHeight = Math.max(0, up ? above : below) + "px";
+      menu.style.transform = up ? "translateY(-100%)" : "";
+    }
+    function activate(index) {
+      active = Math.max(0, Math.min(values.length - 1, index));
+      menu.setAttribute("aria-activedescendant", id + "-" + active);
+      menu.querySelectorAll("button").forEach(function (option, i) { option.dataset.active = String(i === active); });
+      var option = menu.children[active]; if (option.scrollIntoView) option.scrollIntoView({ block: "nearest" });
+    }
+    function choose(value) {
+      close(); trigger.disabled = true;
+      aiSaveConfig(opts.path, value).then(function () { refresh(); if (trigger.isConnected) trigger.focus({ preventScroll: true }); });
+    }
+    function show(index) {
+      if (leavingMenu) { if (leavingMenu._aiMotion) leavingMenu._aiMotion(false); leavingMenu.remove(); leavingMenu = null; }
+      values = opts.values();
+      menu = el("div", { class: opts.reasoning ? "ai-reasoning-menu" : "ai-choice-menu", id: id + "-menu", role: "listbox", tabindex: "-1", "aria-label": opts.label });
+      var current = opts.current();
+      values.forEach(function (value, i) {
+        var option = el("button", { type: "button", class: "ai-model-option ai-reasoning-option", id: id + "-" + i, role: "option", tabindex: "-1", "data-value": value === null ? "" : value, "aria-selected": String(value === current) });
+        var check = el("span", { class: "ai-reasoning-check", "aria-hidden": "true" });
+        if (value === current) check.appendChild(icon("m20 6-11 11-5-5", 14)); option.appendChild(check);
+        option.appendChild(el("span", { class: "ai-reasoning-text", text: label(value) })); if (opts.reasoning) option.appendChild(level(value));
+        option.addEventListener("mouseenter", function () { activate(i); });
+        option.addEventListener("click", function () { choose(value); }); menu.appendChild(option);
+      });
+      document.body.appendChild(menu); trigger.setAttribute("aria-expanded", "true"); position();
+      aiAnimate(menu, [{ opacity: 0 }, { opacity: 1 }]);
+      menu.addEventListener("keydown", keyboard); menu.focus({ preventScroll: true }); activate(index === undefined ? Math.max(0, values.indexOf(current)) : index);
+      document.addEventListener("pointerdown", outside); window.addEventListener("scroll", position, true); window.addEventListener("resize", position);
+    }
+    function keyboard(event) {
+      if (["ArrowDown", "ArrowUp", "Home", "End", "Enter", " ", "Escape", "Tab"].indexOf(event.key) < 0) return;
+      if (event.key === "Tab") { close(false); return; }
+      event.preventDefault(); event.stopPropagation();
+      if (event.key === "Escape") { close(); return; }
+      if (!menu) { show(event.key === "Home" ? 0 : event.key === "End" ? values.length - 1 : undefined); return; }
+      if (event.key === "Enter" || event.key === " ") choose(values[active]);
+      else activate(event.key === "Home" ? 0 : event.key === "End" ? values.length - 1 : active + (event.key === "ArrowDown" ? 1 : -1));
+    }
+    trigger.addEventListener("click", function () { if (menu) close(); else show(); });
+    trigger.addEventListener("keydown", keyboard); host.appendChild(trigger); host._close = close; host._refresh = refresh; refresh();
+    return host;
+  }
+
   function buildAiTasksField() {
     var wrap = el("div", { class: "ai-task-settings" });
     ["default_ref", "tts", "stt"].forEach(function (key) {
-      var row = el("div", { class: "settings-field ai-task-row" });
+      var row = el("div", { class: "ai-task-row" });
       var id = "settings-ai-" + key;
       var label = el("label", { class: "settings-label", text: t("ai.task." + key), for: id + "-trigger" }); row.appendChild(label);
       var host = buildAiModelPicker(el("div", { id: id }), aiConfig()[key], { voice: key !== "default_ref" });
       host.querySelector("button").id = id + "-trigger";
       row.appendChild(host); wrap.appendChild(row);
+      if (key === "default_ref") {
+        row.classList.add("with-effort"); row.appendChild(buildAiReasoningPicker());
+      }
       host.addEventListener("change", function () {
         var previous = aiConfig()[key] || null;
         var next = host._ref ? withField(previous || {}, "provider_id", host._ref.provider_id) : null;
         if (next) next.model = host._ref.model;
-        aiSaveConfig(key, next).then(function (saved) { if (!saved) host._setRef(previous); if (key === "tts") voice.disabled = !aiConfig().tts; });
+        aiSaveConfig(key, next).then(function (saved) {
+          if (!saved) host._setRef(previous);
+          if (key === "tts") { voice.disabled = !aiConfig().tts; speed._refresh(); }
+        });
       });
       if (key === "tts") {
         var voice = el("input", { type: "text", id: "settings-ai-tts-voice", placeholder: t("ai.model.voice") });
-        var voiceLabel = el("label", { for: voice.id, class: "settings-label", text: t("ai.model.voice") }); row.appendChild(voiceLabel);
+        var voiceRow = el("div", { class: "ai-task-row" }); wrap.appendChild(voiceRow);
+        var voiceLabel = el("label", { for: voice.id, class: "settings-label", text: t("ai.task.ttsVoice") }); voiceRow.appendChild(voiceLabel);
         voice.value = (aiConfig().tts && aiConfig().tts.voice) || ""; voice.disabled = !aiConfig().tts;
         voice.addEventListener("change", function () {
           if (aiConfig().tts) aiSaveConfig("tts", withField(aiConfig().tts, "voice", voice.value.trim())).then(function (saved) { if (!saved) voice.value = aiConfig().tts.voice || ""; });
-        }); row.appendChild(voice);
+        }); voiceRow.appendChild(voice);
+        var speedRow = el("div", { class: "ai-task-row" }); wrap.appendChild(speedRow);
+        var speed = buildAiSpeedPicker();
+        speedRow.appendChild(el("label", { for: "settings-ai-tts-speed", class: "settings-label", text: t("ai.task.ttsSpeed") })); speedRow.appendChild(speed);
       }
     });
     return wrap;
@@ -11055,6 +11320,7 @@
           aiConnectionEditor.innerHTML = "";
           aiConnectionEditor.appendChild(buildAiProvidersField());
           var tasks = document.getElementById("ai-task-editor");
+          tasks.querySelectorAll(".ai-reasoning-picker, .ai-choice-picker").forEach(function (picker) { picker._close(false); });
           tasks.innerHTML = "";
           tasks.appendChild(buildAiTasksField());
           var sharing = document.getElementById("ai-sharing-editor");

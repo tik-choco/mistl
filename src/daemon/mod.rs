@@ -678,7 +678,7 @@ pub async fn dispatch_as(
             crate::devlog::clear();
             Ok(json!({ "cleared": true }))
         }
-        "config.show" => {
+        "config.show" | "config.get" => {
             let mut value = serde_json::to_value(state.config())?;
             // Never hand secrets to clients. Mask the per-provider
             // api_key -- an empty string is left as-is so the dashboard can
@@ -695,6 +695,19 @@ pub async fn dispatch_as(
             // Webhook sink header values and URL credentials/query strings
             // are secrets too; set_by_path restores them on a round trip.
             config::mask_bot_webhook_secrets(&mut value);
+            if cmd == "config.get" {
+                let path = args
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .context("config.get needs a string `path`")?;
+                let mut field = &value;
+                for key in path.split('.') {
+                    field = field
+                        .get(key)
+                        .with_context(|| format!("unknown config path {path:?}"))?;
+                }
+                return Ok(field.clone());
+            }
             Ok(value)
         }
         "config.set" => {
@@ -719,7 +732,13 @@ pub async fn dispatch_as(
             if state.network.permitted()
                 && matches!(
                     path,
-                    "ai.providers" | "ai.default_ref" | "ai.tts" | "ai.stt" | "bot.pipelines"
+                    "ai.providers"
+                        | "ai.default_ref"
+                        | "ai.default_reasoning_effort"
+                        | "ai.tts"
+                        | "ai.tts.speed"
+                        | "ai.stt"
+                        | "bot.pipelines"
                 )
             {
                 crate::ai::reload_provider_if_running(state).await?;
@@ -749,6 +768,47 @@ pub async fn dispatch_as(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn dashboard_can_read_ai_effort_and_speed_without_unmasking_secrets() {
+        let state = AppState::for_test();
+        let config = config::set_by_path(
+            &state.config(),
+            "ai.tts",
+            json!({"provider_id":"http","model":"speech","speed":1.25}),
+        )
+        .unwrap();
+        let config =
+            config::set_by_path(&config, "ai.default_reasoning_effort", json!("none")).unwrap();
+        state.set_config(config);
+        for caller in [LOCAL, REMOTE] {
+            let value = dispatch_as(caller, "config.show", json!({}), &state)
+                .await
+                .unwrap();
+            assert_eq!(value["ai"]["default_reasoning_effort"], "none");
+            assert_eq!(value["ai"]["tts"]["speed"], 1.25);
+            assert_eq!(
+                dispatch_as(caller, "config.get", json!({"path":"ai.tts.speed"}), &state)
+                    .await
+                    .unwrap(),
+                json!(1.25)
+            );
+            assert_eq!(
+                dispatch_as(
+                    caller,
+                    "config.get",
+                    json!({"path":"ai.default_reasoning_effort"}),
+                    &state
+                )
+                .await
+                .unwrap(),
+                json!("none")
+            );
+            for path in ["ai.default_reasoning_effort", "ai.tts.speed"] {
+                authorize(caller, "config.set", &json!({"path":path,"value":null})).unwrap();
+            }
+        }
+    }
 
     #[test]
     fn external_apply_is_ipc_only_but_get_and_remove_allow_all_dashboard_callers() {
@@ -785,7 +845,7 @@ mod tests {
         let shown = dispatch("config.show", json!({}), &state).await.unwrap();
         assert_eq!(
             shown["ai"],
-            json!({ "default_ref": { "provider_id": "http", "model": "raw" }, "tts": null, "stt": null,
+            json!({ "default_ref": { "provider_id": "http", "model": "raw" }, "default_reasoning_effort": null, "tts": null, "stt": null,
             "providers": [{ "id": "http", "label": "", "base_url": "http://local/v1", "api_key": "***",
                 "enabled": true, "models": [], "models_fetched_at": null, "provide": false, "shared": [] }],
             "api_listen": "127.0.0.1:6478", "request_timeout_secs": 120, "trusted_providers": [] })

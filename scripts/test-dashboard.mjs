@@ -31,6 +31,7 @@ const fixtures = {
   'sched.ls': {jobs:[]}, 'sched.logs': {runs:[]},
   'bot.list': {pipelines:[]}, 'bot.logs': {runs:[]}, 'bot.items': {items:[]},
   'config.show': {identity:{display_name:'UI test'},storage:{room_ids:[]},stream:{},chat_relay:{enabled:true,rooms:[room]},ai:{
+    request_timeout_secs:120, api_listen:'127.0.0.1:6478',
     default_ref:{provider_id:'old',model:'gem-old'},
     tts:{provider_id:'old',model:'tts-old',voice:'voice-old',lang_voices:{en:'voice-en'}}, stt:null,
     providers:[
@@ -78,8 +79,10 @@ window.fetch = async (url, options) => {
   }
   else if (request.cmd === 'config.set') {
     if(request.args.path===rejectSetting)return {ok:true,json:async()=>({ok:false,error:'setting rejected'})};
-    const [section,key]=request.args.path.split('.');
-    fixtures['config.show'][section][key]=structuredClone(request.args.value);
+    const [section,...keys]=request.args.path.split('.');
+    let target=fixtures['config.show'][section];
+    for(const key of keys.slice(0,-1)) target=target[key]??={};
+    target[keys.at(-1)]=structuredClone(request.args.value);
     if (request.args.path === 'ai.providers') {
       fixtures['ai.status'].rooms = request.args.value.filter(p=>p.base_url.startsWith('mist-network://')).map(p=>{
         const previous = fixtures['ai.status'].rooms.find(room=>room.provider_id===p.id);
@@ -257,7 +260,7 @@ try {
       const style=n=>window.getComputedStyle(n);
       assert.equal(style(head).flexWrap,'nowrap');assert.equal(style(name).minWidth,'0');
       assert.equal(style(head.querySelector('.ai-provider-summary')).flexGrow,'1');assert.equal(style(name).textOverflow,'ellipsis');assert.equal(name.title,name.textContent);
-      assert.equal(style(status).flexShrink,'0');assert.equal(style(status).width,'32px');
+      assert.equal(style(status).flexShrink,'0');assert.equal(style(status).width,'28px');
       assert.equal(style(status.querySelector('.ai-provider-status-text')).display,'none');
       assert.equal(style(address).textOverflow,'ellipsis');assert.equal(style(address).whiteSpace,'nowrap');assert.ok(address.title);
       assert.equal(status.querySelector('.ai-provider-status-dot').getAttribute('aria-hidden'),'true');
@@ -376,7 +379,7 @@ try {
   assert.equal(dialog.querySelector('.ai-model-source[aria-selected=true]').dataset.source,'local','assigned provider is the initial source');
   assert.ok([...dialog.querySelectorAll('.ai-model-option')].every(n=>n.dataset.providerId==='local'),'initial right pane only contains assigned provider');
   assert.equal(dialog.querySelector('.ai-model-provider'),null,'single-source rows omit provider subtitles');
-  assert.ok(dialog.querySelector('.ai-model-group'),'single source has a provider header');
+  assert.equal(dialog.querySelector('.ai-model-group'),null,'single source omits the redundant provider header');
   const pickerDimensions=[window.getComputedStyle(dialog).width,window.getComputedStyle(dialog).height];
   assert.match(html,/\.ai-model-dialog \{[^}]*height: min\(420px, calc\(100dvh - 32px\)\)/,'picker has fixed bounded height (browser harness verifies geometry)');
   dialog.querySelector('[data-source=recent]').click();
@@ -942,8 +945,100 @@ try {
   assert.ok(document.querySelector('#settings-ai-default_ref .ai-model-trigger').textContent.includes(beforeRejected.model));
   assert.ok(document.querySelector('.toast.error').textContent.includes('setting rejected'));
   document.querySelectorAll('.toast.error button').forEach(b=>b.click());
+  // Default task effort distinguishes explicit none from absent; voice speed
+  // writes the nested key without replacing the rest of the voice config.
+  switchTab('tasks');
+  const effort=()=>document.getElementById('settings-ai-default_reasoning_effort');
+  const defaultRow=document.querySelector('#settings-ai-default_ref').closest('.ai-task-row');
+  assert.equal(effort().closest('.ai-task-row'),defaultRow,'effort shares the model row');
+  assert.ok(defaultRow.classList.contains('with-effort'));
+  assert.equal(defaultRow.querySelectorAll('.settings-label').length,1,'no separate effort label row');
+  assert.equal(document.getElementById('settings-ai-request_timeout_secs').value,'120');
+  assert.equal(document.getElementById('settings-ai-api_listen').value,'127.0.0.1:6478');
+  assert.ok(effort().textContent.includes('\u672a\u8a2d\u5b9a'));
+  effort().click();
+  assert.deepEqual([...document.querySelectorAll('.ai-reasoning-option')].map(n=>n.dataset.value),['','none','minimal','low','medium','high','xhigh','max']);
+  assert.equal(document.activeElement,document.querySelector('.ai-reasoning-menu'));
+  document.querySelector('.ai-reasoning-menu').dispatchEvent(new window.KeyboardEvent('keydown',{key:'End',bubbles:true}));
+  assert.equal(document.querySelector('.ai-reasoning-option[data-active=true]').dataset.value,'max');
+  document.querySelector('.ai-reasoning-menu').dispatchEvent(new window.KeyboardEvent('keydown',{key:'Enter',bubbles:true}));await flush();
+  assert.equal(aiCfg.default_reasoning_effort,'max');assert.equal(document.activeElement,effort());
+  assert.equal(effort().querySelectorAll('i.filled').length,6);
+  for(const value of ['none','minimal','low','medium','high','xhigh','max','']) {
+    effort().click();document.querySelector('.ai-reasoning-option[data-value="'+value+'"]').click();await flush();
+    assert.equal(aiCfg.default_reasoning_effort,value||null);
+    assert.ok(calls.some(c=>c.cmd==='config.set'&&c.args.path==='ai.default_reasoning_effort'&&c.args.value===(value||null)));
+  }
+  rejectSetting='ai.default_reasoning_effort';effort().click();document.querySelector('.ai-reasoning-option[data-value=high]').click();await flush();rejectSetting=null;
+  assert.equal(aiCfg.default_reasoning_effort,null);assert.ok(effort().textContent.includes('\u672a\u8a2d\u5b9a'));
+  effort().click();document.querySelector('.ai-reasoning-menu').dispatchEvent(new window.KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+  assert.equal(document.querySelector('.ai-reasoning-menu'),null);assert.equal(document.activeElement,effort());
+  effort().click();document.body.dispatchEvent(new window.PointerEvent('pointerdown',{bubbles:true}));assert.equal(document.querySelector('.ai-reasoning-menu'),null);
+  await pick('settings-ai-tts','local','gem-small');
+  let speed=document.getElementById('settings-ai-tts-speed');
+  aiCfg.tts.voice='preserved-voice';aiCfg.tts.lang_voices={ja:'preserved-ja'};
+  assert.equal(speed.tagName,'BUTTON');assert.equal(speed.disabled,false);
+  const speedOptions=()=>[...document.querySelectorAll('.ai-choice-menu [role=option]')];
+  const chooseSpeed=async value=>{speed.click();document.querySelector('.ai-choice-menu [data-value="'+value+'"]').click();await flush();};
+  speed.click();
+  assert.deepEqual(speedOptions().map(n=>n.dataset.value),['','0.75','1','1.25','1.5','2']);
+  assert.deepEqual(speedOptions().slice(1).map(n=>n.textContent.trim()),['0.75×','1×','1.25×','1.5×','2×']);
+  assert.equal(document.activeElement,document.querySelector('.ai-choice-menu'));
+  document.querySelector('.ai-choice-menu').dispatchEvent(new window.KeyboardEvent('keydown',{key:'End',bubbles:true}));
+  document.querySelector('.ai-choice-menu').dispatchEvent(new window.KeyboardEvent('keydown',{key:'Enter',bubbles:true}));await flush();
+  assert.equal(aiCfg.tts.speed,2);assert.equal(document.activeElement,speed);
+  for(const value of ['0.75','1','1.25','1.5','2']) {await chooseSpeed(value);assert.equal(aiCfg.tts.speed,Number(value));}
+  // A stored custom speed is retained in numeric order, with the same × label.
+  for(const value of [.25,1.35,4]) {
+    aiCfg.tts.speed=value;
+    document.querySelector('[data-target="settings"]').click();await flush();
+    speed=document.getElementById('settings-ai-tts-speed');speed.click();
+    assert.ok(speedOptions().some(n=>n.dataset.value===String(value)&&n.querySelector('.ai-reasoning-text').textContent===value+'×'));
+    const expected=['',...[.75,1,1.25,1.5,2,value].sort((a,b)=>a-b).map(String)];
+    assert.deepEqual(speedOptions().map(n=>n.dataset.value),expected);
+    document.querySelector('.ai-choice-menu [data-value="'+value+'"]').click();await flush();
+    assert.equal(aiCfg.tts.speed,value);
+  }
+  assert.equal(aiCfg.tts.voice,'preserved-voice');assert.deepEqual(aiCfg.tts.lang_voices,{ja:'preserved-ja'});
+  assert.ok(calls.some(c=>c.cmd==='config.set'&&c.args.path==='ai.tts.speed'&&c.args.value===1.35));
+  rejectSetting='ai.tts.speed';await chooseSpeed('2');rejectSetting=null;
+  assert.equal(aiCfg.tts.speed,4);assert.equal(speed.textContent.trim(),'4×');assert.equal(speed.disabled,false);
+  await chooseSpeed('');assert.equal(aiCfg.tts.speed,null);
+  assert.ok(calls.some(c=>c.cmd==='config.set'&&c.args.path==='ai.tts.speed'&&c.args.value===null));
+  assert.equal(speed.textContent.trim(),'提供側の既定（未指定）');
+  speed.click();assert.deepEqual(speedOptions().map(n=>n.dataset.value),['','0.75','1','1.25','1.5','2']);
+  document.querySelector('.ai-choice-menu').dispatchEvent(new window.KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+  assert.equal(document.querySelector('.ai-choice-menu'),null);assert.equal(document.activeElement,speed);
+  speed.click();document.body.dispatchEvent(new window.PointerEvent('pointerdown',{bubbles:true}));assert.equal(document.querySelector('.ai-choice-menu'),null);
+  dialog=await openPicker('settings-ai-tts');dialog.querySelector('[data-source=browser]').click();await flush();
+  assert.equal(aiCfg.tts,null);assert.equal(speed.disabled,true);
+  await pick('settings-ai-tts','local','gem-small');
+  for(const language of ['en','zh','ja']) {
+    effort().click();document.getElementById('lang-'+language+'-btn').click();await flush();
+    assert.equal(document.querySelector('.ai-reasoning-menu'),null,'language rebuild cleans up the portal');
+    effort().click();assert.ok(!document.querySelector('.ai-reasoning-menu').textContent.includes('ai.effort.'));
+    document.querySelector('.ai-reasoning-menu').dispatchEvent(new window.KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+    assert.ok(document.querySelector('label[for=settings-ai-tts-speed]').textContent.trim());
+    const localizedSpeed=document.getElementById('settings-ai-tts-speed');localizedSpeed.click();
+    assert.equal(document.querySelector('.ai-choice-menu [data-value=""] .ai-reasoning-text').textContent,{en:'Provider default (not specified)',zh:'提供方默认（未指定）',ja:'提供側の既定（未指定）'}[language]);
+    document.getElementById('lang-'+({en:'zh',zh:'ja',ja:'en'}[language])+'-btn').click();await flush();
+    assert.equal(document.querySelector('.ai-choice-menu'),null,'language rebuild also removes the speed portal');
+  }
+  document.getElementById('lang-ja-btn').click();await flush();
+  for(const input of document.querySelectorAll('input[type=checkbox]')) {
+    if(/^bot-lang-/.test(input.id)) {assert.equal(input.getAttribute('role'),null);continue;}
+    assert.equal(input.getAttribute('role'),'switch');assert.ok(input.closest('.toggle-switch'),'all binary inputs share the switch component');
+  }
+  for(const theme of ['light','dark']) {
+    document.documentElement.dataset.theme=theme;
+    for(const control of document.querySelectorAll('.toggle-switch')) {
+      const css=window.getComputedStyle(control);assert.equal(css.width,'36px');assert.equal(css.height,'22px');
+    }
+  }
+  document.querySelectorAll('.toast.error button').forEach(b=>b.click());
   assert.deepEqual(errors, []);
   assert.equal(document.querySelectorAll('.toast.error').length, 0, 'no hidden initialization failure');
+  console.log('PASS: S3 shared 36x22 switches in both themes, multi-select semantics, same-row effort, 8 effort choices/unset/keyboard/rollback/portal cleanup, TTS speed choices/custom/provider default/keyboard/rollback/voice preservation, configured inputs, en/zh/ja controls');
   console.log('PASS: full dashboard integration; two-pane model sources/search/counts/narrowing/restore, recent/voice/inherited refs, no manual-entry row, pane keyboard, fixed size/narrow chips/cross-fade/reduced motion, single Room header status, I 360/390 status layout/labels/details/touch/press origin/editor preservation, H header popup/kind/Name/validation/press origin/persistence/entrance/fetch, F.1 grouped subtitles/Recent labels, J single-column/header keyboard/independent switch and dot/blur and Enter commits/Esc/inline feedback and errors/masked-origin combined writes/duplicate and confirmed deletion, provider/room cards, sharing add-room/existing/duplicate/random/copy, eased height cleanup, disabled-reference preservation, bot transforms, all locales and existing features');
 } finally {
   process.removeListener('unhandledRejection', onUnhandled);

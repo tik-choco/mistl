@@ -965,8 +965,12 @@ async fn handle_audio_speech(stream: &mut TcpStream, body: &[u8], call: &TtsFn) 
         format: req
             .get("response_format")
             .and_then(Value::as_str)
+            .filter(|v| super::protocol::valid_tts_format(v))
             .map(str::to_string),
-        speed: req.get("speed").and_then(Value::as_f64),
+        speed: req
+            .get("speed")
+            .and_then(Value::as_f64)
+            .filter(|v| crate::config::valid_tts_speed(*v)),
     };
 
     // `lang` is a mistl extension, not part of OpenAI's schema: it is the

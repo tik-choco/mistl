@@ -4,29 +4,30 @@ import vm from 'node:vm';
 const html=fs.readFileSync(new URL('../src/web/assets/index.html',import.meta.url),'utf8');
 const source=html.slice(html.indexOf('  function pageIdentity()'),html.indexOf('  function withBusy('));
 const banner={hidden:true};
+const networkLabel={};
 const button={disabled:true,setAttribute(k,v){this[k]=v;},addEventListener(k,v){this[k]=v;}};
 const calls=[];
 const build={channel:'dev',version:'1.2.3',instance:'repro',instance_id:'mistl-dev-repro',build_id:'0123456789abcdef',mistlib_version:'0.6.2',profile:'release'};
 const context=vm.createContext({state:undefined,currentLang:'ja',window:{mistlRuntime:build},
-  document:{getElementById:id=>id==='build-banner'?banner:button},
+  document:{getElementById:id=>id==='build-banner'?banner:id==='network-toggle-label'?networkLabel:button},
   api:(cmd,args)=>{calls.push({cmd,args});return Promise.resolve({enabled:args.enabled,state:'restarting',saved:true});},
   showToast:()=>assert.fail('unexpected toast')});
 vm.runInContext(source,context);
 assert.equal(banner.hidden,false,'dev metadata must render before the first daemon poll');
-assert.match(banner.textContent,/DEV · mistl v1\.2\.3 · 0123456789ab/);
+assert.match(banner.textContent,/DEV \u00b7 mistl v1\.2\.3 \u00b7 0123456789ab/);
 assert.equal(button.disabled,true);
 assert.equal(context.pageIdentity(),'mistl-dev-repro/0123456789abcdef');
 context.state={daemon:{build,network:{enabled:false,state:'off',saved:true}}};
 context.renderRuntime();
-assert.equal(button.textContent,'外部接続: OFF'); assert.equal(button['aria-pressed'],'false');
+assert.equal(networkLabel.textContent,'\u5916\u90e8\u63a5\u7d9a: OFF'); assert.equal(button['aria-pressed'],'false');assert.equal(button['aria-checked'],'false');
 assert.equal(button.disabled,false);
 button.click.call(button); await new Promise(r=>setImmediate(r));
 assert.equal(calls[0].cmd,'network.set'); assert.equal(calls[0].args.enabled,true);
-assert.equal(button.disabled,true); assert.match(button.textContent,/切替中/);
+assert.equal(button.disabled,true); assert.match(networkLabel.textContent,/\u5207\u66ff\u4e2d/);
 context.state.daemon.network={enabled:false,state:'off',saved:false,error:'disk full'};
-context.renderRuntime(); assert.match(button.textContent,/未保存/); assert.equal(button.title,'disk full');
+context.renderRuntime(); assert.match(networkLabel.textContent,/\u672a\u4fdd\u5b58/); assert.equal(button.title,'disk full');
 context.currentLang='en'; context.state.daemon.network={enabled:true,state:'on',saved:true};
-context.renderRuntime(); assert.equal(button.textContent,'External connections: ON');
+context.renderRuntime(); assert.equal(networkLabel.textContent,'External connections: ON');assert.equal(button['aria-checked'],'true');
 context.state.daemon.build={...build,channel:'stable'}; context.renderRuntime();
 assert.equal(banner.hidden,true,'stable does not retain a development banner');
 assert.equal((html.match(/setRequestHeader\("x-mistl-instance", pageIdentity\(\)\)/g)||[]).length,3,'all upload paths must identify their source page');

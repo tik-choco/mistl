@@ -82,6 +82,13 @@ const STT_MAX_BUFFERED_BYTES: usize = 25 * 1024 * 1024;
 /// Boxed future returned by a voice call closure.
 type VoiceFuture<T> = Pin<Box<dyn Future<Output = anyhow::Result<T>> + Send>>;
 
+/// Optional hints passed to the speech backend.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TtsOptions {
+    pub speed: Option<f64>,
+    pub response_format: Option<String>,
+}
+
 /// Synthesizes speech: `(text, model_override, voice_override, lang_hint)`
 /// -> audio. Built in `super::provide_start` from the resolved
 /// `ai.tts` model reference (which supplies the default model/voice, and
@@ -90,9 +97,15 @@ type VoiceFuture<T> = Pin<Box<dyn Future<Output = anyhow::Result<T>> + Send>>;
 /// doesn't offer TTS. `lang_hint` is the `tts_request.lang` BCP-47 tag
 /// (mistllm-wire tts-lang-hint-v1), passed through unchanged for the
 /// closure to resolve a voice from; it never overrides an explicit
-/// `voice_override`.
+/// `voice_override`. The trailing options carry speed and output format.
 pub type TtsCallFn = Arc<
-    dyn Fn(String, Option<String>, Option<String>, Option<String>) -> VoiceFuture<TtsAudio>
+    dyn Fn(
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            TtsOptions,
+        ) -> VoiceFuture<TtsAudio>
         + Send
         + Sync,
 >;
@@ -407,6 +420,7 @@ const MODEL_NOT_SHARED_MESSAGE: &str = "The requested model is not shared by thi
 pub struct Provider {
     send: SendFn,
     call: LlmCallFn,
+    default_reasoning_effort: std::sync::RwLock<Option<String>>,
     models: Vec<String>,
     /// Raw shared model id -> exact enabled HTTP connection. Each room has
     /// its own table; shared_restricted also covers nonempty lists whose
@@ -470,6 +484,7 @@ impl Provider {
         Arc::new(Self {
             send,
             call,
+            default_reasoning_effort: std::sync::RwLock::new(None),
             models,
             shared_restricted: std::sync::atomic::AtomicBool::new(!advertised.is_empty()),
             advertised,
@@ -482,6 +497,13 @@ impl Provider {
             hello_replied: Mutex::new(HashMap::new()),
             oai: std::sync::RwLock::new(None),
         })
+    }
+
+    pub fn set_default_reasoning_effort(&self, effort: Option<String>) {
+        *self
+            .default_reasoning_effort
+            .write()
+            .expect("ai effort lock") = effort;
     }
 
     /// Whether a hello reply to `peer` is allowed now (and records it).
@@ -602,7 +624,12 @@ impl Provider {
                 let tools = ToolOptions {
                     tools,
                     tool_choice,
-                    reasoning_effort,
+                    reasoning_effort: reasoning_effort.or_else(|| {
+                        self.default_reasoning_effort
+                            .read()
+                            .expect("ai effort lock")
+                            .clone()
+                    }),
                 };
                 self.handle_llm_request(from, id, messages, tools, model)
                     .await;
@@ -613,9 +640,22 @@ impl Provider {
                 model,
                 voice,
                 lang,
+                speed,
+                response_format,
             } => {
-                self.handle_tts_request(from, id, text, model, voice, lang)
-                    .await;
+                self.handle_tts_request(
+                    from,
+                    id,
+                    text,
+                    model,
+                    voice,
+                    lang,
+                    TtsOptions {
+                        speed,
+                        response_format,
+                    },
+                )
+                .await;
             }
             ProtocolMessage::SttRequest {
                 id,
@@ -663,6 +703,7 @@ impl Provider {
         model: Option<String>,
         voice: Option<String>,
         lang: Option<String>,
+        options: TtsOptions,
     ) {
         let Some(tts) = &self.tts else {
             self.reject_voice_request(&from, id);
@@ -679,7 +720,7 @@ impl Provider {
             );
             return;
         };
-        match tts(text, model, voice, lang).await {
+        match tts(text, model, voice, lang, options).await {
             Ok(audio) => self.send_tts_response(&from, id, audio),
             Err(err) => {
                 (self.send)(
@@ -1203,6 +1244,33 @@ mod tests {
             *seen.lock().unwrap(),
             vec![None, Some("none".into()), Some("future-effort".into())]
         );
+        seen.lock().unwrap().clear();
+        provider.set_default_reasoning_effort(Some("high".into()));
+        for effort in [None, Some("none"), Some("low"), Some("future-effort")] {
+            provider
+                .clone()
+                .handle_message(
+                    "peer".into(),
+                    ProtocolMessage::LlmRequest {
+                        id: crate::ai::protocol::random_id(),
+                        messages: messages(),
+                        model: None,
+                        reasoning_effort: effort.map(String::from),
+                        tools: None,
+                        tool_choice: None,
+                    },
+                )
+                .await;
+        }
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                Some("high".into()),
+                Some("none".into()),
+                Some("low".into()),
+                Some("future-effort".into())
+            ]
+        );
     }
 
     type Sent = Arc<Mutex<Vec<(String, ProtocolMessage)>>>;
@@ -1546,6 +1614,8 @@ mod tests {
                     model: None,
                     voice: None,
                     lang: None,
+                    speed: None,
+                    response_format: None,
                 },
             )
             .await;
@@ -1616,6 +1686,8 @@ mod tests {
                     model: None,
                     voice: None,
                     lang: None,
+                    speed: None,
+                    response_format: None,
                 },
             )
             .await;
@@ -2012,7 +2084,7 @@ mod tests {
     }
 
     fn fake_tts_success(bytes: Vec<u8>, mime: &'static str) -> TtsCallFn {
-        Arc::new(move |_text, _model, _voice, _lang| {
+        Arc::new(move |_text, _model, _voice, _lang, _options| {
             let bytes = bytes.clone();
             Box::pin(async move {
                 Ok(TtsAudio {
@@ -2024,7 +2096,7 @@ mod tests {
     }
 
     fn fake_tts_error(message: &'static str) -> TtsCallFn {
-        Arc::new(move |_text, _model, _voice, _lang| {
+        Arc::new(move |_text, _model, _voice, _lang, _options| {
             Box::pin(async move { anyhow::bail!(message) })
         })
     }
@@ -2037,7 +2109,7 @@ mod tests {
     /// is tested there against `resolve_tts_voice` directly) can be
     /// asserted end to end through `Provider::handle_message`.
     fn fake_tts_capturing(captured: Arc<Mutex<Option<TtsCallArgs>>>) -> TtsCallFn {
-        Arc::new(move |text, model, voice, lang| {
+        Arc::new(move |text, model, voice, lang, _options| {
             let captured = captured.clone();
             Box::pin(async move {
                 *captured.lock().unwrap() = Some((text, model, voice, lang));
@@ -2222,6 +2294,8 @@ mod tests {
                     model: None,
                     voice: None,
                     lang: None,
+                    speed: None,
+                    response_format: None,
                 },
             )
             .await;
@@ -2275,6 +2349,8 @@ mod tests {
                     model: None,
                     voice: None,
                     lang: Some("ja-JP".into()),
+                    speed: None,
+                    response_format: None,
                 },
             )
             .await;
@@ -2313,6 +2389,8 @@ mod tests {
                     model: None,
                     voice: None,
                     lang: None,
+                    speed: None,
+                    response_format: None,
                 },
             )
             .await;

@@ -161,6 +161,8 @@ pub enum AutostartAction {
 pub enum ConfigAction {
     /// Show the current configuration (secrets masked)
     Show,
+    #[command(about = "Get one setting / 設定値を取得 / 读取配置项")]
+    Get { path: String },
     /// Set one field, e.g. `mistl config set ai.default_ref <json>`
     Set {
         /// Field path as section.field (see `mistl config show`)
@@ -517,6 +519,11 @@ pub enum AiAction {
         /// Model to request (default: provider's choice)
         #[arg(short, long)]
         model: Option<String>,
+        #[arg(
+            long,
+            help = "Reasoning effort override / 推論労力の上書き / 覆盖推理强度"
+        )]
+        reasoning_effort: Option<String>,
     },
     /// Show AI network status (room, provider, API server)
     Status,
@@ -1122,9 +1129,14 @@ pub fn dispatch(cli: Cli) -> Result<()> {
                     client_call("ai.external.get", json!({"owner": owner}))
                 }
             },
-            AiAction::Chat { prompt, model } => {
-                client_call("ai.chat", json!({ "prompt": prompt, "model": model }))
-            }
+            AiAction::Chat {
+                prompt,
+                model,
+                reasoning_effort,
+            } => client_call(
+                "ai.chat",
+                json!({ "prompt": prompt, "model": model, "reasoning_effort": reasoning_effort }),
+            ),
             AiAction::Status => client_call("ai.status", json!({})),
             AiAction::Models => client_call("ai.models", json!({})),
             AiAction::Provide { action } => match action {
@@ -1345,6 +1357,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         Command::Status => status_overview(),
         Command::Config { action } => match action {
             ConfigAction::Show => client_call("config.show", json!({})),
+            ConfigAction::Get { path } => client_call("config.get", json!({"path": path})),
             ConfigAction::Set { path, value } => {
                 // Accept JSON for typed values; fall back to a plain string
                 // ("30" stays a number, "native" a string). An empty value
