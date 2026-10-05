@@ -44,6 +44,7 @@
 //!   Multipart rather than a raw body because the point of this server is
 //!   that an unmodified OpenAI client can be pointed at it, and every such
 //!   client sends this endpoint that way.
+//! - Unresolvable explicit models -> `404` with OpenAI `model_not_found`.
 //! - Upstream/backend errors: before any deltas were streamed -> `502` with
 //!   `{"error":{"message":...}}` carrying a generic message (the detail is
 //!   logged only, as it can embed upstream URLs/tokens) (or `400` for malformed requests); once
@@ -77,7 +78,7 @@ use tracing::warn;
 
 use super::openai::{ChatOutput, ToolOptions};
 use super::protocol::ChatMessage;
-use super::{LlmCallFn, ModelsFn, SttFn, ToolsUnsupported, TtsFn, stt, tts};
+use super::{LlmCallFn, ModelNotFound, ModelsFn, SttFn, ToolsUnsupported, TtsFn, stt, tts};
 
 pub(super) type OaiFn = Arc<
     dyn Fn(
@@ -699,9 +700,17 @@ fn tool_calls_stream_delta(calls: &Value) -> Value {
 }
 
 /// Writes the error for a failed backend call before any response bytes
-/// were committed: 400 `tools_unsupported`, else the generic 502.
+/// were committed: 404 `model_not_found`, 400 `tools_unsupported`, else 502.
 async fn write_backend_failure(stream: &mut TcpStream, error: &anyhow::Error) {
-    if is_tools_unsupported(error) {
+    if let Some(error) = error.downcast_ref::<ModelNotFound>() {
+        let body = json!({"error": {
+            "message": error.to_string(),
+            "type": "invalid_request_error",
+            "param": "model",
+            "code": "model_not_found",
+        }});
+        let _ = write_json_response(stream, 404, "Not Found", &body).await;
+    } else if is_tools_unsupported(error) {
         let _ = write_json_response(stream, 400, "Bad Request", &tools_unsupported_body()).await;
     } else {
         warn!("api_server: backend error: {error:#}");
@@ -976,8 +985,7 @@ async fn handle_audio_speech(stream: &mut TcpStream, body: &[u8], call: &TtsFn) 
             stream.write_all(&audio.bytes).await?;
         }
         Err(err) => {
-            warn!("api_server: backend error: {err:#}");
-            let _ = write_error(stream, 502, "Bad Gateway", BACKEND_ERROR_MESSAGE).await;
+            write_backend_failure(stream, &err).await;
         }
     }
     Ok(())
@@ -1039,8 +1047,7 @@ async fn handle_audio_transcriptions(
             let _ = write_json_response(stream, 200, "OK", &json!({ "text": text })).await;
         }
         Err(err) => {
-            warn!("api_server: backend error: {err:#}");
-            let _ = write_error(stream, 502, "Bad Gateway", BACKEND_ERROR_MESSAGE).await;
+            write_backend_failure(stream, &err).await;
         }
     }
     Ok(())
@@ -1406,7 +1413,8 @@ async fn handle_chat_completions_with_oai(
             if !stream_started {
                 // No response bytes have been committed, so answer with a
                 // normal OpenAI-shaped HTTP failure (generic text; see
-                // BACKEND_ERROR_MESSAGE), or 400 `tools_unsupported`.
+                // BACKEND_ERROR_MESSAGE), 404 `model_not_found`, or
+                // 400 `tools_unsupported`.
                 write_backend_failure(stream, &error).await;
             } else {
                 // HTTP status is already committed. Surface a generic error in
@@ -2081,6 +2089,32 @@ mod tests {
             events.iter().any(|e| *e == "data: [DONE]"),
             "expected [DONE] event, got: {events:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn remote_model_not_shared_is_not_reclassified_as_model_not_found() {
+        let call: LlmCallFn = Arc::new(|_, _, _, _| {
+            Box::pin(async {
+                Err(anyhow::anyhow!(
+                    "The requested model is not shared by this provider. (code: model_not_shared)"
+                ))
+            })
+        });
+        let server = start_test_server(call, fake_models()).await;
+        let raw = post_json(
+            &server,
+            "/v1/chat/completions",
+            json!({
+                "model":"private", "messages":[{"role":"user","content":"hi"}]
+            }),
+        )
+        .await;
+        let (head, body) = split_response(&raw);
+        assert_eq!(status_code(&head), 502);
+        let body: Value = serde_json::from_slice(body).unwrap();
+        assert_eq!(body["error"]["message"], BACKEND_ERROR_MESSAGE);
+        assert!(body["error"]["code"].is_null());
+        server.stop();
     }
 
     #[tokio::test]

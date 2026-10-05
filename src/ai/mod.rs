@@ -84,6 +84,23 @@ impl std::fmt::Display for ToolsUnsupported {
 
 impl std::error::Error for ToolsUnsupported {}
 
+/// A local API model name cannot be resolved from enabled providers.
+/// This is distinct from a remote provider refusing an unshared model.
+#[derive(Debug)]
+pub struct ModelNotFound(pub String);
+
+impl std::fmt::Display for ModelNotFound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "The model `{}` does not exist or is not available from enabled providers.",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for ModelNotFound {}
+
 /// Model list for `GET /v1/models`.
 pub type ModelsFn = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
 
@@ -316,6 +333,9 @@ impl AiService {
                 let session = session.clone();
                 Box::pin(async move {
                     let model = network_model(model);
+                    session
+                        .consumer
+                        .validate_api_model(protocol::SERVICE_CHAT, model.as_deref())?;
                     session.broadcast(ProtocolMessage::ConsumerHello).await;
                     let info = session
                         .consumer
@@ -333,6 +353,9 @@ impl AiService {
             Arc::new(move |params, lang| {
                 let session = session.clone();
                 Box::pin(async move {
+                    session
+                        .consumer
+                        .validate_api_model(protocol::SERVICE_TTS, Some(&params.model))?;
                     session.broadcast(ProtocolMessage::ConsumerHello).await;
                     let info = session
                         .consumer
@@ -350,6 +373,9 @@ impl AiService {
             Arc::new(move |params| {
                 let session = session.clone();
                 Box::pin(async move {
+                    session
+                        .consumer
+                        .validate_api_model(protocol::SERVICE_STT, Some(&params.model))?;
                     session.broadcast(ProtocolMessage::ConsumerHello).await;
                     let info = session
                         .consumer
@@ -367,6 +393,9 @@ impl AiService {
             Box::pin(async move {
                 let model =
                     network_model(body.get("model").and_then(Value::as_str).map(String::from));
+                session
+                    .consumer
+                    .validate_api_model(protocol::SERVICE_OAI, model.as_deref())?;
                 body["model"] = json!(model.unwrap_or_default());
                 body["stream"] = json!(false);
                 body.as_object_mut()
@@ -614,6 +643,19 @@ impl AiService {
     ) -> Result<(ChatOutput, &'static str, Option<String>)> {
         let config = self.state.effective_config();
         let reference = resolve_api_ref(&config.ai, model.as_deref(), &self.live_models())?;
+        if let Some(model) = network_model(model)
+            && let Some(room) = config
+                .ai
+                .providers
+                .iter()
+                .find(|p| p.id == reference.provider_id)
+                .and_then(|p| p.room())
+        {
+            self.room(room)
+                .await?
+                .consumer
+                .validate_api_model(protocol::SERVICE_CHAT, Some(&model))?;
+        }
         self.chat_ref(
             &reference,
             tools.reasoning_effort.clone(),
@@ -694,6 +736,9 @@ impl AiService {
             .context("ai: no usable ai.tts configured")?;
         if let Some(room) = resolved_ref.base_url.strip_prefix("mist-network://") {
             let session = self.room(room).await?;
+            session
+                .consumer
+                .validate_api_model(protocol::SERVICE_TTS, Some(&req.model))?;
             session.broadcast(ProtocolMessage::ConsumerHello).await;
             let info = session
                 .consumer
@@ -724,6 +769,7 @@ impl AiService {
         }
         let resolved = voice_ref_provider(&cfg, cfg.tts.as_ref())
             .context("ai: no usable ai.tts configured")?;
+        validate_voice_api_model(&cfg, &req.model, &self.live_models())?;
         let (provider, voice_config) = resolved.clone();
         let request_voice = (!req.voice.trim().is_empty()).then(|| req.voice.clone());
         let catalog = if request_voice.is_none() && (lang.is_some() || voice_config.voice.is_none())
@@ -766,6 +812,9 @@ impl AiService {
             .context("ai: no usable ai.stt configured")?;
         if let Some(room) = resolved_ref.base_url.strip_prefix("mist-network://") {
             let session = self.room(room).await?;
+            session
+                .consumer
+                .validate_api_model(protocol::SERVICE_STT, Some(&req.model))?;
             session.broadcast(ProtocolMessage::ConsumerHello).await;
             let info = session
                 .consumer
@@ -790,6 +839,7 @@ impl AiService {
         }
         let (provider, resolved) = model_ref_provider(&cfg, cfg.stt.as_ref())
             .context("ai: no usable ai.stt configured")?;
+        validate_voice_api_model(&cfg, &req.model, &self.live_models())?;
         let req = stt::SttParams {
             model: if req.model.trim().is_empty() {
                 resolved.model
@@ -819,20 +869,8 @@ fn resolve_api_ref(
             .cloned()
             .context("ai: no usable ai.default_ref configured");
     };
-    if let Some(default) = default.filter(|r| r.model == model) {
-        return Ok(default.clone());
-    }
-    for provider in ai.providers.iter().filter(|p| p.enabled) {
-        let models = provider
-            .room()
-            .and_then(|room| live.get(room))
-            .unwrap_or(&provider.models);
-        if models.iter().any(|m| m == model) {
-            return Ok(ModelRef {
-                provider_id: provider.id.clone(),
-                model: model.to_string(),
-            });
-        }
+    if let Some(reference) = known_api_ref(ai, model, live) {
+        return Ok(reference);
     }
     if let Some(default) = default
         && ai
@@ -845,7 +883,62 @@ fn resolve_api_ref(
             model: model.to_string(),
         });
     }
-    bail!("ai: model {model:?} not found in enabled ai.providers models caches or ai.default_ref")
+    Err(ModelNotFound(model.to_string()).into())
+}
+
+fn known_api_ref(
+    ai: &crate::config::AiConfig,
+    model: &str,
+    live: &HashMap<String, Vec<String>>,
+) -> Option<crate::config::ModelRef> {
+    use crate::config::{ModelRef, resolve_ref_exact};
+    if let Some(reference) = ai.default_ref.as_ref()
+        && reference.model == model
+        && resolve_ref_exact(ai, reference).is_some()
+    {
+        return Some(reference.clone());
+    }
+    for provider in ai.providers.iter().filter(|p| p.enabled) {
+        let models = provider
+            .room()
+            .and_then(|room| live.get(room))
+            .unwrap_or(&provider.models);
+        if models.iter().any(|m| m == model) {
+            return Some(ModelRef {
+                provider_id: provider.id.clone(),
+                model: model.to_string(),
+            });
+        }
+    }
+    let tts = ai.tts.as_ref().map(|r| ModelRef {
+        provider_id: r.provider_id.clone(),
+        model: r.model.clone(),
+    });
+    for reference in ai.stt.iter().chain(tts.iter()).chain(
+        ai.providers
+            .iter()
+            .filter(|p| p.enabled && p.room().is_some())
+            .flat_map(|p| p.shared.iter()),
+    ) {
+        if reference.model == model && resolve_ref_exact(ai, reference).is_some() {
+            return Some(reference.clone());
+        }
+    }
+    None
+}
+
+fn validate_voice_api_model(
+    ai: &crate::config::AiConfig,
+    model: &str,
+    live: &HashMap<String, Vec<String>>,
+) -> Result<()> {
+    if model.trim().is_empty() {
+        return Ok(());
+    }
+    if known_api_ref(ai, model, live).is_some() {
+        return Ok(());
+    }
+    Err(ModelNotFound(model.to_string()).into())
 }
 
 fn enabled_api_room(ai: &crate::config::AiConfig, room: &str) -> bool {
@@ -1872,6 +1965,207 @@ mod tests {
                 .unwrap()
                 .provider_id,
             "room"
+        );
+    }
+
+    #[test]
+    fn api_unknown_models_have_a_clean_error_and_configured_models_remain_usable() {
+        let mut ai = sample_config();
+        ai.providers[0].models.clear();
+        let live = HashMap::new();
+        assert_eq!(resolve_api_ref(&ai, None, &live).unwrap().model, "raw");
+        assert_eq!(
+            resolve_api_ref(&ai, Some("raw"), &live).unwrap().model,
+            "raw"
+        );
+        ai.tts = Some(crate::config::VoiceConfig {
+            provider_id: "http".into(),
+            model: "speech".into(),
+            ..Default::default()
+        });
+        ai.stt = Some(ModelRef {
+            provider_id: "http".into(),
+            model: "transcribe".into(),
+        });
+        for model in ["raw", "speech", "transcribe"] {
+            validate_voice_api_model(&ai, model, &live).unwrap();
+            assert_eq!(
+                resolve_api_ref(&ai, Some(model), &live).unwrap().model,
+                model
+            );
+        }
+        validate_voice_api_model(&ai, "", &live).unwrap();
+        let error = resolve_api_ref(&ai, Some("unknown"), &live).unwrap_err();
+        assert!(error.downcast_ref::<ModelNotFound>().is_some());
+        assert_eq!(
+            error.to_string(),
+            "The model `unknown` does not exist or is not available from enabled providers."
+        );
+        assert!(validate_voice_api_model(&ai, "unknown", &live).is_err());
+        ai.providers[0].enabled = false;
+        assert!(resolve_api_ref(&ai, Some("speech"), &live).is_err());
+        assert!(validate_voice_api_model(&ai, "transcribe", &live).is_err());
+    }
+
+    #[tokio::test]
+    async fn local_api_unknown_models_return_404_before_http_or_room_calls() {
+        let state = AppState::for_test();
+        let mut config = state.config();
+        config.ai = sample_config();
+        config.ai.tts = Some(crate::config::VoiceConfig {
+            provider_id: "http".into(),
+            model: "speech".into(),
+            voice: Some("speaker".into()),
+            ..Default::default()
+        });
+        config.ai.stt = Some(ModelRef {
+            provider_id: "http".into(),
+            model: "transcribe".into(),
+        });
+        state.set_config(config);
+        let sent = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = sent.clone();
+        let session = test_session_with_send(
+            "test",
+            Arc::new(move |_, _| {
+                count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }),
+        );
+        session.consumer.handle_message(
+            "peer",
+            &ProtocolMessage::ProviderHello {
+                models: Some(vec!["raw".into(), "speech".into(), "transcribe".into()]),
+                services: Some(vec![
+                    "chat".into(),
+                    "tts".into(),
+                    "stt".into(),
+                    "oai".into(),
+                ]),
+                voices: None,
+            },
+        );
+        sent.store(0, std::sync::atomic::Ordering::Relaxed);
+        let service = Arc::new(AiService {
+            state: state.clone(),
+            rooms: RwLock::new(HashMap::from([("test".into(), session)])),
+            on_demand: RwLock::new(HashSet::new()),
+            sync: Mutex::new(()),
+            api_server: Mutex::new(None),
+        });
+        let chat_service = service.clone();
+        let call: LlmCallFn = Arc::new(move |m, t, model, tx| {
+            let service = chat_service.clone();
+            Box::pin(async move {
+                service
+                    .chat(m, t, model, tx)
+                    .await
+                    .map(|(output, _, _)| output)
+            })
+        });
+        let tts_service = service.clone();
+        let tts_state = state.clone();
+        let tts: TtsFn = Arc::new(move |params, lang| {
+            let service = tts_service.clone();
+            let state = tts_state.clone();
+            Box::pin(async move { service.synthesize(&state, params, lang).await })
+        });
+        let stt_service = service.clone();
+        let stt_state = state.clone();
+        let stt: SttFn = Arc::new(move |params| {
+            let service = stt_service.clone();
+            let state = stt_state.clone();
+            Box::pin(async move { service.transcribe(&state, params).await })
+        });
+        let room_service = service.clone();
+        let rooms: api_server::RoomsFn =
+            Arc::new(move |room| Box::pin(room_service.clone().api_room(room)));
+        let server = ApiServer::start_with_rooms(
+            "127.0.0.1:0",
+            call,
+            Arc::new(Vec::new),
+            tts,
+            stt,
+            Some(rooms),
+        )
+        .await
+        .unwrap();
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        for prefix in ["/v1", "/v1/rooms/test"] {
+            for stream in [false, true] {
+                let response = client.post(format!("http://{}{prefix}/chat/completions", server.addr()))
+                    .json(&json!({"model":"missing","messages":[{"role":"user","content":"hi"}],"stream":stream}))
+                    .send().await.unwrap();
+                assert_model_not_found(response).await;
+            }
+            let response = client
+                .post(format!("http://{}{prefix}/audio/speech", server.addr()))
+                .json(&json!({"model":"missing","input":"hi","voice":"speaker"}))
+                .send()
+                .await
+                .unwrap();
+            assert_model_not_found(response).await;
+            let body = "--b\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nmissing\r\n--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.wav\"\r\nContent-Type: audio/wav\r\n\r\naudio\r\n--b--\r\n";
+            let response = client
+                .post(format!(
+                    "http://{}{prefix}/audio/transcriptions",
+                    server.addr()
+                ))
+                .header("content-type", "multipart/form-data; boundary=b")
+                .body(body)
+                .send()
+                .await
+                .unwrap();
+            assert_model_not_found(response).await;
+        }
+        for stream in [false, true] {
+            let response = client.post(format!("http://{}/v1/rooms/test/chat/completions", server.addr()))
+                .json(&json!({"model":"missing","stream":stream,"messages":[{"role":"user","content":[
+                    {"type":"text","text":"hi"},{"type":"image_url","image_url":{"url":"data:image/png;base64,YQ=="}}
+                ]}]})).send().await.unwrap();
+            assert_model_not_found(response).await;
+        }
+        // A default Room reference must also reject from its current catalog.
+        let mut config = state.config();
+        config.ai.default_ref = Some(ModelRef {
+            provider_id: "room".into(),
+            model: "raw".into(),
+        });
+        config.ai.tts.as_mut().unwrap().provider_id = "room".into();
+        config.ai.stt.as_mut().unwrap().provider_id = "room".into();
+        state.set_config(config);
+        let response = client
+            .post(format!("http://{}/v1/chat/completions", server.addr()))
+            .json(&json!({"model":"missing","messages":[{"role":"user","content":"hi"}]}))
+            .send()
+            .await
+            .unwrap();
+        assert_model_not_found(response).await;
+        let response = client
+            .post(format!("http://{}/v1/audio/speech", server.addr()))
+            .json(&json!({"model":"missing","input":"hi"}))
+            .send()
+            .await
+            .unwrap();
+        assert_model_not_found(response).await;
+        assert_eq!(
+            sent.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "unknown requests must not be sent to peers"
+        );
+        server.stop();
+    }
+
+    async fn assert_model_not_found(response: reqwest::Response) {
+        assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+        assert_eq!(
+            response.json::<Value>().await.unwrap(),
+            json!({"error": {
+                "message":"The model `missing` does not exist or is not available from enabled providers.",
+                "type":"invalid_request_error", "param":"model", "code":"model_not_found",
+            }})
         );
     }
 

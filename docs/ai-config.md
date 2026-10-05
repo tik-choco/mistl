@@ -206,6 +206,32 @@ SSE adaptation once that response completes. Text-only chat still uses
 `llm_request`. Local `/rooms/{room}/embeddings` and tunnel consumers for arbitrary
 paths are not exposed; mistai consumers can call all three provider tunnel paths.
 
+### API errors
+
+An explicit model that cannot be resolved from an enabled provider's advertised,
+cached or configured models returns HTTP 404 before an upstream call, with an
+OpenAI-compatible error body:
+
+```json
+{"error":{"message":"The model `unknown-model` does not exist or is not available from enabled providers.","type":"invalid_request_error","param":"model","code":"model_not_found"}}
+```
+
+This applies to chat (including streaming requests) and the local speech and
+transcription endpoints. Room routes check the room's current advertisements,
+including image chat, and reject unknown names immediately when at least one
+provider for the requested service supplies a model list. They do not wait for discovery to
+reject a known mismatch. With no providers, the existing no-provider error remains;
+legacy providers without model lists retain pass-through behavior. Omitted or
+empty models keep the configured default behavior; room `network-auto` requests
+still defer selection to the remote provider. Embeddings have no local API route.
+
+`model_not_found` is a local API resolution error. The wire-level
+`model_not_shared` refusal remains distinct: a providing peer rejects a named
+model outside its configured shared list, even if that model exists upstream.
+Other backend failures retain the generic HTTP 502 response, with details in the
+daemon log. `mistl ai chat` prints the model resolution message through its normal
+CLI error path.
+
 Bot transforms use `model = { provider_id, model }`, optional `reasoning_effort`
 for summarize/translate, and optional `voice` for TTS. A missing TTS voice uses
 `ai.tts.voice` when the same provider is selected.
