@@ -56,6 +56,8 @@ pub struct ProviderInfo {
     pub node_id: String,
     /// Models from the provider's latest `provider_hello` (may be empty).
     pub models: Vec<String>,
+    /// Whether the latest hello included a model list (even an empty one).
+    pub models_known: bool,
     /// Raw `services` from the provider's latest `provider_hello`, as
     /// decoded (`None` if the field was absent/invalid on the wire). This
     /// consumer only locks onto providers that advertise chat (see the
@@ -248,6 +250,7 @@ impl Consumer {
                                 trusted,
                                 node_id: from.to_string(),
                                 models: models.clone().unwrap_or_default(),
+                                models_known: models.is_some(),
                                 services: services.clone(),
                                 voices: voices.clone(),
                             },
@@ -278,6 +281,7 @@ impl Consumer {
                             trusted,
                             node_id: from.to_string(),
                             models: models.clone().unwrap_or_default(),
+                            models_known: models.is_some(),
                             services: services.clone(),
                             voices: voices.clone(),
                         });
@@ -286,6 +290,7 @@ impl Consumer {
                     }
                     Some(info) if info.node_id == from => {
                         info.models = models.clone().unwrap_or_default();
+                        info.models_known = models.is_some();
                         info.services = services.clone();
                         info.voices = voices.clone();
                         info.did = did.clone();
@@ -389,6 +394,27 @@ impl Consumer {
             }
         }
         models.into_iter().collect()
+    }
+
+    /// Reject unknown explicit local API models using current advertisements.
+    /// No providers or only legacy hellos without model lists keep discovery.
+    pub fn validate_api_model(&self, service: &str, model: Option<&str>) -> Result<()> {
+        let Some(model) = model.filter(|m| !m.trim().is_empty() && *m != "network-auto") else {
+            return Ok(());
+        };
+        let catalog = self.catalog.lock().expect("catalog lock");
+        let available = || {
+            catalog
+                .values()
+                .filter(|p| protocol::advertises_service(&p.services, service))
+        };
+        if available().any(|p| p.models.iter().any(|m| m == model)) {
+            return Ok(());
+        }
+        if available().any(|p| p.models_known) {
+            return Err(super::ModelNotFound(model.to_string()).into());
+        }
+        Ok(())
     }
 
     pub async fn wait_for_catalog(&self, timeout: Duration) -> bool {
@@ -777,6 +803,107 @@ mod tests {
             },
         );
         assert_eq!(task.await.unwrap().unwrap().content, "ok");
+    }
+
+    #[tokio::test]
+    async fn api_model_validation_preserves_no_provider_and_legacy_discovery() {
+        let consumer = Consumer::new(Arc::new(|_, _| {}));
+        consumer
+            .validate_api_model(protocol::SERVICE_CHAT, Some("unknown"))
+            .unwrap();
+        let error = consumer
+            .wait_for_model(Some("unknown"), Duration::from_millis(1))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("no provider"));
+        assert!(
+            error
+                .downcast_ref::<super::super::ModelNotFound>()
+                .is_none()
+        );
+        consumer.handle_message(
+            "legacy",
+            &ProtocolMessage::ProviderHello {
+                models: None,
+                services: None,
+                voices: None,
+            },
+        );
+        consumer
+            .validate_api_model(protocol::SERVICE_CHAT, Some("unknown"))
+            .unwrap();
+        assert_eq!(
+            consumer
+                .provider_for_model(Some("unknown"))
+                .unwrap()
+                .node_id,
+            "legacy"
+        );
+    }
+
+    #[test]
+    fn api_model_validation_uses_live_lists_including_empty_lists() {
+        let consumer = Consumer::new(Arc::new(|_, _| {}));
+        for (peer, models) in [("one", vec!["a".into()]), ("two", vec!["b".into()])] {
+            consumer.handle_message(
+                peer,
+                &ProtocolMessage::ProviderHello {
+                    models: Some(models),
+                    services: Some(vec!["chat".into()]),
+                    voices: None,
+                },
+            );
+        }
+        for model in [None, Some(""), Some("network-auto"), Some("a"), Some("b")] {
+            consumer
+                .validate_api_model(protocol::SERVICE_CHAT, model)
+                .unwrap();
+        }
+        assert!(
+            consumer
+                .validate_api_model(protocol::SERVICE_CHAT, Some("missing"))
+                .unwrap_err()
+                .downcast_ref::<super::super::ModelNotFound>()
+                .is_some()
+        );
+        consumer.on_peer_disconnected("one");
+        assert!(
+            consumer
+                .validate_api_model(protocol::SERVICE_CHAT, Some("a"))
+                .is_err()
+        );
+        consumer.handle_message(
+            "two",
+            &ProtocolMessage::ProviderHello {
+                models: Some(vec![]),
+                services: Some(vec!["tts".into()]),
+                voices: None,
+            },
+        );
+        assert!(
+            consumer
+                .validate_api_model(protocol::SERVICE_TTS, Some("b"))
+                .is_err()
+        );
+        // A known voice-only provider preserves the "no chat provider" path.
+        consumer
+            .validate_api_model(protocol::SERVICE_CHAT, Some("missing"))
+            .unwrap();
+        consumer.handle_message(
+            "two",
+            &ProtocolMessage::ProviderHello {
+                models: None,
+                services: Some(vec!["tts".into()]),
+                voices: None,
+            },
+        );
+        consumer
+            .validate_api_model(protocol::SERVICE_TTS, Some("b"))
+            .unwrap();
+        consumer.on_peer_disconnected("two");
+        consumer
+            .validate_api_model(protocol::SERVICE_CHAT, Some("missing"))
+            .unwrap();
     }
 
     #[test]
