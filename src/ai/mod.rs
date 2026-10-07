@@ -1828,10 +1828,21 @@ async fn serve_start(service: &Arc<AiService>, state: &Arc<AppState>) -> Result<
         let service = service.clone();
         Arc::new(move |room| Box::pin(service.clone().api_room(room)))
     };
-    let server =
-        ApiServer::start_with_rooms(&api_listen, call, models_fn, tts_fn, stt_fn, Some(rooms))
-            .await
-            .with_context(|| format!("ai: binding API server on {api_listen}"))?;
+    let origins: api_server::OriginsFn = {
+        let state = state.clone();
+        Arc::new(move || state.effective_config().ai.api_allowed_origins)
+    };
+    let server = ApiServer::start_with_rooms(
+        &api_listen,
+        call,
+        models_fn,
+        tts_fn,
+        stt_fn,
+        Some(rooms),
+        Some(origins),
+    )
+    .await
+    .with_context(|| format!("ai: binding API server on {api_listen}"))?;
     let addr = server.addr();
     *guard = Some(server);
 
@@ -1961,6 +1972,7 @@ mod tests {
             tts,
             stt,
             Some(rooms),
+            None,
         )
         .await
         .unwrap();
@@ -2576,6 +2588,7 @@ mod tests {
             tts,
             stt,
             Some(rooms),
+            None,
         )
         .await
         .unwrap();

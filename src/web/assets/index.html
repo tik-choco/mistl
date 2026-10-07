@@ -3513,6 +3513,8 @@
       "settings.field.ai.request_timeout_secs.desc": "How long to wait for an upstream response before giving up.",
       "settings.field.ai.api_listen.label": "API listen address",
       "settings.field.ai.api_listen.desc": "Address:port the local OpenAI-compatible API server binds to.",
+      "settings.field.ai.api_allowed_origins.label": "Allowed web app origins",
+      "settings.field.ai.api_allowed_origins.desc": "Comma-separated origins (e.g. https://example.com) of web apps allowed to call the local API from the browser. Only list sites you trust.",
       "settings.ai.providers.removeBtn": "Delete connection",
       "settings.field.ui.listen.label": "Listen address",
       "settings.field.ui.listen.desc": "Address:port this dashboard binds to.",
@@ -4301,6 +4303,8 @@
       "settings.field.ai.request_timeout_secs.desc": "アップストリームからの応答を待つ最大時間です。",
       "settings.field.ai.api_listen.label": "API待ち受けアドレス",
       "settings.field.ai.api_listen.desc": "ローカルのOpenAI互換APIサーバーが待ち受けるアドレス:ポートです。",
+      "settings.field.ai.api_allowed_origins.label": "許可するWebアプリのオリジン",
+      "settings.field.ai.api_allowed_origins.desc": "ブラウザからローカルAPIを呼び出してよいWebアプリのオリジン（例: https://example.com）をカンマ区切りで指定します。信頼できるサイトだけを追加してください。",
       "settings.ai.providers.removeBtn": "接続先を削除",
       "settings.field.ui.listen.label": "待ち受けアドレス",
       "settings.field.ui.listen.desc": "このダッシュボードが待ち受けるアドレス:ポートです。",
@@ -5087,6 +5091,8 @@
       "settings.field.ai.request_timeout_secs.desc": "等待上游响应的最长时间，超过则放弃。",
       "settings.field.ai.api_listen.label": "API 监听地址",
       "settings.field.ai.api_listen.desc": "本地 OpenAI 兼容 API 服务器绑定的地址:端口。",
+      "settings.field.ai.api_allowed_origins.label": "允许的 Web 应用来源",
+      "settings.field.ai.api_allowed_origins.desc": "允许从浏览器调用本地 API 的 Web 应用来源（例如 https://example.com），以逗号分隔。请只添加信任的网站。",
       "settings.ai.providers.desc": "此守护进程使用的HTTP连接和房间。禁用连接会保留模型引用。",
       "settings.ai.providers.removeBtn": "删除连接",
       "settings.ai.providers.removeConfirm": "删除此连接？现有模型引用将保留并显示警告。",
@@ -9878,7 +9884,8 @@
     ] },
     { section: "ai", titleKey: "settings.section.ai", container: "settings-drawer-body-ai", fields: [
       { key: "request_timeout_secs", labelKey: "settings.field.ai.request_timeout_secs.label", descKey: "settings.field.ai.request_timeout_secs.desc", type: "number", advanced: true },
-      { key: "api_listen", labelKey: "settings.field.ai.api_listen.label", descKey: "settings.field.ai.api_listen.desc", type: "text", advanced: true }
+      { key: "api_listen", labelKey: "settings.field.ai.api_listen.label", descKey: "settings.field.ai.api_listen.desc", type: "text", advanced: true },
+      { key: "api_allowed_origins", labelKey: "settings.field.ai.api_allowed_origins.label", descKey: "settings.field.ai.api_allowed_origins.desc", type: "list", advanced: true }
     ] },
     { section: "scheduler", titleKey: "settings.section.scheduler", container: "settings-drawer-body-scheduler", fields: [
       { key: "enabled", labelKey: "settings.field.scheduler.enabled.label", descKey: "settings.field.scheduler.enabled.desc", type: "toggle" }

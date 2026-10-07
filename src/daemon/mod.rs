@@ -531,6 +531,8 @@ fn remote_config_denied(path: &str) -> bool {
         "ai.upstream_url",
         "ai.upstream_api_key",
         "ai.api_listen",
+        // Lets web pages spend the local providers.
+        "ai.api_allowed_origins",
         "stream.rtsp_url",
     ];
     // Whole sections: update source/cadence, dashboard bind address, and the
@@ -848,7 +850,7 @@ mod tests {
             json!({ "default_ref": { "provider_id": "http", "model": "raw" }, "default_reasoning_effort": null, "tts": null, "stt": null,
             "providers": [{ "id": "http", "label": "", "base_url": "http://local/v1", "api_key": "***",
                 "enabled": true, "models": [], "models_fetched_at": null, "provide": false, "shared": [] }],
-            "api_listen": "127.0.0.1:6478", "request_timeout_secs": 120, "trusted_providers": [] })
+            "api_listen": "127.0.0.1:6478", "api_allowed_origins": [], "request_timeout_secs": 120, "trusted_providers": [] })
         );
     }
 
@@ -871,6 +873,7 @@ mod tests {
             "ui.listen",
             "ai.providers",
             "ai.upstream_url",
+            "ai.api_allowed_origins",
             "stream.rtsp_url",
             "foo.some_dir",
             "foo.bind_listen",

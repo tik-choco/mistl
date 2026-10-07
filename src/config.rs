@@ -491,6 +491,9 @@ pub struct AiConfig {
     pub stt: Option<ModelRef>,
     pub providers: Vec<AiProviderConfig>,
     pub api_listen: String,
+    /// Browser origins (`scheme://host[:port]`) allowed to call the local
+    /// API cross-origin (CORS). Empty: only native clients and same-origin.
+    pub api_allowed_origins: Vec<String>,
     pub request_timeout_secs: u64,
     pub trusted_providers: Vec<String>,
     // Deserialize-only fields, consumed by Config::load's migration.
@@ -525,6 +528,7 @@ impl Default for AiConfig {
             stt: None,
             providers: Vec::new(),
             api_listen: "127.0.0.1:6478".into(),
+            api_allowed_origins: Vec::new(),
             request_timeout_secs: 120,
             trusted_providers: Vec::new(),
             room_id: None,
@@ -546,6 +550,61 @@ pub fn valid_reasoning_effort(value: &str) -> bool {
         value,
         "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
     )
+}
+
+/// The serialized form browsers send in `Origin` (lower-case
+/// `scheme://host[:port]`, default port dropped), or `None` when `value` is
+/// not an http(s) origin. A single trailing `/` is tolerated so a copied
+/// site URL works; paths, queries, userinfo and wildcards are not.
+pub fn normalize_origin(value: &str) -> Option<String> {
+    let value = value.trim();
+    let value = value.strip_suffix('/').unwrap_or(value);
+    let (scheme, authority) = value.split_once("://")?;
+    let scheme = scheme.to_ascii_lowercase();
+    let default_port = match scheme.as_str() {
+        "http" => 80,
+        "https" => 443,
+        _ => return None,
+    };
+    if authority.is_empty()
+        || !authority
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-.:[]".contains(&b))
+    {
+        return None;
+    }
+    let authority = authority.to_ascii_lowercase();
+    let (host, port) = if let Some(rest) = authority.strip_prefix('[') {
+        let (addr, after) = rest.split_once(']')?;
+        if addr.is_empty() || addr.contains('[') {
+            return None;
+        }
+        let port = match after {
+            "" => None,
+            p => Some(p.strip_prefix(':')?),
+        };
+        (format!("[{addr}]"), port)
+    } else {
+        let (host, port) = match authority.split_once(':') {
+            Some((h, p)) => (h, Some(p)),
+            None => (authority.as_str(), None),
+        };
+        if host.is_empty() || host.contains(['[', ']']) {
+            return None;
+        }
+        (host.to_string(), port)
+    };
+    let port = match port {
+        None => None,
+        Some(p) if !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) => {
+            Some(p.parse::<u16>().ok()?).filter(|&p| p != default_port)
+        }
+        Some(_) => return None,
+    };
+    Some(match port {
+        Some(port) => format!("{scheme}://{host}:{port}"),
+        None => format!("{scheme}://{host}"),
+    })
 }
 
 pub fn valid_tts_speed(value: f64) -> bool {
@@ -573,6 +632,15 @@ impl AiConfig {
                 "ai.tts.speed must be a finite number between 0.25 and 4.0 (null clears it)"
             );
         }
+        if let Some(bad) = self
+            .api_allowed_origins
+            .iter()
+            .find(|v| normalize_origin(v).is_none())
+        {
+            anyhow::bail!(
+                "ai.api_allowed_origins: {bad:?} is not an origin; use scheme://host[:port] such as https://example.com or http://localhost:5173 (no path, no wildcard)"
+            );
+        }
         Ok(())
     }
 
@@ -591,6 +659,13 @@ impl AiConfig {
             tracing::warn!("ai: ignoring invalid ai.tts.speed");
             tts.speed = None;
         }
+        self.api_allowed_origins.retain(|v| {
+            let ok = normalize_origin(v).is_some();
+            if !ok {
+                tracing::warn!("ai: ignoring invalid ai.api_allowed_origins entry {v:?}");
+            }
+            ok
+        });
     }
 }
 
@@ -1216,6 +1291,8 @@ pub fn applies_when(path: &str) -> &'static str {
         // below, which need an explicit stop/start of *something* -- there
         // is nothing left for the user to do at all.
         "network.membership_allowlist" | "ai.trusted_providers" => "applied immediately",
+        // The API server reads it on every request.
+        "ai.api_allowed_origins" => "applied immediately",
         "ai.providers"
         | "ai.default_ref"
         | "ai.default_reasoning_effort"
@@ -2085,7 +2162,7 @@ mod tests {
                 "default_ref": null, "default_reasoning_effort": null, "tts": null, "stt": null,
                 "providers": [{ "id": "http", "label": "", "base_url": "http://local/v1", "api_key": "",
                     "enabled": true, "models": [], "models_fetched_at": null, "provide": false, "shared": [] }],
-                "api_listen": "127.0.0.1:6478", "request_timeout_secs": 120, "trusted_providers": []
+                "api_listen": "127.0.0.1:6478", "api_allowed_origins": [], "request_timeout_secs": 120, "trusted_providers": []
             })
         );
     }
@@ -2926,5 +3003,67 @@ mod tests {
         let updated = set_by_path(&config, "ai.trusted_providers", json!([did_ok()])).unwrap();
         assert_eq!(updated.ai.trusted_providers, vec![did_ok()]);
         assert_eq!(applies_when("ai.trusted_providers"), "applied immediately");
+    }
+
+    #[test]
+    fn normalize_origin_matches_browser_serialization() {
+        for (input, expected) in [
+            ("https://example.com", "https://example.com"),
+            ("HTTPS://Example.COM/", "https://example.com"),
+            ("https://example.com:443", "https://example.com"),
+            ("http://localhost:80", "http://localhost"),
+            ("http://localhost:5173", "http://localhost:5173"),
+            ("https://example.com:8443", "https://example.com:8443"),
+            ("http://[::1]:3000", "http://[::1]:3000"),
+            (" http://127.0.0.1:8080 ", "http://127.0.0.1:8080"),
+        ] {
+            assert_eq!(
+                normalize_origin(input).as_deref(),
+                Some(expected),
+                "{input}"
+            );
+        }
+        for input in [
+            "*",
+            "null",
+            "example.com",
+            "ftp://example.com",
+            "https://",
+            "https://example.com/app",
+            "https://example.com?x=1",
+            "https://user@example.com",
+            "https://*.example.com",
+            "https://example.com:",
+            "https://example.com:99999",
+            "https://example.com:1:2",
+            "http://[::1",
+            "https://exa mple.com",
+            "https://example.com\r\nX-Injected: 1",
+        ] {
+            assert_eq!(normalize_origin(input), None, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn api_allowed_origins_validates_on_set_and_applies_immediately() {
+        let config = Config::default();
+        assert!(config.ai.api_allowed_origins.is_empty());
+        let origins = json!(["https://example.com", "http://localhost:5173"]);
+        let updated = set_by_path(&config, "ai.api_allowed_origins", origins).unwrap();
+        assert_eq!(updated.ai.api_allowed_origins.len(), 2);
+        for bad in ["*", "https://example.com/app"] {
+            assert!(set_by_path(&config, "ai.api_allowed_origins", json!([bad])).is_err());
+        }
+        assert_eq!(
+            applies_when("ai.api_allowed_origins"),
+            "applied immediately"
+        );
+
+        let mut ai = AiConfig {
+            api_allowed_origins: vec!["*".into(), "https://example.com".into()],
+            ..AiConfig::default()
+        };
+        ai.discard_invalid_options();
+        assert_eq!(ai.api_allowed_origins, vec!["https://example.com"]);
     }
 }

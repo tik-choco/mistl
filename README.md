@@ -326,6 +326,7 @@ stdio_enabled = false                        # let approved peers run `stdio_com
 # tts = { provider_id = "http", model = "speech-model", voice = "speaker", lang_voices = { en = "english-speaker" } }
 # stt = { provider_id = "http", model = "transcription-model" }
 api_listen = "127.0.0.1:6478"                # local OpenAI-compatible API (serve)
+# api_allowed_origins = ["https://example.com"]  # web apps allowed to call that API (CORS)
 request_timeout_secs = 120                   # p2p inactivity timeout (resets per chunk)
 
 # [[ai.providers]]                          # HTTP endpoint
@@ -522,7 +523,8 @@ descendant processes are not yet fully supervised.
   `ai.stt` are configured (otherwise voice requests get an immediate
   `voice_error`); `raft_message` scheduling is passed through untouched
 - The local API server (`ai serve`) has no auth; keep `api_listen` on loopback unless
-  the network is trusted
+  the network is trusted. Browser pages from other origins are refused unless listed
+  in `ai.api_allowed_origins`
 - The web dashboard requires a session. Open it with `mistl ui`, the tray, or the URL
   shown by `mistl daemon status`; keep `[ui] listen` on loopback unless the network is
   trusted
