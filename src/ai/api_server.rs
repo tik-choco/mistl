@@ -52,6 +52,17 @@
 //!   the HTTP chunked body cleanly (without a success `[DONE]` event).
 //! - Anything else -> `404`.
 //!
+//! ## Browser callers (CORS)
+//!
+//! A request carrying a foreign `Origin` is refused with `403` unless that
+//! origin is listed in `ai.api_allowed_origins` (read per request, compared
+//! after [`crate::config::normalize_origin`]). For a listed origin, `OPTIONS`
+//! preflights get `204` with the CORS grant (plus
+//! `Access-Control-Allow-Private-Network` when asked, for https pages
+//! calling loopback), and every response carries `Access-Control-Allow-Origin`
+//! echoing it. No wildcard: any page in the user's browser could otherwise
+//! spend their providers.
+//!
 //! Audio endpoints resolve ai.tts/ai.stt directly. HTTP references call their
 //! endpoint; Room references use the room's advertised voice service.
 //!
@@ -97,6 +108,9 @@ pub(super) struct RoomRoutes {
     pub oai: OaiFn,
 }
 
+/// Extra browser origins allowed to call the API (`ai.api_allowed_origins`).
+pub(super) type OriginsFn = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
+
 pub(super) type RoomsFn = Arc<
     dyn Fn(
             String,
@@ -118,11 +132,28 @@ const HEAD_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Concurrent connections served; extra ones are dropped at accept.
 const MAX_CONNECTIONS: usize = 32;
-const SSE_RESPONSE_HEADER: &str = "HTTP/1.1 200 OK\r\n\
-                                   Content-Type: text/event-stream\r\n\
-                                   Transfer-Encoding: chunked\r\n\
-                                   Cache-Control: no-cache\r\n\
-                                   Connection: close\r\n\r\n";
+/// Preflight cache lifetime granted to allowed origins.
+const CORS_MAX_AGE_SECS: u32 = 600;
+/// Cap on an echoed `Access-Control-Request-Headers` list.
+const MAX_CORS_REQUEST_HEADERS_BYTES: usize = 1024;
+
+tokio::task_local! {
+    /// CORS header lines for the request being served: empty unless its
+    /// `Origin` is in `ai.api_allowed_origins`. Every response head appends
+    /// [`cors_headers`], so no write site can forget the grant.
+    static CORS_HEADERS: String;
+}
+
+fn cors_headers() -> String {
+    CORS_HEADERS.try_with(String::clone).unwrap_or_default()
+}
+
+fn sse_response_header() -> String {
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nCache-Control: no-cache\r\n{}Connection: close\r\n\r\n",
+        cors_headers()
+    )
+}
 
 /// A running API server; dropping/stopping aborts the accept loop and all
 /// connection tasks.
@@ -143,7 +174,7 @@ impl ApiServer {
         tts_call: TtsFn,
         stt_call: SttFn,
     ) -> Result<Arc<ApiServer>> {
-        Self::start_with_rooms(listen, call, models, tts_call, stt_call, None).await
+        Self::start_with_rooms(listen, call, models, tts_call, stt_call, None, None).await
     }
 
     pub async fn start_with_rooms(
@@ -153,6 +184,7 @@ impl ApiServer {
         tts_call: TtsFn,
         stt_call: SttFn,
         rooms: Option<RoomsFn>,
+        origins: Option<OriginsFn>,
     ) -> Result<Arc<ApiServer>> {
         let listener = TcpListener::bind(listen)
             .await
@@ -183,10 +215,12 @@ impl ApiServer {
                 let tts_call = tts_call.clone();
                 let stt_call = stt_call.clone();
                 let rooms = rooms.clone();
+                let origins = origins.clone();
                 let handle = tokio::spawn(async move {
                     let _permit = permit;
                     if let Err(error) =
-                        handle_connection(socket, call, models, tts_call, stt_call, rooms).await
+                        handle_connection(socket, call, models, tts_call, stt_call, rooms, origins)
+                            .await
                     {
                         warn!(%error, "api_server connection ended with error");
                     }
@@ -428,13 +462,26 @@ fn origin_is_allowed(origin: &str, local_addr: &SocketAddr) -> bool {
     name_ok && port_ok
 }
 
+/// The request's `Origin` when it is one of `allowed` (CORS grant), compared
+/// in normalized form; `None` for anything else.
+fn cors_origin<'a>(head: &'a RequestHead, allowed: &[String]) -> Option<&'a str> {
+    let origin = head.header("origin")?.trim();
+    let normalized = crate::config::normalize_origin(origin)?;
+    allowed
+        .iter()
+        .any(|a| crate::config::normalize_origin(a).as_deref() == Some(normalized.as_str()))
+        .then_some(origin)
+}
+
 /// Request-level guards run before any routing: request-smuggling shapes,
-/// DNS rebinding (`Host`), and cross-site browser requests (`Origin`).
+/// DNS rebinding (`Host`), and cross-site browser requests (`Origin`, unless
+/// listed in `allowed_origins`). `Ok` carries the origin to grant CORS to.
 /// `Err` carries `(status, reason, message)`.
-fn check_request_guards(
-    head: &RequestHead,
+fn check_request_guards<'a>(
+    head: &'a RequestHead,
     local_addr: &SocketAddr,
-) -> Result<(), (u16, &'static str, &'static str)> {
+    allowed_origins: &[String],
+) -> Result<Option<&'a str>, (u16, &'static str, &'static str)> {
     let count = |name: &str| {
         head.headers
             .iter()
@@ -448,11 +495,53 @@ fn check_request_guards(
         return Err((403, "Forbidden", "host not allowed"));
     }
     if let Some(origin) = head.header("origin") {
-        if !origin_is_allowed(origin, local_addr) {
-            return Err((403, "Forbidden", "origin not allowed"));
+        if origin_is_allowed(origin, local_addr) {
+            return Ok(None);
         }
+        return match cors_origin(head, allowed_origins) {
+            Some(origin) => Ok(Some(origin)),
+            None => Err((403, "Forbidden", "origin not allowed")),
+        };
     }
-    Ok(())
+    Ok(None)
+}
+
+/// The `Access-Control-Allow-Headers` value for a preflight: the requested
+/// list echoed when it is a plain header-name list (the OpenAI JS SDK sends
+/// several `x-stainless-*` headers besides `authorization`), else the basics.
+fn cors_allow_headers(head: &RequestHead) -> &str {
+    match head.header("access-control-request-headers") {
+        Some(v)
+            if !v.trim().is_empty()
+                && v.len() <= MAX_CORS_REQUEST_HEADERS_BYTES
+                && v.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_, ".contains(&b)) =>
+        {
+            v.trim()
+        }
+        _ => "authorization, content-type",
+    }
+}
+
+/// `204` answer to a CORS preflight from an allowed origin.
+async fn write_preflight(stream: &mut TcpStream, head: &RequestHead) -> io::Result<()> {
+    // Chromium's Private Network Access asks before an https page may reach
+    // loopback; the grant is only sent when asked.
+    let private_network = head
+        .header("access-control-request-private-network")
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("true"));
+    let response = format!(
+        "HTTP/1.1 204 No Content\r\n{}Access-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: {}\r\nAccess-Control-Max-Age: {CORS_MAX_AGE_SECS}\r\n{}Content-Length: 0\r\nConnection: close\r\n\r\n",
+        cors_headers(),
+        cors_allow_headers(head),
+        if private_network {
+            "Access-Control-Allow-Private-Network: true\r\n"
+        } else {
+            ""
+        },
+    );
+    stream.write_all(response.as_bytes()).await?;
+    stream.flush().await
 }
 
 async fn write_json_response(
@@ -463,8 +552,9 @@ async fn write_json_response(
 ) -> io::Result<()> {
     let body_bytes = serde_json::to_vec(body).unwrap_or_else(|_| b"{}".to_vec());
     let head = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        body_bytes.len()
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{}Connection: close\r\n\r\n",
+        body_bytes.len(),
+        cors_headers()
     );
     stream.write_all(head.as_bytes()).await?;
     stream.write_all(&body_bytes).await?;
@@ -725,6 +815,7 @@ async fn handle_connection(
     tts_call: TtsFn,
     stt_call: SttFn,
     rooms: Option<RoomsFn>,
+    origins: Option<OriginsFn>,
 ) -> Result<()> {
     let local_addr = stream.local_addr().context("reading local address")?;
     // Same rule as the dashboard: while external connections are OFF, only
@@ -767,11 +858,44 @@ async fn handle_connection(
             }
         };
 
-    if let Err((status, reason, message)) = check_request_guards(&head, &local_addr) {
-        let _ = write_error(&mut stream, status, reason, message).await;
-        return Ok(());
-    }
+    let allowed_origins = origins.map(|f| f()).unwrap_or_default();
+    let cors = match check_request_guards(&head, &local_addr, &allowed_origins) {
+        Ok(Some(origin)) => {
+            format!("Access-Control-Allow-Origin: {origin}\r\nVary: Origin\r\n")
+        }
+        Ok(None) => String::new(),
+        Err((status, reason, message)) => {
+            let _ = write_error(&mut stream, status, reason, message).await;
+            return Ok(());
+        }
+    };
+    let preflight = !cors.is_empty() && head.method.eq_ignore_ascii_case("OPTIONS");
+    CORS_HEADERS
+        .scope(cors, async move {
+            if preflight {
+                let _ = write_preflight(&mut stream, &head).await;
+                return Ok(());
+            }
+            route_request(
+                stream, head, leftover, call, models, tts_call, stt_call, rooms,
+            )
+            .await
+        })
+        .await
+}
 
+/// Routes a request that passed [`check_request_guards`].
+#[allow(clippy::too_many_arguments)]
+async fn route_request(
+    mut stream: TcpStream,
+    head: RequestHead,
+    leftover: Vec<u8>,
+    call: LlmCallFn,
+    models: ModelsFn,
+    tts_call: TtsFn,
+    stt_call: SttFn,
+    rooms: Option<RoomsFn>,
+) -> Result<()> {
     let is_post = head.method.eq_ignore_ascii_case("POST");
     let is_get = head.method.eq_ignore_ascii_case("GET");
     let mut path = head.path.split('?').next().unwrap_or("").to_string();
@@ -981,9 +1105,10 @@ async fn handle_audio_speech(stream: &mut TcpStream, body: &[u8], call: &TtsFn) 
     match (call)(params, lang).await {
         Ok(audio) => {
             let head = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\n{}Connection: close\r\n\r\n",
                 audio.mime,
-                audio.bytes.len()
+                audio.bytes.len(),
+                cors_headers()
             );
             stream.write_all(head.as_bytes()).await?;
             stream.write_all(&audio.bytes).await?;
@@ -1242,9 +1367,10 @@ async fn handle_chat_completions_with_oai(
                 "Upstream Error"
             };
             let head = format!(
-                "HTTP/1.1 {} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 {} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{}Connection: close\r\n\r\n",
                 response.status,
-                response.body.len()
+                response.body.len(),
+                cors_headers()
             );
             stream.write_all(head.as_bytes()).await?;
             stream.write_all(&response.body).await?;
@@ -1345,7 +1471,7 @@ async fn handle_chat_completions_with_oai(
                 match maybe_delta {
                     Some(delta) => {
                         if !stream_started {
-                            stream.write_all(SSE_RESPONSE_HEADER.as_bytes()).await?;
+                            stream.write_all(sse_response_header().as_bytes()).await?;
                             stream.flush().await?;
                             stream_started = true;
                         }
@@ -1377,7 +1503,7 @@ async fn handle_chat_completions_with_oai(
             // A successful backend is allowed to produce no content. It is
             // still a valid empty SSE completion, so commit the response now.
             if !stream_started {
-                stream.write_all(SSE_RESPONSE_HEADER.as_bytes()).await?;
+                stream.write_all(sse_response_header().as_bytes()).await?;
                 stream.flush().await?;
             }
             // Tool calls arrive complete (not streamed upstream-to-us), so
@@ -1566,6 +1692,7 @@ mod tests {
             fake_tts(),
             fake_stt(),
             Some(rooms),
+            None,
         )
         .await
         .unwrap();
@@ -2376,6 +2503,143 @@ mod tests {
         let origin = format!("Origin: http://127.0.0.1:{}\r\n", addr.port());
         let raw = send_request(addr, &mk(&origin, "127.0.0.1", json)).await;
         assert_eq!(status_code(&split_response(&raw).0), 200);
+    }
+
+    async fn start_cors_server(allowed: &[&str]) -> Arc<ApiServer> {
+        let allowed: Vec<String> = allowed.iter().map(|s| s.to_string()).collect();
+        ApiServer::start_with_rooms(
+            "127.0.0.1:0",
+            fake_call_ok(),
+            fake_models(),
+            fake_tts(),
+            fake_stt(),
+            None,
+            Some(Arc::new(move || allowed.clone())),
+        )
+        .await
+        .unwrap()
+    }
+
+    fn head_has(head: &str, line: &str) -> bool {
+        head.lines().any(|l| l.eq_ignore_ascii_case(line))
+    }
+
+    #[tokio::test]
+    async fn allowed_origin_gets_preflight_and_cors_headers() {
+        let server = start_cors_server(&["HTTPS://App.Example.com/"]).await;
+        let addr = server.addr();
+
+        let raw = send_request(
+            addr,
+            "OPTIONS /v1/models HTTP/1.1\r\nHost: localhost\r\nOrigin: https://app.example.com\r\nAccess-Control-Request-Method: GET\r\nAccess-Control-Request-Headers: authorization, x-stainless-os\r\nAccess-Control-Request-Private-Network: true\r\n\r\n",
+        )
+        .await;
+        let (head, body) = split_response(&raw);
+        assert_eq!(status_code(&head), 204, "{head}");
+        assert!(body.is_empty());
+        for line in [
+            "Access-Control-Allow-Origin: https://app.example.com",
+            "Vary: Origin",
+            "Access-Control-Allow-Methods: GET, POST, OPTIONS",
+            "Access-Control-Allow-Headers: authorization, x-stainless-os",
+            "Access-Control-Allow-Private-Network: true",
+        ] {
+            assert!(head_has(&head, line), "missing {line:?} in {head}");
+        }
+
+        // A header list that is not plain names is not echoed.
+        let raw = send_request(
+            addr,
+            "OPTIONS /v1/models HTTP/1.1\r\nHost: localhost\r\nOrigin: https://app.example.com\r\nAccess-Control-Request-Headers: x-a;evil\r\n\r\n",
+        )
+        .await;
+        let head = split_response(&raw).0;
+        assert!(head_has(
+            &head,
+            "Access-Control-Allow-Headers: authorization, content-type"
+        ));
+        assert!(!head.contains("Private-Network"), "{head}");
+
+        let raw = send_request(
+            addr,
+            "GET /v1/models HTTP/1.1\r\nHost: localhost\r\nOrigin: https://app.example.com\r\n\r\n",
+        )
+        .await;
+        let (head, body) = split_response(&raw);
+        assert_eq!(status_code(&head), 200);
+        assert!(head_has(
+            &head,
+            "Access-Control-Allow-Origin: https://app.example.com"
+        ));
+        let v: Value = serde_json::from_slice(body).unwrap();
+        assert_eq!(v["data"][0]["id"], "m1");
+
+        // Errors after the guard carry the grant too, so the page can read them.
+        let raw = send_request(
+            addr,
+            "GET /v1/nope HTTP/1.1\r\nHost: localhost\r\nOrigin: https://app.example.com\r\n\r\n",
+        )
+        .await;
+        let head = split_response(&raw).0;
+        assert_eq!(status_code(&head), 404);
+        assert!(head_has(
+            &head,
+            "Access-Control-Allow-Origin: https://app.example.com"
+        ));
+
+        let body = "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"stream\":true}";
+        let raw = send_request(
+            addr,
+            &format!(
+                "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nOrigin: https://app.example.com\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+        )
+        .await;
+        let head = split_response(&raw).0;
+        assert_eq!(status_code(&head), 200);
+        assert!(head_has(&head, "Content-Type: text/event-stream"));
+        assert!(head_has(
+            &head,
+            "Access-Control-Allow-Origin: https://app.example.com"
+        ));
+    }
+
+    #[tokio::test]
+    async fn unlisted_origins_stay_refused_and_get_no_grant() {
+        let server = start_cors_server(&["https://app.example.com"]).await;
+        let addr = server.addr();
+        for origin in [
+            "https://evil.example.com",
+            "http://app.example.com",
+            "https://app.example.com:8443",
+            "null",
+        ] {
+            for method in ["OPTIONS", "GET"] {
+                let raw = send_request(
+                    addr,
+                    &format!(
+                        "{method} /v1/models HTTP/1.1\r\nHost: localhost\r\nOrigin: {origin}\r\n\r\n"
+                    ),
+                )
+                .await;
+                let head = split_response(&raw).0;
+                assert_eq!(status_code(&head), 403, "{method} {origin}");
+                assert!(!head.contains("Access-Control"), "{head}");
+            }
+        }
+        // Native clients (no Origin) are unaffected and get no CORS headers.
+        let raw = send_request(addr, "GET /v1/models HTTP/1.1\r\nHost: localhost\r\n\r\n").await;
+        let head = split_response(&raw).0;
+        assert_eq!(status_code(&head), 200);
+        assert!(!head.contains("Access-Control"), "{head}");
+        // The Host (DNS rebinding) guard still applies to allowed origins.
+        let raw = send_request(
+            addr,
+            "GET /v1/models HTTP/1.1\r\nHost: evil.example.com\r\nOrigin: https://app.example.com\r\n\r\n",
+        )
+        .await;
+        assert_eq!(status_code(&split_response(&raw).0), 403);
     }
 
     // ---- tool calling -------------------------------------------------

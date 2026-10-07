@@ -264,6 +264,26 @@ Other backend failures retain the generic HTTP 502 response, with details in the
 daemon log. `mistl ai chat` prints the model resolution message through its normal
 CLI error path.
 
+### Browser apps (CORS)
+
+Native OpenAI clients send no `Origin` and are unaffected. A web page served
+from another origin (for example a tc-* app) is refused with HTTP 403
+`origin not allowed`, including its `OPTIONS` preflight, until its origin is
+listed in `ai.api_allowed_origins`:
+
+```console
+$ mistl config set ai.api_allowed_origins '["https://example.com", "http://localhost:5173"]'
+```
+
+Entries are exact origins (`scheme://host[:port]`, no path, no wildcard);
+case, a trailing `/` and default ports are normalized. The list is read on
+every request, so changes apply immediately. A listed origin gets `204` for
+preflights (`GET, POST, OPTIONS`, the requested header names, and
+`Access-Control-Allow-Private-Network: true` when the browser asks) and
+`Access-Control-Allow-Origin` on every response. Only list sites you trust:
+a listed page can use your providers without further prompts. The setting can
+only be changed locally (CLI or a loopback dashboard session).
+
 Bot transforms use `model = { provider_id, model }`, optional `reasoning_effort`
 for summarize/translate, and optional `voice` for TTS. A missing TTS voice uses
 `ai.tts.voice` when the same provider is selected.
