@@ -1837,6 +1837,7 @@
 </style>
 <link rel="stylesheet" href="/assets/features/topology.css">
 <link rel="stylesheet" href="/assets/features/storage.css">
+<link rel="stylesheet" href="/assets/features/escrow.css">
 <link rel="stylesheet" href="/assets/features/chat.css">
 <link rel="stylesheet" href="/assets/features/tunnel-graph.css">
 <link rel="stylesheet" href="/assets/features/peers.css">
@@ -2077,6 +2078,7 @@
         <button type="button" data-subtab-target="files"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span data-i18n="store.tabs.files">Files</span></button>
         <button type="button" data-subtab-target="sandbox"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 4h16v16H4zM4 14h5l1 3h4l1-3h5M12 7v6m-3-3 3 3 3-3"/></svg><span data-i18n="store.tabs.sandbox">Sandbox</span></button>
         <button type="button" data-subtab-target="sync"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M20 8a8 8 0 0 0-14-3L3 8m0-5v5h5M4 16a8 8 0 0 0 14 3l3-3m0 5v-5h-5"/></svg><span data-i18n="store.tabs.sync">Folder sync</span></button>
+        <button type="button" data-subtab-target="escrow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3"/></svg><span data-i18n="escrow.title">Escrow</span></button>
       </div>
       <div class="store-sidebar-summary" data-store-summary></div>
     </aside>
@@ -2204,6 +2206,49 @@
       </div>
       <div id="store-folder-share"></div>
       <div class="store-folder-access" id="store-folder-access" hidden></div>
+    </div>
+    <div class="subtab-page" data-subtab="escrow" id="panel-escrow">
+      <div class="escrow-head">
+        <h3 data-i18n="escrow.title">Escrow</h3>
+        <button type="button" data-escrow-refresh data-i18n="common.refresh">Refresh</button>
+      </div>
+      <p class="escrow-help" data-i18n="escrow.help">Use the same room as the app's 'mistl room'. tc-linkai shows an auto room like tce-xxxxxxxx… with a Copy button.</p>
+      <dl class="kv" data-escrow-summary aria-live="polite"></dl>
+      <div class="escrow-restart-notice" data-escrow-restart-notice hidden>
+        <p data-i18n="escrow.restartNotice">Changes to rooms, enabled and limits require a daemon restart. Configured rooms may differ from joined rooms until restart.</p>
+        <button type="button" class="badge restart" data-escrow-restart data-i18n="overview.restartDaemon">Restart daemon</button>
+      </div>
+      <form class="inline escrow-add-form" data-escrow-add-form novalidate>
+        <div class="field">
+          <label for="escrow-room" data-i18n="escrow.roomLabel">mistl room</label>
+          <input type="text" id="escrow-room" data-escrow-room maxlength="96" pattern="[A-Za-z0-9_.\/:\-]{1,96}" autocomplete="off" aria-describedby="escrow-room-error" data-i18n-placeholder="escrow.roomPlaceholder" placeholder="tce-xxxxxxxx… or a custom room">
+        </div>
+        <button type="submit" class="primary" data-escrow-add data-i18n="escrow.addRoom">Add room</button>
+      </form>
+      <p class="escrow-error" id="escrow-room-error" data-escrow-error role="alert" hidden></p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th data-i18n="escrow.roomLabel">mistl room</th>
+            <th data-i18n="escrow.configured">Configured</th>
+            <th data-i18n="escrow.joined">Joined</th>
+            <th data-i18n="escrow.slots">Slots</th>
+            <th data-i18n="escrow.bytes">Stored bytes</th>
+            <th data-i18n="store.col.actions">Actions</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="empty-note" data-escrow-empty data-i18n="escrow.empty">No escrow rooms. Add the app's mistl room to start.</div>
+      </div>
+      <p class="escrow-accounting" data-i18n="escrow.accounting">Removing a room retains its data. Total bytes include manifests and data for removed rooms. Rooms are joined only when Escrow and external connections are enabled.</p>
+      <details class="settings-drawer" id="settings-drawer-escrow">
+        <summary>
+          <svg class="gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg>
+          <span data-i18n="settings.drawer.escrow">Escrow settings</span>
+          <span class="drawer-chevron" aria-hidden="true"></span>
+        </summary>
+        <div class="settings-drawer-body" id="settings-drawer-body-escrow"></div>
+      </details>
     </div>
     </div>
     </div>
@@ -2796,6 +2841,7 @@
 <script src="/assets/features/peers.js"></script>
 <script src="/assets/features/topology.js"></script>
 <script src="/assets/features/storage.js"></script>
+<script src="/assets/features/escrow.js"></script>
 <script src="/assets/features/chat.js"></script>
 <script src="/assets/features/tunnel-graph.js"></script>
 <script src="/assets/features/messenger.js"></script>
@@ -2807,6 +2853,38 @@
 
   var T = {
     en: {
+      "escrow.title": "Escrow",
+      "escrow.help": "Use the same room as the app's 'mistl room'. tc-linkai shows an auto room like tce-xxxxxxxx… with a Copy button.",
+      "escrow.enabled": "Enabled (configured)",
+      "escrow.running": "Running",
+      "escrow.configuredRooms": "Configured rooms",
+      "escrow.joinedRooms": "Joined rooms",
+      "escrow.totalSlots": "Total slots",
+      "escrow.totalBytes": "Total stored bytes",
+      "escrow.restartNotice": "Changes to rooms, enabled and limits require a daemon restart. Configured rooms may differ from joined rooms until restart.",
+      "escrow.roomLabel": "mistl room",
+      "escrow.roomPlaceholder": "tce-xxxxxxxx… or a custom room",
+      "escrow.addRoom": "Add room",
+      "escrow.removeRoom": "Remove",
+      "escrow.configured": "Configured",
+      "escrow.joined": "Joined",
+      "escrow.slots": "Slots",
+      "escrow.bytes": "Stored bytes",
+      "escrow.empty": "No escrow rooms. Add the app's mistl room to start.",
+      "escrow.invalidRoom": "Room IDs must be 1–96 characters using only A–Z, a–z, 0–9, _ . / : -",
+      "escrow.accounting": "Removing a room retains its data. Total bytes include manifests and data for removed rooms. Rooms are joined only when Escrow and external connections are enabled.",
+      "settings.section.escrow": "Escrow",
+      "settings.drawer.escrow": "Escrow settings",
+      "settings.field.escrow.rooms.label": "Escrow rooms",
+      "settings.field.escrow.rooms.desc": "Use the app's mistl room. Room changes take effect after daemon restart.",
+      "settings.field.escrow.enabled.label": "Enable Escrow",
+      "settings.field.escrow.enabled.desc": "Store encrypted checkpoints in configured rooms. Requires daemon restart.",
+      "settings.field.escrow.max_blob_bytes.label": "Maximum blob size",
+      "settings.field.escrow.max_blob_bytes.desc": "GiB per encrypted blob (default 0.03125 GiB = 32 MiB; maximum 1 GiB). Requires daemon restart.",
+      "settings.field.escrow.max_total_bytes.label": "Total capacity",
+      "settings.field.escrow.max_total_bytes.desc": "GiB for all retained data (default 1 GiB; maximum 1024 GiB). Requires daemon restart.",
+      "settings.field.escrow.max_slots_per_room.label": "Slots per room",
+      "settings.field.escrow.max_slots_per_room.desc": "Maximum slots per room (default 1024; range 1–65536). Requires daemon restart.",
       "ai.sharing.toggle": "Share {model} with {room}",
       "ai.sharing.noHttp": "Add an enabled HTTP connection in Connections to share its models.",
       "ai.sharing.noRooms": "Add a room to share models.",
@@ -3597,6 +3675,38 @@
       "tunnel.toast.stopped": "Tunnel stopped.",
     },
     ja: {
+      "escrow.title": "Escrow",
+      "escrow.help": "アプリの「mistl room」と同じルームを使ってください。tc-linkai には tce-xxxxxxxx… のような自動生成ルームと Copy ボタンが表示されます。",
+      "escrow.enabled": "有効（設定）",
+      "escrow.running": "稼働中",
+      "escrow.configuredRooms": "設定済みルーム数",
+      "escrow.joinedRooms": "参加済みルーム数",
+      "escrow.totalSlots": "合計スロット数",
+      "escrow.totalBytes": "合計保存容量",
+      "escrow.restartNotice": "ルーム・有効設定・上限の変更にはデーモンの再起動が必要です。再起動までは設定済みルームと参加済みルームが異なる場合があります。",
+      "escrow.roomLabel": "mistl room",
+      "escrow.roomPlaceholder": "tce-xxxxxxxx… または任意のルーム",
+      "escrow.addRoom": "ルームを追加",
+      "escrow.removeRoom": "削除",
+      "escrow.configured": "設定済み",
+      "escrow.joined": "参加済み",
+      "escrow.slots": "スロット数",
+      "escrow.bytes": "保存容量",
+      "escrow.empty": "Escrow ルームがありません。アプリの mistl room を追加してください。",
+      "escrow.invalidRoom": "ルーム ID は A–Z、a–z、0–9、_ . / : - のみで 1〜96 文字にしてください。",
+      "escrow.accounting": "ルームを削除しても保存データは残ります。合計容量にはマニフェストと削除済みルームのデータも含まれます。Escrow と外部接続が有効な場合のみルームに参加します。",
+      "settings.section.escrow": "Escrow",
+      "settings.drawer.escrow": "Escrow 設定",
+      "settings.field.escrow.rooms.label": "Escrow ルーム",
+      "settings.field.escrow.rooms.desc": "アプリの mistl room を指定します。ルームの変更はデーモン再起動後に反映されます。",
+      "settings.field.escrow.enabled.label": "Escrow を有効化",
+      "settings.field.escrow.enabled.desc": "設定したルームの暗号化チェックポイントを保存します。デーモンの再起動が必要です。",
+      "settings.field.escrow.max_blob_bytes.label": "blob の最大容量",
+      "settings.field.escrow.max_blob_bytes.desc": "暗号化 blob ごとの GiB 上限（既定 0.03125 GiB = 32 MiB、最大 1 GiB）。デーモンの再起動が必要です。",
+      "settings.field.escrow.max_total_bytes.label": "合計容量の上限",
+      "settings.field.escrow.max_total_bytes.desc": "保存データ全体の GiB 上限（既定 1 GiB、最大 1024 GiB）。デーモンの再起動が必要です。",
+      "settings.field.escrow.max_slots_per_room.label": "ルームごとのスロット上限",
+      "settings.field.escrow.max_slots_per_room.desc": "ルームごとの最大スロット数（既定 1024、範囲 1〜65536）。デーモンの再起動が必要です。",
       "ai.sharing.toggle": "{model}を{room}に共有",
       "ai.sharing.noHttp": "接続先で有効なHTTP接続先を追加してください。",
       "ai.sharing.noRooms": "ルームを追加すると、モデルを提供できます。",
@@ -4387,6 +4497,38 @@
       "tunnel.toast.stopped": "トンネルを停止しました。",
     },
     zh: {
+      "escrow.title": "Escrow",
+      "escrow.help": "请使用与应用的“mistl room”相同的房间。tc-linkai 会显示 tce-xxxxxxxx… 这样的自动房间，并提供 Copy 按钮。",
+      "escrow.enabled": "已启用（配置）",
+      "escrow.running": "运行中",
+      "escrow.configuredRooms": "已配置房间数",
+      "escrow.joinedRooms": "已加入房间数",
+      "escrow.totalSlots": "槽位总数",
+      "escrow.totalBytes": "已存储总容量",
+      "escrow.restartNotice": "更改房间、启用状态和限制需要重启守护进程。重启前，已配置房间与已加入房间可能不同。",
+      "escrow.roomLabel": "mistl room",
+      "escrow.roomPlaceholder": "tce-xxxxxxxx… 或自定义房间",
+      "escrow.addRoom": "添加房间",
+      "escrow.removeRoom": "移除",
+      "escrow.configured": "已配置",
+      "escrow.joined": "已加入",
+      "escrow.slots": "槽位数",
+      "escrow.bytes": "已存储容量",
+      "escrow.empty": "暂无 Escrow 房间。请添加应用的 mistl room。",
+      "escrow.invalidRoom": "房间 ID 必须为 1–96 个字符，只能使用 A–Z、a–z、0–9、_ . / : -",
+      "escrow.accounting": "移除房间会保留数据。总容量包括清单及已移除房间的数据。仅在 Escrow 和外部连接均启用时加入房间。",
+      "settings.section.escrow": "Escrow",
+      "settings.drawer.escrow": "Escrow 设置",
+      "settings.field.escrow.rooms.label": "Escrow 房间",
+      "settings.field.escrow.rooms.desc": "请使用应用的 mistl room。更改房间将在重启守护进程后生效。",
+      "settings.field.escrow.enabled.label": "启用 Escrow",
+      "settings.field.escrow.enabled.desc": "在配置的房间中保存加密检查点。需要重启守护进程。",
+      "settings.field.escrow.max_blob_bytes.label": "blob 大小上限",
+      "settings.field.escrow.max_blob_bytes.desc": "每个加密 blob 的 GiB 上限（默认 0.03125 GiB = 32 MiB，最大 1 GiB）。需要重启守护进程。",
+      "settings.field.escrow.max_total_bytes.label": "总容量上限",
+      "settings.field.escrow.max_total_bytes.desc": "所有保留数据的 GiB 上限（默认 1 GiB，最大 1024 GiB）。需要重启守护进程。",
+      "settings.field.escrow.max_slots_per_room.label": "每个房间的槽位上限",
+      "settings.field.escrow.max_slots_per_room.desc": "每个房间的最大槽位数（默认 1024，范围 1–65536）。需要重启守护进程。",
       "ai.model.voice": "音色",
       "ai.model.empty": "没有匹配的模型",
       "ai.model.roomAuto": "由{provider}选择",
@@ -5508,6 +5650,7 @@
     renderAi();
     renderChatRelayRooms(state.chatRelayRooms);
     renderStore(state.storeItems);
+    escrowView.refreshLanguage();
     renderSandbox(state.sandboxItems);
     renderSchedulerJobs(state.schedulerJobs);
     renderSchedulerRuns(state.schedulerRuns);
@@ -7444,6 +7587,39 @@
     withBusy(e.currentTarget, function () { return pollChatRelayRooms(); });
   });
 
+
+  /* ---------- escrow (Storage sub-page) ---------- */
+
+  var escrowRequested = false;
+  var escrowPoll = null;
+  var escrowView = window.MistlEscrow.create({
+    root: document.getElementById("panel-escrow"), t: t, formatBytes: fmtBytes,
+    addRoom: function (room) { return changeEscrowRoom("escrow.rooms.add", room); },
+    removeRoom: function (room) { return changeEscrowRoom("escrow.rooms.remove", room); },
+    refresh: function (button) {
+      withBusy(button, pollEscrow).catch(function (err) { showToast(err.message || String(err), "error"); });
+    },
+    restart: restartDaemon
+  });
+
+  function pollEscrow() {
+    escrowRequested = true;
+    if (escrowPoll) return escrowPoll;
+    escrowPoll = api("escrow.status", {}).then(function (data) {
+      escrowView.render(data);
+    }).finally(function () { escrowPoll = null; });
+    return escrowPoll;
+  }
+
+  function changeEscrowRoom(cmd, room) {
+    return api(cmd, { room: room }).then(function (data) {
+      showToast(t(data.applies === "daemon restart" ? "settings.savedRestart" : "settings.savedLive"), "success");
+      // Let an older status poll finish before fetching the saved configuration.
+      return Promise.resolve(escrowPoll).catch(function () {}).then(function () {
+        return Promise.all([pollEscrow(), pollConfig()]);
+      });
+    });
+  }
 
   /* ---------- store ---------- */
 
@@ -9878,6 +10054,13 @@
       { key: "audio_capture", labelKey: "settings.field.stream.audio_capture.label", descKey: "settings.field.stream.audio_capture.desc", type: "toggle", advanced: true },
       { key: "cascade", labelKey: "settings.field.stream.cascade.label", descKey: "settings.field.stream.cascade.desc", type: "toggle", advanced: true }
     ] },
+    { section: "escrow", titleKey: "settings.section.escrow", container: "settings-drawer-body-escrow", fields: [
+      { key: "rooms", labelKey: "settings.field.escrow.rooms.label", descKey: "settings.field.escrow.rooms.desc", type: "list", validate: window.MistlEscrow.validRoom, invalidKey: "escrow.invalidRoom" },
+      { key: "enabled", labelKey: "settings.field.escrow.enabled.label", descKey: "settings.field.escrow.enabled.desc", type: "toggle" },
+      { key: "max_blob_bytes", labelKey: "settings.field.escrow.max_blob_bytes.label", descKey: "settings.field.escrow.max_blob_bytes.desc", type: "gib", advanced: true },
+      { key: "max_total_bytes", labelKey: "settings.field.escrow.max_total_bytes.label", descKey: "settings.field.escrow.max_total_bytes.desc", type: "gib", advanced: true },
+      { key: "max_slots_per_room", labelKey: "settings.field.escrow.max_slots_per_room.label", descKey: "settings.field.escrow.max_slots_per_room.desc", type: "number", advanced: true }
+    ] },
     { section: "chat_relay", titleKey: "settings.section.chat_relay", container: "settings-drawer-body-chat-relay", fields: [
       { key: "rooms", labelKey: "settings.field.chat_relay.rooms.label", descKey: "settings.field.chat_relay.rooms.desc", type: "list" },
       { key: "enabled", labelKey: "settings.field.chat_relay.enabled.label", descKey: "settings.field.chat_relay.enabled.desc", type: "toggle" }
@@ -9915,6 +10098,7 @@
     ai: "panel-ai",
     chat_relay: "panel-chat-relay",
     storage: "panel-store",
+    escrow: "panel-escrow",
     identity: "panel-profile",
     scheduler: "panel-scheduler",
     bot: "panel-bot",
@@ -9955,6 +10139,7 @@
         : "settings.savedNextStart";
       showToast(t(toastKey), "success");
       refreshAiHints();
+      if (path.indexOf("escrow.") === 0) pollEscrow().catch(function (err) { showToast(err.message || String(err), "error"); });
     }, function (err) {
       showToast("config.set " + path + ": " + (err.message || err), "error");
     });
@@ -10086,6 +10271,9 @@
         var raw = addInput.value;
         if (!raw.trim()) return;
         var parts = raw.split(",").map(function (s) { return s.trim(); }).filter(function (s) { return s !== ""; });
+        if (f.validate && parts.some(function (part) { return !f.validate(part); })) {
+          showToast(t(f.invalidKey), "error"); return;
+        }
         var next = items.slice();
         parts.forEach(function (p) { if (next.indexOf(p) === -1) next.push(p); });
         addInput.value = "";
@@ -11620,6 +11808,8 @@
     pollTopology();
     pollAiStatus();
     pollChatRelayRooms();
+    // Start escrow polling when first opened, then keep its last-known state fresh.
+    if (escrowRequested) pollEscrow().catch(function () { /* retain last-known state */ });
     /* folder sync entries change in the background (daemon-side
        connect/retry loop), so poll them on the same unconditional cycle as
        everything else above rather than gating on panel visibility --
@@ -11718,7 +11908,8 @@
      links and settings shortcuts keep working and open the right tab. */
   var PANEL_ALIASES = {
     "panel-stream": { panel: "panel-chat", tab: "stream" },
-    "panel-chat-relay": { panel: "panel-chat", tab: "rooms" }
+    "panel-chat-relay": { panel: "panel-chat", tab: "rooms" },
+    "panel-escrow": { panel: "panel-store", tab: "escrow" }
   };
 
   function panelFromHash() {
@@ -11875,6 +12066,9 @@
             }
             heightTimer = setTimeout(fallback, 260);
           }
+        }
+        if (panel.id === "panel-store" && name === "escrow") {
+          pollEscrow().catch(function (err) { showToast(err.message || String(err), "error"); });
         }
         if (panel.id === "panel-ai" && name === "sharing" && panel.classList.contains("active")) aiRefreshModels(false);
         try { localStorage.setItem(storeKey, name); } catch (e) { /* ignore */ }

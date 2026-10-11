@@ -8,6 +8,7 @@ mod consensus;
 mod daemon;
 mod devlog;
 mod dm;
+mod escrow;
 mod identity;
 mod install;
 mod net;

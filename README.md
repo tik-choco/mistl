@@ -282,6 +282,18 @@ These two settings used to live in the (now removed) `[mailbox]` section as
 `chat_rooms`/`chat_relay`; a config.toml still carrying them is migrated to
 `[chat_relay]` on the next daemon start, and the old section is dropped.
 
+### Encrypted checkpoint escrow
+
+The optional tc-escrow v1 service keeps browser-encrypted application checkpoints
+for late joiners. Run `mistl escrow rooms add <room>`, restart the daemon, and enable
+network connections; configure that same escrow room in the application.
+`mistl escrow status` reports rooms, slots, and bytes without exposing contents.
+The dashboard's **Store → Escrow** page offers the same room controls, status,
+enabled switch and advanced capacity limits, with a daemon restart action. In
+tc-linkai, copy the auto-generated `tce-…` **mistl room** into **Add room**.
+Signed heads use CAS and a pinned writer, with durable current/previous blobs that
+remain downloadable after restart. See [escrow setup and protocol](docs/escrow.md).
+
 ## Configuration
 
 Configuration lives in `%APPDATA%\tik-choco\mistl\config\config.toml` (created with
