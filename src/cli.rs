@@ -73,6 +73,11 @@ pub enum Command {
         #[command(subcommand)]
         action: ChatAction,
     },
+    /// Durable encrypted checkpoint escrow
+    Escrow {
+        #[command(subcommand)]
+        action: EscrowAction,
+    },
     /// P2P AI network: consume or provide LLM inference (mistai compatible)
     Ai {
         #[command(subcommand)]
@@ -488,6 +493,22 @@ pub enum StreamAction {
     Stop,
     /// Show stream status and URL
     Status,
+}
+
+#[derive(Subcommand)]
+pub enum EscrowAction {
+    Status,
+    Rooms {
+        #[command(subcommand)]
+        action: EscrowRoomsAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum EscrowRoomsAction {
+    Add { room: String },
+    Remove { room: String },
+    List,
 }
 
 #[derive(Subcommand)]
@@ -1105,6 +1126,18 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             }
             StreamAction::Stop => client_call("stream.stop", json!({})),
             StreamAction::Status => client_call("stream.status", json!({})),
+        },
+        Command::Escrow { action } => match action {
+            EscrowAction::Status => client_call("escrow.status", json!({})),
+            EscrowAction::Rooms { action } => match action {
+                EscrowRoomsAction::Add { room } => {
+                    client_call("escrow.rooms.add", json!({"room":room}))
+                }
+                EscrowRoomsAction::Remove { room } => {
+                    client_call("escrow.rooms.remove", json!({"room":room}))
+                }
+                EscrowRoomsAction::List => client_call("escrow.rooms.list", json!({})),
+            },
         },
         Command::Chat { action } => match action {
             ChatAction::Rooms => client_call("chat.rooms", json!({})),

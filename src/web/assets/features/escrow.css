@@ -1,0 +1,16 @@
+/* Scoped escrow view; colors follow the shared dashboard theme. */
+#panel-escrow { min-width: 0; }
+#panel-escrow .escrow-head { display: flex; align-items: center; gap: 12px; }
+#panel-escrow .escrow-head h3 { margin: 0; flex: 1; }
+#panel-escrow .escrow-help, #panel-escrow .escrow-accounting { color: var(--text-dim); font-size: 12px; line-height: 1.6; }
+#panel-escrow .escrow-room-name { overflow-wrap: anywhere; min-width: 160px; max-width: 240px; }
+#panel-escrow .escrow-restart-notice { border: 1px solid var(--panel-border); border-radius: 8px; padding: 12px; margin: 12px 0; }
+#panel-escrow .escrow-restart-notice p { margin: 0 0 8px; }
+#panel-escrow .escrow-error { color: var(--err); font-size: 12px; overflow-wrap: anywhere; }
+#panel-escrow .escrow-add-form { margin: 12px 0; }
+#panel-escrow .escrow-add-form .field { flex: 1; min-width: 160px; }
+#panel-escrow .table-wrap { overflow-x: auto; }
+#panel-escrow .settings-drawer { margin-top: 16px; }
+
+#panel-escrow th, #panel-escrow td:not(.escrow-room-name) { white-space: nowrap; }
+#panel-escrow td button { white-space: nowrap; }

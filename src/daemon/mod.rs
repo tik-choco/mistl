@@ -68,6 +68,24 @@ impl AppState {
         Ok(())
     }
 
+    pub fn set_escrow_room(&self, room: &str, add: bool) -> Result<()> {
+        anyhow::ensure!(crate::escrow::valid_room(room), "invalid escrow room id");
+        let mut config = self.config.write().expect("config lock poisoned");
+        let mut updated = config.clone();
+        if add {
+            if !updated.escrow.rooms.iter().any(|r| r == room) {
+                updated.escrow.rooms.push(room.into());
+            }
+            updated.escrow.enabled = true;
+        } else {
+            updated.escrow.rooms.retain(|r| r != room);
+        }
+        updated.escrow.validate()?;
+        updated.save()?;
+        *config = updated;
+        Ok(())
+    }
+
     pub fn set_ai_provide(&self, start: bool) -> Result<Vec<String>> {
         let mut config = self.config.write().expect("config lock poisoned");
         let mut updated = config.clone();
@@ -553,6 +571,13 @@ fn authorize(caller: Caller, cmd: &str, args: &Value) -> Result<()> {
     if cmd == "ai.external.apply" && caller != Caller::Ipc {
         bail!("`ai.external.apply` is available only through the local mistl CLI");
     }
+    // Room shortcuts are configuration writes and must share config.set's policy.
+    if matches!(cmd, "escrow.rooms.add" | "escrow.rooms.remove") {
+        authorize(caller, "config.set", &json!({"path": "escrow.rooms"}))?;
+        if cmd == "escrow.rooms.add" {
+            authorize(caller, "config.set", &json!({"path": "escrow.enabled"}))?;
+        }
+    }
     if caller != (Caller::Http { remote: true }) {
         return Ok(());
     }
@@ -621,7 +646,13 @@ pub async fn dispatch_as(
             );
         }
     }
-    if !state.network.permitted() && !crate::network::offline_command_allowed(cmd) {
+    if !state.network.permitted()
+        && !crate::network::offline_command_allowed(cmd)
+        && !matches!(
+            cmd,
+            "escrow.status" | "escrow.rooms.list" | "escrow.rooms.add" | "escrow.rooms.remove"
+        )
+    {
         state.network.require_online()?;
     }
     match cmd {
@@ -752,6 +783,7 @@ pub async fn dispatch_as(
             Some("store") => crate::storage::handle(cmd, args, state).await,
             Some("stream") => crate::stream::handle(cmd, args, state).await,
             Some("chat") => crate::chat_relay::handle(cmd, args, state).await,
+            Some("escrow") => crate::escrow::handle(cmd, args, state).await,
             Some("dm") => crate::dm::handle(cmd, args, state).await,
             Some("peers") => crate::net::peer_profile::handle(cmd, args, state).await,
             Some("sched") => crate::scheduler::handle(cmd, args, state).await,
@@ -892,6 +924,27 @@ mod tests {
         ] {
             authorize(REMOTE, "config.set", &json!({"path": path, "value": 1}))
                 .unwrap_or_else(|e| panic!("{path}: {e}"));
+        }
+    }
+
+    #[test]
+    fn escrow_dashboard_commands_follow_config_policy() {
+        for caller in [LOCAL, REMOTE, Caller::Ipc, Caller::Internal] {
+            for cmd in ["escrow.status", "escrow.rooms.list"] {
+                authorize(caller, cmd, &json!({})).unwrap();
+            }
+            let rooms_allowed =
+                authorize(caller, "config.set", &json!({"path": "escrow.rooms"})).is_ok();
+            let enabled_allowed =
+                authorize(caller, "config.set", &json!({"path": "escrow.enabled"})).is_ok();
+            assert_eq!(
+                authorize(caller, "escrow.rooms.add", &json!({"room": "tce-test"})).is_ok(),
+                rooms_allowed && enabled_allowed
+            );
+            assert_eq!(
+                authorize(caller, "escrow.rooms.remove", &json!({"room": "tce-test"})).is_ok(),
+                rooms_allowed
+            );
         }
     }
 

@@ -14,6 +14,8 @@ pub struct Config {
     pub stream: StreamConfig,
     #[serde(default)]
     pub chat_relay: ChatRelayConfig,
+    #[serde(default)]
+    pub escrow: EscrowConfig,
     /// Legacy `[mailbox]` section, from before the p2p store-and-forward
     /// mail feature was removed and the tc-chat relay became its own
     /// module. Deserializable (so an old config.toml keeps loading, and its
@@ -314,6 +316,56 @@ pub struct ChatRelayConfig {
     /// of `enabled`. Joined once at daemon start; requires a daemon restart
     /// to take effect.
     pub rooms: Vec<String>,
+}
+
+/// Durable encrypted checkpoint escrow. All settings require a daemon restart.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EscrowConfig {
+    pub enabled: bool,
+    pub rooms: Vec<String>,
+    pub max_blob_bytes: u64,
+    pub max_total_bytes: u64,
+    pub max_slots_per_room: usize,
+}
+
+impl Default for EscrowConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            rooms: Vec::new(),
+            max_blob_bytes: 32 * 1024 * 1024,
+            max_total_bytes: 1024 * 1024 * 1024,
+            max_slots_per_room: 1024,
+        }
+    }
+}
+
+impl EscrowConfig {
+    pub fn validate(&self) -> Result<()> {
+        anyhow::ensure!(self.rooms.len() <= 64, "escrow.rooms: at most 64 rooms");
+        let mut unique = std::collections::HashSet::new();
+        for room in &self.rooms {
+            anyhow::ensure!(
+                crate::escrow::valid_room(room),
+                "escrow.rooms: invalid room id"
+            );
+            anyhow::ensure!(unique.insert(room), "escrow.rooms: duplicate room id");
+        }
+        anyhow::ensure!(
+            (1..=1024 * 1024 * 1024).contains(&self.max_blob_bytes),
+            "escrow.max_blob_bytes: expected 1..1073741824"
+        );
+        anyhow::ensure!(
+            (1..=1u64 << 40).contains(&self.max_total_bytes),
+            "escrow.max_total_bytes: expected 1..1099511627776"
+        );
+        anyhow::ensure!(
+            (1..=65536).contains(&self.max_slots_per_room),
+            "escrow.max_slots_per_room: expected 1..65536"
+        );
+        Ok(())
+    }
 }
 
 /// HTTP endpoint or Room provider, including discovery cache and per-room sharing.
@@ -1243,6 +1295,7 @@ pub fn set_by_path(config: &Config, path: &str, value: serde_json::Value) -> Res
         .with_context(|| format!("invalid value for {section}.{field}"))?;
     updated.network.validate()?;
     updated.ai.validate()?;
+    updated.escrow.validate()?;
     Ok(updated)
 }
 
@@ -1253,6 +1306,7 @@ pub fn set_by_path(config: &Config, path: &str, value: serde_json::Value) -> Res
 pub fn applies_when(path: &str) -> &'static str {
     match path {
         "ui.enabled" | "ui.listen" => "daemon restart",
+        path if path.starts_with("escrow.") => "daemon restart",
         // The background updater re-reads config each tick, but its cadence
         // and enabled state are simplest to reason about across a restart.
         "update.auto_check" | "update.check_interval_hours" => "daemon restart",
@@ -1369,6 +1423,7 @@ impl Config {
             }
         }
         let mut config: Self = tree.try_into()?;
+        config.escrow.validate()?;
         config.ai.discard_invalid_options();
         let migrated = config.migrate_legacy();
         config.ai.discard_invalid_options();
