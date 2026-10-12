@@ -98,6 +98,59 @@ impl Head {
     }
 }
 
+#[derive(Clone, Debug, Deserialize)]
+pub struct Delete {
+    pub slot: String,
+    pub seq: u64,
+    pub head: String,
+    pub sig: String,
+}
+
+impl Delete {
+    pub fn validate(&self) -> Result<(), Error> {
+        if !hex_string(&self.slot, 32)
+            || self.seq == 0
+            || self.seq > MAX_SAFE
+            || !hex_string(&self.head, 64)
+            || self.sig.len() != 86
+        {
+            return Err(Error::new("bad_request"));
+        }
+        Ok(())
+    }
+
+    pub fn signing_payload(&self) -> Vec<u8> {
+        format!(
+            "tc-escrow/v1/delete\n{}",
+            crate::wiresign::stable_stringify(
+                &json!({"slot":self.slot,"seq":self.seq,"head":self.head})
+            )
+        )
+        .into_bytes()
+    }
+
+    pub fn verify(&self, writer: &str) -> Result<(), Error> {
+        let key: [u8; 32] = URL_SAFE_NO_PAD
+            .decode(writer)
+            .ok()
+            .and_then(|k| k.try_into().ok())
+            .ok_or_else(|| Error::new("bad_signature"))?;
+        let sig = URL_SAFE_NO_PAD
+            .decode(&self.sig)
+            .ok()
+            .and_then(|s| Signature::from_slice(&s).ok())
+            .ok_or_else(|| Error::new("bad_signature"))?;
+        VerifyingKey::from_bytes(&key)
+            .ok()
+            .and_then(|k| k.verify_strict(&self.signing_payload(), &sig).ok())
+            .ok_or_else(|| Error::new("bad_signature"))
+    }
+
+    pub fn reply(&self, id: &str) -> Value {
+        json!({"v":1,"type":"escrow_deleted","id":id,"slot":self.slot})
+    }
+}
+
 #[derive(Debug)]
 pub struct Error {
     pub code: &'static str,

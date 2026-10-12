@@ -1213,3 +1213,281 @@ fn escrow_cid_matching_malformed_manifest_is_fetch_failure_without_disabling_wri
     drop(repo);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+fn delete_request(head: &Head, seed: [u8; 32]) -> protocol::Delete {
+    let mut request = protocol::Delete {
+        slot: head.slot.clone(),
+        seq: head.seq,
+        head: head.hash(),
+        sig: String::new(),
+    };
+    request.sig = URL_SAFE_NO_PAD.encode(
+        SigningKey::from_bytes(&seed)
+            .sign(&request.signing_payload())
+            .to_bytes(),
+    );
+    request
+}
+
+#[test]
+fn escrow_delete_vector_is_byte_exact() {
+    let v: Value = serde_json::from_str(include_str!("fixtures/delete-vector.json")).unwrap();
+    let request: protocol::Delete = serde_json::from_value(v["request"].clone()).unwrap();
+    request.validate().unwrap();
+    assert_eq!(
+        request.signing_payload(),
+        v["signing_payload_utf8"].as_str().unwrap().as_bytes()
+    );
+    assert_eq!(request.head, vector()["head_hash_hex"]);
+    let seed: [u8; 32] = hex::decode(v["writeSeed_hex"].as_str().unwrap())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let key = SigningKey::from_bytes(&seed);
+    assert_eq!(
+        URL_SAFE_NO_PAD.encode(key.verifying_key().as_bytes()),
+        v["writer_b64u"]
+    );
+    assert_eq!(
+        URL_SAFE_NO_PAD.encode(key.sign(&request.signing_payload()).to_bytes()),
+        request.sig
+    );
+    request.verify(v["writer_b64u"].as_str().unwrap()).unwrap();
+}
+
+#[tokio::test]
+async fn escrow_delete_checks_writer_cas_idempotence_and_releases_quota() {
+    let dir = scratch();
+    let cfg = EscrowConfig {
+        max_slots_per_room: 1,
+        max_total_bytes: 4096,
+        ..Default::default()
+    };
+    let service = Service::open(dir.clone(), cfg.clone()).unwrap();
+    assert_eq!(service.provider()["features"], json!(["delete"]));
+    let (first, bytes) = fixture(b"checkpoint", 1, None);
+    accept(&service.repo, &first, b"checkpoint", &bytes);
+    let (current, bytes) = fixture(b"next", 2, Some(first.hash()));
+    accept(&service.repo, &current, b"next", &bytes);
+    let wrong = delete_request(&current, [8; 32]);
+    assert_eq!(
+        service.repo.delete("test-room", &wrong).unwrap_err().code,
+        "bad_signature"
+    );
+    for stale in [
+        delete_request(&first, [7; 32]),
+        protocol::Delete {
+            seq: 1,
+            ..delete_request(&current, [7; 32])
+        },
+        protocol::Delete {
+            head: "0".repeat(64),
+            ..delete_request(&current, [7; 32])
+        },
+    ] {
+        let error = service.repo.delete("test-room", &stale).unwrap_err();
+        assert_eq!(error.code, "conflict");
+        assert_eq!(*error.head.unwrap(), current);
+    }
+    let mut replacement = first.clone();
+    replacement.slot = "b".repeat(32);
+    sign(&mut replacement, [8; 32]);
+    assert_eq!(
+        service
+            .repo
+            .reserve("test-room", &replacement)
+            .err()
+            .unwrap()
+            .code,
+        "quota"
+    );
+    let request = delete_request(&current, [7; 32]);
+    let wire = json!({"v":1,"type":"escrow_delete","id":"del","slot":request.slot,"seq":request.seq,"head":request.head,"sig":request.sig});
+    assert_eq!(
+        service
+            .request("test-room", "peer", wire.clone())
+            .await
+            .unwrap(),
+        request.reply("del")
+    );
+    assert_eq!(
+        service.request("test-room", "peer", wire).await.unwrap(),
+        request.reply("del")
+    );
+    assert!(service.repo.head("test-room", &current.slot).is_none());
+    assert_eq!(service.repo.total_bytes(), 0);
+    assert_eq!(service.repo.status("test-room"), (0, 0));
+    assert!(service.repo.block("test-room", &first.cid).is_none());
+    assert!(service.repo.block("test-room", &current.cid).is_none());
+    assert_eq!(std::fs::read_dir(dir.join("heads")).unwrap().count(), 0);
+    assert_eq!(std::fs::read_dir(dir.join("blobs")).unwrap().count(), 0);
+    let mut recreated = first.clone();
+    sign(&mut recreated, [8; 32]);
+    let (_, bytes) = fixture(b"checkpoint", 1, None);
+    accept(&service.repo, &recreated, b"checkpoint", &bytes);
+    drop(service);
+    let repo = Repository::open(dir.clone(), cfg).unwrap();
+    assert_eq!(repo.head("test-room", &recreated.slot), Some(recreated));
+    drop(repo);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn escrow_delete_crash_after_head_removal_reconciles_orphans() {
+    let dir = scratch();
+    let cfg = EscrowConfig::default();
+    let repo = Repository::open(dir.clone(), cfg.clone()).unwrap();
+    let (head, bytes) = fixture(b"checkpoint", 1, None);
+    accept(&repo, &head, b"checkpoint", &bytes);
+    let request = delete_request(&head, [7; 32]);
+    repo.inject_post_publish_failure();
+    assert_eq!(
+        repo.delete("test-room", &request).unwrap_err().code,
+        "fetch_failed"
+    );
+    assert_eq!(std::fs::read_dir(dir.join("heads")).unwrap().count(), 0);
+    assert_eq!(std::fs::read_dir(dir.join("blobs")).unwrap().count(), 1);
+    assert_eq!(
+        repo.delete("test-room", &request).unwrap_err().code,
+        "quota"
+    );
+    let (next, _) = fixture(b"next", 2, Some(head.hash()));
+    assert_eq!(
+        repo.reserve("test-room", &next).err().unwrap().code,
+        "quota"
+    );
+    drop(repo);
+    let repo = Repository::open(dir.clone(), cfg).unwrap();
+    assert!(repo.head("test-room", &head.slot).is_none());
+    assert!(repo.block("test-room", &head.cid).is_none());
+    assert_eq!(repo.total_bytes(), 0);
+    assert_eq!(std::fs::read_dir(dir.join("blobs")).unwrap().count(), 0);
+    repo.delete("test-room", &request).unwrap();
+    accept(&repo, &head, b"checkpoint", &bytes);
+    drop(repo);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn escrow_delete_preserves_shared_cid_blocks_and_other_rooms() {
+    let dir = scratch();
+    let repo = Repository::open(dir.clone(), EscrowConfig::default()).unwrap();
+    let (first, bytes) = fixture(b"same blob", 1, None);
+    accept(&repo, &first, b"same blob", &bytes);
+    let mut second = first.clone();
+    second.slot = "b".repeat(32);
+    sign(&mut second, [7; 32]);
+    accept(&repo, &second, b"same blob", &bytes);
+    let reserve = repo.reserve("other-room", &first).unwrap().unwrap();
+    repo.commit("other-room", &first, b"same blob", &bytes)
+        .unwrap();
+    drop(reserve);
+    repo.delete("test-room", &delete_request(&first, [7; 32]))
+        .unwrap();
+    assert_eq!(repo.block("test-room", &first.cid).unwrap(), bytes);
+    assert_eq!(repo.block("other-room", &first.cid).unwrap(), bytes);
+    assert!(repo.head("other-room", &first.slot).is_some());
+    assert_eq!(repo.status("test-room").0, 1);
+    drop(repo);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn escrow_delete_uses_put_admission_and_slot_lock() {
+    let dir = scratch();
+    let mut service = Service::open(dir.clone(), EscrowConfig::default()).unwrap();
+    let (head, manifest) = fixture(b"checkpoint", 1, None);
+    accept(&service.repo, &head, b"checkpoint", &manifest);
+    let request = delete_request(&head, [7; 32]);
+    let msg = json!({"v":1,"type":"escrow_delete","id":"delete","slot":request.slot,"seq":request.seq,"head":request.head,"sig":request.sig});
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    service.serving.send = Arc::new(move |_, _, bytes| {
+        let tx = tx.clone();
+        Box::pin(async move {
+            tx.send(serde_json::from_slice::<Value>(&bytes).unwrap())
+                .unwrap();
+            Ok(())
+        })
+    });
+    let service = Arc::new(service);
+    let held: Vec<_> = (0..admission::MAX_PUT_REQUESTS)
+        .map(|i| {
+            service
+                .requests
+                .acquire(&format!("holder-{i}"), Class::Put)
+                .unwrap()
+        })
+        .collect();
+    let rt = tokio::runtime::Handle::current();
+    service.enqueue_request(&rt, "test-room", "peer", msg.clone());
+    assert_eq!(rx.recv().await.unwrap()["code"], "busy");
+    assert!(service.repo.head("test-room", &head.slot).is_some());
+    drop(held);
+    let stripe = usize::from(sha2_byte("test-room", &head.slot));
+    let slot = service.slots[stripe].lock().await;
+    service.enqueue_request(&rt, "test-room", "peer", msg.clone());
+    tokio::task::yield_now().await;
+    assert!(rx.try_recv().is_err());
+    // A mutation parked behind a PUT stripe cannot consume the read reserve.
+    service.enqueue_request(
+        &rt,
+        "test-room",
+        "reader",
+        json!({"v":1,"type":"escrow_get","id":"get","slot":head.slot}),
+    );
+    assert_eq!(rx.recv().await.unwrap()["head"], json!(head));
+    tokio::time::advance(SLOT_WAIT + Duration::from_millis(1)).await;
+    assert_eq!(rx.recv().await.unwrap()["code"], "busy");
+    drop(slot);
+    service.enqueue_request(&rt, "test-room", "peer", msg);
+    assert_eq!(rx.recv().await.unwrap()["type"], "escrow_deleted");
+    assert!(service.repo.head("test-room", &head.slot).is_none());
+    drop(service);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn escrow_delete_failure_must_not_ack_a_lost_put() {
+    for retry_previous in [false, true] {
+        let dir = scratch();
+        let cfg = EscrowConfig::default();
+        let service = Service::open(dir.clone(), cfg.clone()).unwrap();
+        let (head, manifest) = fixture(b"saved checkpoint", 1, None);
+        accept(&service.repo, &head, b"saved checkpoint", &manifest);
+        let current = if retry_previous {
+            let (next, manifest) = fixture(b"next checkpoint", 2, Some(head.hash()));
+            accept(&service.repo, &next, b"next checkpoint", &manifest);
+            next
+        } else {
+            head.clone()
+        };
+        service.repo.inject_post_publish_failure();
+        let deletion = service
+            .repo
+            .delete("test-room", &delete_request(&current, [7; 32]));
+        assert_eq!(deletion.unwrap_err().code, "fetch_failed");
+        assert_eq!(std::fs::read_dir(dir.join("heads")).unwrap().count(), 0);
+        let retry = service
+            .request(
+                "test-room",
+                "peer",
+                json!({
+                    "v": 1, "type": "escrow_put", "id": "retry", "head": head
+                }),
+            )
+            .await
+            .unwrap();
+        drop(service);
+        let restarted = Service::open(dir.clone(), cfg).unwrap();
+        let persisted = restarted.repo.head("test-room", &head.slot);
+        assert_eq!(restarted.repo.total_bytes(), 0);
+        drop(restarted);
+        std::fs::remove_dir_all(dir).unwrap();
+        assert!(
+            retry["type"] != "escrow_ack" || persisted == Some(head),
+            "PUT was ACKed after failed DELETE, but restart lost it: reply={retry}, persisted={persisted:?}"
+        );
+        assert_eq!(retry["type"], "escrow_error");
+        assert_eq!(retry["code"], "quota");
+    }
+}
