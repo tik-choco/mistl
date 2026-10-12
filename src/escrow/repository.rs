@@ -1,5 +1,5 @@
 //! Authoritative durable copies, independent of both mistlib stores and LRU eviction.
-use super::protocol::{Error, Head, check_cas, digest, hex_string};
+use super::protocol::{Delete, Error, Head, check_cas, digest, hex_string};
 use crate::config::EscrowConfig;
 use anyhow::{Context, Result, ensure};
 use mistlib_core::storage::cid::{MULTICODEC_DAG_CBOR, MULTICODEC_RAW, verify_cid};
@@ -271,6 +271,11 @@ impl Repository {
         head.validate(self.cfg.max_blob_bytes)?;
         head.verify()?;
         let mut index = self.index.lock().unwrap();
+        // Publication/deletion failures can leave retained heads only in memory.
+        // Reject even retries until restart has reconciled the authoritative files.
+        if index.write_failed {
+            return Err(Error::new("quota"));
+        }
         let k = key(room, &head.slot);
         let record = index.records.get(&k);
         // Retained accepted heads are retries, never a request to roll back the slot.
@@ -278,9 +283,6 @@ impl Repository {
             || check_cas(head, record.map(|r| &r.current))?
         {
             return Ok(None);
-        }
-        if index.write_failed {
-            return Err(Error::new("quota"));
         }
         let slots = index.records.values().filter(|r| r.room == room).count()
             + index
@@ -375,6 +377,15 @@ impl Repository {
         index.records.insert(k.clone(), record);
         // Rebuild from already validated metadata: no fallible I/O after publication.
         self.index_generation(index, room, &k, head, manifest, bytes.len());
+        self.rebuild_index(index);
+        if let Err(error) = self.cleanup(index) {
+            index.write_failed = true;
+            tracing::warn!(%error, "escrow: cleanup failed; writes disabled until restart");
+        }
+        Ok(())
+    }
+
+    fn rebuild_index(&self, index: &mut Index) {
         index.blocks.clear();
         index.bytes = 0;
         let records: Vec<_> = index
@@ -392,10 +403,46 @@ impl Repository {
             }
         }
         index.manifests.retain(|key, _| retained.contains(key));
-        if let Err(error) = self.cleanup(index) {
-            index.write_failed = true;
-            tracing::warn!(%error, "escrow: cleanup failed; writes disabled until restart");
+    }
+
+    /// Caller holds the same slot lock used for PUT, including pending pulls.
+    pub fn delete(&self, room: &str, request: &Delete) -> Result<(), Error> {
+        request.validate()?;
+        let mut index = self.index.lock().unwrap();
+        // An uncertain publication must be reconciled before deciding a slot is absent.
+        if index.write_failed {
+            return Err(Error::new("quota"));
         }
+        let k = key(room, &request.slot);
+        let Some(record) = index.records.get(&k) else {
+            return Ok(());
+        };
+        if request.seq != record.current.seq || request.head != record.current.hash() {
+            return Err(Error::conflict(&record.current));
+        }
+        request.verify(&record.current.writer)?;
+        self.delete_inner(&mut index, &k).map_err(|error| {
+            index.write_failed = true;
+            tracing::warn!(%error, "escrow: durable delete failed; writes disabled until restart");
+            Error::new("fetch_failed")
+        })
+    }
+
+    fn delete_inner(&self, index: &mut Index, k: &str) -> Result<()> {
+        // Unlink is atomic; sync its directory before removing referenced generations.
+        std::fs::remove_file(self.root.join("heads").join(format!("{k}.json")))?;
+        sync_dir(&self.root.join("heads"))?;
+        #[cfg(test)]
+        ensure!(
+            !self
+                .fail_after_publish
+                .swap(false, std::sync::atomic::Ordering::SeqCst),
+            "injected post-delete cleanup failure"
+        );
+        index.records.remove(k);
+        self.rebuild_index(index);
+        self.cleanup(index)?;
+        sync_dir(&self.root.join("blobs"))?;
         Ok(())
     }
 

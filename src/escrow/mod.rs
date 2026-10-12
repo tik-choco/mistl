@@ -11,7 +11,7 @@ use crate::config::EscrowConfig;
 use crate::daemon::AppState;
 use admission::{Admission, Class};
 use anyhow::{Context, Result, bail};
-use protocol::{Error, Head, MAX_MESSAGE, hex_string};
+use protocol::{Delete, Error, Head, MAX_MESSAGE, hex_string};
 use repository::Repository;
 use serde_json::{Value, json};
 use serving::Serving;
@@ -61,7 +61,7 @@ impl Service {
     }
 
     fn provider(&self) -> Value {
-        json!({"v":1,"type":"escrow_provider","maxBlob":self.cfg.max_blob_bytes,"version":1})
+        json!({"v":1,"type":"escrow_provider","maxBlob":self.cfg.max_blob_bytes,"version":1,"features":["delete"]})
     }
 
     async fn put(&self, room: &str, from: &str, head: Head, id: &str) -> Result<Value, Error> {
@@ -89,6 +89,16 @@ impl Service {
         Ok(head.ack(id))
     }
 
+    async fn delete(&self, room: &str, request: Delete, id: &str) -> Result<Value, Error> {
+        request.validate()?;
+        let stripe = usize::from(sha2_byte(room, &request.slot));
+        let _slot = tokio::time::timeout(SLOT_WAIT, self.slots[stripe].lock())
+            .await
+            .map_err(|_| Error::new("busy"))?;
+        self.repo.delete(room, &request)?;
+        Ok(request.reply(id))
+    }
+
     async fn request(&self, room: &str, from: &str, msg: Value) -> Option<Value> {
         if msg["v"] != 1 {
             return None;
@@ -97,7 +107,7 @@ impl Service {
             return Some(self.provider());
         }
         let kind = msg["type"].as_str()?;
-        if !matches!(kind, "escrow_get" | "escrow_put") {
+        if !matches!(kind, "escrow_get" | "escrow_put" | "escrow_delete") {
             return None;
         }
         let Some(id) = msg["id"].as_str().filter(|s| s.len() <= 64) else {
@@ -109,6 +119,13 @@ impl Service {
                     Ok(
                         json!({"v":1,"type":"escrow_head","id":id,"slot":slot,"head":self.repo.head(room, slot)}),
                     )
+                } else {
+                    Err(Error::new("bad_request"))
+                }
+            }
+            "escrow_delete" => {
+                if let Ok(request) = serde_json::from_value::<Delete>(msg.clone()) {
+                    self.delete(room, request, id).await
                 } else {
                     Err(Error::new("bad_request"))
                 }
@@ -138,7 +155,7 @@ impl Service {
         if msg["v"] != 1 {
             return;
         }
-        let class = if msg["type"] == "escrow_put" {
+        let class = if matches!(msg["type"].as_str(), Some("escrow_put" | "escrow_delete")) {
             Class::Put
         } else {
             Class::Reply
@@ -212,7 +229,7 @@ impl Service {
             };
             if !matches!(
                 msg["type"].as_str(),
-                Some("escrow_hello" | "escrow_get" | "escrow_put")
+                Some("escrow_hello" | "escrow_get" | "escrow_put" | "escrow_delete")
             ) {
                 return;
             }

@@ -1,0 +1,14 @@
+{
+  "writeSeed_hex": "1cd7ce489ed9445ddb1b6e4a54498c73c6dc5af42b0c0aab914207992e1868ec",
+  "writer_b64u": "mUaEOZcygLoXuqvRyBN440jjKFUKA4bcBiKDUO6_KAo",
+  "signing_payload_utf8": "tc-escrow/v1/delete\n{\"head\":\"621e209333c299684fd918eb529ccefeb2fd5acb480cfe27a3aefaa281f35f98\",\"seq\":1,\"slot\":\"f07a5b5be1c8ef4609958f767e53e6ae\"}",
+  "request": {
+    "v": 1,
+    "type": "escrow_delete",
+    "id": "delete-vector",
+    "slot": "f07a5b5be1c8ef4609958f767e53e6ae",
+    "seq": 1,
+    "head": "621e209333c299684fd918eb529ccefeb2fd5acb480cfe27a3aefaa281f35f98",
+    "sig": "eM3grXc4ei2IzHxoVpzNRvljfCsaO4Akj7pSTZNOgG_PmrKzOF6XOQSPCr-BpjMVE7nQy6mFbrKrl1T8QKALAw"
+  }
+}

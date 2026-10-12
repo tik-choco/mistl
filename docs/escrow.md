@@ -76,7 +76,35 @@ UTF-8 JSON control messages have v:1 and are capped at 16 KiB. The service direc
 answers escrow_hello with escrow_provider, and broadcasts provider advertisements
 on peer joins. escrow_get returns escrow_head (current signed head or null).
 escrow_put returns escrow_ack only after durable persistence, or escrow_error.
-Unknown message types and additional fields are ignored.
+Provider advertisements include `"features":["delete"]`; absent features mean slot
+deletion is unsupported. Unknown message types and additional fields are ignored.
+
+A deletion request has `{v:1,type:"escrow_delete",id,slot,seq,head,sig}`. Here `head`
+is the SHA-256 hash of the complete current canonical head and `seq` is its sequence.
+The pinned writer signs UTF-8 `"tc-escrow/v1/delete\n"` followed by
+`stable_stringify({slot,seq,head})`. A stale sequence or hash returns `conflict`
+with the current head; an invalid writer signature returns `bad_signature`.
+Success replies with `{v:1,type:"escrow_deleted",id,slot}`; repeating a deletion
+of an absent slot returns the same reply. A later PUT may recreate it with
+parent=null and pins its writer anew. This extension keeps protocol v:1; old
+providers ignore the new messages, so clients check the feature before sending.
+
+The portable client tracks all providers for each canonical head hash: verified
+GETs add a provider, and PUT attempts record their target before sending. Failed
+sends, lost ACKs and provider failover retain every possibly stored copy. DELETE
+sends separately pinned requests to all recorded providers concurrently, waiting
+for departed providers to rejoin within the request timeout. Only all-provider
+delete confirmations with complete provenance return deleted; reachable copies are
+still removed if another provider times out, conflicts or lacks delete support.
+An absent-slot success from a different provider cannot prove deletion of a copy.
+
+History is local to one handle, capped at 1024 head hashes and 64 providers per hash,
+and retained after deletion for idempotent retries. Entries are not evicted; PUT
+returns busy before sending if its target cannot be recorded. GET still works, but
+unknown or incomplete provenance cannot prove deletion and returns a transport
+error. Overlapping PUT/DELETE operations for the same head return busy; providers
+learned during DELETE require a retry. Copies made by other handles or sessions
+are outside this local inventory.
 
 Heads use exactly the tc-escrow-head v1 fields. Signatures cover the UTF-8 prefix
 tc-escrow/v1/head followed by a newline and wiresign::stable_stringify of the known
@@ -99,6 +127,13 @@ LRU block store and outside mistlib-native's TEMP store. Each generation contain
 the exact original CBOR file manifest and encrypted blob bytes. Slot records under
 <data_dir>/escrow/heads/ atomically reference the current and previous generation.
 Both generations are retained and served; older generations are removed after commit.
+DELETE atomically removes the head record and syncs its directory before removing
+both blob/manifest generations. It then rebuilds quotas and room-scoped block indices
+from retained records, preserving CIDs shared with other slots. A crash between head
+removal and blob cleanup leaves only orphan generations, removed at restart.
+Deletion I/O failures disable subsequent mutations until restart reconciliation,
+including identical current/previous PUT retries: their in-memory records may no
+longer exist on disk. Healthy retained-head retries still ACK without a blob pull.
 
 PUT pulls the root manifest and chunks using ordinary QUERY/WANT/HAVE/HAVE_CHUNK
 frames directed exclusively to the sending transport peer in the request's room.
@@ -126,13 +161,13 @@ The failure flag is set under the same index lock as publication, and no subsequ
 commit or generation cleanup may use that potentially stale index. An ACKed current
 head remains readable; restart reloads any head that was replaced before a sync error.
 
-PUTs serialize through fixed slot-lock stripes. Shape/signature validation, writer and
+PUTs and DELETEs serialize through the same fixed slot-lock stripes. Shape/signature validation, writer and
 CAS checks, and identical-head ACKs precede blob-pull admission. At most four blob
 pulls run globally, with at most one per transport peer; identical retries still ACK
 while those limits are full. There are no unbounded waiter or peer maps.
 JSON admission happens before spawning tasks. The 32 task permits are divided into
-20 PUT requests, 8 GET/HELLO/provider responses, and 4 busy responses. Each transport
-peer may occupy at most two permits in each class across all rooms, including PUTs
+20 PUT/DELETE requests, 8 GET/HELLO/provider responses, and 4 busy responses. Each transport
+peer may occupy at most two permits in each class across all rooms, including PUTs and DELETEs
 waiting on a slot stripe. PUT overload uses the busy-response pool and cannot consume
 the GET/HELLO reserve. Slot waits have a 5-second deadline and return busy on expiry;
 reply sends have a 2-second deadline. A flood of PUTs therefore cannot occupy all
@@ -179,7 +214,9 @@ escrow.rooms.remove {room}. The CLI exposes the same operations.
 cargo test --bin mistl escrow
 ~~~
 
-Tests include the byte-exact shared derivation/encryption/signature/head-hash vector,
+Tests include the byte-exact shared derivation/encryption/signature/head-hash and
+delete-signature vectors, deletion writer/CAS checks, absent-slot idempotence,
+quota release and TOFU recreation, shared-CID preservation and interrupted-delete recovery,
 CAS conflicts, TOFU writer mismatch, idempotence, bad signatures, size/hash failures,
 quota reservations, sender/room-bound transfer assembly, and restart recovery with
 both retained generations served through the normal block representation, crash temporary
