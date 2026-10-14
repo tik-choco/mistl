@@ -284,6 +284,10 @@ These two settings used to live in the (now removed) `[mailbox]` section as
 
 ### Encrypted checkpoint escrow
 
+An opt-in [Raft replication prototype](docs/escrow-replication.md) can replicate
+new escrow rooms across a fixed set of storage nodes. It has bounded history and
+requires additional work before unattended long-running use.
+
 The optional tc-escrow v1 service keeps browser-encrypted application checkpoints
 for late joiners. Run `mistl escrow rooms add <room>`, restart the daemon, and enable
 network connections; configure that same escrow room in the application.

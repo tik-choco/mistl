@@ -1,6 +1,7 @@
 //! Config-driven tc-escrow v1 service. Settings take effect on daemon restart.
 mod admission;
 mod protocol;
+mod replication;
 mod repository;
 mod serving;
 #[cfg(test)]
@@ -15,7 +16,7 @@ use protocol::{Delete, Error, Head, MAX_MESSAGE, hex_string};
 use repository::Repository;
 use serde_json::{Value, json};
 use serving::Serving;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 use tokio::sync::{Mutex, OnceCell};
@@ -34,6 +35,10 @@ pub fn valid_room(room: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"_./:-".contains(&b))
 }
 
+pub fn valid_voter(node: &str) -> bool {
+    protocol::hex_string(node, 16)
+}
+
 struct Service {
     cfg: EscrowConfig,
     repo: Repository,
@@ -43,12 +48,41 @@ struct Service {
     requests: Arc<Admission>,
     serving: Serving,
     pulling: StdMutex<HashSet<String>>,
+    replication_root: std::path::PathBuf,
+    clusters: StdMutex<HashMap<String, Arc<replication::Cluster>>>,
 }
 
 impl Service {
     fn open(dir: std::path::PathBuf, cfg: EscrowConfig) -> Result<Self> {
+        cfg.validate()?;
+        let replication_root = dir.join("replication");
+        if replication_root.exists() {
+            let configured: HashSet<_> = cfg
+                .replication
+                .iter()
+                .map(|c| protocol::digest(c.room.as_bytes()))
+                .collect();
+            for entry in std::fs::read_dir(&replication_root)? {
+                let entry = entry?;
+                if entry.file_type()?.is_dir()
+                    && protocol::hex_string(&entry.file_name().to_string_lossy(), 64)
+                {
+                    anyhow::ensure!(
+                        configured.contains(entry.file_name().to_string_lossy().as_ref()),
+                        "escrow: retained replicated room is unconfigured; restore its replication configuration"
+                    );
+                }
+            }
+        }
+        let mut local_cfg = cfg.clone();
+        local_cfg.max_total_bytes /= cfg.replication.len() as u64 + 1;
+        let repo = Repository::open(dir.clone(), local_cfg.clone())?;
+        anyhow::ensure!(
+            repo.total_bytes() <= local_cfg.max_total_bytes,
+            "escrow: existing data exceeds replication quota partition"
+        );
         Ok(Self {
-            repo: Repository::open(dir, cfg.clone())?,
+            repo,
             cfg,
             joined: StdMutex::new(HashSet::new()),
             // Fixed lock stripes serialize each (room,slot) without an unbounded lock map.
@@ -57,11 +91,114 @@ impl Service {
             requests: Arc::new(Admission::default()),
             serving: Serving::default(),
             pulling: StdMutex::new(HashSet::new()),
+            replication_root,
+            clusters: StdMutex::new(HashMap::new()),
         })
     }
 
     fn provider(&self) -> Value {
         json!({"v":1,"type":"escrow_provider","maxBlob":self.cfg.max_blob_bytes,"version":1,"features":["delete"]})
+    }
+
+    fn cluster(&self, room: &str) -> Option<Arc<replication::Cluster>> {
+        self.clusters.lock().unwrap().get(room).cloned()
+    }
+
+    fn provider_for(&self, room: &str) -> Value {
+        let mut provider = self.provider();
+        if self.cluster(room).is_some() {
+            provider["features"] = json!([
+                "delete",
+                "raft",
+                "snapshot",
+                "membership",
+                "delete-continue"
+            ]);
+        }
+        provider
+    }
+
+    async fn configure_replication(self: &Arc<Self>, state: &Arc<AppState>) -> Result<()> {
+        if self.cfg.replication.is_empty() {
+            return Ok(());
+        }
+        let identity = crate::identity::current(state).await?;
+        for setting in &self.cfg.replication {
+            let has_data = self.repo.status(&setting.room).0 > 0;
+            anyhow::ensure!(
+                !has_data || setting.migration_seed.as_deref() == Some(identity.node_id().as_str()),
+                "escrow: existing data requires this node as the explicit migration seed"
+            );
+        }
+        let mut cfg = self.cfg.clone();
+        cfg.max_total_bytes /= cfg.replication.len() as u64 + 1;
+        for setting in &self.cfg.replication {
+            let cluster = replication::Cluster::open(
+                self.replication_root
+                    .join(protocol::digest(setting.room.as_bytes())),
+                setting.room.clone(),
+                setting.voters.clone(),
+                identity.clone(),
+                cfg.clone(),
+            )?;
+            if setting.migration_seed.as_deref() == Some(identity.node_id().as_str()) {
+                cluster.set_migration_source(self.repo.room_heads(&setting.room))?;
+            }
+            self.clusters
+                .lock()
+                .unwrap()
+                .insert(setting.room.clone(), cluster);
+        }
+        Ok(())
+    }
+
+    fn start_replication(self: &Arc<Self>) -> Result<()> {
+        let weak = Arc::downgrade(self);
+        let pull: replication::Puller = Arc::new(move |room, from, head| {
+            let service = weak.clone();
+            Box::pin(async move {
+                let service = service.upgrade().ok_or_else(|| Error::new("busy"))?;
+                let _guard = {
+                    let mut pulling = service.pulling.lock().unwrap();
+                    if pulling.len() >= 4 || !pulling.insert(from.clone()) {
+                        return Err(Error::new("busy"));
+                    }
+                    PullGuard {
+                        service: &service,
+                        from: from.clone(),
+                    }
+                };
+                if let Some(bytes) = service.repo.generation_bytes(&room, &head)? {
+                    return Ok(bytes);
+                }
+                service.transfers.pull(&room, &from, &head).await
+            })
+        });
+        for cluster in self.clusters.lock().unwrap().values() {
+            cluster.start(pull.clone())?;
+        }
+        let weak = Arc::downgrade(self);
+        tokio::spawn(async move {
+            let mut timer = tokio::time::interval(Duration::from_secs(5));
+            loop {
+                timer.tick().await;
+                let Some(service) = weak.upgrade() else {
+                    break;
+                };
+                for setting in &service.cfg.replication {
+                    if setting.migration_seed.is_some()
+                        && service
+                            .cluster(&setting.room)
+                            .is_some_and(|cluster| cluster.status()["migration_finished"] == true)
+                    {
+                        if let Err(error) = service.repo.retire_room(&setting.room) {
+                            tracing::warn!(%error, "escrow: migrated legacy cleanup failed");
+                        }
+                    }
+                }
+            }
+        });
+        Ok(())
     }
 
     async fn put(&self, room: &str, from: &str, head: Head, id: &str) -> Result<Value, Error> {
@@ -104,11 +241,14 @@ impl Service {
             return None;
         }
         if msg["type"] == "escrow_hello" {
-            return Some(self.provider());
+            return Some(self.provider_for(room));
         }
         let kind = msg["type"].as_str()?;
         if !matches!(kind, "escrow_get" | "escrow_put" | "escrow_delete") {
             return None;
+        }
+        if let Some(cluster) = self.cluster(room) {
+            return cluster.request(from, &msg).await;
         }
         let Some(id) = msg["id"].as_str().filter(|s| s.len() <= 64) else {
             return Some(Error::new("bad_request").reply(""));
@@ -204,7 +344,7 @@ impl Service {
                 let (service, room) = (service.clone(), room.to_string());
                 rt.spawn(async move {
                     let _permit = permit;
-                    let bytes = serde_json::to_vec(&service.provider()).unwrap();
+                    let bytes = serde_json::to_vec(&service.provider_for(&room)).unwrap();
                     let _ =
                         tokio::time::timeout(REPLY_WAIT, crate::net::send_broadcast(&room, bytes))
                             .await;
@@ -216,6 +356,12 @@ impl Service {
             }
             // Transfer parsing uses borrowed bytes and enforces the pending request's cap.
             service.transfers.receive(room, from, raw);
+            if service
+                .cluster(room)
+                .is_some_and(|cluster| cluster.receive(from, raw))
+            {
+                return;
+            }
             if service.enqueue_storage(&rt, room, from, raw) {
                 return;
             }
@@ -256,11 +402,12 @@ impl Drop for PullGuard<'_> {
 async fn local(state: &Arc<AppState>) -> Result<Arc<Service>> {
     Ok(SERVICE
         .get_or_try_init(|| async {
-            Service::open(
+            let service = Arc::new(Service::open(
                 crate::config::data_dir()?.join("escrow"),
                 state.config().escrow,
-            )
-            .map(Arc::new)
+            )?);
+            service.configure_replication(state).await?;
+            Ok::<_, anyhow::Error>(service)
         })
         .await?
         .clone())
@@ -280,6 +427,7 @@ async fn start(state: &Arc<AppState>) -> Result<()> {
     }
     let service = local(state).await?;
     service.register();
+    service.start_replication()?;
     for room in &service.cfg.rooms {
         match crate::net::ensure_started(state, room.clone()).await {
             Ok(_) => {
@@ -291,7 +439,8 @@ async fn start(state: &Arc<AppState>) -> Result<()> {
     // Joins are asynchronous. Hello requests and peer joins also advertise later.
     tokio::time::sleep(std::time::Duration::from_millis(700)).await;
     for room in &service.cfg.rooms {
-        let _ = crate::net::send_broadcast(room, serde_json::to_vec(&service.provider())?).await;
+        let _ = crate::net::send_broadcast(room, serde_json::to_vec(&service.provider_for(room))?)
+            .await;
     }
     Ok(())
 }
@@ -307,6 +456,18 @@ pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Val
                 json!({"saved":true,"applies":"daemon restart","enabled":state.config().escrow.enabled,"rooms":state.config().escrow.rooms}),
             )
         }
+        "escrow.replication.membership" => {
+            let room = args["room"].as_str().context("membership requires room")?;
+            let voters: Vec<String> = serde_json::from_value(args["voters"].clone())?;
+            let learners: Vec<String> = if args["learners"].is_null() {
+                Vec::new()
+            } else {
+                serde_json::from_value(args["learners"].clone()).context("invalid learners")?
+            };
+            let service = local(state).await?;
+            let cluster = service.cluster(room).context("room is not replicated")?;
+            cluster.change_membership(voters, learners).await
+        }
         "escrow.status" | "escrow.rooms.list" => {
             let service = local(state).await?;
             let cfg = state.config().escrow;
@@ -318,10 +479,17 @@ pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Val
             let joined = service.joined.lock().unwrap();
             let rooms: Vec<_> = rooms.iter().map(|room| {
                 let (slots, bytes) = service.repo.status(room);
-                json!({"room":room,"configured":cfg.rooms.contains(room),"joined":joined.contains(room),"slots":slots,"bytes":bytes})
+                let mut status = json!({"room":room,"configured":cfg.rooms.contains(room),"joined":joined.contains(room),"slots":slots,"bytes":bytes});
+                if let Some(cluster) = service.cluster(room) {
+                    let replication = cluster.status();
+                    status["slots"] = replication["slots"].clone();
+                    status["bytes"] = json!(cluster.total_bytes());
+                    status["replication"] = replication;
+                }
+                status
             }).collect();
             Ok(
-                json!({"enabled":cfg.enabled,"running":!joined.is_empty(),"rooms":rooms,"bytes":service.repo.total_bytes(),"applies":"daemon restart"}),
+                json!({"enabled":cfg.enabled,"running":!joined.is_empty(),"rooms":rooms,"bytes":service.repo.total_bytes() + service.clusters.lock().unwrap().values().map(|cluster| cluster.total_bytes()).sum::<u64>(),"applies":"daemon restart"}),
             )
         }
         _ => bail!("unknown escrow command: {cmd}"),

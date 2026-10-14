@@ -1,5 +1,9 @@
 # Encrypted checkpoint escrow
 
+An opt-in, fixed-voter [Raft replication prototype](escrow-replication.md) is also
+available for new rooms. It is intended for evaluation and has explicit lifetime,
+membership, and deletion limits. The behavior below describes standalone rooms.
+
 The optional daemon service implements tc-escrow v1. It stores encrypted application
 checkpoints and signed mutable heads. Encryption and key derivation happen in the
 browser; mistl receives only an opaque slot, encrypted blob, and Ed25519 public writer.

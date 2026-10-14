@@ -238,6 +238,62 @@ impl Repository {
             .map(|r| r.current.clone())
     }
 
+    pub fn room_heads(&self, room: &str) -> Vec<Head> {
+        let index = self.index.lock().unwrap();
+        let mut heads: Vec<_> = index
+            .records
+            .values()
+            .filter(|record| record.room == room)
+            .map(|record| record.current.clone())
+            .collect();
+        heads.sort_by(|a, b| a.slot.cmp(&b.slot));
+        heads
+    }
+
+    pub fn retire_room(&self, room: &str) -> Result<()> {
+        let mut index = self.index.lock().unwrap();
+        ensure!(
+            !index.write_failed,
+            "escrow: legacy repository needs restart reconciliation"
+        );
+        let keys: Vec<_> = index
+            .records
+            .iter()
+            .filter(|(_, record)| record.room == room)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in keys {
+            if let Err(error) = self.delete_inner(&mut index, &key) {
+                index.write_failed = true;
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn generation_bytes(
+        &self,
+        room: &str,
+        head: &Head,
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>, Error> {
+        let index = self.index.lock().unwrap();
+        let k = key(room, &head.slot);
+        let Some(record) = index.records.get(&k) else {
+            return Ok(None);
+        };
+        if record.current != *head && record.previous.as_ref() != Some(head) {
+            return Ok(None);
+        }
+        let dir = self.generation(&k, head);
+        let blob = read_bounded(&dir.join("blob.bin"), head.size as usize)
+            .map_err(|_| Error::new("fetch_failed"))?;
+        let manifest = read_bounded(&dir.join("manifest.bin"), MAX_MANIFEST)
+            .map_err(|_| Error::new("fetch_failed"))?;
+        validate_blob(head, &blob)?;
+        validate_manifest(head, &manifest)?;
+        Ok(Some((blob, manifest)))
+    }
+
     pub fn status(&self, room: &str) -> (usize, u64) {
         let index = self.index.lock().unwrap();
         let records: Vec<_> = index.records.values().filter(|r| r.room == room).collect();

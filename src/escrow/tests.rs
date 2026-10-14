@@ -1491,3 +1491,175 @@ async fn escrow_delete_failure_must_not_ack_a_lost_put() {
         assert_eq!(retry["code"], "quota");
     }
 }
+
+#[test]
+fn escrow_unconfigured_replication_directory_fails_before_touching_legacy_data() {
+    let root = scratch();
+    let retained = root.join("replication").join(digest(b"retained-room"));
+    std::fs::create_dir_all(&retained).unwrap();
+    let marker = retained.join("raft.json");
+    std::fs::write(&marker, b"retained durable consensus state").unwrap();
+    let error = Service::open(root.clone(), EscrowConfig::default())
+        .err()
+        .unwrap();
+    assert!(
+        error
+            .to_string()
+            .contains("retained replicated room is unconfigured")
+    );
+    assert_eq!(
+        std::fs::read(&marker).unwrap(),
+        b"retained durable consensus state"
+    );
+    assert!(!root.join("heads").exists());
+    let cfg = EscrowConfig {
+        rooms: vec!["other-room".into()],
+        replication: vec![crate::config::EscrowReplication {
+            room: "other-room".into(),
+            voters: vec!["0123456789abcdef".into()],
+            learners: vec![],
+            migration_seed: None,
+        }],
+        ..Default::default()
+    };
+    assert!(Service::open(root.clone(), cfg).is_err());
+    assert_eq!(
+        std::fs::read(&marker).unwrap(),
+        b"retained durable consensus state"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn escrow_replication_quota_partition_refuses_oversized_existing_standalone_data() {
+    let root = scratch();
+    let cfg = EscrowConfig::default();
+    let repo = Repository::open(root.clone(), cfg.clone()).unwrap();
+    let blob = vec![7; 4096];
+    let (head, manifest) = fixture(&blob, 1, None);
+    accept(&repo, &head, &blob, &manifest);
+    let retained = repo.total_bytes();
+    drop(repo);
+    let heads = std::fs::read_dir(root.join("heads"))
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            let bytes = std::fs::read(&path).unwrap();
+            (path, bytes)
+        })
+        .collect::<Vec<_>>();
+    let partitioned = EscrowConfig {
+        rooms: vec!["fresh-room".into()],
+        replication: vec![crate::config::EscrowReplication {
+            room: "fresh-room".into(),
+            voters: vec!["0123456789abcdef".into()],
+            learners: vec![],
+            migration_seed: None,
+        }],
+        max_total_bytes: retained,
+        ..cfg.clone()
+    };
+    let error = Service::open(root.clone(), partitioned).err().unwrap();
+    assert!(
+        error
+            .to_string()
+            .contains("existing data exceeds replication quota partition")
+    );
+    for (path, bytes) in &heads {
+        assert_eq!(std::fs::read(path).unwrap(), *bytes);
+    }
+    let recovered = Repository::open(root.clone(), cfg).unwrap();
+    assert_eq!(recovered.head("test-room", &head.slot), Some(head.clone()));
+    assert_eq!(recovered.block("test-room", &head.cid), Some(manifest));
+    assert_eq!(recovered.total_bytes(), retained);
+    drop(recovered);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn escrow_default_mode_preserves_existing_room_current_previous_and_original_bytes() {
+    let root = scratch();
+    let cfg = EscrowConfig {
+        enabled: true,
+        rooms: vec!["test-room".into()],
+        ..Default::default()
+    };
+    let repo = Repository::open(root.clone(), cfg.clone()).unwrap();
+    let (first, first_manifest) = fixture(b"legacy first", 1, None);
+    let (next, next_manifest) = fixture(b"legacy second", 2, Some(first.hash()));
+    accept(&repo, &first, b"legacy first", &first_manifest);
+    accept(&repo, &next, b"legacy second", &next_manifest);
+    let retained = repo.total_bytes();
+    drop(repo);
+    let records = std::fs::read_dir(root.join("heads"))
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            let bytes = std::fs::read(&path).unwrap();
+            (path, bytes)
+        })
+        .collect::<Vec<_>>();
+    let service = Service::open(root.clone(), cfg).unwrap();
+    assert!(service.cfg.replication.is_empty());
+    assert_eq!(
+        service.repo.head("test-room", &next.slot),
+        Some(next.clone())
+    );
+    assert_eq!(service.repo.total_bytes(), retained);
+    assert_eq!(
+        service.repo.block("test-room", &first.cid),
+        Some(first_manifest)
+    );
+    assert_eq!(
+        service.repo.block("test-room", &next.cid),
+        Some(next_manifest)
+    );
+    assert_eq!(service.provider()["features"], json!(["delete"]));
+    for (path, bytes) in &records {
+        assert_eq!(std::fs::read(path).unwrap(), *bytes);
+    }
+    drop(service);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn migration_export_and_retirement_are_room_scoped_and_preserve_other_data() {
+    let root = scratch();
+    let repo = Repository::open(root.clone(), EscrowConfig::default()).unwrap();
+    let (first, first_manifest) = fixture(b"first encrypted", 1, None);
+    let (latest, latest_manifest) = fixture(b"latest encrypted", 2, Some(first.hash()));
+    accept(&repo, &first, b"first encrypted", &first_manifest);
+    accept(&repo, &latest, b"latest encrypted", &latest_manifest);
+    let (other, other_manifest) = fixture(b"other room", 1, None);
+    let reservation = repo.reserve("other-room", &other).unwrap().unwrap();
+    repo.commit("other-room", &other, b"other room", &other_manifest)
+        .unwrap();
+    drop(reservation);
+    assert_eq!(repo.room_heads("test-room"), vec![latest.clone()]);
+    assert_eq!(
+        repo.generation_bytes("test-room", &latest).unwrap(),
+        Some((b"latest encrypted".to_vec(), latest_manifest))
+    );
+    assert_eq!(
+        repo.generation_bytes("test-room", &first).unwrap(),
+        Some((b"first encrypted".to_vec(), first_manifest))
+    );
+    assert!(
+        repo.generation_bytes("other-room", &latest)
+            .unwrap()
+            .is_none()
+    );
+    repo.retire_room("test-room").unwrap();
+    assert!(repo.room_heads("test-room").is_empty());
+    assert!(repo.block("test-room", &latest.cid).is_none());
+    assert_eq!(repo.head("other-room", &other.slot), Some(other.clone()));
+    drop(repo);
+    let repo = Repository::open(root.clone(), EscrowConfig::default()).unwrap();
+    assert!(repo.room_heads("test-room").is_empty());
+    assert_eq!(
+        repo.generation_bytes("other-room", &other).unwrap(),
+        Some((b"other room".to_vec(), other_manifest))
+    );
+    drop(repo);
+    std::fs::remove_dir_all(root).unwrap();
+}

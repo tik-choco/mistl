@@ -182,7 +182,10 @@ impl Service {
 
     async fn serve_storage(&self, request: &Request) {
         // Read the block only after admission to the four active tasks, never while queuing.
-        let Some(data) = self.repo.block(&request.room, &request.cid) else {
+        let Some(data) = self.repo.block(&request.room, &request.cid).or_else(|| {
+            self.cluster(&request.room)
+                .and_then(|cluster| cluster.block(&request.cid))
+        }) else {
             return;
         };
         if request.query {

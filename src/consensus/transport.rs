@@ -74,8 +74,11 @@ pub fn embedded_sender(msg: &RaftMessage) -> &NodeId {
     match msg {
         RaftMessage::RequestVote { candidate_id, .. } => candidate_id,
         RaftMessage::RequestVoteResponse { voter_id, .. } => voter_id,
-        RaftMessage::AppendEntries { leader_id, .. } => leader_id,
-        RaftMessage::AppendEntriesResponse { follower_id, .. } => follower_id,
+        RaftMessage::AppendEntries { leader_id, .. }
+        | RaftMessage::InstallSnapshot { leader_id, .. } => leader_id,
+        RaftMessage::AppendEntriesResponse { follower_id, .. }
+        | RaftMessage::InstallSnapshotResponse { follower_id, .. }
+        | RaftMessage::AppendEntriesConflict { follower_id, .. } => follower_id,
     }
 }
 

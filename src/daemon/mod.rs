@@ -541,6 +541,7 @@ fn remote_config_denied(path: &str) -> bool {
         // Decide which peers are trusted as providers / relay members.
         "ai.trusted_providers",
         "network.membership_allowlist",
+        "escrow.replication",
         // Local paths.
         "storage.blocks_dir",
         "storage.export_dir",
@@ -570,6 +571,9 @@ fn remote_config_denied(path: &str) -> bool {
 fn authorize(caller: Caller, cmd: &str, args: &Value) -> Result<()> {
     if cmd == "ai.external.apply" && caller != Caller::Ipc {
         bail!("`ai.external.apply` is available only through the local mistl CLI");
+    }
+    if cmd == "escrow.replication.membership" && caller != Caller::Ipc {
+        bail!("`escrow.replication.membership` is available only through the local mistl CLI");
     }
     // Room shortcuts are configuration writes and must share config.set's policy.
     if matches!(cmd, "escrow.rooms.add" | "escrow.rooms.remove") {
@@ -924,6 +928,18 @@ mod tests {
         ] {
             authorize(REMOTE, "config.set", &json!({"path": path, "value": 1}))
                 .unwrap_or_else(|e| panic!("{path}: {e}"));
+        }
+    }
+
+    #[test]
+    fn escrow_membership_changes_require_local_ipc() {
+        let config = json!({"path":"escrow.replication","value":[]});
+        assert!(authorize(REMOTE, "config.set", &config).is_err());
+        authorize(LOCAL, "config.set", &config).unwrap();
+        let args = json!({"room":"room-a","voters":["0123456789abcdef"],"learners":[]});
+        authorize(Caller::Ipc, "escrow.replication.membership", &args).unwrap();
+        for caller in [LOCAL, REMOTE, Caller::Internal] {
+            assert!(authorize(caller, "escrow.replication.membership", &args).is_err());
         }
     }
 

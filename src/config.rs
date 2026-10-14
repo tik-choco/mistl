@@ -324,6 +324,7 @@ pub struct ChatRelayConfig {
 pub struct EscrowConfig {
     pub enabled: bool,
     pub rooms: Vec<String>,
+    pub replication: Vec<EscrowReplication>,
     pub max_blob_bytes: u64,
     pub max_total_bytes: u64,
     pub max_slots_per_room: usize,
@@ -334,6 +335,7 @@ impl Default for EscrowConfig {
         Self {
             enabled: false,
             rooms: Vec::new(),
+            replication: Vec::new(),
             max_blob_bytes: 32 * 1024 * 1024,
             max_total_bytes: 1024 * 1024 * 1024,
             max_slots_per_room: 1024,
@@ -352,6 +354,45 @@ impl EscrowConfig {
             );
             anyhow::ensure!(unique.insert(room), "escrow.rooms: duplicate room id");
         }
+        let mut replicated = std::collections::HashSet::new();
+        for cluster in &self.replication {
+            anyhow::ensure!(
+                self.rooms.contains(&cluster.room),
+                "escrow.replication: room must be configured"
+            );
+            anyhow::ensure!(
+                replicated.insert(&cluster.room),
+                "escrow.replication: duplicate room"
+            );
+            anyhow::ensure!(
+                (1..=9).contains(&cluster.voters.len()),
+                "escrow.replication: expected 1..9 genesis voters"
+            );
+            let mut voters = std::collections::HashSet::new();
+            for voter in &cluster.voters {
+                anyhow::ensure!(
+                    crate::escrow::valid_voter(voter) && voters.insert(voter),
+                    "escrow.replication: invalid or duplicate voter node id"
+                );
+            }
+            anyhow::ensure!(
+                cluster.learners.len() <= 9,
+                "escrow.replication: at most 9 initial learners"
+            );
+            for learner in &cluster.learners {
+                anyhow::ensure!(
+                    crate::escrow::valid_voter(learner) && voters.insert(learner),
+                    "escrow.replication: invalid, duplicate or voting learner node id"
+                );
+            }
+            anyhow::ensure!(
+                cluster
+                    .migration_seed
+                    .as_ref()
+                    .is_none_or(|seed| cluster.voters.contains(seed)),
+                "escrow.replication: migration seed must be a genesis voter"
+            );
+        }
         anyhow::ensure!(
             (1..=1024 * 1024 * 1024).contains(&self.max_blob_bytes),
             "escrow.max_blob_bytes: expected 1..1073741824"
@@ -366,6 +407,18 @@ impl EscrowConfig {
         );
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EscrowReplication {
+    pub room: String,
+    /// Immutable genesis voters define the cluster identity.
+    pub voters: Vec<String>,
+    #[serde(default)]
+    pub learners: Vec<String>,
+    #[serde(default)]
+    pub migration_seed: Option<String>,
 }
 
 /// HTTP endpoint or Room provider, including discovery cache and per-room sharing.
