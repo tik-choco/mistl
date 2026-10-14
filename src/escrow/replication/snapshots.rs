@@ -15,7 +15,8 @@ pub(super) const MAX_SNAPSHOT_BYTES: usize = 64 * 1024 * 1024;
 pub(super) const CHUNK_BYTES: usize = 8 * 1024;
 const MAX_ENCODED_CHUNK: usize = (CHUNK_BYTES * 4).div_ceil(3);
 const MAX_PEERS: usize = 18;
-const TTL: Duration = Duration::from_secs(180);
+const METADATA_TTL: Duration = Duration::from_secs(180);
+const OUTGOING_TTL: Duration = Duration::from_secs(660);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -53,6 +54,7 @@ struct Outgoing {
     offer: Offer,
     expires: Instant,
     _lease: Lease,
+    metadata_complete: bool,
 }
 struct Shared {
     snapshot: Arc<RaftSnapshot>,
@@ -82,6 +84,25 @@ impl SnapshotTransfers {
         now: Instant,
     ) -> Result<Option<Offer>> {
         self.expire(now);
+        if let Some(existing) = self.outgoing.get_mut(peer) {
+            if term < existing.offer.term {
+                return Ok(None);
+            }
+            if term > existing.offer.term {
+                // Keep the protected payload until installation is acknowledged,
+                // but contact the recipient in the current leader term.
+                let renewed = Offer {
+                    ticket: crate::net::peer_auth::fresh_nonce(),
+                    term,
+                    ..existing.offer.clone()
+                };
+                validate_offer(peer, &renewed)?;
+                existing.offer = renewed;
+                existing.expires = now + OUTGOING_TTL;
+                existing.metadata_complete = false;
+            }
+            return Ok(Some(existing.offer.clone()));
+        }
         let same_payload = self.shared.as_ref().filter(|shared| {
             Arc::ptr_eq(&shared.snapshot.data, &snapshot.data)
                 && shared.snapshot.last_included_index == snapshot.last_included_index
@@ -93,11 +114,10 @@ impl SnapshotTransfers {
                 || shared.snapshot.last_included_term != snapshot.last_included_term
                 || shared.snapshot.membership != snapshot.membership
         });
-        let sha = if different_header && !self.outgoing.is_empty() {
-            self.shared.as_ref().unwrap().sha.clone()
-        } else {
-            same_payload.map_or_else(|| digest(&snapshot.data), |shared| shared.sha.clone())
-        };
+        if different_header && !self.outgoing.is_empty() {
+            return Ok(None);
+        }
+        let sha = same_payload.map_or_else(|| digest(&snapshot.data), |shared| shared.sha.clone());
         let offer = Offer {
             ticket: crate::net::peer_auth::fresh_nonce(),
             term,
@@ -117,31 +137,23 @@ impl SnapshotTransfers {
         if !same {
             // An active recipient may still fetch this snapshot's ciphertext generations.
             if !self.outgoing.is_empty() {
-                return Ok(self
-                    .outgoing
-                    .get(peer)
-                    .filter(|item| item.offer.term == term)
-                    .map(|item| item.offer.clone()));
+                return Ok(None);
             }
             self.shared = Some(Shared {
                 snapshot: Arc::new(snapshot),
                 sha: offer.sha.clone(),
             });
         }
-        if let Some(existing) = self.outgoing.get(peer) {
-            if existing.offer.term == term {
-                return Ok(Some(existing.offer.clone()));
-            }
-        }
-        if !self.outgoing.contains_key(peer) && self.outgoing.len() >= MAX_PEERS {
+        if self.outgoing.len() >= MAX_PEERS {
             return Ok(None);
         }
         self.outgoing.insert(
             peer.into(),
             Outgoing {
                 offer: offer.clone(),
-                expires: now + TTL,
+                expires: now + OUTGOING_TTL,
                 _lease: lease,
+                metadata_complete: false,
             },
         );
         Ok(Some(offer))
@@ -182,7 +194,7 @@ impl SnapshotTransfers {
             peer: peer.into(),
             offer,
             bytes: Vec::new(),
-            expires: now + TTL,
+            expires: now + METADATA_TTL,
         });
         Ok(Receive::Request(request))
     }
@@ -204,7 +216,10 @@ impl SnapshotTransfers {
             return None;
         }
         let end = offset.saturating_add(CHUNK_BYTES).min(snapshot.data.len());
-        outgoing.expires = now + TTL;
+        if !outgoing.metadata_complete {
+            outgoing.expires = now + OUTGOING_TTL;
+            outgoing.metadata_complete = end == snapshot.data.len();
+        }
         Some(Chunk {
             ticket: request.ticket.clone(),
             offset: request.offset,
@@ -265,7 +280,7 @@ impl SnapshotTransfers {
         );
         incoming.bytes.try_reserve(bytes.len())?;
         incoming.bytes.extend_from_slice(&bytes);
-        incoming.expires = now + TTL;
+        incoming.expires = now + METADATA_TTL;
         if end as u64 != incoming.offer.size {
             return Ok(Receive::Request(Request {
                 ticket: incoming.offer.ticket.clone(),
@@ -636,8 +651,11 @@ mod tests {
         let next = request(recv.accept_offer(OTHER, b, now).unwrap());
         assert_eq!(next.offset, 0);
         assert_eq!(recv.incoming.as_ref().unwrap().peer, OTHER);
-        recv.expire(now + TTL);
-        send.expire(now + TTL);
+        recv.expire(now + METADATA_TTL);
+        assert!(recv.incoming.is_none());
+        send.expire(now + METADATA_TTL);
+        assert!(!send.outgoing.is_empty());
+        send.expire(now + OUTGOING_TTL);
         assert!(recv.incoming.is_none());
         assert!(send.outgoing.is_empty());
         assert!(send.shared.is_none());
@@ -674,7 +692,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        send.expire(now + TTL);
+        send.expire(now + OUTGOING_TTL);
         assert_eq!(fixture.archive.collect(&HashSet::new()).unwrap(), 1);
     }
 
@@ -750,18 +768,20 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert!(
-            send.offer(FOLLOWER, 3, snapshot(vec![5; 4], 8), fixture.lease(), now)
-                .unwrap()
-                .is_none()
-        );
+        let renewed = send
+            .offer(FOLLOWER, 3, snapshot(vec![5; 4], 8), fixture.lease(), now)
+            .unwrap()
+            .unwrap();
+        assert_eq!(renewed.index, old.index);
+        assert_eq!(renewed.term, 3);
+        assert_ne!(renewed.ticket, old.ticket);
         assert_eq!(fixture.archive.collect(&HashSet::new()).unwrap(), 0);
         assert!(fixture.archive.has(&head));
         assert!(
             send.reply_chunk(
                 FOLLOWER,
                 &Request {
-                    ticket: old.ticket,
+                    ticket: renewed.ticket,
                     offset: 0
                 },
                 now
@@ -777,14 +797,14 @@ mod tests {
                 .index,
             8
         );
-        send.expire(now + TTL);
+        send.expire(now + OUTGOING_TTL);
         let head = generation(&fixture);
         send.offer(
             FOLLOWER,
             3,
             snapshot(vec![5; 4], 8),
             fixture.archive.pin_heads(&[head]).unwrap(),
-            now + TTL,
+            now + OUTGOING_TTL,
         )
         .unwrap()
         .unwrap();
@@ -794,12 +814,12 @@ mod tests {
                 3,
                 snapshot(vec![5; 5], 9),
                 fixture.lease(),
-                now + TTL
+                now + OUTGOING_TTL
             )
             .unwrap()
             .is_none()
         );
-        send.expire(now + TTL * 2);
+        send.expire(now + OUTGOING_TTL * 2);
         assert_eq!(fixture.archive.collect(&HashSet::new()).unwrap(), 1);
         assert_eq!(
             send.offer(
@@ -807,12 +827,174 @@ mod tests {
                 3,
                 snapshot(vec![5; 5], 9),
                 fixture.lease(),
-                now + TTL * 2
+                now + OUTGOING_TTL * 2
             )
             .unwrap()
             .unwrap()
             .index,
             9
         );
+    }
+    #[test]
+    fn outgoing_generation_survives_full_ciphertext_preparation_deadline() {
+        let fixture = Fixture::new();
+        let head = generation(&fixture);
+        let now = Instant::now();
+        let mut send = SnapshotTransfers::default();
+        let offer = send
+            .offer(
+                FOLLOWER,
+                2,
+                snapshot(vec![5; 3], 7),
+                fixture.archive.pin_heads(&[head.clone()]).unwrap(),
+                now,
+            )
+            .unwrap()
+            .unwrap();
+        let mut recv = SnapshotTransfers::default();
+        let start = request(recv.accept_offer(LEADER, offer.clone(), now).unwrap());
+        let chunk = send.reply_chunk(FOLLOWER, &start, now).unwrap();
+        assert!(matches!(
+            recv.accept_chunk(LEADER, chunk, now).unwrap(),
+            Receive::Complete { .. }
+        ));
+        send.expire(now + METADATA_TTL);
+        assert_eq!(fixture.archive.collect(&HashSet::new()).unwrap(), 0);
+        send.expire(now + Duration::from_secs(600));
+        assert!(fixture.archive.has(&head));
+        assert_eq!(fixture.archive.collect(&HashSet::new()).unwrap(), 0);
+        send.expire(now + OUTGOING_TTL);
+        assert_eq!(fixture.archive.collect(&HashSet::new()).unwrap(), 1);
+        assert!(send.outgoing.is_empty());
+    }
+    #[test]
+    fn repeated_completed_metadata_cannot_pin_old_generation_forever() {
+        let fixture = Fixture::new();
+        let head = generation(&fixture);
+        let now = Instant::now();
+        let mut send = SnapshotTransfers::default();
+        let offer = send
+            .offer(
+                FOLLOWER,
+                2,
+                snapshot(vec![5; CHUNK_BYTES + 3], 7),
+                fixture.archive.pin_heads(&[head.clone()]).unwrap(),
+                now,
+            )
+            .unwrap()
+            .unwrap();
+        let first = Request {
+            ticket: offer.ticket.clone(),
+            offset: 0,
+        };
+        send.reply_chunk(FOLLOWER, &first, now).unwrap();
+        let final_request = Request {
+            ticket: offer.ticket.clone(),
+            offset: CHUNK_BYTES as u64,
+        };
+        let final_sent = now + Duration::from_secs(100);
+        send.reply_chunk(FOLLOWER, &final_request, final_sent)
+            .unwrap();
+        let deadline = final_sent + OUTGOING_TTL;
+        for seconds in [180, 500, 650] {
+            let retry = final_sent + Duration::from_secs(seconds);
+            assert!(send.reply_chunk(FOLLOWER, &first, retry).is_some());
+            assert!(send.reply_chunk(FOLLOWER, &final_request, retry).is_some());
+            assert_eq!(send.outgoing[FOLLOWER].expires, deadline);
+            assert_eq!(
+                send.offer(FOLLOWER, 2, snapshot(vec![6; 3], 8), fixture.lease(), retry)
+                    .unwrap()
+                    .unwrap(),
+                offer
+            );
+            assert_eq!(fixture.archive.collect(&HashSet::new()).unwrap(), 0);
+        }
+        send.expire(deadline);
+        assert_eq!(fixture.archive.collect(&HashSet::new()).unwrap(), 1);
+        assert_eq!(
+            send.offer(OTHER, 2, snapshot(vec![6; 3], 8), fixture.lease(), deadline)
+                .unwrap()
+                .unwrap()
+                .index,
+            8
+        );
+    }
+
+    #[test]
+    fn higher_term_reoffers_protected_snapshot_then_advances_after_install_ack() {
+        let fixture = Fixture::new();
+        let head = generation(&fixture);
+        let now = Instant::now();
+        let old_snapshot = snapshot(vec![7; 3], 7);
+        let current = snapshot(vec![8; 4], 15);
+        let mut send = SnapshotTransfers::default();
+        let old = send
+            .offer(
+                FOLLOWER,
+                2,
+                old_snapshot.clone(),
+                fixture.archive.pin_heads(&[head.clone()]).unwrap(),
+                now,
+            )
+            .unwrap()
+            .unwrap();
+        let mut recv = SnapshotTransfers::default();
+        let old_request = request(recv.accept_offer(LEADER, old.clone(), now).unwrap());
+        let first = send.reply_chunk(FOLLOWER, &old_request, now).unwrap();
+        assert!(matches!(
+            recv.accept_chunk(LEADER, first, now).unwrap(),
+            Receive::Complete { term: 2, .. }
+        ));
+        assert!(send.outgoing[FOLLOWER].metadata_complete);
+        let later = now + Duration::from_secs(7);
+        let renewed = send
+            .offer(FOLLOWER, 4, current.clone(), fixture.lease(), later)
+            .unwrap()
+            .unwrap();
+        assert_eq!(renewed.term, 4);
+        assert_eq!(renewed.index, old.index);
+        assert_eq!(renewed.snapshot_term, old.snapshot_term);
+        assert_eq!(renewed.sha, old.sha);
+        assert_eq!(renewed.size, old.size);
+        assert_eq!(renewed.membership, old.membership);
+        assert_ne!(renewed.ticket, old.ticket);
+        assert!(!send.outgoing[FOLLOWER].metadata_complete);
+        assert_eq!(send.outgoing[FOLLOWER].expires, later + OUTGOING_TTL);
+        assert!(
+            send.offer(FOLLOWER, 3, current.clone(), fixture.lease(), later)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(send.outgoing[FOLLOWER].offer, renewed);
+        assert!(
+            send.offer(OTHER, 4, current.clone(), fixture.lease(), later)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(fixture.archive.collect(&HashSet::new()).unwrap(), 0);
+        assert!(fixture.archive.has(&head));
+        assert_eq!(fixture.archive.load(&head).unwrap().0, vec![9; 64]);
+        assert!(
+            send.reply_chunk(FOLLOWER, &old_request, later).is_none(),
+            "old ticket is fenced"
+        );
+        let new_request = request(recv.accept_offer(LEADER, renewed.clone(), later).unwrap());
+        let chunk = send.reply_chunk(FOLLOWER, &new_request, later).unwrap();
+        match recv.accept_chunk(LEADER, chunk, later).unwrap() {
+            Receive::Complete { term, snapshot } => {
+                assert_eq!(term, 4);
+                assert_eq!(snapshot, old_snapshot);
+            }
+            other => panic!("expected protected snapshot: {other:?}"),
+        }
+        send.acknowledged(FOLLOWER, renewed.index);
+        assert!(send.shared.is_none());
+        assert_eq!(fixture.archive.collect(&HashSet::new()).unwrap(), 1);
+        let latest = send
+            .offer(FOLLOWER, 4, current.clone(), fixture.lease(), later)
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.index, current.last_included_index);
+        assert_eq!(latest.sha, digest(&current.data));
     }
 }

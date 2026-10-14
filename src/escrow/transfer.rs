@@ -6,6 +6,7 @@ use super::{
 use mistlib_core::storage::cid::{MULTICODEC_RAW, verify_cid};
 use mistlib_core::storage::{CHUNK_SIZE, protocol::*};
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Mutex;
 use tokio::sync::oneshot;
 
@@ -142,6 +143,41 @@ impl Transfers {
     }
 }
 
+/// Reconstruct a generation from local raw blocks without peer resolution.
+/// A partial local copy returns None so the caller can use its normal pull path.
+pub(super) async fn local_generation<F, Fut>(
+    head: &Head,
+    max_blob: u64,
+    mut read: F,
+) -> Result<Option<(Vec<u8>, Vec<u8>)>, Error>
+where
+    F: FnMut(String) -> Fut,
+    Fut: Future<Output = Result<Option<Vec<u8>>, Error>>,
+{
+    head.validate(max_blob)?;
+    head.verify()?;
+    let size = usize::try_from(head.size).map_err(|_| Error::new("too_large"))?;
+    let Some(bytes) = read(head.cid.clone()).await? else {
+        return Ok(None);
+    };
+    let manifest = validate_manifest(head, &bytes)?;
+    let mut blob = Vec::new();
+    for cid in &manifest.chunks {
+        let expected = size.saturating_sub(blob.len()).min(CHUNK_SIZE);
+        let Some(chunk) = read(cid.clone()).await? else {
+            return Ok(None);
+        };
+        if chunk.len() != expected || !verify_cid(cid, &chunk, MULTICODEC_RAW) {
+            return Err(Error::new("hash_mismatch"));
+        }
+        blob.try_reserve_exact(chunk.len())
+            .map_err(|_| Error::new("too_large"))?;
+        blob.extend_from_slice(&chunk);
+    }
+    validate_blob(head, &blob)?;
+    Ok(Some((blob, bytes)))
+}
+
 struct PendingGuard<'a> {
     transfers: &'a Transfers,
     key: Key,
@@ -191,5 +227,190 @@ mod tests {
             &build_have_chunk_message("bcid", 0, 2, b"te"),
         );
         assert_eq!(rx.try_recv().unwrap().unwrap(), b"test");
+    }
+
+    fn signed(head: &mut Head) {
+        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+        use ed25519_dalek::{Signer, SigningKey};
+        let key = SigningKey::from_bytes(&[7; 32]);
+        head.writer = URL_SAFE_NO_PAD.encode(key.verifying_key().as_bytes());
+        head.sig = URL_SAFE_NO_PAD.encode(key.sign(&head.signing_payload()).to_bytes());
+    }
+
+    fn local_fixture(blob: &[u8]) -> (Head, HashMap<String, Vec<u8>>, Vec<u8>) {
+        use mistlib_core::storage::cid::{MULTICODEC_DAG_CBOR, compute_cid};
+        let chunks: Vec<_> = blob
+            .chunks(CHUNK_SIZE)
+            .map(|bytes| compute_cid(bytes, MULTICODEC_RAW))
+            .collect();
+        let manifest = mistlib_core::storage::FileManifest {
+            name: "tc-escrow.bin".into(),
+            size: blob.len() as u64,
+            chunks: chunks.clone(),
+        };
+        // Preserve extensions and the original CBOR representation.
+        let mut value: serde_cbor::Value =
+            serde_cbor::from_slice(&serde_cbor::to_vec(&manifest).unwrap()).unwrap();
+        if let serde_cbor::Value::Map(fields) = &mut value {
+            fields.insert(
+                serde_cbor::Value::Text("future".into()),
+                serde_cbor::Value::Text("opaque".into()),
+            );
+        }
+        let bytes = serde_cbor::to_vec(&value).unwrap();
+        let mut head = Head {
+            v: 1,
+            kind: "tc-escrow-head".into(),
+            slot: "ab".repeat(16),
+            seq: 1,
+            parent: None,
+            cid: compute_cid(&bytes, MULTICODEC_DAG_CBOR),
+            size: blob.len() as u64,
+            sha256: super::super::protocol::digest(blob),
+            comp: "none".into(),
+            schema: "test/1".into(),
+            writer: String::new(),
+            at: 1,
+            sig: String::new(),
+        };
+        signed(&mut head);
+        let mut blocks: HashMap<_, _> = chunks
+            .into_iter()
+            .zip(blob.chunks(CHUNK_SIZE).map(|bytes| bytes.to_vec()))
+            .collect();
+        blocks.insert(head.cid.clone(), bytes.clone());
+        (head, blocks, bytes)
+    }
+
+    #[tokio::test]
+    async fn local_generation_reconstructs_multiple_chunks_and_preserves_original_manifest() {
+        let blob: Vec<_> = (0..CHUNK_SIZE + 19).map(|n| (n % 251) as u8).collect();
+        let (head, blocks, original) = local_fixture(&blob);
+        let mut reads = Vec::new();
+        let (actual, manifest) = local_generation(&head, blob.len() as u64, |cid| {
+            reads.push(cid.clone());
+            std::future::ready(Ok(blocks.get(&cid).cloned()))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(actual, blob);
+        assert_eq!(manifest, original);
+        assert_eq!(reads.len(), 3);
+        assert_eq!(reads[0], head.cid);
+    }
+
+    #[tokio::test]
+    async fn local_generation_validates_size_and_signature_before_reading_blocks() {
+        let (mut head, _, _) = local_fixture(b"ciphertext");
+        let mut reads = 0;
+        let result = local_generation(&head, head.size - 1, |_| {
+            reads += 1;
+            std::future::ready(Ok(None))
+        })
+        .await;
+        assert_eq!(result.unwrap_err().code, "too_large");
+        assert_eq!(reads, 0);
+        head.seq += 1;
+        let result = local_generation(&head, 1024, |_| {
+            reads += 1;
+            std::future::ready(Ok(None))
+        })
+        .await;
+        assert_eq!(result.unwrap_err().code, "bad_sig");
+        assert_eq!(reads, 0);
+    }
+
+    #[tokio::test]
+    async fn local_generation_returns_none_for_missing_root_or_chunk() {
+        let (head, mut blocks, _) = local_fixture(&vec![7; CHUNK_SIZE + 3]);
+        assert!(
+            local_generation(&head, head.size, |_| std::future::ready(Ok(None)))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let chunks: Vec<_> = blocks
+            .keys()
+            .filter(|cid| **cid != head.cid)
+            .cloned()
+            .collect();
+        blocks.remove(&chunks[0]);
+        assert!(
+            local_generation(&head, head.size, |cid| std::future::ready(Ok(blocks
+                .get(&cid)
+                .cloned())))
+            .await
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn local_generation_rejects_bad_manifest_chunk_and_total_hash() {
+        let (head, blocks, _) = local_fixture(b"ciphertext");
+        let mut bad_manifest = blocks.clone();
+        bad_manifest.get_mut(&head.cid).unwrap().push(0);
+        assert_eq!(
+            local_generation(&head, head.size, |cid| std::future::ready(Ok(bad_manifest
+                .get(&cid)
+                .cloned())))
+            .await
+            .unwrap_err()
+            .code,
+            "hash_mismatch"
+        );
+        let mut bad_chunk = blocks.clone();
+        let chunk = bad_chunk
+            .iter_mut()
+            .find(|(cid, _)| **cid != head.cid)
+            .unwrap()
+            .1;
+        chunk[0] ^= 1;
+        assert_eq!(
+            local_generation(&head, head.size, |cid| std::future::ready(Ok(bad_chunk
+                .get(&cid)
+                .cloned())))
+            .await
+            .unwrap_err()
+            .code,
+            "hash_mismatch"
+        );
+        let mut bad_hash = head.clone();
+        bad_hash.sha256 = "00".repeat(32);
+        signed(&mut bad_hash);
+        assert_eq!(
+            local_generation(&bad_hash, bad_hash.size, |cid| std::future::ready(Ok(
+                blocks.get(&cid).cloned()
+            )))
+            .await
+            .unwrap_err()
+            .code,
+            "hash_mismatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_generation_rejects_invalid_manifest_chunk_cid_before_chunk_lookup() {
+        use mistlib_core::storage::cid::{MULTICODEC_DAG_CBOR, compute_cid};
+        let (mut head, _, _) = local_fixture(b"ciphertext");
+        let bytes = serde_cbor::to_vec(&mistlib_core::storage::FileManifest {
+            name: "tc-escrow.bin".into(),
+            size: head.size,
+            chunks: vec!["invalid-cid".into()],
+        })
+        .unwrap();
+        head.cid = compute_cid(&bytes, MULTICODEC_DAG_CBOR);
+        signed(&mut head);
+        let mut reads = 0;
+        assert!(
+            local_generation(&head, head.size, |_| {
+                reads += 1;
+                std::future::ready(Ok(Some(bytes.clone())))
+            })
+            .await
+            .is_err()
+        );
+        assert_eq!(reads, 1);
     }
 }

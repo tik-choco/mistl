@@ -1,6 +1,6 @@
 # Automatic release: every push to main builds mistl for Windows / macOS /
 # Linux, picks the next version, tags it, and publishes a GitHub Release with
-# auto-generated notes.
+# auto-generated notes. Develop pushes run the same verification without publishing.
 #
 # Versioning rules (job: plan):
 #   - no v* tag yet                -> release the version in Cargo.toml
@@ -25,7 +25,7 @@ name: release
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
     paths-ignore:
       - "**.md"
       - ".gitignore"
@@ -43,9 +43,9 @@ env:
   # Public mistlib. Switch to tik-choco-lab/mistlib-dev + develop (and set the
   # MISTLIB_DEV_TOKEN secret) to build against unreleased mistlib commits.
   MISTLIB_REPO: tik-choco-lab/mistlib
-  MISTLIB_REF: main
+  MISTLIB_REF: 0f5fd9e18a6a154fa8b826fd9a8c2fed8d8980a8
   MISTLIB_CONSENSUS_REPO: tik-choco-lab/mistlib-consensus
-  MISTLIB_CONSENSUS_REF: main
+  MISTLIB_CONSENSUS_REF: a80f80b22de5466387fd9f93e63a3e793ff2f456
   # Runner cmake is 4.x; vendored libopus still declares an ancient minimum.
   CMAKE_POLICY_VERSION_MINIMUM: "3.5"
 
@@ -187,6 +187,7 @@ jobs:
           if-no-files-found: error
 
   release:
+    if: github.ref == 'refs/heads/main'
     needs: [plan, build]
     runs-on: ubuntu-latest
     steps:

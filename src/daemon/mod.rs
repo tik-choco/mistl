@@ -575,6 +575,9 @@ fn authorize(caller: Caller, cmd: &str, args: &Value) -> Result<()> {
     if cmd == "escrow.replication.membership" && caller != Caller::Ipc {
         bail!("`escrow.replication.membership` is available only through the local mistl CLI");
     }
+    if cmd == "escrow.client.request" && caller != Caller::Ipc {
+        bail!("`escrow.client.request` is available only through local IPC");
+    }
     // Room shortcuts are configuration writes and must share config.set's policy.
     if matches!(cmd, "escrow.rooms.add" | "escrow.rooms.remove") {
         authorize(caller, "config.set", &json!({"path": "escrow.rooms"}))?;
@@ -940,6 +943,16 @@ mod tests {
         authorize(Caller::Ipc, "escrow.replication.membership", &args).unwrap();
         for caller in [LOCAL, REMOTE, Caller::Internal] {
             assert!(authorize(caller, "escrow.replication.membership", &args).is_err());
+        }
+    }
+
+    #[test]
+    fn escrow_client_requests_require_local_ipc() {
+        let args = json!({"room":"room-a","peer":"0123456789abcdef",
+            "request":{"v":1,"type":"escrow_get","slot":"ab".repeat(16)}});
+        authorize(Caller::Ipc, "escrow.client.request", &args).unwrap();
+        for caller in [LOCAL, REMOTE, Caller::Internal] {
+            assert!(authorize(caller, "escrow.client.request", &args).is_err());
         }
     }
 

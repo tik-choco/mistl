@@ -527,6 +527,8 @@ impl Cluster {
     }
 
     async fn stage(&self, from: &str, head: &Head) -> Result<archive::Lease, Error> {
+        head.validate(1024 * 1024 * 1024)?;
+        head.verify()?;
         if !self.running.load(Ordering::Relaxed) {
             return Err(Error::new("fetch_failed"));
         }
@@ -539,6 +541,7 @@ impl Cluster {
                     .map_err(|_| Error::new("fetch_failed"));
             }
         }
+        head.validate(self.cfg.max_blob_bytes)?;
         let Some(pull) = self.pull.get() else {
             return Err(Error::new("busy"));
         };
@@ -1026,8 +1029,15 @@ impl Cluster {
             }
         };
         let previous = inner.engine.log().last();
-        let prev_log_index = previous.map_or(0, |entry| entry.index);
-        let prev_log_term = previous.map_or(0, |entry| entry.term);
+        let snapshot = inner.engine.snapshot();
+        let prev_log_index = previous.map_or_else(
+            || snapshot.as_ref().map_or(0, |s| s.last_included_index),
+            |entry| entry.index,
+        );
+        let prev_log_term = previous.map_or_else(
+            || snapshot.as_ref().map_or(0, |s| s.last_included_term),
+            |entry| entry.term,
+        );
         let probe = Body::Raft(RaftMessage::AppendEntries {
             term,
             leader_id: NodeId(self.identity.node_id()),
@@ -1086,6 +1096,23 @@ impl Cluster {
         timers: &mut Timers,
         suppress_send: bool,
     ) {
+        let mut outputs = outputs;
+        if outputs
+            .iter()
+            .any(|output| matches!(output, Output::BecameLeader))
+        {
+            let command = Command::ReadBarrier {
+                ticket: crate::net::peer_auth::fresh_nonce(),
+            };
+            let command = serde_json::to_vec(&command).expect("leadership barrier serialization");
+            match inner.engine.step(Event::ClientPropose { command }) {
+                Ok(barrier) => outputs.extend(barrier),
+                Err(error) => {
+                    self.fail(inner, error.to_string());
+                    return;
+                }
+            }
+        }
         for output in &outputs {
             if let Output::InstallSnapshot { snapshot } = output {
                 match State::decode(&snapshot.data, APPLY_SLOTS) {
@@ -1180,6 +1207,7 @@ impl Cluster {
                 Output::ResetHeartbeatTimer => timers.heartbeat = Instant::now() + HEARTBEAT,
                 Output::SendMessage { to, mut msg } if !suppress_send => {
                     if let RaftMessage::InstallSnapshot { term, snapshot, .. } = msg {
+                        let snapshot = inner.engine.snapshot().unwrap_or(snapshot);
                         let result = State::decode(&snapshot.data, APPLY_SLOTS).and_then(|state| {
                             let _gate = self.archive_gate.lock().unwrap();
                             let lease = self.archive.pin_heads(&state.retained_heads())?;
