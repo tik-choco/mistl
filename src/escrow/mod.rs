@@ -1,5 +1,6 @@
 //! Config-driven tc-escrow v1 service. Settings take effect on daemon restart.
 mod admission;
+mod client;
 mod protocol;
 mod replication;
 mod repository;
@@ -152,10 +153,12 @@ impl Service {
         Ok(())
     }
 
-    fn start_replication(self: &Arc<Self>) -> Result<()> {
+    fn start_replication(self: &Arc<Self>, state: &Arc<AppState>) -> Result<()> {
         let weak = Arc::downgrade(self);
+        let state = state.clone();
         let pull: replication::Puller = Arc::new(move |room, from, head| {
             let service = weak.clone();
+            let state = state.clone();
             Box::pin(async move {
                 let service = service.upgrade().ok_or_else(|| Error::new("busy"))?;
                 let _guard = {
@@ -169,6 +172,23 @@ impl Service {
                     }
                 };
                 if let Some(bytes) = service.repo.generation_bytes(&room, &head)? {
+                    return Ok(bytes);
+                }
+                let store = crate::storage::store(&state)
+                    .await
+                    .map_err(|_| Error::new("fetch_failed"))?;
+                if let Some(bytes) =
+                    transfer::local_generation(&head, service.cfg.max_blob_bytes, |cid| {
+                        let store = store.clone();
+                        async move {
+                            store
+                                .get_local(&cid)
+                                .await
+                                .map_err(|_| Error::new("fetch_failed"))
+                        }
+                    })
+                    .await?
+                {
                     return Ok(bytes);
                 }
                 service.transfers.pull(&room, &from, &head).await
@@ -427,7 +447,7 @@ async fn start(state: &Arc<AppState>) -> Result<()> {
     }
     let service = local(state).await?;
     service.register();
-    service.start_replication()?;
+    service.start_replication(state)?;
     for room in &service.cfg.rooms {
         match crate::net::ensure_started(state, room.clone()).await {
             Ok(_) => {
@@ -447,6 +467,7 @@ async fn start(state: &Arc<AppState>) -> Result<()> {
 
 pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Value> {
     match cmd {
+        "escrow.client.request" => client::request(args, state).await,
         "escrow.rooms.add" | "escrow.rooms.remove" => {
             let room = args["room"]
                 .as_str()

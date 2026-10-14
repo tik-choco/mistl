@@ -201,7 +201,7 @@ impl Store {
     /// nodes both missing a block and asking each other for it would
     /// otherwise loop) and could equally back a future "do we have this
     /// already" check before kicking off a `get_remote`.
-    async fn get_local(&self, cid: &str) -> Result<Option<Vec<u8>>> {
+    pub(crate) async fn get_local(&self, cid: &str) -> Result<Option<Vec<u8>>> {
         let data = self.engine.get_block(cid).await?;
         Ok(data)
     }

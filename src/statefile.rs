@@ -151,6 +151,10 @@ fn replace_file(from: &Path, to: &Path) -> Result<()> {
     use windows_sys::Win32::Storage::FileSystem::{
         MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
     };
+    // Canonical paths include the extended-length prefix required by Win32.
+    let from = std::fs::canonicalize(from)?;
+    let to = std::fs::canonicalize(to.parent().context("missing state parent")?)?
+        .join(to.file_name().context("missing state filename")?);
     let from: Vec<u16> = from.as_os_str().encode_wide().chain(Some(0)).collect();
     let to: Vec<u16> = to.as_os_str().encode_wide().chain(Some(0)).collect();
     // SAFETY: valid NUL-terminated strings, owned for the duration of the call.
@@ -248,5 +252,24 @@ mod tests {
         let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&path), 0o600);
         assert_eq!(mode(&dir), 0o700);
+    }
+    #[cfg(windows)]
+    #[test]
+    fn private_atomic_replacement_supports_long_windows_paths() {
+        let root = scratch_dir("long-path");
+        let dir = root
+            .join("a".repeat(80))
+            .join("b".repeat(80))
+            .join("c".repeat(80));
+        let path = dir.join("encrypted.bin");
+        assert!(path.as_os_str().len() > 260);
+        write_private(&path, b"first encrypted generation").unwrap();
+        write_private(&path, b"second encrypted generation").unwrap();
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"second encrypted generation"
+        );
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

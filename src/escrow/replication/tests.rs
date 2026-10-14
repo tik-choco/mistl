@@ -12,6 +12,7 @@ pub(super) struct Network {
     pub(super) partitioned: StdMutex<HashSet<String>>,
     pub(super) stalled: StdMutex<HashSet<String>>,
     pub(super) wake: Notify,
+    hidden_commits: StdMutex<HashMap<String, u64>>,
     pub(super) files: StdMutex<HashMap<String, (Vec<u8>, Vec<u8>)>>,
 }
 
@@ -27,6 +28,18 @@ impl Network {
                     return Ok(());
                 }
                 drop(partitioned);
+                if let Some(boundary) = network.hidden_commits.lock().unwrap().get(&source) {
+                    if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
+                        if let Ok(Body::Raft(RaftMessage::AppendEntries {
+                            leader_commit, ..
+                        })) = serde_json::from_value(value["body"].clone())
+                        {
+                            if leader_commit >= *boundary {
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
                 let target = network
                     .nodes
                     .lock()
@@ -177,8 +190,39 @@ impl Harness {
         node
     }
 
+    async fn wait_condition(&self, phase: &str, condition: impl Fn() -> bool) {
+        let result = tokio::time::timeout(Duration::from_secs(12), async {
+            while !condition() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        if result.is_err() {
+            let status: Vec<_> = self
+                .nodes
+                .iter()
+                .map(|node| {
+                    let mut status = node.status();
+                    let inner = node.inner.lock().unwrap();
+                    status["term"] = json!(inner.engine.current_term());
+                    status["tail"] = json!(
+                        inner
+                            .engine
+                            .log()
+                            .iter()
+                            .map(|entry| (entry.index, entry.term))
+                            .collect::<Vec<_>>()
+                    );
+                    status["preparing"] = json!(node.preparing.lock().unwrap().clone());
+                    status
+                })
+                .collect();
+            panic!("{phase} timed out: {status:?}");
+        }
+    }
+
     pub(super) async fn leader(&self, excluded: Option<usize>) -> usize {
-        wait_for(|| {
+        self.wait_condition("leader election", || {
             self.nodes
                 .iter()
                 .enumerate()
@@ -313,13 +357,13 @@ async fn majority_replaces_disconnected_leader_and_restart_preserves_latest_head
     let old_leader = harness.leader(None).await;
     let first = harness.network.fixture(b"first", 1, None);
     assert_eq!(harness.put(old_leader, &first).await["type"], "escrow_ack");
-    wait_for(|| {
-        harness
-            .nodes
-            .iter()
-            .all(|node| node.inner.lock().unwrap().state.head(&first.slot) == Some(first.clone()))
-    })
-    .await;
+    harness
+        .wait_condition("all replicas applied first", || {
+            harness.nodes.iter().all(|node| {
+                node.inner.lock().unwrap().state.head(&first.slot) == Some(first.clone())
+            })
+        })
+        .await;
     harness
         .network
         .partitioned
@@ -340,13 +384,13 @@ async fn majority_replaces_disconnected_leader_and_restart_preserves_latest_head
     let second = harness.network.fixture(b"second", 2, Some(first.hash()));
     assert_eq!(harness.put(leader, &second).await["type"], "escrow_ack");
     harness.network.partitioned.lock().unwrap().clear();
-    wait_for(|| {
-        harness
-            .nodes
-            .iter()
-            .all(|node| node.inner.lock().unwrap().state.head(&second.slot) == Some(second.clone()))
-    })
-    .await;
+    harness
+        .wait_condition("rejoined leader caught up", || {
+            harness.nodes.iter().all(|node| {
+                node.inner.lock().unwrap().state.head(&second.slot) == Some(second.clone())
+            })
+        })
+        .await;
     harness.nodes[old_leader].stop();
     harness.nodes[old_leader] = harness.open(old_leader);
     assert_eq!(
@@ -363,7 +407,11 @@ async fn majority_replaces_disconnected_leader_and_restart_preserves_latest_head
         b"second"
     );
     let read = json!({"v":1,"type":"escrow_get","id":"restored","slot":second.slot});
-    wait_for(|| harness.nodes[old_leader].status()["leader"].is_string()).await;
+    harness
+        .wait_condition("restarted follower knows leader", || {
+            harness.nodes[old_leader].status()["leader"].is_string()
+        })
+        .await;
     let response = tokio::time::timeout(
         Duration::from_secs(12),
         harness.nodes[old_leader].request("browser", &read),
@@ -372,4 +420,67 @@ async fn majority_replaces_disconnected_leader_and_restart_preserves_latest_head
     .unwrap()
     .unwrap();
     assert_eq!(response["head"], json!(second));
+}
+
+#[tokio::test]
+async fn new_leader_commits_acknowledged_previous_term_without_a_client_write() {
+    let harness = Harness::new();
+    let old_leader = harness.leader(None).await;
+    let first = harness.network.fixture(b"first", 1, None);
+    assert_eq!(harness.put(old_leader, &first).await, first.ack("put"));
+    harness
+        .wait_condition("initial replicas", || {
+            harness.nodes.iter().all(|node| {
+                node.inner.lock().unwrap().state.head(&first.slot) == Some(first.clone())
+            })
+        })
+        .await;
+    let boundary = harness.nodes[old_leader]
+        .inner
+        .lock()
+        .unwrap()
+        .engine
+        .commit_index()
+        + 2;
+    harness
+        .network
+        .hidden_commits
+        .lock()
+        .unwrap()
+        .insert(harness.identities[old_leader].node_id(), boundary);
+    let second = harness
+        .network
+        .fixture(b"acknowledged ciphertext", 2, Some(first.hash()));
+    assert_eq!(harness.put(old_leader, &second).await, second.ack("put"));
+    assert!(
+        harness
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != old_leader)
+            .all(|(_, node)| node.inner.lock().unwrap().engine.commit_index() < boundary)
+    );
+    harness.nodes[old_leader].stop();
+    let new_leader = harness.leader(Some(old_leader)).await;
+    harness
+        .wait_condition(
+            "previous-term ACK recovered without client activity",
+            || {
+                harness
+                    .nodes
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != old_leader)
+                    .all(|(_, node)| {
+                        let inner = node.inner.lock().unwrap();
+                        inner.state.head(&second.slot) == Some(second.clone())
+                            && inner.engine.commit_index() > boundary
+                    })
+            },
+        )
+        .await;
+    assert_eq!(
+        harness.nodes[new_leader].archive.load(&second).unwrap().0,
+        b"acknowledged ciphertext"
+    );
 }
