@@ -98,7 +98,7 @@ impl Head {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Delete {
     pub slot: String,
     pub seq: u64,
@@ -170,7 +170,7 @@ impl Error {
     pub fn reply(&self, id: &str) -> Value {
         let mut reply =
             json!({"v":1,"type":"escrow_error","id":id,"code":self.code,"message":self.code});
-        if self.code == "conflict" {
+        if matches!(self.code, "conflict" | "deleted") {
             reply["head"] = json!(self.head);
         }
         reply

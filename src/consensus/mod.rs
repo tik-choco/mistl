@@ -172,14 +172,15 @@ impl RelayConsensus {
         };
         // Peers are not known up front -- they join dynamically as hellos
         // arrive (see `register_net_handler`'s `add_peer` call below).
-        let raft = mistlib_consensus_native::spawn_native(
+        let raft = RaftNode::new_ephemeral(
             NodeId(node_id.clone()),
             Vec::new(),
             config,
+            Arc::new(mistlib_consensus_native::TokioRuntime::current()),
             raft_transport,
-            MemoryStorage::new(),
         );
 
+        raft.start();
         let membership = Arc::new(StdMutex::new(Membership::new(node_id.clone())));
         let initial_peers = membership
             .lock()

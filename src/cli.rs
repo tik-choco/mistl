@@ -498,6 +498,14 @@ pub enum StreamAction {
 #[derive(Subcommand)]
 pub enum EscrowAction {
     Status,
+    /// Change a cluster's voters after learners have caught up (local IPC only)
+    Membership {
+        room: String,
+        #[arg(long, value_delimiter = ',', required = true)]
+        voters: Vec<String>,
+        #[arg(long, value_delimiter = ',')]
+        learners: Vec<String>,
+    },
     Rooms {
         #[command(subcommand)]
         action: EscrowRoomsAction,
@@ -1129,6 +1137,14 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         },
         Command::Escrow { action } => match action {
             EscrowAction::Status => client_call("escrow.status", json!({})),
+            EscrowAction::Membership {
+                room,
+                voters,
+                learners,
+            } => client_call(
+                "escrow.replication.membership",
+                json!({"room":room,"voters":voters,"learners":learners}),
+            ),
             EscrowAction::Rooms { action } => match action {
                 EscrowRoomsAction::Add { room } => {
                     client_call("escrow.rooms.add", json!({"room":room}))
@@ -2790,5 +2806,46 @@ mod sched_render_tests {
         });
         let rendered = render_sched_logs(&response);
         assert_eq!(rendered, "2026-07-10T00:00:00Z  still-running  FAIL");
+    }
+}
+
+#[cfg(test)]
+mod escrow_membership_cli_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_membership_preserves_isolated_instance_and_list_arguments() {
+        let parsed = Cli::try_parse_from([
+            "mistl",
+            "--instance",
+            "backup",
+            "--state-dir",
+            "state",
+            "escrow",
+            "membership",
+            "room-a",
+            "--voters",
+            "0000000000000001,0000000000000002,0000000000000003",
+            "--learners",
+            "0000000000000004,0000000000000005",
+        ])
+        .unwrap();
+        assert_eq!(parsed.instance.as_deref(), Some("backup"));
+        assert_eq!(parsed.state_dir, Some(std::path::PathBuf::from("state")));
+        let Some(Command::Escrow {
+            action:
+                EscrowAction::Membership {
+                    room,
+                    voters,
+                    learners,
+                },
+        }) = parsed.command
+        else {
+            panic!("expected membership command")
+        };
+        assert_eq!(room, "room-a");
+        assert_eq!(voters.len(), 3);
+        assert_eq!(learners.len(), 2);
+        assert!(Cli::try_parse_from(["mistl", "escrow", "membership", "room-a"]).is_err());
     }
 }
