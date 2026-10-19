@@ -598,8 +598,10 @@ fn authorize(caller: Caller, cmd: &str, args: &Value) -> Result<()> {
         // Reads an arbitrary local file into the store / sandbox.
         "store.put" | "store.put-file" if has("path") => Some("reads an arbitrary local path"),
         "store.sandbox.import" => Some("reads an arbitrary local path"),
+        "escrow.import" => Some("reads an arbitrary local path"),
         "store.folder-share" => Some("publishes an arbitrary local directory"),
         // Writes to a caller-chosen local path.
+        "escrow.export" => Some("writes to an arbitrary local path"),
         "store.get" | "store.get-file" | "store.fetch-share" | "store.sandbox.export"
             if has("output") =>
         {
@@ -657,7 +659,12 @@ pub async fn dispatch_as(
         && !crate::network::offline_command_allowed(cmd)
         && !matches!(
             cmd,
-            "escrow.status" | "escrow.rooms.list" | "escrow.rooms.add" | "escrow.rooms.remove"
+            "escrow.status"
+                | "escrow.rooms.list"
+                | "escrow.rooms.add"
+                | "escrow.rooms.remove"
+                | "escrow.export"
+                | "escrow.import"
         )
     {
         state.network.require_online()?;
@@ -974,6 +981,23 @@ mod tests {
                 authorize(caller, "escrow.rooms.remove", &json!({"room": "tce-test"})).is_ok(),
                 rooms_allowed
             );
+        }
+    }
+
+    #[test]
+    fn escrow_transfer_paths_require_local_callers() {
+        for cmd in ["escrow.export", "escrow.import"] {
+            for args in [json!({"path":"/tmp/export.mistl-escrow"}), json!({})] {
+                assert!(
+                    authorize(REMOTE, cmd, &args)
+                        .unwrap_err()
+                        .to_string()
+                        .contains(MSG)
+                );
+                for caller in [LOCAL, Caller::Ipc, Caller::Internal] {
+                    authorize(caller, cmd, &args).unwrap();
+                }
+            }
         }
     }
 

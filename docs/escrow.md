@@ -74,6 +74,60 @@ exactly the `config.set escrow.rooms` policy for additions/removals (and
 Dashboard session authentication and other remote configuration restrictions remain
 in force.
 
+## Export and import (moving to another node)
+
+Export on the old node, copy the `.mistl-escrow` file to the new node, and import
+it there. The CLI resolves relative paths against its current directory:
+
+~~~console
+mistl escrow export /absolute/path/checkpoints.mistl-escrow
+mistl escrow export /absolute/path/selected.mistl-escrow --room my-escrow-room --room another-room --force
+mistl escrow import /absolute/path/checkpoints.mistl-escrow
+mistl escrow import /absolute/path/checkpoints.mistl-escrow --room my-escrow-room
+mistl escrow rooms add my-escrow-room
+~~~
+
+On Windows, use an absolute path such as `C:\Backups\checkpoints.mistl-escrow`.
+Omitting `--room` selects all rooms with data; repeat it to select several rooms.
+Export refuses to overwrite an existing file unless `--force` is supplied. It
+writes a temporary file in the destination directory and renames it into place
+only on success. A slot changed or removed during export is skipped as `changed`.
+Export includes only current heads, not previous generations or deletion tombstones.
+
+In **Store → Escrow**, **Export all** downloads every room to a file in the browser,
+and **Import all** uploads a selected file and imports every room in it after
+confirmation. Each room row also has its own **Export** and **Import**: they
+download only that room, or import only that room's slots from the chosen file
+(other rooms in the file are ignored). The result shows imported,
+unchanged and skipped counts, grouped skip reasons, and a reminder to configure
+imported rooms when needed. These operations work with external connections off
+and with the escrow service disabled. Remote dashboard sessions cannot use the
+path-based IPC commands, but can use these download/upload buttons.
+
+The version 1 portable format starts with a versioned JSON header, followed by
+entries containing a room ID, the original writer-signed head, the original CBOR
+storage manifest and the encrypted blob, then a counted JSON trailer. It contains
+no plaintext or encryption keys. Still treat the file as sensitive: anyone with
+the application name and room code can derive keys in this trial protocol.
+
+Import first copies the file into the escrow data directory (so it needs that much
+free space temporarily; an interrupted copy is removed at restart) and validates the
+whole copy's structure, trailer, signatures and content hashes before applying any entries. It adds or updates slots and never deletes
+existing slots. Each slot is handled independently after validation:
+
+- An identical head is counted as unchanged.
+- A head from the same writer with a higher sequence replaces the local head.
+- A lower sequence is skipped as `older`.
+- The same sequence with a different head is skipped as `conflict`.
+- A different writer is skipped as `writer_mismatch`.
+- An entry exceeding local capacity limits is skipped as `quota`.
+- A room replicated on this node is skipped as `replicated` (see
+  [replicated-room migration](escrow-replication.md#migrate-a-standalone-room)).
+
+Import does not configure rooms automatically. Imported rooms are served only if
+configured: run `mistl escrow rooms add <room>`, restart the daemon, and enable
+external connections as in Setup above.
+
 ## Protocol
 
 UTF-8 JSON control messages have v:1 and are capped at 16 KiB. The service directly
@@ -213,6 +267,21 @@ so a nearly full service may reject replacement writes with quota.
 
 IPC commands are escrow.status, escrow.rooms.list, escrow.rooms.add {room}, and
 escrow.rooms.remove {room}. The CLI exposes the same operations.
+
+Local IPC also supports `escrow.export` with
+`{"path":"<absolute file path>","rooms":["room"],"overwrite":false}` and
+`escrow.import` with `{"path":"<absolute file path>","rooms":["room"]}`.
+For either command, omit `rooms` or set it to `null` to select all rooms.
+Export's optional `overwrite` defaults to false. The `path` is on the daemon host
+and must be absolute, so remote dashboard sessions cannot call these commands.
+The browser uses `GET /api/escrow/export` and raw-file `POST /api/escrow/import`
+instead, under the dashboard's session and instance checks. Both accept optional
+repeated `?room=<percent-encoded id>` parameters with the same meaning as `rooms`.
+
+Export returns `{path, slots, bytes, rooms: [{room, slots, bytes}], skipped}`;
+byte counts sum encrypted blob sizes, excluding manifests. Import returns
+`{imported, unchanged, skipped, rooms: [{room, imported, unchanged, skipped, configured}]}`.
+Each skipped item is `{room, slot, reason}`. See the import rules above for reasons.
 
 ~~~console
 cargo test --bin mistl escrow

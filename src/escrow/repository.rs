@@ -45,6 +45,13 @@ pub struct Repository {
     fail_after_publish: std::sync::atomic::AtomicBool,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum ImportOutcome {
+    Imported,
+    Unchanged,
+    Skipped(&'static str),
+}
+
 fn key(room: &str, slot: &str) -> String {
     digest(format!("{room}\n{slot}").as_bytes())
 }
@@ -172,11 +179,15 @@ impl Repository {
                     validate_manifest(head, &bytes).map_err(|e| anyhow::anyhow!(e.code))?;
                 repo.index_generation(&mut index, &record.room, &k, head, &manifest, bytes.len());
             }
-            ensure!(
-                !check_cas(&record.current, record.previous.as_ref())
-                    .map_err(|e| anyhow::anyhow!(e.code))?,
-                "escrow: duplicate backup generation"
-            );
+            // An imported current head may omit intermediate history. When a
+            // backup exists it must still be the signed direct parent.
+            if let Some(previous) = &record.previous {
+                ensure!(
+                    !check_cas(&record.current, Some(previous))
+                        .map_err(|e| anyhow::anyhow!(e.code))?,
+                    "escrow: duplicate backup generation"
+                );
+            }
             index.records.insert(k, record);
         }
         // A crash before the head replacement may leave unreferenced generations.
@@ -294,6 +305,25 @@ impl Repository {
         Ok(Some((blob, manifest)))
     }
 
+    /// Export only a still-current generation under the same index lock as reads.
+    pub fn current_bytes(
+        &self,
+        room: &str,
+        head: &Head,
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>, Error> {
+        let index = self.index.lock().unwrap();
+        let k = key(room, &head.slot);
+        if index.records.get(&k).is_none_or(|r| r.current != *head) {
+            return Ok(None);
+        }
+        let dir = self.generation(&k, head);
+        let blob = read_bounded(&dir.join("blob.bin"), head.size as usize)
+            .map_err(|_| Error::new("fetch_failed"))?;
+        let manifest = read_bounded(&dir.join("manifest.bin"), MAX_MANIFEST)
+            .map_err(|_| Error::new("fetch_failed"))?;
+        Ok(Some((blob, manifest)))
+    }
+
     pub fn status(&self, room: &str) -> (usize, u64) {
         let index = self.index.lock().unwrap();
         let records: Vec<_> = index.records.values().filter(|r| r.room == room).collect();
@@ -388,7 +418,20 @@ impl Repository {
         if index.write_failed {
             return Err(Error::new("quota"));
         }
-        self.commit_inner(&mut index, room, head, blob, manifest_bytes, &manifest).map_err(|error| {
+        let previous = index
+            .records
+            .get(&key(room, &head.slot))
+            .map(|r| r.current.clone());
+        self.commit_inner(
+            &mut index,
+            room,
+            head,
+            previous,
+            blob,
+            manifest_bytes,
+            &manifest,
+        )
+        .map_err(|error| {
             // Publication may have succeeded before its directory sync failed. Record
             // failure before releasing this same lock: even reserved PUTs must stop.
             index.write_failed = true;
@@ -397,17 +440,100 @@ impl Repository {
         })
     }
 
+    /// Caller holds the PUT slot stripe. Import can advance over missing history.
+    pub fn import(
+        &self,
+        room: &str,
+        head: &Head,
+        blob: &[u8],
+        manifest_bytes: &[u8],
+    ) -> Result<ImportOutcome, Error> {
+        if !super::valid_room(room) {
+            return Err(Error::new("bad_request"));
+        }
+        head.validate(self.cfg.max_blob_bytes)?;
+        head.verify()?;
+        validate_blob(head, blob)?;
+        let manifest = validate_manifest(head, manifest_bytes)?;
+        for (cid, chunk) in manifest.chunks.iter().zip(blob.chunks(CHUNK_SIZE)) {
+            if !verify_cid(cid, chunk, MULTICODEC_RAW) {
+                return Err(Error::new("hash_mismatch"));
+            }
+        }
+        let mut index = self.index.lock().unwrap();
+        if index.write_failed {
+            return Err(Error::new("quota"));
+        }
+        let k = key(room, &head.slot);
+        let mut previous = None;
+        if let Some(record) = index.records.get(&k) {
+            if record.current == *head || record.previous.as_ref() == Some(head) {
+                return Ok(ImportOutcome::Unchanged);
+            }
+            if record.current.writer != head.writer {
+                return Ok(ImportOutcome::Skipped("writer_mismatch"));
+            }
+            if head.seq < record.current.seq {
+                return Ok(ImportOutcome::Skipped("older"));
+            }
+            if head.seq == record.current.seq {
+                return Ok(ImportOutcome::Skipped("conflict"));
+            }
+            if record.current.seq.checked_add(1) == Some(head.seq)
+                && head.parent.as_deref() == Some(record.current.hash().as_str())
+            {
+                previous = Some(record.current.clone());
+            }
+        } else {
+            let slots = index.records.values().filter(|r| r.room == room).count()
+                + index
+                    .pending_slots
+                    .values()
+                    .filter(|r| r.as_str() == room)
+                    .count();
+            if slots >= self.cfg.max_slots_per_room
+                || index.records.len() + index.pending_slots.len() >= 65536
+            {
+                return Ok(ImportOutcome::Skipped("quota"));
+            }
+        }
+        if index
+            .bytes
+            .saturating_add(index.reserved)
+            .saturating_add(head.size)
+            .saturating_add(manifest_bytes.len() as u64)
+            > self.cfg.max_total_bytes
+        {
+            return Ok(ImportOutcome::Skipped("quota"));
+        }
+        self.commit_inner(
+            &mut index,
+            room,
+            head,
+            previous,
+            blob,
+            manifest_bytes,
+            &manifest,
+        )
+        .map_err(|error| {
+            index.write_failed = true;
+            tracing::warn!(%error, "escrow: durable import failed; writes disabled until restart");
+            Error::new("fetch_failed")
+        })?;
+        Ok(ImportOutcome::Imported)
+    }
+
     fn commit_inner(
         &self,
         index: &mut Index,
         room: &str,
         head: &Head,
+        previous: Option<Head>,
         blob: &[u8],
         bytes: &[u8],
         manifest: &FileManifest,
     ) -> Result<()> {
         let k = key(room, &head.slot);
-        let previous = index.records.get(&k).map(|r| r.current.clone());
         let dir = self.generation(&k, head);
         crate::statefile::write_private(&dir.join("blob.bin"), blob)?;
         crate::statefile::write_private(&dir.join("manifest.bin"), bytes)?;
@@ -576,7 +702,7 @@ fn read_bounded(path: &Path, max: usize) -> Result<Vec<u8>> {
 
 // statefile::write_private replaces an extension with <16 hex random digits>.tmp.
 // Only regular files with our exact stems and temporary suffix are crash leftovers.
-fn remove_temps(dir: &Path, valid_stem: impl Fn(&str) -> bool) -> Result<()> {
+pub(super) fn remove_temps(dir: &Path, valid_stem: impl Fn(&str) -> bool) -> Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let name = entry.file_name();

@@ -149,6 +149,12 @@ impl State {
             .collect()
     }
 
+    pub fn current_heads(&self) -> Vec<Head> {
+        let mut heads: Vec<_> = self.heads.values().cloned().collect();
+        heads.sort_by(|a, b| a.slot.cmp(&b.slot));
+        heads
+    }
+
     pub fn migrating(&self) -> bool {
         self.migration_started && !self.migration_finished
     }

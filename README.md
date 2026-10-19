@@ -295,6 +295,9 @@ network connections; configure that same escrow room in the application.
 The dashboard's **Store → Escrow** page offers the same room controls, status,
 enabled switch and advanced capacity limits, with a daemon restart action. In
 tc-linkai, copy the auto-generated `tce-…` **mistl room** into **Add room**.
+Move encrypted checkpoints between nodes with `mistl escrow export <FILE>` and
+`mistl escrow import <FILE>` (optional repeated `--room`; export accepts `--force`),
+or use the dashboard's **Export** and **Import** buttons.
 Signed heads use CAS and a pinned writer, with durable current/previous blobs that
 remain downloadable after restart. See [escrow setup and protocol](docs/escrow.md).
 

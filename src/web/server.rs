@@ -14,6 +14,11 @@
 //! - `GET /api/store/download?cid=...` -> `store.get`'s the cid to a temp
 //!   file and streams it back with a `Content-Disposition: attachment`
 //!   header, or 404 JSON error if the cid is unknown.
+//! - `GET /api/escrow/export?room=...` -> portable encrypted escrow download;
+//!   repeat `room` to select rooms, or omit it to export all rooms.
+//! - `POST /api/escrow/import?room=...` -> raw escrow export file, streamed to
+//!   disk and validated before import; `room` selects rooms like the export.
+//!   Answers 200 `{"ok":...}` like `/api/call`.
 //! - `POST /api/store/sandbox-upload` -> identical protocol to
 //!   `/api/store/upload`, but the file lands in the path-jailed content
 //!   sandbox via `store.sandbox.import` instead of the content store via
@@ -39,12 +44,12 @@
 //!   without a session serves a small 401 "locked" page. This holds on
 //!   loopback too: any local process could otherwise drive the daemon.
 //! - `POST /api/call`, `POST /api/store/upload`, and
-//!   `POST /api/store/sandbox-upload` require the request header
+//!   `POST /api/store/sandbox-upload`, and `POST /api/escrow/import` require the request header
 //!   `x-mistl-ui: 1`. Browsers cannot attach custom headers cross-origin
 //!   without a CORS preflight, and this server never sends CORS headers
 //!   (OPTIONS -> 403), so web pages from other origins can't drive the
 //!   daemon (CSRF protection).
-//! - `GET /api/store/download` and `GET /api/store/sandbox-download`
+//! - `GET /api/store/download`, `GET /api/store/sandbox-download`, and `GET /api/escrow/export`
 //!   deliberately skip the `x-mistl-ui` check; see the doc comment on
 //!   `handle_store_download` for why that's still safe.
 //! - The `Host` header must be `127.0.0.1[:port]` or `localhost[:port]`
@@ -772,6 +777,10 @@ async fn handle_connection_inner(
         }
         ("POST", "/api/store/upload") => handle_store_upload(stream, &head, leftover, state).await,
         ("GET", "/api/store/download") => handle_store_download(stream, &head, state).await,
+        ("GET", "/api/escrow/export") => handle_escrow_export(stream, &head, state).await,
+        ("POST", "/api/escrow/import") => {
+            handle_escrow_import(stream, &head, leftover, state).await
+        }
         ("POST", "/api/store/sandbox-upload") => {
             handle_store_sandbox_upload(stream, &head, leftover, state).await
         }
@@ -866,6 +875,197 @@ async fn handle_api_call(
             .await
         }
     }
+}
+
+fn escrow_room_filter(path: &str) -> Option<Option<Vec<String>>> {
+    let query = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+    let mut rooms = Vec::new();
+    for part in query.split('&') {
+        let (key, value) = part.split_once('=').unwrap_or((part, ""));
+        if key == "room" {
+            let room = percent_decode(value)?;
+            if room.is_empty() {
+                return None;
+            }
+            rooms.push(room);
+        }
+    }
+    Some((!rooms.is_empty()).then_some(rooms))
+}
+
+/// Room IDs may contain `/` and `:`; keep download names portable.
+fn file_safe(room: &str) -> String {
+    room.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || "-_.".contains(c) {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Path-free download, using the same Host guard as store downloads.
+async fn handle_escrow_export(
+    stream: &mut TcpStream,
+    head: &RequestHead,
+    state: Arc<AppState>,
+) -> io::Result<()> {
+    if is_guard_denied(head, &stream.local_addr()?, false) {
+        return write_error(stream, 403, "Forbidden", "forbidden").await;
+    }
+    let Some(rooms) = escrow_room_filter(&head.path) else {
+        return write_error(stream, 400, "Bad Request", "invalid room query parameter").await;
+    };
+    let dir = std::env::temp_dir().join(format!(
+        "mistl-escrow-export-{:016x}",
+        rand::random::<u64>()
+    ));
+    if let Err(error) = tokio::fs::create_dir(&dir).await {
+        warn!(%error, "creating escrow export temp dir failed");
+        return write_error(
+            stream,
+            500,
+            "Internal Server Error",
+            "failed to create temp directory",
+        )
+        .await;
+    }
+    let path = dir.join("export.mistl-escrow");
+    let result = async {
+        if let Err(error) = crate::daemon::dispatch(
+            "escrow.export",
+            json!({"path": path.to_string_lossy(), "rooms": rooms}),
+            &state,
+        )
+        .await
+        {
+            return write_error(stream, 500, "Internal Server Error", &format!("{error:#}")).await;
+        }
+        let mut file = match File::open(&path).await {
+            Ok(file) => file,
+            Err(error) => {
+                return write_error(stream, 500, "Internal Server Error", &format!("{error:#}"))
+                    .await;
+            }
+        };
+        let len = match file.metadata().await {
+            Ok(metadata) => metadata.len(),
+            Err(error) => {
+                return write_error(stream, 500, "Internal Server Error", &format!("{error:#}"))
+                    .await;
+            }
+        };
+        let unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let filename = match rooms.as_deref() {
+            Some([room]) => format!("mistl-escrow-{}-{unix}.mistl-escrow", file_safe(room)),
+            _ => format!("mistl-escrow-{unix}.mistl-escrow"),
+        };
+        stream
+            .write_all(download_response_head(len, &filename).as_bytes())
+            .await?;
+        let mut chunk = [0u8; STREAM_CHUNK_BYTES];
+        loop {
+            let n = file.read(&mut chunk).await?;
+            if n == 0 {
+                break;
+            }
+            stream.write_all(&chunk[..n]).await?;
+        }
+        stream.flush().await
+    }
+    .await;
+    if let Err(error) = tokio::fs::remove_dir_all(&dir).await {
+        debug!(%error, "removing escrow export temp dir failed");
+    }
+    result
+}
+
+/// Path-free import; no browser-supplied filename or local path is used.
+async fn handle_escrow_import(
+    stream: &mut TcpStream,
+    head: &RequestHead,
+    leftover: Vec<u8>,
+    state: Arc<AppState>,
+) -> io::Result<()> {
+    if is_guard_denied(head, &stream.local_addr()?, true) {
+        return write_error(stream, 403, "Forbidden", "forbidden").await;
+    }
+    let Some(rooms) = escrow_room_filter(&head.path) else {
+        return write_error(stream, 400, "Bad Request", "invalid room query parameter").await;
+    };
+    let Ok(_slot) = UPLOAD_SLOTS.try_acquire() else {
+        return write_error(
+            stream,
+            503,
+            "Service Unavailable",
+            "too many uploads in progress",
+        )
+        .await;
+    };
+    let content_length: u64 = match head.header("content-length") {
+        Some(value) => match value.trim().parse() {
+            Ok(n) => n,
+            Err(_) => {
+                return write_error(stream, 400, "Bad Request", "invalid Content-Length").await;
+            }
+        },
+        None => {
+            return write_error(stream, 411, "Length Required", "Content-Length required").await;
+        }
+    };
+    if content_length > MAX_UPLOAD_BYTES {
+        return write_error(stream, 413, "Payload Too Large", "upload too large").await;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "mistl-escrow-import-{:016x}",
+        rand::random::<u64>()
+    ));
+    if let Err(error) = tokio::fs::create_dir(&dir).await {
+        warn!(%error, "creating escrow import temp dir failed");
+        return write_error(
+            stream,
+            500,
+            "Internal Server Error",
+            "failed to create temp directory",
+        )
+        .await;
+    }
+    let path = dir.join("import.mistl-escrow");
+    let result = async {
+        let mut file = match File::create(&path).await {
+            Ok(file) => file,
+            Err(error) => {
+                return write_error(stream, 500, "Internal Server Error", &format!("{error:#}"))
+                    .await;
+            }
+        };
+        if let Err(error) = read_body_to_file(stream, leftover, content_length, &mut file).await {
+            debug!(%error, "reading escrow import body failed");
+            return write_error(stream, 400, "Bad Request", "incomplete request body").await;
+        }
+        drop(file);
+        let response = match crate::daemon::dispatch(
+            "escrow.import",
+            json!({"path": path.to_string_lossy(), "rooms": rooms}),
+            &state,
+        )
+        .await
+        {
+            Ok(data) => json!({"ok": true, "data": data}),
+            Err(error) => json!({"ok": false, "error": format!("{error:#}")}),
+        };
+        write_json_response(stream, 200, "OK", &response).await
+    }
+    .await;
+    if let Err(error) = tokio::fs::remove_dir_all(&dir).await {
+        debug!(%error, "removing escrow import temp dir failed");
+    }
+    result
 }
 
 /// `POST /api/store/upload`: body is the raw file bytes, name carried in
@@ -1500,6 +1700,84 @@ mod tests {
         assert!(!is_guard_denied(&head, &addr("127.0.0.1:6480"), false));
         let head = head_with(&[("host", "evil.com")]);
         assert!(is_guard_denied(&head, &addr("127.0.0.1:6480"), false));
+    }
+
+    #[test]
+    fn escrow_download_names_are_portable() {
+        assert_eq!(file_safe("tce-ab.c_d"), "tce-ab.c_d");
+        assert_eq!(file_safe("app/room:1"), "app_room_1");
+    }
+
+    #[test]
+    fn escrow_export_query_preserves_repeated_rooms() {
+        assert_eq!(escrow_room_filter("/api/escrow/export"), Some(None));
+        assert_eq!(escrow_room_filter("/api/escrow/export?other=x"), Some(None));
+        assert_eq!(
+            escrow_room_filter("/api/escrow/export?room=a%20b&room=c%2Fd"),
+            Some(Some(vec!["a b".into(), "c/d".into()]))
+        );
+        for query in ["room=bad%zz", "room=", "room", "room=ok&room=%ff"] {
+            assert_eq!(
+                escrow_room_filter(&format!("/api/escrow/export?{query}")),
+                None
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn escrow_transfer_routes_enforce_guards_and_upload_limits() {
+        for (export, ui, host, length, status) in [
+            (false, false, "localhost", None, 403),
+            (false, true, "evil.com", None, 403),
+            (false, true, "localhost", None, 411),
+            (false, true, "localhost", Some("invalid".to_string()), 400),
+            (
+                false,
+                true,
+                "localhost",
+                Some((MAX_UPLOAD_BYTES + 1).to_string()),
+                413,
+            ),
+            (true, false, "evil.com", None, 403),
+            (true, false, "localhost", None, 400),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let mut head = head_with(&[("host", host)]);
+            head.path = if export {
+                "/api/escrow/export?room=%zz"
+            } else {
+                "/api/escrow/import"
+            }
+            .into();
+            if ui {
+                head.headers.push(("x-mistl-ui".into(), "1".into()));
+            }
+            if let Some(length) = length {
+                head.headers.push(("content-length".into(), length));
+            }
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let state = AppState::for_test();
+                if export {
+                    handle_escrow_export(&mut socket, &head, state)
+                        .await
+                        .unwrap();
+                } else {
+                    handle_escrow_import(&mut socket, &head, Vec::new(), state)
+                        .await
+                        .unwrap();
+                }
+            });
+            let mut client = TcpStream::connect(address).await.unwrap();
+            let mut response = String::new();
+            client.read_to_string(&mut response).await.unwrap();
+            server.await.unwrap();
+            assert!(
+                response.starts_with(&format!("HTTP/1.1 {status} ")),
+                "{response}"
+            );
+        }
     }
 
     // -- response framing -----------------------------------------------------

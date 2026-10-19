@@ -1,6 +1,8 @@
 //! Config-driven tc-escrow v1 service. Settings take effect on daemon restart.
 mod admission;
 mod client;
+mod portable;
+mod portable_io;
 mod protocol;
 mod replication;
 mod repository;
@@ -78,6 +80,8 @@ impl Service {
         let mut local_cfg = cfg.clone();
         local_cfg.max_total_bytes /= cfg.replication.len() as u64 + 1;
         let repo = Repository::open(dir.clone(), local_cfg.clone())?;
+        // An interrupted import leaves its spooled copy beside the repository.
+        repository::remove_temps(&dir, |stem| stem == "import")?;
         anyhow::ensure!(
             repo.total_bytes() <= local_cfg.max_total_bytes,
             "escrow: existing data exceeds replication quota partition"
@@ -467,6 +471,15 @@ async fn start(state: &Arc<AppState>) -> Result<()> {
 
 pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Value> {
     match cmd {
+        "escrow.export" | "escrow.import" => {
+            let service = local(state).await?;
+            let configured = state.config().escrow.rooms;
+            let export = cmd == "escrow.export";
+            tokio::task::spawn_blocking(move || {
+                portable_io::handle(&service, export, args, &configured)
+            })
+            .await?
+        }
         "escrow.client.request" => client::request(args, state).await,
         "escrow.rooms.add" | "escrow.rooms.remove" => {
             let room = args["room"]

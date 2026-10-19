@@ -7,6 +7,9 @@ use mistlib_core::storage::cid::{MULTICODEC_DAG_CBOR, MULTICODEC_RAW, compute_ci
 use mistlib_core::storage::{CHUNK_SIZE, FileManifest};
 use tokio::sync::Semaphore;
 
+#[path = "portable_tests.rs"]
+mod portable_tests;
+
 fn vector() -> Value {
     serde_json::from_str(include_str!("fixtures/vectors.json")).unwrap()
 }

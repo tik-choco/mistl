@@ -141,7 +141,29 @@ pub(super) struct Cluster {
     tasks: StdMutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
+pub(super) struct ExportHeads {
+    pub heads: Vec<Head>,
+    _lease: archive::Lease,
+}
+
 impl Cluster {
+    /// Local committed state on any member; it may slightly lag the leader.
+    /// Keep the lease alive until all generations have been read for export.
+    pub(super) fn export_heads(&self) -> Result<ExportHeads> {
+        let inner = self.inner.lock().unwrap();
+        let _gate = self.archive_gate.lock().unwrap();
+        let heads = inner.state.current_heads();
+        let lease = self.archive.pin_heads(&heads)?;
+        Ok(ExportHeads {
+            heads,
+            _lease: lease,
+        })
+    }
+
+    pub(super) fn export_bytes(&self, head: &Head) -> Result<(Vec<u8>, Vec<u8>), Error> {
+        self.archive.load(head)
+    }
+
     pub(super) fn open(
         dir: PathBuf,
         room: String,

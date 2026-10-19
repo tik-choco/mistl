@@ -498,6 +498,20 @@ pub enum StreamAction {
 #[derive(Subcommand)]
 pub enum EscrowAction {
     Status,
+    /// Export encrypted escrow slots to a portable file
+    Export {
+        file: String,
+        #[arg(long = "room")]
+        rooms: Vec<String>,
+        #[arg(long)]
+        force: bool,
+    },
+    /// Import slots from an escrow export file (validated before anything is written)
+    Import {
+        file: String,
+        #[arg(long = "room")]
+        rooms: Vec<String>,
+    },
     /// Change a cluster's voters after learners have caught up (local IPC only)
     Membership {
         room: String,
@@ -1137,6 +1151,19 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         },
         Command::Escrow { action } => match action {
             EscrowAction::Status => client_call("escrow.status", json!({})),
+            EscrowAction::Export { file, rooms, force } => {
+                let path = escrow_export_path(&file)?;
+                let rooms = (!rooms.is_empty()).then_some(rooms);
+                client_call(
+                    "escrow.export",
+                    json!({"path": path, "rooms": rooms, "overwrite": force}),
+                )
+            }
+            EscrowAction::Import { file, rooms } => {
+                let path = canonicalize_or_die(&file);
+                let rooms = (!rooms.is_empty()).then_some(rooms);
+                client_call("escrow.import", json!({"path": path, "rooms": rooms}))
+            }
             EscrowAction::Membership {
                 room,
                 voters,
@@ -1660,6 +1687,21 @@ fn client_call(cmd: &str, args: Value) -> Result<()> {
 fn store_error(error: anyhow::Error) -> ! {
     eprintln!("error: {error}");
     std::process::exit(1);
+}
+
+/// Resolve the existing parent while preserving a not-yet-created export filename.
+fn escrow_export_path(path: &str) -> Result<std::path::PathBuf> {
+    let path = std::path::Path::new(path);
+    let name = path
+        .file_name()
+        .context("export path requires a file name")?;
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let parent = std::fs::canonicalize(parent).context("export parent directory must exist")?;
+    anyhow::ensure!(parent.is_dir(), "export parent must be a directory");
+    Ok(parent.join(name))
 }
 
 /// Resolve `path` to an absolute path, or exit via [`store_error`] with the
@@ -2812,6 +2854,63 @@ mod sched_render_tests {
 #[cfg(test)]
 mod escrow_membership_cli_tests {
     use super::*;
+
+    #[test]
+    fn escrow_transfer_cli_parses_rooms_and_force() {
+        let parsed = Cli::try_parse_from([
+            "mistl",
+            "escrow",
+            "export",
+            "out.mistl-escrow",
+            "--room",
+            "a",
+            "--room",
+            "b",
+            "--force",
+        ])
+        .unwrap();
+        let Some(Command::Escrow {
+            action: EscrowAction::Export { file, rooms, force },
+        }) = parsed.command
+        else {
+            panic!("expected export command")
+        };
+        assert_eq!(file, "out.mistl-escrow");
+        assert_eq!(rooms, ["a", "b"]);
+        assert!(force);
+        let parsed = Cli::try_parse_from(["mistl", "escrow", "export", "out"]).unwrap();
+        assert!(
+            matches!(parsed.command, Some(Command::Escrow { action: EscrowAction::Export { rooms, force: false, .. } }) if rooms.is_empty())
+        );
+        for rooms_args in [vec![], vec!["--room", "a", "--room", "b"]] {
+            let mut args = vec!["mistl", "escrow", "import", "in.mistl-escrow"];
+            args.extend(rooms_args);
+            let parsed = Cli::try_parse_from(args).unwrap();
+            let Some(Command::Escrow {
+                action: EscrowAction::Import { file, rooms },
+            }) = parsed.command
+            else {
+                panic!("expected import command")
+            };
+            assert_eq!(file, "in.mistl-escrow");
+            assert!(rooms.is_empty() || rooms == ["a", "b"]);
+        }
+        assert!(Cli::try_parse_from(["mistl", "escrow", "import", "in", "--force"]).is_err());
+        assert!(Cli::try_parse_from(["mistl", "escrow", "export"]).is_err());
+    }
+
+    #[test]
+    fn escrow_export_cli_resolves_parent_of_new_file() {
+        let name = format!("escrow-cli-{:016x}.mistl-escrow", rand::random::<u64>());
+        let cwd = std::fs::canonicalize(".").unwrap();
+        assert_eq!(escrow_export_path(&name).unwrap(), cwd.join(&name));
+        assert_eq!(
+            escrow_export_path(cwd.join(&name).to_str().unwrap()).unwrap(),
+            cwd.join(&name)
+        );
+        assert!(!cwd.join(&name).exists());
+        assert!(escrow_export_path(&format!("{name}/missing/export")).is_err());
+    }
 
     #[test]
     fn explicit_membership_preserves_isolated_instance_and_list_arguments() {

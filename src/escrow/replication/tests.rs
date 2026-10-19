@@ -6,6 +6,67 @@ use mistlib_core::storage::{CHUNK_SIZE, FileManifest};
 use std::sync::Weak;
 use tokio::sync::Notify;
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn replicated_export_uses_local_current_heads_and_pins_their_archive() {
+    let harness = Harness::new();
+    let leader = harness.leader(None).await;
+    let first = harness.network.fixture(b"first", 1, None);
+    assert_eq!(harness.put(leader, &first).await["type"], "escrow_ack");
+    let current = harness.network.fixture(b"current", 2, Some(first.hash()));
+    assert_eq!(harness.put(leader, &current).await["type"], "escrow_ack");
+    wait_for(|| {
+        harness.nodes.iter().all(|node| {
+            node.inner.lock().unwrap().state.head(&current.slot) == Some(current.clone())
+        })
+    })
+    .await;
+    for node in &harness.nodes {
+        let snapshot = node.export_heads().unwrap();
+        assert_eq!(snapshot.heads, vec![current.clone()]);
+        let mut writer = crate::escrow::portable::Writer::new(Vec::new(), 0).unwrap();
+        for head in &snapshot.heads {
+            let (blob, manifest) = node.export_bytes(head).unwrap();
+            writer.entry("test-room", head, &manifest, &blob).unwrap();
+        }
+        let bytes = writer.finish().unwrap();
+        let mut reader =
+            crate::escrow::portable::Reader::new(std::io::Cursor::new(&bytes), 1024).unwrap();
+        let entry = reader.next().unwrap().unwrap();
+        assert_eq!(entry.head, current);
+        assert_eq!(entry.blob, b"current");
+        assert!(reader.next().unwrap().is_none());
+        let service_dir = harness
+            .dir
+            .join(format!("export-test-{}", node.identity.node_id()));
+        let service =
+            crate::escrow::Service::open(service_dir.clone(), EscrowConfig::default()).unwrap();
+        service
+            .clusters
+            .lock()
+            .unwrap()
+            .insert("test-room".into(), node.clone());
+        let mut exported = Vec::new();
+        let result = crate::escrow::portable_io::export_to(&service, &mut exported, &None).unwrap();
+        assert_eq!(result["slots"], 1);
+        let mut exported =
+            crate::escrow::portable::Reader::new(std::io::Cursor::new(exported), 1024).unwrap();
+        assert_eq!(exported.next().unwrap().unwrap().head, current);
+        assert!(exported.next().unwrap().is_none());
+        let path = service_dir.join("replicated.mistl-escrow");
+        std::fs::write(&path, bytes).unwrap();
+        let result =
+            crate::escrow::portable_io::handle(&service, false, json!({"path":path}), &[]).unwrap();
+        assert_eq!(result["imported"], 0);
+        assert_eq!(result["skipped"][0]["reason"], "replicated");
+        // Exercise collection without log/state retention after stopping this
+        // test member: only the export lease protects its current generation.
+        node.stop();
+        node.archive.collect(&HashSet::new()).unwrap();
+        assert!(node.archive.has(&current));
+        drop(snapshot);
+    }
+}
+
 #[derive(Default)]
 pub(super) struct Network {
     pub(super) nodes: StdMutex<HashMap<String, Weak<Cluster>>>,

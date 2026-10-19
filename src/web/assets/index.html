@@ -2211,6 +2211,9 @@
       <div class="escrow-head">
         <h3 data-i18n="escrow.title">Escrow</h3>
         <button type="button" data-escrow-refresh data-i18n="common.refresh">Refresh</button>
+        <button type="button" data-escrow-export data-i18n="escrow.exportAll">Export all</button>
+        <button type="button" data-escrow-import data-i18n="escrow.importAll">Import all</button>
+        <input type="file" data-escrow-file accept=".mistl-escrow" hidden>
       </div>
       <p class="escrow-help" data-i18n="escrow.help">Use the same room as the app's 'mistl room'. tc-linkai shows an auto room like tce-xxxxxxxx… with a Copy button.</p>
       <dl class="kv" data-escrow-summary aria-live="polite"></dl>
@@ -2226,6 +2229,7 @@
         <button type="submit" class="primary" data-escrow-add data-i18n="escrow.addRoom">Add room</button>
       </form>
       <p class="escrow-error" id="escrow-room-error" data-escrow-error role="alert" hidden></p>
+      <p class="escrow-result" data-escrow-result role="status" hidden></p>
       <div class="table-wrap">
         <table>
           <thead><tr>
@@ -2854,6 +2858,18 @@
   var T = {
     en: {
       "escrow.title": "Escrow",
+      "escrow.export": "Export",
+      "escrow.import": "Import",
+      "escrow.exportAll": "Export all",
+      "escrow.importAll": "Import all",
+      "escrow.exportRoomAria": "Export {room}",
+      "escrow.importRoomAria": "Import into {room}",
+      "escrow.importRoomConfirm": "Import only room {room} from this escrow file? Other rooms in the file are ignored. Slots will be added or updated, never deleted. Existing newer slots will be kept.",
+      "escrow.importRoomEmpty": "The file has no slots for {room}.",
+      "escrow.importConfirm": "Import this escrow file? Slots will be added or updated, never deleted. Existing newer slots will be kept.",
+      "escrow.importResult": "Imported {imported}, unchanged {unchanged}, skipped {skipped}",
+      "escrow.importConfigure": "Add the room to serve it.",
+      "escrow.archiveError": "Escrow transfer failed ({status}).",
       "escrow.help": "Use the same room as the app's 'mistl room'. tc-linkai shows an auto room like tce-xxxxxxxx… with a Copy button.",
       "escrow.enabled": "Enabled (configured)",
       "escrow.running": "Running",
@@ -3676,6 +3692,18 @@
     },
     ja: {
       "escrow.title": "Escrow",
+      "escrow.export": "エクスポート",
+      "escrow.import": "インポート",
+      "escrow.exportAll": "すべてエクスポート",
+      "escrow.importAll": "すべてインポート",
+      "escrow.exportRoomAria": "{room} をエクスポート",
+      "escrow.importRoomAria": "{room} にインポート",
+      "escrow.importRoomConfirm": "この Escrow ファイルからルーム {room} だけをインポートしますか？ファイル内の他のルームは無視されます。スロットは追加・更新されますが、削除されません。既存のスロットのほうが新しい場合は、そのまま保持されます。",
+      "escrow.importRoomEmpty": "このファイルには {room} のスロットがありません。",
+      "escrow.importConfirm": "この Escrow ファイルをインポートしますか？スロットは追加・更新されますが、削除されません。既存のスロットのほうが新しい場合は、そのまま保持されます。",
+      "escrow.importResult": "インポート {imported} 件、変更なし {unchanged} 件、スキップ {skipped} 件",
+      "escrow.importConfigure": "保存したデータを配信するには、ルームを追加してください。",
+      "escrow.archiveError": "Escrow データの転送に失敗しました（{status}）。",
       "escrow.help": "アプリの「mistl room」と同じルームを使ってください。tc-linkai には tce-xxxxxxxx… のような自動生成ルームと Copy ボタンが表示されます。",
       "escrow.enabled": "有効（設定）",
       "escrow.running": "稼働中",
@@ -4498,6 +4526,18 @@
     },
     zh: {
       "escrow.title": "Escrow",
+      "escrow.export": "导出",
+      "escrow.import": "导入",
+      "escrow.exportAll": "全部导出",
+      "escrow.importAll": "全部导入",
+      "escrow.exportRoomAria": "导出 {room}",
+      "escrow.importRoomAria": "导入到 {room}",
+      "escrow.importRoomConfirm": "仅从此 Escrow 文件导入房间 {room}？文件中的其他房间将被忽略。槽位只会添加或更新，不会删除。现有的较新槽位将保留。",
+      "escrow.importRoomEmpty": "此文件中没有 {room} 的槽位。",
+      "escrow.importConfirm": "导入此 Escrow 文件？槽位只会添加或更新，不会删除。现有的较新槽位将保留。",
+      "escrow.importResult": "已导入 {imported}，未更改 {unchanged}，已跳过 {skipped}",
+      "escrow.importConfigure": "请添加房间以提供已存储的数据。",
+      "escrow.archiveError": "Escrow 数据传输失败（{status}）。",
       "escrow.help": "请使用与应用的“mistl room”相同的房间。tc-linkai 会显示 tce-xxxxxxxx… 这样的自动房间，并提供 Copy 按钮。",
       "escrow.enabled": "已启用（配置）",
       "escrow.running": "运行中",
@@ -7596,11 +7636,52 @@
     root: document.getElementById("panel-escrow"), t: t, formatBytes: fmtBytes,
     addRoom: function (room) { return changeEscrowRoom("escrow.rooms.add", room); },
     removeRoom: function (room) { return changeEscrowRoom("escrow.rooms.remove", room); },
+    exportArchive: function (room) {
+      var query = room ? "?room=" + encodeURIComponent(room) : "";
+      return fetch("/api/escrow/export" + query).then(function (resp) {
+        if (!resp.ok) return escrowArchiveError(resp);
+        var disposition = resp.headers.get("Content-Disposition") || "";
+        // The plain filename="download" is a fallback; the real name is in filename*.
+        var encoded = /filename\*=UTF-8''([^;]+)/i.exec(disposition), filename = "";
+        try { filename = encoded ? decodeURIComponent(encoded[1].trim()) : ""; } catch (_) {}
+        return resp.blob().then(function (blob) {
+          var url = URL.createObjectURL(blob), link = document.createElement("a");
+          link.href = url;
+          link.download = filename || "mistl-escrow.mistl-escrow";
+          document.body.appendChild(link);
+          try { link.click(); } finally {
+            link.remove();
+            setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+          }
+        });
+      });
+    },
+    importArchive: function (file, room) {
+      var query = room ? "?room=" + encodeURIComponent(room) : "";
+      return fetch("/api/escrow/import" + query, {
+        method: "POST",
+        headers: { "Content-Type": "application/octet-stream", "x-mistl-ui": "1", "x-mistl-instance": pageIdentity() },
+        body: file
+      }).then(function (resp) {
+        if (!resp.ok) return escrowArchiveError(resp);
+        return resp.json().then(function (json) {
+          if (!json.ok) throw new Error(json.error || t("escrow.archiveError", { status: resp.status }));
+          return json.data;
+        });
+      });
+    },
     refresh: function (button) {
-      withBusy(button, pollEscrow).catch(function (err) { showToast(err.message || String(err), "error"); });
+      if (!button) return Promise.resolve(escrowPoll).catch(function () {}).then(pollEscrow);
+      return withBusy(button, pollEscrow).catch(function (err) { showToast(err.message || String(err), "error"); });
     },
     restart: restartDaemon
   });
+
+  function escrowArchiveError(resp) {
+    return resp.json().catch(function () { return {}; }).then(function (json) {
+      throw new Error(json.error || t("escrow.archiveError", { status: resp.status }));
+    });
+  }
 
   function pollEscrow() {
     escrowRequested = true;

@@ -56,6 +56,13 @@ A timeout is ambiguous: inspect live status before retrying a membership change.
 
 ## Migrate a standalone room
 
+Portable [export/import](escrow.md#export-and-import-moving-to-another-node) can
+export a replicated room from any member, reading that member's local committed
+state. Import into a room that is replicated on the destination node is skipped
+as `replicated`. To move a replicated room through an export file, import on one
+node where the room is still standalone, then configure replication with that
+node as `migration_seed`, following the procedure below.
+
 Choose one authoritative standalone daemon as the explicit migration seed. Its node ID must be in the original voter list. Configure the same `migration_seed` on every member before starting the replicated room:
 
 ```toml

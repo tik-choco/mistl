@@ -221,7 +221,6 @@ impl Archive {
                 .is_some_and(|e| e.record.head == *head)
     }
 
-    #[cfg(test)]
     pub fn load(&self, head: &Head) -> Result<(Vec<u8>, Vec<u8>), Error> {
         let mut index = self.index.lock().unwrap();
         let hash = head.hash();
