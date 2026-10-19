@@ -252,7 +252,7 @@ impl Harness {
     }
 
     async fn wait_condition(&self, phase: &str, condition: impl Fn() -> bool) {
-        let result = tokio::time::timeout(Duration::from_secs(12), async {
+        let result = tokio::time::timeout(CONDITION_WAIT, async {
             while !condition() {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
@@ -327,8 +327,12 @@ impl Drop for Harness {
     }
 }
 
+// Liveness polls return as soon as the condition holds; the bound only has to
+// cover slow shared CI runners (Windows runs the suite ~2.3x slower than local).
+const CONDITION_WAIT: Duration = Duration::from_secs(30);
+
 pub(super) async fn wait_for(condition: impl Fn() -> bool) {
-    tokio::time::timeout(Duration::from_secs(12), async {
+    tokio::time::timeout(CONDITION_WAIT, async {
         while !condition() {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
