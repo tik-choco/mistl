@@ -1,13 +1,12 @@
-# Automatic release: every push to main builds mistl for Windows / macOS /
-# Linux, picks the next version, tags it, and publishes a GitHub Release with
-# auto-generated notes. Develop pushes run the same verification without publishing.
+# Tag-driven release: pushing a `v*` tag builds mistl for Windows / macOS /
+# Linux and publishes a GitHub Release with auto-generated notes. Tags with a
+# semver prerelease suffix (`v0.2.0-beta.1`) become GitHub prereleases, which
+# only `update.prerelease = true` installs pick up. Create tags with
+# `just publish beta|stable` (scripts/publish.mjs) rather than by hand.
+# Pushes to main / develop run the same verification without publishing.
 #
-# Versioning rules (job: plan):
-#   - no v* tag yet                -> release the version in Cargo.toml
-#   - Cargo.toml bumped by hand    -> release that version (minor/major control)
-#   - otherwise                    -> auto-bump the patch of the latest tag
-# The chosen version is stamped into Cargo.toml before building, so
-# `mistl --version` matches the tag even without a manual bump.
+# The version is taken from the tag and stamped into Cargo.toml before
+# building, so `mistl --version` matches the tag without a manual bump.
 #
 # The mistlib / mistlib-consensus path dependencies are checked out into
 # .mistlib-src/ and .mistlib-consensus-src/ (the same locations the local
@@ -26,6 +25,8 @@ name: release
 on:
   push:
     branches: [main, develop]
+    # Path filters are not evaluated for tag pushes.
+    tags: ["v*"]
     paths-ignore:
       - "**.md"
       - ".gitignore"
@@ -35,7 +36,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: release
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 env:
@@ -54,31 +55,28 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.ver.outputs.version }}
+      prerelease: ${{ steps.ver.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0 # full history so all existing v* tags are visible
 
-      - name: Pick the next version
+      - name: Pick the version
         id: ver
         shell: bash
         run: |
-          cargo_ver=$(sed -nE 's/^version *= *"([^"]+)".*/\1/p' Cargo.toml | head -1)
-          latest=$(git tag -l 'v*' --sort=-v:refname | head -1)
-          if [ -z "$latest" ]; then
-            next="$cargo_ver"
-          elif [ -n "$(git tag -l "v$cargo_ver")" ]; then
-            next=$(echo "${latest#v}" | awk -F. '{printf "%d.%d.%d", $1, $2, $3 + 1}')
-          else
-            # Cargo.toml holds an unreleased version; use it if it is actually
-            # newer than the latest tag, else fall back to a patch bump.
-            next=$(printf '%s\n%s\n' "$cargo_ver" "${latest#v}" | sort -V | tail -1)
-            if [ "$next" = "${latest#v}" ]; then
-              next=$(echo "${latest#v}" | awk -F. '{printf "%d.%d.%d", $1, $2, $3 + 1}')
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+            if ! echo "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
+              echo "::error::tag $GITHUB_REF_NAME is not vMAJOR.MINOR.PATCH[-PRERELEASE]"
+              exit 1
             fi
+          else
+            # Branch push: verification only, the Cargo.toml version is fine.
+            version=$(sed -nE 's/^version *= *"([^"]+)".*/\1/p' Cargo.toml | head -1)
           fi
-          echo "version=$next" >> "$GITHUB_OUTPUT"
-          echo "next release: v$next (Cargo.toml: $cargo_ver, latest tag: ${latest:-none})"
+          case "$version" in *-*) prerelease=true ;; *) prerelease=false ;; esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          echo "version: v$version (prerelease: $prerelease, ref: $GITHUB_REF)"
 
   build:
     needs: plan
@@ -187,7 +185,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref_type == 'tag'
     needs: [plan, build]
     runs-on: ubuntu-latest
     steps:
@@ -225,5 +223,8 @@ jobs:
         with:
           tag_name: v${{ needs.plan.outputs.version }}
           name: MISTL v${{ needs.plan.outputs.version }}
+          prerelease: ${{ needs.plan.outputs.prerelease }}
+          # A beta must not become the "Latest" release stable updaters fetch.
+          make_latest: ${{ needs.plan.outputs.prerelease == 'true' && 'false' || 'true' }}
           generate_release_notes: true
           files: dist/*

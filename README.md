@@ -100,6 +100,16 @@ Use `just dev` / `just watch` for development. `just release` only builds and no
 longer stops running daemons. See [runtime and connection controls](docs/runtime.md)
 for instance paths, migration, tray controls, and verification commands.
 
+Releases are tag-driven: pushing a `v*` tag makes CI build every target and
+publish a GitHub Release (a `-beta.N` tag becomes a prerelease, installed only
+with `update.prerelease = true`). `just publish` computes and creates the tag:
+
+```
+$ just publish status                 # current tags and the next versions; changes nothing
+$ just publish beta --push            # on develop: v0.1.16 -> v0.2.0-beta.1 -> v0.2.0-beta.2 ...
+$ just publish stable --push          # on main: v0.2.0-beta.N -> v0.2.0
+```
+
 Double-click `mistl.exe` (or run `mistl` with no arguments): the daemon starts in
 the background and the dashboard opens in your browser — everything below can be
 done from there, including settings. The dashboard is bilingual (English/日本語,

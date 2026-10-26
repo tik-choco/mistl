@@ -109,6 +109,15 @@ _copy-exe:
     cp "target/release/{{bin}}" "dist/"
     @echo "packaged: dist/{{bin}}"
 
+# --- publish (GitHub Release) ------------------------------------------------
+
+# Tag a GitHub release; CI builds and publishes on tag push.
+#   just publish status                                # current/next versions, changes nothing
+#   just publish beta [minor|patch|major] [--push]     # v0.1.16 -> v0.2.0-beta.1 -> -beta.2 ...
+#   just publish stable [--push] [--allow-changes]     # v0.2.0-beta.N -> v0.2.0 (on main)
+publish *args:
+    node scripts/publish.mjs {{args}}
+
 # --- cross build: Linux binary via WSL --------------------------------------
 
 # Build a native Linux release binary by running cargo inside WSL2 against
