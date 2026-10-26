@@ -3,7 +3,9 @@
 # semver prerelease suffix (`v0.2.0-beta.1`) become GitHub prereleases, which
 # only `update.prerelease = true` installs pick up. Create tags with
 # `just publish beta|stable` (scripts/publish.mjs) rather than by hand.
-# Pushes to main / develop run the same verification without publishing.
+# Pushes to develop only run the tests on Windows and Linux x86_64; main is
+# not built on push, since it only receives already-verified develop merges
+# and releases come from tags.
 #
 # The version is taken from the tag and stamped into Cargo.toml before
 # building, so `mistl --version` matches the tag without a manual bump.
@@ -24,11 +26,13 @@ name: release
 
 on:
   push:
-    branches: [main, develop]
+    branches: [develop]
     # Path filters are not evaluated for tag pushes.
     tags: ["v*"]
     paths-ignore:
       - "**.md"
+      - "docs/**"
+      - "LICENSE"
       - ".gitignore"
   workflow_dispatch:
 
@@ -37,7 +41,8 @@ permissions:
 
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: false
+  # A newer branch push supersedes an older verification; tag builds always finish.
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 env:
   MISTL_BUILD_CHANNEL: stable
@@ -56,6 +61,7 @@ jobs:
     outputs:
       version: ${{ steps.ver.outputs.version }}
       prerelease: ${{ steps.ver.outputs.prerelease }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
 
@@ -78,22 +84,26 @@ jobs:
           echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
           echo "version: v$version (prerelease: $prerelease, ref: $GITHUB_REF)"
 
+      - name: Pick the targets
+        # Tags build every release target; anything else only tests on
+        # Windows and Linux x86_64.
+        id: matrix
+        shell: bash
+        run: |
+          windows='{"os":"windows-latest","target":"x86_64-pc-windows-msvc"}'
+          linux='{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"}'
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            extra=',{"os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu"}'
+            extra="$extra"',{"os":"macos-latest","target":"aarch64-apple-darwin"}'
+            extra="$extra"',{"os":"macos-latest","target":"x86_64-apple-darwin"}'
+          fi
+          echo "matrix={\"include\":[$windows,$linux${extra:-}]}" >> "$GITHUB_OUTPUT"
+
   build:
     needs: plan
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-          - os: macos-latest
-            target: aarch64-apple-darwin
-          - os: macos-latest
-            target: x86_64-apple-darwin
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -155,9 +165,11 @@ jobs:
         run: cargo test -- --test-threads=1
 
       - name: Build
+        if: github.ref_type == 'tag'
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Package
+        if: github.ref_type == 'tag'
         # Ship BOTH an archive (for humans) and the raw binary named per
         # target. The self-updater (`mistl update`) downloads the raw binary
         # and verifies it against SHA256SUMS.txt, so it never has to unpack an
@@ -179,6 +191,7 @@ jobs:
           esac
 
       - uses: actions/upload-artifact@v4
+        if: github.ref_type == 'tag'
         with:
           name: mistl-${{ matrix.target }}
           path: dist/*

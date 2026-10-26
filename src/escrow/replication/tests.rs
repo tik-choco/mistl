@@ -9,11 +9,10 @@ use tokio::sync::Notify;
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn replicated_export_uses_local_current_heads_and_pins_their_archive() {
     let harness = Harness::new();
-    let leader = harness.leader(None).await;
     let first = harness.network.fixture(b"first", 1, None);
-    assert_eq!(harness.put(leader, &first).await["type"], "escrow_ack");
+    assert_eq!(harness.put_acked(&first, None).await, first.ack("put"));
     let current = harness.network.fixture(b"current", 2, Some(first.hash()));
-    assert_eq!(harness.put(leader, &current).await["type"], "escrow_ack");
+    assert_eq!(harness.put_acked(&current, None).await, current.ack("put"));
     wait_for(|| {
         harness.nodes.iter().all(|node| {
             node.inner.lock().unwrap().state.head(&current.slot) == Some(current.clone())
@@ -316,6 +315,34 @@ impl Harness {
         .expect("write did not reach a quorum")
         .unwrap()
     }
+
+    // Ordinary writes may cross an election. Keep put() for tests that must
+    // exercise a particular member or term, and exclude partitioned members
+    // here because an isolated old leader can still report itself as leader.
+    pub(super) async fn put_acked(&self, head: &Head, excluded: Option<usize>) -> Value {
+        let mut last_reply = Value::Null;
+        tokio::time::timeout(CONDITION_WAIT, async {
+            loop {
+                let leader = self.leader(excluded).await;
+                let reply = self.put(leader, head).await;
+                if reply["type"] == "escrow_error" {
+                    if reply["code"] == "busy" {
+                        last_reply = reply;
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        continue;
+                    }
+                    // A step-down can lose the reply after committing the put.
+                    // Only the identical committed head makes a conflict safe.
+                    if reply["code"] == "conflict" && reply["head"] == json!(head) {
+                        return head.ack("put");
+                    }
+                }
+                return reply;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("put seq {} timed out; last reply: {last_reply}", head.seq))
+    }
 }
 
 impl Drop for Harness {
@@ -419,9 +446,8 @@ async fn durable_quorum_ack_waits_for_blob_then_all_replicas_serve_identical_dat
 #[tokio::test]
 async fn majority_replaces_disconnected_leader_and_restart_preserves_latest_head() {
     let mut harness = Harness::new();
-    let old_leader = harness.leader(None).await;
     let first = harness.network.fixture(b"first", 1, None);
-    assert_eq!(harness.put(old_leader, &first).await["type"], "escrow_ack");
+    assert_eq!(harness.put_acked(&first, None).await, first.ack("put"));
     harness
         .wait_condition("all replicas applied first", || {
             harness.nodes.iter().all(|node| {
@@ -429,6 +455,7 @@ async fn majority_replaces_disconnected_leader_and_restart_preserves_latest_head
             })
         })
         .await;
+    let old_leader = harness.leader(None).await;
     harness
         .network
         .partitioned
@@ -445,9 +472,11 @@ async fn majority_replaces_disconnected_leader_and_restart_preserves_latest_head
         .is_err(),
         "isolated old leader must not answer a fresh read without quorum"
     );
-    let leader = harness.leader(Some(old_leader)).await;
     let second = harness.network.fixture(b"second", 2, Some(first.hash()));
-    assert_eq!(harness.put(leader, &second).await["type"], "escrow_ack");
+    assert_eq!(
+        harness.put_acked(&second, Some(old_leader)).await,
+        second.ack("put")
+    );
     harness.network.partitioned.lock().unwrap().clear();
     harness
         .wait_condition("rejoined leader caught up", || {
@@ -490,9 +519,8 @@ async fn majority_replaces_disconnected_leader_and_restart_preserves_latest_head
 #[tokio::test]
 async fn new_leader_commits_acknowledged_previous_term_without_a_client_write() {
     let harness = Harness::new();
-    let old_leader = harness.leader(None).await;
     let first = harness.network.fixture(b"first", 1, None);
-    assert_eq!(harness.put(old_leader, &first).await, first.ack("put"));
+    assert_eq!(harness.put_acked(&first, None).await, first.ack("put"));
     harness
         .wait_condition("initial replicas", || {
             harness.nodes.iter().all(|node| {
@@ -500,6 +528,7 @@ async fn new_leader_commits_acknowledged_previous_term_without_a_client_write() 
             })
         })
         .await;
+    let old_leader = harness.leader(None).await;
     let boundary = harness.nodes[old_leader]
         .inner
         .lock()

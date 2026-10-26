@@ -21,16 +21,29 @@ async fn compacted_cluster_installs_snapshot_only_after_ciphertext_and_survives_
             seq,
             parent.clone(),
         );
-        assert_eq!(harness.put(leader, &head).await, head.ack("put"));
+        assert_eq!(
+            harness.put_acked(&head, Some(follower)).await,
+            head.ack("put")
+        );
         parent = Some(head.hash());
         heads.push(head);
     }
     let latest = heads.last().unwrap().clone();
+    // The isolated follower must miss every write, even if the other two
+    // members exchange leadership during the burst.
+    let leader = harness.leader(Some(follower)).await;
     wait_condition(&harness, "leader compaction", || {
         harness.nodes[leader].status()["snapshot_index"]
             .as_u64()
             .unwrap_or(0)
             > 0
+            && harness.nodes[leader]
+                .inner
+                .lock()
+                .unwrap()
+                .state
+                .head(&latest.slot)
+                == Some(latest.clone())
     })
     .await;
     assert!(
