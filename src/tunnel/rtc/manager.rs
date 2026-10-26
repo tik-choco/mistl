@@ -175,7 +175,7 @@ impl RTCManagerHandle {
         };
 
         let weak = Arc::downgrade(&handle.inner);
-        // Single FIFO worker for EVENT_JOIN/EVENT_LEAVE/EVENT_RAW/EVENT_OVERLAY:
+        // Single FIFO worker for EVENT_PEER_CONNECTED/EVENT_PEER_DISCONNECTED/EVENT_RAW/EVENT_OVERLAY:
         // events reach `dispatch_event` (via the room-filter closure below)
         // in strict order from mistlib's one dispatch thread, and this
         // worker processes each to completion before the next, preserving
@@ -356,7 +356,7 @@ impl RTCManagerHandle {
         self.inner.route_pins.write().await.remove(target);
     }
 
-    /// The peer's current session epoch: incremented on each `EVENT_JOIN`
+    /// The peer's current session epoch: incremented on each `EVENT_PEER_CONNECTED`
     /// for `peer_id`, `0` if the peer has never joined. Lets callers detect
     /// a fresh session for a peer_id (e.g. to purge state scoped to the
     /// prior session) versus a peer that never disconnected.
@@ -555,7 +555,7 @@ impl RTCManagerHandle {
     /// Every handler registered via `on_*` stays wired (they live on this
     /// same `inner`, untouched here). Only per-room membership state is
     /// reset: leaving/rejoining tears the underlying session down directly
-    /// rather than emitting a real `EVENT_LEAVE` per peer (see
+    /// rather than emitting a real `EVENT_PEER_DISCONNECTED` per peer (see
     /// `event::handle_leave`), so `peers`/`peer_roles`/`peer_forward_keys`/
     /// `peer_epochs` are cleared by hand here instead. Callers that need the
     /// equivalent of a per-peer leave notification (e.g.

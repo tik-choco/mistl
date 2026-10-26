@@ -24,7 +24,7 @@
 //! *is* the decision the rest of mistl consumes. `RaftNode::propose` is
 //! intentionally never called; only `role()`/`leader_hint()` (via
 //! [`RelayConsensus::role`]/[`RelayConsensus::leader`]) and membership
-//! (`add_peer`/`remove_peer`, driven by hello/`EVENT_LEAVE`) are used.
+//! (`add_peer`/`remove_peer`, driven by hello/`EVENT_PEER_DISCONNECTED`) are used.
 //!
 //! ## Peer authentication
 //!
@@ -336,7 +336,7 @@ fn gate_inbound(
 /// Wires a room-aware `crate::net` handler for this instance: verifies and
 /// demuxes Raft RPCs (fed into the driver) and relay hellos (tracked in
 /// `membership`, promoted to `RaftNode::add_peer` on first sight), and clears
-/// departed peers on `EVENT_LEAVE` -- all only for events that actually
+/// departed peers on `EVENT_PEER_DISCONNECTED` -- all only for events that actually
 /// arrived in this instance's room. Entirely synchronous -- no tokio runtime
 /// is available on `crate::net`'s dispatch thread, and nothing here needs
 /// one (channel sends and `std::sync::Mutex`/`watch::Sender` don't require
@@ -378,7 +378,7 @@ fn register_net_handler(consensus: Arc<RelayConsensus>) {
                     }
                 }
             }
-            crate::net::EVENT_LEAVE => {
+            crate::net::EVENT_PEER_DISCONNECTED => {
                 let was_known = consensus
                     .membership
                     .lock()

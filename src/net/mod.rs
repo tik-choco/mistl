@@ -50,8 +50,8 @@ pub const NET_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Event-type constants re-exported for handler implementations.
 pub const EVENT_RAW: u32 = mistlib::EVENT_RAW;
-pub const EVENT_JOIN: u32 = mistlib::EVENT_JOIN;
-pub const EVENT_LEAVE: u32 = mistlib::EVENT_LEAVE;
+pub const EVENT_PEER_CONNECTED: u32 = mistlib::EVENT_PEER_CONNECTED;
+pub const EVENT_PEER_DISCONNECTED: u32 = mistlib::EVENT_PEER_DISCONNECTED;
 
 /// Nostr signaling discovery namespace, together with [`MIST_INVITE_CODE`].
 /// mistlib ships a built-in default (`"nostr-sig-test-local-salt"` /
@@ -246,7 +246,7 @@ struct ActivityRecord {
 /// Process-wide send/receive activity, keyed by `(room, peer)` with an empty
 /// peer id meaning a room-wide broadcast (see [`send_broadcast`]). Peer ids
 /// come from remote peers, so the table is bounded: entries are dropped when the peer leaves
-/// (`EVENT_LEAVE`) or we leave the room, and the table is capped at
+/// (`EVENT_PEER_DISCONNECTED`) or we leave the room, and the table is capped at
 /// [`MAX_ACTIVITY_ENTRIES`], evicting the least recently active entry.
 static ACTIVITY: LazyLock<RwLock<HashMap<(String, String), ActivityRecord>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
@@ -408,7 +408,7 @@ unsafe extern "C" fn dispatch_room_event(
     let data = unsafe { std::slice::from_raw_parts(data_ptr, data_len) };
     if event_type == EVENT_RAW {
         record_rx(&room, &from, data.len());
-    } else if event_type == EVENT_LEAVE {
+    } else if event_type == EVENT_PEER_DISCONNECTED {
         forget_peer_activity(&room, &from);
     }
     let handlers = ROOM_HANDLERS

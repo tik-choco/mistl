@@ -66,9 +66,16 @@ fn run() -> Result<()> {
         .with(devlog_layer)
         .init();
 
+    let mistlib_build: serde_json::Value =
+        serde_json::from_str(&mistlib::build_info::get_build_info()).unwrap_or_default();
     tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        channel = runtime::CHANNEL,
+        build = runtime::BUILD_ID.get(..12).unwrap_or(runtime::BUILD_ID),
+        commit = env!("MISTL_COMMIT"),
         mistlib_version = mistlib::build_info::get_version(),
-        "mistlib version"
+        mistlib_commit = mistlib_build["commit"].as_str().unwrap_or("unknown"),
+        "mistl starting"
     );
 
     runtime::initialize(args.instance.clone(), args.state_dir.clone(), args.no_tray)?;

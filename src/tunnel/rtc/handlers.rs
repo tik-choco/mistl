@@ -177,7 +177,7 @@ impl RTCManagerHandle {
             .push(Arc::new(f));
     }
 
-    /// Registers `f` to run when a peer's `EVENT_JOIN` is processed, with
+    /// Registers `f` to run when a peer's `EVENT_PEER_CONNECTED` is processed, with
     /// its post-increment session epoch (see [`RTCManagerHandle::peer_epoch`]).
     /// `f` runs synchronously on the manager's serialized event worker; if it
     /// needs to do async work, spawn a task from within it (as
@@ -190,7 +190,7 @@ impl RTCManagerHandle {
             .push(Arc::new(f));
     }
 
-    /// Registers `f` to run when a peer's `EVENT_LEAVE` is processed, with
+    /// Registers `f` to run when a peer's `EVENT_PEER_DISCONNECTED` is processed, with
     /// the session epoch the peer held at the time it left (see
     /// [`RTCManagerHandle::peer_epoch`]). Same execution contract as
     /// [`RTCManagerHandle::on_peer_join`].

@@ -143,7 +143,7 @@ impl RawEventReceiver {
 /// wrapper `manager::RTCManagerHandle::new` registers with
 /// `crate::net::register_room_handler`.
 ///
-/// `EVENT_JOIN`, `EVENT_LEAVE`, and `EVENT_RAW`/`EVENT_OVERLAY` (tunnel/stdio
+/// `EVENT_PEER_CONNECTED`, `EVENT_PEER_DISCONNECTED`, and `EVENT_RAW`/`EVENT_OVERLAY` (tunnel/stdio
 /// payloads) all go through `tx`, a FIFO channel (payloads bounded, see
 /// [`RawEventSender`]; Join/Leave never dropped) drained by a single
 /// FIFO worker (`run_payload_worker`) that awaits each event to completion
@@ -175,8 +175,8 @@ pub(super) fn dispatch_event(
     }
 
     let event = match message_type {
-        mistlib::EVENT_JOIN => RawEvent::Join { peer_id: from },
-        mistlib::EVENT_LEAVE => RawEvent::Leave { peer_id: from },
+        mistlib::EVENT_PEER_CONNECTED => RawEvent::Join { peer_id: from },
+        mistlib::EVENT_PEER_DISCONNECTED => RawEvent::Leave { peer_id: from },
         mistlib::EVENT_RAW | mistlib::EVENT_OVERLAY => RawEvent::Payload { from, data },
         _ => return,
     };
@@ -269,7 +269,7 @@ pub(super) async fn handle_payload(inner: Arc<RTCManagerInner>, peer_id: String,
         return;
     }
 
-    // Receiving any message proves the peer is connected. `EVENT_JOIN` only
+    // Receiving any message proves the peer is connected. `EVENT_PEER_CONNECTED` only
     // fires for peers that join after us, so the later-joining side would
     // otherwise never register peers that were already in the room.
     if inner.peers.write().await.insert(peer_id.clone()) {

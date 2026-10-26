@@ -298,13 +298,13 @@ impl AiService {
                     }
                 });
             }
-            crate::net::EVENT_JOIN => {
+            crate::net::EVENT_PEER_CONNECTED => {
                 (session.send)(from, ProtocolMessage::ConsumerHello);
                 if let Some(provider) = session.local_provider() {
                     (session.send)(from, provider.hello());
                 }
             }
-            crate::net::EVENT_LEAVE => {
+            crate::net::EVENT_PEER_DISCONNECTED => {
                 session.consumer.on_peer_disconnected(from);
                 session.voice.on_peer_left(from);
                 session.oai.drop_peer(from);
@@ -3013,7 +3013,7 @@ mod tests {
                     .local_provider()
                     .unwrap();
                 assert_eq!(hello["services"], json!(local.services()));
-                service.handle_room_event(crate::net::EVENT_JOIN, room, "new-consumer", &[], &rt);
+                service.handle_room_event(crate::net::EVENT_PEER_CONNECTED, room, "new-consumer", &[], &rt);
                 assert_eq!(
                     protocol::decode(&rx.recv().await.unwrap().2),
                     Some(ProtocolMessage::ConsumerHello)

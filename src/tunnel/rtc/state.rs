@@ -76,13 +76,13 @@ pub(super) struct RTCManagerInner {
     pub(super) room: RwLock<String>,
     pub(super) peers: RwLock<HashSet<String>>,
     /// Peers for which `stdio_open_handlers` have fired in their current
-    /// session (set on `EVENT_JOIN` or on the first `Stdio` payload, cleared on
+    /// session (set on `EVENT_PEER_CONNECTED` or on the first `Stdio` payload, cleared on
     /// leave), so a stdio session open is only ever triggered by explicit
     /// stdio traffic or a join -- not by any arbitrary first payload.
     pub(super) stdio_opened: RwLock<HashSet<String>>,
     pub(super) peer_roles: RwLock<HashMap<String, PeerRole>>,
     pub(super) peer_forward_keys: RwLock<HashMap<String, HashSet<String>>>,
-    /// Per-peer session epoch, incremented on each `EVENT_JOIN` for that
+    /// Per-peer session epoch, incremented on each `EVENT_PEER_CONNECTED` for that
     /// `peer_id`. Lets later layers (e.g. auth/negotiation purge) tell a
     /// fresh session for a peer apart from one that never disconnected.
     /// `0` means the peer has never joined.

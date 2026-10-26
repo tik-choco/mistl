@@ -361,7 +361,7 @@ impl Service {
             if !service.cfg.rooms.iter().any(|r| r == room) {
                 return;
             }
-            if event == crate::net::EVENT_JOIN {
+            if event == crate::net::EVENT_PEER_CONNECTED {
                 let Some(permit) = service.requests.acquire(from, Class::Reply) else {
                     return;
                 };

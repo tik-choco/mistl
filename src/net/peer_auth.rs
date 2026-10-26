@@ -5,7 +5,7 @@
 //! at the transport layer.
 //!
 //! This module adds that binding. Every mistl node periodically
-//! broadcasts -- and answers every `EVENT_JOIN` with -- a small hello signed
+//! broadcasts -- and answers every `EVENT_PEER_CONNECTED` with -- a small hello signed
 //! with its `did:key` via [`crate::wiresign`]:
 //!
 //! ```json
@@ -542,7 +542,7 @@ pub(super) fn start(identity: Arc<Identity>, runtime: tokio::runtime::Handle) {
                 Err(error) => debug!(%room, node = %from, ?error, "peer auth: rejected hello"),
             }
         }
-        super::EVENT_JOIN => {
+        super::EVENT_PEER_CONNECTED => {
             // Answer every join directly, so a newcomer learns our DID
             // without waiting for the next periodic broadcast.
             let bytes = hello_bytes(room, &handler_identity, false);
@@ -552,7 +552,7 @@ pub(super) fn start(identity: Arc<Identity>, runtime: tokio::runtime::Handle) {
                 let _ = super::send_direct(&room, &to, bytes).await;
             });
         }
-        super::EVENT_LEAVE => forget_peer(room, from),
+        super::EVENT_PEER_DISCONNECTED => forget_peer(room, from),
         _ => {}
     });
 

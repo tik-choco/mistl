@@ -167,7 +167,7 @@ impl Membership {
         self.peers.get(node).map(|peer| peer.did.as_str())
     }
 
-    /// Explicit departure (`EVENT_LEAVE`). Returns `true` if the peer was
+    /// Explicit departure (`EVENT_PEER_DISCONNECTED`). Returns `true` if the peer was
     /// known (i.e. membership changed).
     pub fn remove(&mut self, node: &str) -> bool {
         self.peers.remove(node).is_some()

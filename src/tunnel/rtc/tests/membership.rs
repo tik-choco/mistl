@@ -6,7 +6,7 @@ use super::super::event::{handle_join, handle_leave};
 use super::super::state::PeerRole;
 use super::test_manager;
 
-/// (B)/session-epoch coverage: each `EVENT_JOIN` for a peer_id bumps its
+/// (B)/session-epoch coverage: each `EVENT_PEER_CONNECTED` for a peer_id bumps its
 /// epoch, regardless of intervening leaves; a peer that never joined reads
 /// as epoch `0`.
 #[tokio::test]
@@ -28,7 +28,7 @@ async fn epoch_increments_on_each_join() {
     assert_eq!(manager.peer_epoch("peer-2").await, 0);
 }
 
-/// `EVENT_JOIN` for our own id is a no-op (mistlib can echo our own presence
+/// `EVENT_PEER_CONNECTED` for our own id is a no-op (mistlib can echo our own presence
 /// back), so it must not consume an epoch or fire join hooks.
 #[tokio::test]
 async fn self_join_does_not_bump_epoch_or_fire_hooks() {

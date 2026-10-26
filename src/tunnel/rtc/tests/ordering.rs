@@ -1,6 +1,6 @@
 //! Ported verbatim from `p2p/src/rtc/manager/tests/ordering.rs`.
 //!
-//! `mistlib::EVENT_RAW`/`EVENT_JOIN`/`EVENT_LEAVE` are used directly here
+//! `mistlib::EVENT_RAW`/`EVENT_PEER_CONNECTED`/`EVENT_PEER_DISCONNECTED` are used directly here
 //! (rather than `crate::net`'s re-exported constants of the same value) to
 //! stay as close as possible to upstream: `dispatch_event`/`run_payload_worker`
 //! are pure functions over a `u32` event-type code and have no notion of
@@ -88,8 +88,8 @@ async fn burst_of_raw_events_is_processed_in_order() {
     assert_eq!(*order.lock().unwrap(), expected);
 }
 
-/// Regression test for (A) in the manager-layer audit: `EVENT_JOIN`/
-/// `EVENT_LEAVE` used to be dispatched via independent `tokio::spawn` calls,
+/// Regression test for (A) in the manager-layer audit: `EVENT_PEER_CONNECTED`/
+/// `EVENT_PEER_DISCONNECTED` used to be dispatched via independent `tokio::spawn` calls,
 /// so a rapid leave->rejoin for the same peer_id could have its join task
 /// finish before its leave task, leaving a live peer absent from `peers`.
 /// Now that join/leave share the same FIFO worker as payloads, arrival order
@@ -110,11 +110,11 @@ async fn rapid_leave_then_join_always_ends_with_peer_present() {
         dispatch_event(
             &weak,
             &tx,
-            mistlib::EVENT_LEAVE,
+            mistlib::EVENT_PEER_DISCONNECTED,
             peer_id.clone(),
             Vec::new(),
         );
-        dispatch_event(&weak, &tx, mistlib::EVENT_JOIN, peer_id, Vec::new());
+        dispatch_event(&weak, &tx, mistlib::EVENT_PEER_CONNECTED, peer_id, Vec::new());
     }
 
     // Wait for every enqueued leave/join pair to actually be processed by

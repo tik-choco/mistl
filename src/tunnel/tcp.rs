@@ -63,7 +63,7 @@ pub const TUNNEL_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_
 pub const RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// How long a peer's tunnel connections are kept alive (unsent, but not torn
-/// down) after `EVENT_LEAVE`/tunnel-close fires for that peer, waiting for it
+/// down) after `EVENT_PEER_DISCONNECTED`/tunnel-close fires for that peer, waiting for it
 /// to rejoin before giving up. Chosen to comfortably exceed the time a
 /// legitimate reconnect (full room rejoin after a failed ICE restart) should
 /// take. See `schedule_close_all_for_peer` for the resume mechanism.
@@ -275,7 +275,7 @@ impl TcpManager {
             })
             .await;
 
-        // If the peer rejoins (fresh EVENT_JOIN, or simply the first payload
+        // If the peer rejoins (fresh EVENT_PEER_CONNECTED, or simply the first payload
         // we see from it again) within the grace window above, cancel the
         // pending close. Tunnel sends resolve the peer's mistlib session by
         // peer_id at send time (see `send_to`/`send_tunnel_to`), not via a

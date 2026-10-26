@@ -130,7 +130,7 @@ pub enum NoticeKind {
     Error,
 }
 
-/// How long to wait after a peer's `EVENT_LEAVE` before treating pending
+/// How long to wait after a peer's `EVENT_PEER_DISCONNECTED` before treating pending
 /// auth requests / forward negotiations addressed to it as abandoned.
 /// Mirrors the grace window `crate::tunnel::tcp::PEER_LEAVE_GRACE` uses for
 /// tunnel-close cleanup (duplicated here since that constant isn't `pub`).
@@ -1163,7 +1163,7 @@ pub async fn register_peer_leave_purge(
 /// meantime (its session epoch has moved on from `epoch_at_leave`) --
 /// denies/removes anything still keyed to it. Split out from
 /// `register_peer_leave_purge` so it can be driven directly in tests
-/// without depending on a real `EVENT_LEAVE`/`EVENT_JOIN` round trip.
+/// without depending on a real `EVENT_PEER_DISCONNECTED`/`EVENT_PEER_CONNECTED` round trip.
 async fn purge_after_grace(
     peer_id: String,
     epoch_at_leave: u64,
@@ -1757,7 +1757,7 @@ mod tests {
     // --- purge_after_grace: the epoch-changed => no-purge wiring rule -------
     //
     // These drive `purge_after_grace` directly rather than through a real
-    // `EVENT_LEAVE`/`EVENT_JOIN` round trip: simulating an actual mistlib
+    // `EVENT_PEER_DISCONNECTED`/`EVENT_PEER_CONNECTED` round trip: simulating an actual mistlib
     // rejoin (which would bump `RTCManagerHandle::peer_epoch`) requires
     // internals not exposed outside `crate::tunnel::rtc`. Passing
     // `epoch_at_leave` directly exercises the same comparison

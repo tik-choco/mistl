@@ -267,7 +267,7 @@ pub(super) fn ensure_wire_handler_registered() {
     REGISTERED.call_once(|| {
         let rt = tokio::runtime::Handle::current();
         crate::net::register_room_handler(move |event_type, room, from, data| {
-            if event_type == crate::net::EVENT_LEAVE {
+            if event_type == crate::net::EVENT_PEER_DISCONNECTED {
                 REGISTRY.sender_reset(&NodeId(from.to_string()), room);
             }
             if event_type != crate::net::EVENT_RAW {
