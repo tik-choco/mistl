@@ -2,29 +2,17 @@
 //! mistl's own room-based transport (`crate::net`), speaking the same
 //! QUERY/WANT/HAVE(_CHUNK) wire protocol
 //! (`mistlib_core::storage::protocol`) that mistlib-native's
-//! `NativePeerResolver` and mistlib-wasm's `WasmPeerResolver` both speak --
+//! shared `NetworkPeerResolver` speaks --
 //! so a CID missing from the local block store can be resolved from any
 //! peer sharing a joined room, including a browser tab running
 //! tc-news/tc-chat/tc-storage's wasm build.
 //!
-//! mistlib-native ships its own built-in P2P storage
-//! (`mistlib::storage::*`: `STORAGE`, `WANT_REGISTRY`, `handle_want`,
-//! `handle_query`, ...), but it's wired to mistlib-native's *internal*
-//! session/transport registry (`crate::engine::SessionCtx`,
-//! `mistlib_core::transport::Transport`), which mistl's own `net` module --
-//! a thin wrapper over the public `mistlib::app::*` FFI surface
-//! (`join_room`/`try_send_message_in_room`/`register_raw_handler`) -- has no
-//! access to, and mistl never calls `mistlib::storage::init_storage` to
-//! activate it. So this module reimplements the same wire-level protocol on
-//! top of `net::send_broadcast`/`net::send_direct`/
-//! `net::register_room_handler` instead, exactly like mistl's other
-//! room-scoped protocols (ai, chat_relay). mistlib-native's internal storage
-//! handling still silently runs alongside this on every inbound message
-//! (see `mistlib-native/src/engine/network.rs::handle_storage_message`,
-//! called unconditionally before the raw event is *also* forwarded to
-//! mistl's `EVENT_RAW` handlers) but is inert here since its `STORAGE`/
-//! `WANT_REGISTRY` are never populated/read by mistl -- harmless dead work
-//! on mistlib's side, not ours to remove.
+//! mistlib-native also initializes its own process-wide storage cache when
+//! joining a room. That cache is separate from mistl's Store and its metadata,
+//! so this resolver uses the public room-scoped `net` APIs to serve and fetch
+//! mistl's blocks. Storage frames must reach mistl's room handlers; stock
+//! mistlib 0.7.0 consumes them before raw dispatch, so embedding it requires
+//! an upstream storage-event forwarding hook.
 //!
 //! `PeerResolver::resolve_block` is declared in mistlib-core as an
 //! `#[async_trait]` method; unlike the old `NoopResolver` (which hand-wrote
@@ -38,21 +26,19 @@ use std::time::Duration;
 use async_trait::async_trait;
 use mistlib_core::storage::PeerResolver;
 use mistlib_core::storage::protocol::{
-    MSG_WANT, WantRegistry, build_have_payload, build_have_status_message, build_query_message,
-    chunk_size_for_limit, have_chunk_count, parse_have_chunk_message, parse_have_message,
-    parse_have_status_message, parse_query_message, parse_want_message,
+    WantRegistry, build_have_payload, build_have_status_message, build_query_message,
+    build_want_message, chunk_size_for_limit, have_chunk_count, parse_have_chunk_message,
+    parse_have_message, parse_have_status_message, parse_query_message, parse_want_message,
 };
 use mistlib_core::types::NodeId;
 
 /// How long a resolution waits, end to end, when the caller (plain
-/// `Store::get`) doesn't ask for a specific budget. Matches
-/// mistlib-native's `NativePeerResolver` default (`init_storage`'s
-/// `timeout_ms: 5000`).
+/// `Store::get`) doesn't ask for a specific budget. Retains mistl's existing
+/// five-second budget independently of the shared resolver's longer attempts.
 pub(super) const DEFAULT_REMOTE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long to wait for at least one HAVE_STATUS reply to a QUERY broadcast
-/// before falling back to a blind WANT broadcast. Matches
-/// `NativePeerResolver`/`WasmPeerResolver`'s shared 500ms discovery window.
+/// before trying sender-bound WANTs to discovered or connected peers.
 const DISCOVERY_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Per-peer WANT timeout during round-robin failover, derived from the
@@ -100,14 +86,23 @@ pub(super) async fn with_scope<F: std::future::Future>(scope: ResolveScope, fut:
 /// sides must share the exact same registry.
 static REGISTRY: std::sync::LazyLock<WantRegistry> = std::sync::LazyLock::new(WantRegistry::new);
 
+// Drop the resolution future (and its receivers) before pruning. Cancellation
+// must never cancel another concurrent request for the same CID.
+struct RegistryCleanup;
+
+impl Drop for RegistryCleanup {
+    fn drop(&mut self) {
+        REGISTRY.cancel_closed();
+    }
+}
+
 /// [`PeerResolver`] backed by mistl's own room transport (`crate::net`)
 /// instead of a no-op. There's only ever one instance (owned by the single
 /// process-wide [`super::Store`]), paired with the process-wide [`REGISTRY`]
 /// above.
 pub struct RoomPeerResolver {
     /// Round-robins WANT targets across known peers so repeated resolutions
-    /// don't hammer the same one first every time (mirrors
-    /// `NativePeerResolver`'s `next_peer`).
+    /// don't hammer the same one first every time.
     next_peer: AtomicUsize,
 }
 
@@ -137,6 +132,7 @@ impl PeerResolver for RoomPeerResolver {
             return None;
         }
 
+        let _cleanup = RegistryCleanup;
         match tokio::time::timeout(
             scope.timeout,
             self.resolve_within(cid, &scope.rooms, scope.timeout),
@@ -145,7 +141,6 @@ impl PeerResolver for RoomPeerResolver {
         {
             Ok(data) => data,
             Err(_) => {
-                REGISTRY.cancel(cid);
                 tracing::debug!(
                     "storage: resolve_block({cid}) timed out after {:?}",
                     scope.timeout
@@ -157,11 +152,8 @@ impl PeerResolver for RoomPeerResolver {
 }
 
 impl RoomPeerResolver {
-    /// The actual QUERY -> discover peers -> WANT (with failover) -> blind
-    /// WANT fallback dance, mirroring `NativePeerResolver::resolve_block`
-    /// but fanned out across `rooms` (plural) instead of "every session
-    /// transport" (mistl has no such registry -- see the module doc
-    /// comment). Bounded by the outer `tokio::time::timeout` in
+    /// QUERY discovery followed by sender-bound WANTs with failover, fanned
+    /// out across only the requested rooms. Bounded by the outer timeout in
     /// [`PeerResolver::resolve_block`] above, not by anything in here.
     async fn resolve_within(
         &self,
@@ -183,11 +175,12 @@ impl RoomPeerResolver {
             let start = self.next_peer.fetch_add(1, Ordering::Relaxed);
             for offset in 0..known_peers.len() {
                 let target = &known_peers[(start + offset) % known_peers.len()];
-                let rx_data = REGISTRY.register(cid);
-                send_to_rooms(rooms, &target.0, build_want_message(cid)).await;
-                if let Ok(Ok(data)) = tokio::time::timeout(per_attempt, rx_data).await {
+                let attempt = REGISTRY.register_attempt(cid, target.clone());
+                send_to_rooms(rooms, &target.0, build_want_message(cid), attempt.id).await;
+                if let Ok(Ok(data)) = tokio::time::timeout(per_attempt, attempt.data).await {
                     return Some(data);
                 }
+                REGISTRY.cancel_closed();
                 tracing::debug!(
                     "storage: peer {} did not deliver {cid}, failing over",
                     target.0
@@ -195,23 +188,32 @@ impl RoomPeerResolver {
             }
         }
 
-        tracing::debug!("storage: broadcasting fallback WANT for {cid}");
-        let rx_data = REGISTRY.register(cid);
-        broadcast_to_rooms(rooms, build_want_message(cid)).await;
-        rx_data.await.ok()
+        // Snapshot the recipients, then unicast so each waiter is bound to
+        // the actual sender and rooms contacted, including routed providers
+        // already discovered above. Never accept a reply from an arbitrary peer.
+        tracing::debug!("storage: trying connected peers for {cid}");
+        let mut peers = known_peers;
+        for (room, connections) in crate::net::room_connections().await {
+            if rooms.contains(&room) {
+                peers.extend(connections.into_iter().map(|(peer, _)| NodeId(peer)));
+            }
+        }
+        peers.sort_by(|a, b| a.0.cmp(&b.0));
+        peers.dedup();
+        use futures_util::stream::{FuturesUnordered, StreamExt};
+        let mut pending = FuturesUnordered::new();
+        for peer in peers {
+            let attempt = REGISTRY.register_attempt(cid, peer.clone());
+            send_to_rooms(rooms, &peer.0, build_want_message(cid), attempt.id).await;
+            pending.push(attempt.data);
+        }
+        while let Some(result) = pending.next().await {
+            if let Ok(data) = result {
+                return Some(data);
+            }
+        }
+        None
     }
-}
-
-/// Builds a `MSG_WANT` frame: `[MSG_WANT] ++ cid_bytes` (no length prefix --
-/// `cid` is simply the rest of the message, matching `parse_want_message`).
-/// `mistlib_core::storage::protocol` exports `parse_want_message` but no
-/// matching builder (mistlib-native/wasm build it inline instead); kept as
-/// its own function here so it can be unit-tested against
-/// `parse_want_message` like every other message shape already is.
-fn build_want_message(cid: &str) -> Vec<u8> {
-    let mut msg = vec![MSG_WANT];
-    msg.extend_from_slice(cid.as_bytes());
-    msg
 }
 
 /// Broadcasts `data` into every room in `rooms`. Fire-and-forget: a room
@@ -227,12 +229,18 @@ async fn broadcast_to_rooms(rooms: &[String], data: Vec<u8>) {
 /// Sends `data` to `target` in every room in `rooms`. We don't track which
 /// room a peer was discovered through -- `HAVE_STATUS` only carries a node
 /// id, not a room (see `ensure_wire_handler_registered`'s `HaveStatus`
-/// handling below) -- so, mirroring `NativePeerResolver::send_all`, this
-/// fans the unicast WANT out across every room in scope and lets
-/// `send_direct` fail harmlessly on any room `target` isn't actually in.
-async fn send_to_rooms(rooms: &[String], target: &str, data: Vec<u8>) {
+/// handling below) -- so this fans the unicast WANT out across every room
+/// in scope, retaining only paths where the local write succeeds.
+async fn send_to_rooms(rooms: &[String], target: &str, data: Vec<u8>, attempt: u64) {
     for room in rooms {
-        let _ = crate::net::send_direct(room, target, data.clone()).await;
+        let attached = REGISTRY.track_path(attempt, room);
+        if crate::net::send_direct_wait(room, target, data.clone())
+            .await
+            .is_err()
+            && attached
+        {
+            REGISTRY.untrack_path(attempt, room);
+        }
     }
 }
 
@@ -259,6 +267,9 @@ pub(super) fn ensure_wire_handler_registered() {
     REGISTERED.call_once(|| {
         let rt = tokio::runtime::Handle::current();
         crate::net::register_room_handler(move |event_type, room, from, data| {
+            if event_type == crate::net::EVENT_LEAVE {
+                REGISTRY.sender_reset(&NodeId(from.to_string()), room);
+            }
             if event_type != crate::net::EVENT_RAW {
                 return;
             }
@@ -268,15 +279,22 @@ pub(super) fn ensure_wire_handler_registered() {
             } else if let Some(cid) = parse_query_message(data) {
                 let (room, from) = (room.to_string(), from.to_string());
                 rt.spawn(async move { reply_have_status(&room, &from, &cid).await });
-            } else if let Some(cid) = parse_have_status_message(data) {
-                REGISTRY.register_peer(&cid, NodeId(from.to_string()));
-            } else if let Some((cid, payload)) = parse_have_message(data) {
-                REGISTRY.fulfill(&cid, payload);
-            } else if let Some((cid, index, total, payload)) = parse_have_chunk_message(data) {
-                REGISTRY.fulfill_chunk(&cid, index, total, payload);
+            } else {
+                receive_reply(&REGISTRY, room, from, data);
             }
         });
     });
+}
+
+fn receive_reply(registry: &WantRegistry, room: &str, from: &str, data: &[u8]) {
+    let sender = NodeId(from.to_string());
+    if let Some(cid) = parse_have_status_message(data) {
+        registry.register_peer(&cid, sender);
+    } else if let Some((cid, payload)) = parse_have_message(data) {
+        registry.fulfill_in(room, &cid, &sender, payload);
+    } else if let Some((cid, index, total, payload)) = parse_have_chunk_message(data) {
+        registry.fulfill_chunk_in(room, &cid, &sender, index, total, payload);
+    }
 }
 
 /// Answers an inbound QUERY: if we have `cid` locally, tell `from` so (via
@@ -304,9 +322,9 @@ async fn reply_have(room: &str, from: &str, cid: &str) {
     let Ok(Some(data)) = store.get_local(cid).await else {
         return;
     };
-    // The public app transport does not expose its negotiated per-peer
-    // message limit, so retain mistlib-core's conservative fallback size.
-    let chunk_size = chunk_size_for_limit(cid, None);
+    // The public app transport does not expose its negotiated per-peer limit.
+    // Reserve room for the overlay envelope within the browser's 16 KiB ceiling.
+    let chunk_size = chunk_size_for_limit(cid, Some(16 * 1024));
     let Some(total_chunks) = have_chunk_count(data.len(), chunk_size) else {
         tracing::warn!(
             "storage: refusing to serve oversized block {cid} ({} bytes)",
@@ -316,9 +334,9 @@ async fn reply_have(room: &str, from: &str, cid: &str) {
     };
     for chunk_index in 0..total_chunks {
         let msg = build_have_payload(cid, &data, chunk_index, total_chunks, chunk_size);
-        let _ = crate::net::send_direct(room, from, msg).await;
-        if chunk_index % 8 == 0 {
-            tokio::task::yield_now().await;
+        if let Err(error) = crate::net::send_direct_wait(room, from, msg).await {
+            tracing::debug!(%error, %cid, "storage: block response failed");
+            return;
         }
     }
 }
@@ -329,8 +347,71 @@ mod tests {
 
     #[test]
     fn want_message_roundtrips_with_parse_want_message() {
-        let msg = build_want_message("bexamplecid");
-        assert_eq!(parse_want_message(&msg).as_deref(), Some("bexamplecid"));
+        let cid =
+            mistlib_core::storage::compute_cid(b"test", mistlib_core::storage::cid::MULTICODEC_RAW);
+        let msg = build_want_message(&cid);
+        assert_eq!(parse_want_message(&msg).as_deref(), Some(cid.as_str()));
+    }
+
+    #[test]
+    fn storage_replies_only_complete_the_requested_sender_and_room() {
+        use mistlib_core::storage::cid::{MULTICODEC_RAW, compute_cid};
+        use mistlib_core::storage::protocol::build_have_message;
+        let registry = WantRegistry::new();
+        let cid = compute_cid(b"test", MULTICODEC_RAW);
+        let mut first = registry.register_attempt(&cid, NodeId("first".into()));
+        let mut second = registry.register_attempt(&cid, NodeId("second".into()));
+        registry.track_path(first.id, "room");
+        registry.track_path(second.id, "room");
+        let frame = build_have_message(&cid, b"test");
+        receive_reply(&registry, "other-room", "first", &frame);
+        receive_reply(&registry, "room", "unsolicited", &frame);
+        assert!(first.data.try_recv().is_err());
+        assert!(second.data.try_recv().is_err());
+        receive_reply(&registry, "room", "first", &frame);
+        assert_eq!(first.data.try_recv().unwrap(), b"test");
+        assert!(second.data.try_recv().is_err());
+        receive_reply(&registry, "room", "second", &frame);
+        assert_eq!(second.data.try_recv().unwrap(), b"test");
+    }
+
+    #[test]
+    fn unordered_storage_chunks_remain_separate_across_rooms_and_senders() {
+        use mistlib_core::storage::cid::{MULTICODEC_RAW, compute_cid};
+        use mistlib_core::storage::protocol::build_have_chunk_message;
+        let registry = WantRegistry::new();
+        let cid = compute_cid(b"test", MULTICODEC_RAW);
+        let mut attempt = registry.register_attempt(&cid, NodeId("peer".into()));
+        registry.track_path(attempt.id, "room");
+        let tail = build_have_chunk_message(&cid, 1, 2, b"st");
+        let head = build_have_chunk_message(&cid, 0, 2, b"te");
+        receive_reply(&registry, "room", "peer", &tail);
+        receive_reply(&registry, "other-room", "peer", &head);
+        receive_reply(&registry, "room", "other-peer", &head);
+        assert!(attempt.data.try_recv().is_err());
+        receive_reply(&registry, "room", "peer", &head);
+        assert_eq!(attempt.data.try_recv().unwrap(), b"test");
+    }
+
+    #[test]
+    fn cancelling_one_storage_waiter_preserves_another_for_the_same_cid() {
+        use mistlib_core::storage::cid::{MULTICODEC_RAW, compute_cid};
+        use mistlib_core::storage::protocol::build_have_message;
+        let registry = WantRegistry::new();
+        let cid = compute_cid(b"test", MULTICODEC_RAW);
+        let cancelled = registry.register_attempt(&cid, NodeId("peer".into()));
+        let mut active = registry.register_attempt(&cid, NodeId("peer".into()));
+        registry.track_path(cancelled.id, "room");
+        registry.track_path(active.id, "room");
+        drop(cancelled);
+        registry.cancel_closed();
+        receive_reply(
+            &registry,
+            "room",
+            "peer",
+            &build_have_message(&cid, b"test"),
+        );
+        assert_eq!(active.data.try_recv().unwrap(), b"test");
     }
 
     #[test]

@@ -1,3 +1,4 @@
+mod agent;
 mod ai;
 mod bot;
 mod chat_relay;
@@ -42,9 +43,17 @@ fn main() -> std::process::ExitCode {
 }
 
 fn run() -> Result<()> {
+    let args = cli::Cli::parse();
+    // `mistl agent` draws a TUI on the terminal; stray log lines on stderr
+    // would corrupt it, so it logs to stderr only when RUST_LOG asks for it.
+    let default_filter = if matches!(args.command, Some(cli::Command::Agent(_))) {
+        "off"
+    } else {
+        "mistl=info"
+    };
     let stderr_layer = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
-        .with_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "mistl=info".into()));
+        .with_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| default_filter.into()));
     // Always captures debug detail into the dashboard's ring buffer,
     // independent of the stderr log's own level -- so the "developer mode"
     // toggle in the dashboard shows detail immediately with no restart.
@@ -62,7 +71,6 @@ fn run() -> Result<()> {
         "mistlib version"
     );
 
-    let args = cli::Cli::parse();
     runtime::initialize(args.instance.clone(), args.state_dir.clone(), args.no_tray)?;
     cli::dispatch(args)
 }

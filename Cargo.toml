@@ -93,6 +93,17 @@ ratatui = "0.29"
 hex = "0.4"
 uuid = { version = "1", features = ["v4"] }
 
+# agent (`mistl agent`, natural-language TUI): crossterm's event stream
+# drives the async TUI loop (same crossterm ratatui already pulls in), and
+# ignore/globset back the workspace file tools (gitignore-aware walk, globs).
+crossterm = { version = "0.28", features = ["event-stream"] }
+futures-util = "0.3"
+tokio-util = "0.7"
+globset = "0.4"
+ignore = "0.4"
+regex = "1"
+unicode-width = "0.2"
+
 # self-update (GitHub Releases): version compare + atomic replace of the
 # running executable (handles the Windows "can't delete a running exe" dance).
 semver = "1"
@@ -155,3 +166,8 @@ mistlib-core = { path = ".mistlib-src/mistlib-core" }
 
 [patch."https://github.com/tik-choco-lab/mistlib-dev.git"]
 mistlib-core = { path = ".mistlib-src/mistlib-core" }
+
+# Cargo only applies patches from the root manifest. mistlib 0.7.0 needs
+# its vendored SCTP receive-buffer hook, including through webrtc's deps.
+[patch.crates-io]
+webrtc-sctp = { path = ".mistlib-src/third_party/webrtc-sctp" }

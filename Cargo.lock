@@ -266,6 +266,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bstr"
+version = "1.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6bb31b46c14244e20ee9984b11bf5c992b91fb6939fea616e3512c8baecdbe5f"
+dependencies = [
+ "memchr",
+ "serde_core",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -538,6 +548,7 @@ checksum = "829d955a0bb380ef178a640b91779e3987da38c9aea133b20614cfed8cdea9c6"
 dependencies = [
  "bitflags 2.13.0",
  "crossterm_winapi",
+ "futures-core",
  "mio",
  "parking_lot",
  "rustix 0.38.44",
@@ -808,7 +819,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1030,6 +1041,19 @@ checksum = "f0d8a4362ccb29cb0b265253fb0a2728f592895ee6854fd9bc13f2ffda266ff1"
 dependencies = [
  "opaque-debug",
  "polyval",
+]
+
+[[package]]
+name = "globset"
+version = "0.4.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e47d37d2ae4464254884b60ab7071be2b876a9c35b696bd018ddcc76847309cd"
+dependencies = [
+ "aho-corasick",
+ "bstr",
+ "log",
+ "regex-automata",
+ "regex-syntax",
 ]
 
 [[package]]
@@ -1328,6 +1352,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ignore"
+version = "0.4.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b17771570a2b94107741a7b033f19132c2eee21d59d21b24d2ced26500bd66e"
+dependencies = [
+ "crossbeam-deque",
+ "globset",
+ "log",
+ "memchr",
+ "regex-automata",
+ "same-file",
+ "walkdir",
+ "winapi-util",
+]
+
+[[package]]
 name = "indexmap"
 version = "2.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1620,11 +1660,15 @@ dependencies = [
  "chrono",
  "clap",
  "cron",
+ "crossterm",
  "directories",
  "ed25519-dalek",
  "fdk-aac",
+ "futures-util",
+ "globset",
  "hex",
  "hmac",
+ "ignore",
  "libc",
  "minisign-verify",
  "mistlib-consensus-core",
@@ -1638,6 +1682,7 @@ dependencies = [
  "pbkdf2",
  "rand 0.8.6",
  "ratatui",
+ "regex",
  "reqwest",
  "rtp",
  "rtsp-types",
@@ -1650,9 +1695,11 @@ dependencies = [
  "temp-env",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "toml",
  "tracing",
  "tracing-subscriber",
+ "unicode-width 0.2.0",
  "uuid",
  "windows-capture",
  "windows-sys 0.61.2",
@@ -1692,7 +1739,7 @@ dependencies = [
 
 [[package]]
 name = "mistlib-core"
-version = "0.6.4"
+version = "0.7.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -1716,7 +1763,7 @@ dependencies = [
 
 [[package]]
 name = "mistlib-native"
-version = "0.6.4"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1742,6 +1789,7 @@ dependencies = [
  "url",
  "web-time",
  "webrtc",
+ "webrtc-sctp",
  "webrtc-util",
 ]
 
@@ -2454,7 +2502,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2940,7 +2988,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3719,8 +3767,6 @@ dependencies = [
 [[package]]
 name = "webrtc-sctp"
 version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07439c134425d51d2f10907aaf2f815fdfb587dce19fe94a4ae8b5faf2aae5ae"
 dependencies = [
  "arc-swap",
  "async-trait",

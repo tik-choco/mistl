@@ -108,6 +108,9 @@ pub enum Command {
         #[command(subcommand)]
         action: TunnelAction,
     },
+    /// Natural-language agent (TUI) that runs mistl commands and workspace
+    /// tools, using the AI network through the local API
+    Agent(crate::agent::AgentArgs),
     /// Open the web dashboard in the default browser (starts the daemon if needed)
     Ui,
     /// Show a combined status overview (daemon, stream, AI)
@@ -1429,6 +1432,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             },
             TunnelAction::Tui => crate::tunnel::tui::run(),
         },
+        Command::Agent(args) => crate::agent::run(args),
         Command::Ui => open_dashboard(),
         Command::Status => status_overview(),
         Command::Config { action } => match action {

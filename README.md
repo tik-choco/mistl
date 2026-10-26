@@ -213,6 +213,59 @@ separately in `ai-external.json`, and merged live with user settings. A disabled
 user Room stays disabled. `get` masks API keys and reports room status; the
 dashboard shows each owner's contributions read-only and can unregister them.
 
+### Terminal AI agent
+
+`mistl agent` opens a terminal UI: ask in natural language to check status,
+manage stored files, or work on a project, and it runs tools and summarizes
+the results. It uses the LLM selected by mistl's `ai.default_ref` / `ai.providers`
+through the local OpenAI-compatible API, starting the daemon and API as needed.
+See [AI configuration](docs/ai-config.md) for model setup.
+
+```console
+$ mistl agent                              # interactive TUI
+$ mistl agent -p "Is the AI network up?"    # one prompt on stdout, then exit
+$ mistl agent -m model-id --reasoning-effort high
+$ mistl agent --list-models                 # list model ids from the local API
+```
+
+Flags: `-p` / `--prompt` runs without the TUI; `-m` / `--model` selects a model;
+`--reasoning-effort` overrides effort for this session; `-y` / `--yes` approves
+state-changing tools automatically. `--tool-mode native|prompt` selects OpenAI
+tools or fenced tool blocks (default: native, with automatic fallback when the
+provider reports tools unsupported).
+
+Read-only queries run directly; state-changing tools ask for `y` (yes), `n`
+(no), or `a` (approve all for this session). Headless `-p` refuses changes unless
+`-y` is given. Interactive or never-ending mistl commands are refused.
+
+The startup directory is the workspace. File tools (`list_dir`, `find_files`,
+`grep`, `read_file`) inspect files within it. With `just` on PATH, the agent
+discovers justfile recipes and can run builds, tests, or background dev servers.
+Model-requested recipes, shell commands, and background-process stops need
+approval; process listing and output do not. Background processes started by the
+agent are stopped on exit. Type `!<command>` to run a shell command yourself
+without approval; its output is shared with the model on your next message.
+
+| Command | Action |
+| --- | --- |
+| `/model [id]` | Pick a model from the local API, or set a raw model id |
+| `/effort [level]` | Pick or set session effort; `default` uses mistl's default |
+| `/mistl [start]` | Show instance info, or start the daemon |
+| `/just` | List workspace recipes |
+| `/clear`, `/help`, `/quit` | Clear the conversation, show help, or quit |
+
+Typing `/` opens completion: `Up` / `Down` select, `Tab` completes, `Enter`
+runs, and `Esc` hides it. `!` also completes `!just <recipe>`.
+
+| Key | Action |
+| --- | --- |
+| `Enter` | Send |
+| `Alt+Enter` / `Ctrl+J` | New line |
+| `Esc` | Cancel the running turn or user shell command |
+| `PgUp` / `PgDn` | Scroll |
+| `Ctrl+O` | Expand/collapse tool output |
+| `Ctrl+C` | Cancel, or quit when idle |
+
 ### Sharing a tc-chat screen into VRChat
 
 Someone shares their screen in a [tc-chat](https://github.com/tik-choco/tc-chat) room

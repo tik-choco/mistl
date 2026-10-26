@@ -43,7 +43,7 @@ env:
   # Public mistlib. Switch to tik-choco-lab/mistlib-dev + develop (and set the
   # MISTLIB_DEV_TOKEN secret) to build against unreleased mistlib commits.
   MISTLIB_REPO: tik-choco-lab/mistlib
-  MISTLIB_REF: 0f5fd9e18a6a154fa8b826fd9a8c2fed8d8980a8
+  MISTLIB_REF: 170420b05045ee76b6f220d3d01cc31a834f9061
   MISTLIB_CONSENSUS_REPO: tik-choco-lab/mistlib-consensus
   MISTLIB_CONSENSUS_REF: a80f80b22de5466387fd9f93e63a3e793ff2f456
   # Runner cmake is 4.x; vendored libopus still declares an ancient minimum.

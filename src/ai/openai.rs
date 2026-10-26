@@ -17,10 +17,11 @@
 //!   "no model configured" error before sending.
 //! - Non-2xx -> error including status and the first 500 chars of the body.
 //! - If the response `content-type` contains `text/event-stream`, parse
-//!   SSE: buffer text across chunks, split on `\n`, keep the trailing
-//!   partial line buffered; for each complete line: trim, require `data:`
+//!   SSE: buffer bytes across chunks, decode complete `\n`-terminated lines,
+//!   keep the trailing partial line buffered (at most 8 MiB); for each
+//!   complete line: trim, require `data:`
 //!   prefix (else skip), strip prefix + trim; `[DONE]` -> skip; else parse
-//!   JSON (malformed -> skip silently) and extract
+//!   JSON (malformed -> skip silently), propagate `error` payloads, and extract
 //!   `choices[0].delta.content`; when it is a non-empty string, append it
 //!   to the accumulated result and send it into `delta_tx` (if provided).
 //!   Return the accumulated full string at stream end.
@@ -55,9 +56,9 @@ const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 const TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
-/// An upstream HTTP non-2xx reply. A typed error so the provider can send
-/// peers only the status (the detail carries the upstream body) while
-/// still logging everything locally.
+/// An upstream HTTP non-2xx reply or SSE error (mapped to 502). A typed
+/// error so the provider can send peers only the status (the detail carries
+/// the upstream body) while still logging everything locally.
 #[derive(Debug)]
 pub struct UpstreamHttpError {
     pub label: &'static str,
@@ -150,6 +151,9 @@ impl From<String> for ChatOutput {
 /// Upper bound on the total `function.arguments` bytes accumulated from one
 /// streamed answer (the upstream is not fully trusted to stay bounded).
 const MAX_TOOL_ARGS_BYTES: usize = 4 * 1024 * 1024;
+
+/// Bound an unfinished SSE line, including its JSON encoding overhead.
+const MAX_SSE_LINE_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Default)]
 struct PartialToolCall {
@@ -378,7 +382,7 @@ async fn stream_sse(
     mut response: reqwest::Response,
     delta_tx: Option<UnboundedSender<String>>,
 ) -> Result<ChatOutput> {
-    let mut buffer = String::new();
+    let mut buffer = Vec::new();
     let mut full = String::new();
     let mut acc = ToolCallAccumulator::default();
 
@@ -387,53 +391,77 @@ async fn stream_sse(
         .await
         .context("ai: reading LLM API stream")?
     {
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-
-        let mut lines: Vec<String> = buffer.split('\n').map(str::to_string).collect();
-        // The last element is either an empty string (buffer ended in a
-        // full line) or a partial line to keep buffered for the next chunk.
-        let remainder = lines.pop().unwrap_or_default();
-
-        for line in lines {
-            let trimmed = line.trim();
-            let Some(data) = trimmed.strip_prefix("data:") else {
-                continue; // No `data:` prefix -- skip (e.g. SSE comments).
-            };
-            let data = data.trim();
-            if data == "[DONE]" {
-                continue;
+        for part in chunk.split_inclusive(|byte| *byte == b'\n') {
+            if part.len() > MAX_SSE_LINE_BYTES - buffer.len() {
+                bail!("ai: upstream SSE line is too large");
             }
-
-            let Ok(parsed) = serde_json::from_str::<Value>(data) else {
-                continue; // Malformed SSE line -- skip silently.
-            };
-            let delta_obj = parsed
-                .get("choices")
-                .and_then(|c| c.get(0))
-                .and_then(|c| c.get("delta"));
-            if let Some(calls) = delta_obj.and_then(|d| d.get("tool_calls")) {
-                acc.apply(calls)?;
-            }
-            let delta = delta_obj
-                .and_then(|d| d.get("content"))
-                .and_then(Value::as_str);
-            if let Some(delta) = delta {
-                if !delta.is_empty() {
-                    full.push_str(delta);
-                    if let Some(tx) = &delta_tx {
-                        let _ = tx.send(delta.to_string());
-                    }
-                }
+            buffer.extend_from_slice(part);
+            if part.ends_with(b"\n") {
+                // Decode only complete lines: HTTP chunks can split a UTF-8
+                // character anywhere, including inside tool-call arguments.
+                apply_sse_line(&buffer, &mut full, &mut acc, delta_tx.as_ref())?;
+                buffer.clear();
             }
         }
-
-        buffer = remainder;
     }
 
     Ok(ChatOutput {
         content: full,
         tool_calls: acc.finish(),
     })
+}
+
+fn apply_sse_line(
+    line: &[u8],
+    full: &mut String,
+    acc: &mut ToolCallAccumulator,
+    delta_tx: Option<&UnboundedSender<String>>,
+) -> Result<()> {
+    let line = String::from_utf8_lossy(line);
+    let Some(data) = line.trim().strip_prefix("data:") else {
+        return Ok(()); // No `data:` prefix -- skip (e.g. SSE comments).
+    };
+    let data = data.trim();
+    if data == "[DONE]" {
+        return Ok(());
+    }
+    let Ok(parsed) = serde_json::from_str::<Value>(data) else {
+        return Ok(()); // Malformed SSE line -- skip silently.
+    };
+    if let Some(error) = parsed.get("error").filter(|e| !e.is_null()) {
+        let detail = error
+            .get("message")
+            .and_then(Value::as_str)
+            .or_else(|| error.as_str())
+            .map(truncate_500)
+            .unwrap_or_else(|| truncate_500(&error.to_string()));
+        // The HTTP headers already said 200; represent a backend failure as
+        // a bad gateway so providers use their existing peer-safe error path.
+        return Err(anyhow::Error::new(UpstreamHttpError {
+            label: "LLM API",
+            status: 502,
+            detail,
+        }));
+    }
+    let delta_obj = parsed
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("delta"));
+    if let Some(calls) = delta_obj.and_then(|d| d.get("tool_calls")) {
+        acc.apply(calls)?;
+    }
+    let delta = delta_obj
+        .and_then(|d| d.get("content"))
+        .and_then(Value::as_str);
+    if let Some(delta) = delta {
+        if !delta.is_empty() {
+            full.push_str(delta);
+            if let Some(tx) = delta_tx {
+                let _ = tx.send(delta.to_string());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `GET {base_url}/models` -> the model id list (OpenAI shape:
@@ -665,12 +693,16 @@ mod tests {
 
     /// One real HTTP chunked-transfer response, `parts` each written as a
     /// separate chunk frame (and thus, with a delay, a separate TCP write).
-    fn chunked_sse_response(parts: &[&str]) -> Vec<Vec<u8>> {
+    fn chunked_sse_response(parts: &[impl AsRef<[u8]>]) -> Vec<Vec<u8>> {
         let mut writes = vec![
             b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n".to_vec(),
         ];
         for part in parts {
-            writes.push(format!("{:x}\r\n{part}\r\n", part.len()).into_bytes());
+            let part = part.as_ref();
+            let mut frame = format!("{:x}\r\n", part.len()).into_bytes();
+            frame.extend_from_slice(part);
+            frame.extend_from_slice(b"\r\n");
+            writes.push(frame);
         }
         writes.push(b"0\r\n\r\n".to_vec());
         writes
@@ -777,6 +809,127 @@ mod tests {
         assert_eq!(deltas, vec!["Hello".to_string(), " world".to_string()]);
 
         server.await.unwrap();
+    }
+
+    /// Split at every UTF-8 continuation byte, forcing every interior
+    /// boundary of 2-, 3-, and 4-byte characters into separate HTTP chunks.
+    fn split_multibyte_chunks(body: &str) -> Vec<&[u8]> {
+        let bytes = body.as_bytes();
+        let mut parts = Vec::new();
+        let mut start = 0;
+        for (i, byte) in bytes.iter().enumerate() {
+            if byte & 0xc0 == 0x80 {
+                parts.push(&bytes[start..i]);
+                start = i;
+            }
+        }
+        parts.push(&bytes[start..]);
+        parts
+    }
+
+    #[tokio::test]
+    async fn sse_preserves_split_utf8_content_and_deltas() {
+        let content = "é日😀";
+        let body = format!(
+            "data: {}\r\n\r\ndata: [DONE]\r\n\r\n",
+            json!({"choices":[{"delta":{"content":content}}]})
+        );
+        let (base_url, server) = mock_server(
+            chunked_sse_response(&split_multibyte_chunks(&body)),
+            Duration::from_millis(5),
+        )
+        .await;
+        let (tx, mut rx) = unbounded_channel();
+        let config = cfg(base_url, Some("m"), None);
+        let result = stream_chat_completion(&config, &one_message(), None, Some(tx))
+            .await
+            .unwrap();
+
+        assert_eq!(result, content);
+        assert_eq!(rx.try_recv().unwrap(), content);
+        assert!(rx.try_recv().is_err());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sse_preserves_split_utf8_tool_arguments() {
+        let arguments = r#"{"text":"é日😀"}"#;
+        let body = format!(
+            "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+            json!({"choices":[{"delta":{"tool_calls":[{
+                "index":0,"id":"call_1","type":"function",
+                "function":{"name":"echo","arguments":"{\"text\":"}
+            }]}}]}),
+            json!({"choices":[{"delta":{"tool_calls":[{
+                "index":0,"function":{"arguments":"\"é日😀\"}"}
+            }]}}]})
+        );
+        let (base_url, server) = mock_server(
+            chunked_sse_response(&split_multibyte_chunks(&body)),
+            Duration::from_millis(5),
+        )
+        .await;
+        let config = cfg(base_url, Some("m"), None);
+        let out = stream_chat_completion_tools(
+            &config,
+            &one_message(),
+            None,
+            &ToolOptions::default(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out.content, "");
+        assert_eq!(
+            out.tool_calls,
+            Some(json!([{"id":"call_1","type":"function",
+                "function":{"name":"echo","arguments":arguments}}]))
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sse_mid_stream_error_fails_text_and_tool_completions() {
+        let message = "backend failed after partial output: 接続エラー";
+        let body = format!(
+            "data: {}\n\nevent: error\ndata: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+            json!({"choices":[{"delta":{
+                "content":"partial",
+                "tool_calls":[{"index":0,"function":{"name":"echo","arguments":"{"}}]
+            }}]}),
+            json!({"error":{"message":message,"type":"server_error"}}),
+            json!({"choices":[{"delta":{"content":"must not arrive"}}]})
+        );
+        for with_tools in [false, true] {
+            let (base_url, server) =
+                mock_server(chunked_sse_response(&[&body]), Duration::ZERO).await;
+            let config = cfg(base_url, Some("m"), None);
+            let (tx, mut rx) = unbounded_channel();
+            let err = if with_tools {
+                stream_chat_completion_tools(
+                    &config,
+                    &one_message(),
+                    None,
+                    &ToolOptions::default(),
+                    Some(tx),
+                )
+                .await
+                .unwrap_err()
+            } else {
+                stream_chat_completion(&config, &one_message(), None, Some(tx))
+                    .await
+                    .unwrap_err()
+            };
+
+            let http = err.downcast_ref::<UpstreamHttpError>().unwrap();
+            assert_eq!(http.status, 502);
+            assert_eq!(http.detail, message);
+            assert!(err.to_string().contains(message));
+            assert_eq!(rx.try_recv().unwrap(), "partial");
+            assert!(rx.try_recv().is_err(), "stop forwarding after the error");
+            server.await.unwrap();
+        }
     }
 
     #[tokio::test]

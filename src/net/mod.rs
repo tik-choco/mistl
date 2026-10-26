@@ -593,6 +593,28 @@ pub async fn send_direct(room: &str, to_node: &str, bytes: Vec<u8>) -> Result<()
     Ok(())
 }
 
+/// Reliable room-scoped send that waits for capacity and the local DataChannel
+/// write, bounded by [`NET_TIMEOUT`]. Storage responders use this to avoid
+/// dropping chunks when mistlib's bounded peer queues are full. This is not
+/// an acknowledgement from the remote application.
+pub async fn send_direct_wait(room: &str, to_node: &str, bytes: Vec<u8>) -> Result<()> {
+    let len = bytes.len();
+    tokio::time::timeout(
+        NET_TIMEOUT,
+        mistlib::app::send_message_direct_wait_in_room(
+            room.to_string(),
+            to_node.to_string(),
+            bytes,
+            mistlib::app::DELIVERY_RELIABLE,
+        ),
+    )
+    .await
+    .with_context(|| format!("net: send in room {room:?} timed out"))?
+    .map_err(|err| anyhow::anyhow!("net: send in room {room:?} failed: {err}"))?;
+    record_tx(room, to_node, len);
+    Ok(())
+}
+
 /// Reliable room-wide broadcast (every peer in `room`), scoped the same way
 /// [`send_direct`] is. An empty target node id is mistlib-core's broadcast
 /// sentinel -- the same convention tc-chat's own web client uses

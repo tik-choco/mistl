@@ -18,9 +18,9 @@ pub(super) const MAX_PEER_REQUESTS: usize = 64;
 // Discovery must leave room for WANTs whose clients already found this provider.
 const MAX_QUERIES: usize = MAX_REQUESTS - 64;
 const MAX_PEER_QUERIES: usize = MAX_PEER_REQUESTS - 16;
-// net::send_direct only acknowledges app-queue admission. No downstream capacity
-// or delivery ACK is exposed. One frame per 10 ms limits a peer to 100 frames/s;
-// keep the delay after the last frame too, so consecutive WANTs cannot burst.
+// Await local write completion and retain the per-peer fairness limit: one
+// frame per 10 ms, including after the last frame so consecutive WANTs cannot
+// burst. Local completion is not a delivery ACK from the remote application.
 pub(super) const FRAME_SPACING: Duration = Duration::from_millis(10);
 const SEND_DEADLINE: Duration = Duration::from_secs(5);
 
@@ -108,7 +108,7 @@ impl Default for Serving {
         Self {
             queue: Mutex::new(Queue::default()),
             send: Arc::new(|room, from, bytes| {
-                Box::pin(async move { crate::net::send_direct(&room, &from, bytes).await })
+                Box::pin(async move { crate::net::send_direct_wait(&room, &from, bytes).await })
             }),
         }
     }
