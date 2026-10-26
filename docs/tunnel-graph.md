@@ -1,72 +1,72 @@
-# Tunnel のノードグラフ
+# Tunnel Node Graph
 
-Tunnel パネルで Room ID を入力して Connect を押すと、セッションが開始されます。同じルームに入ったノードを表示し、その場で接続許可と TCP/UDP ポート転送を設定できます。
+Enter a Room ID in the Tunnel panel and click Connect to start a session. The graph shows nodes in the same room and lets you configure connection permissions and TCP/UDP port forwarding.
 
-## 操作
+## Operation
 
-1. ノード右端の丸い端子から別ノードの端子へドラッグします。端子を順にクリックしても接続できます。見出しのドラッグ、または見出しにフォーカスして矢印キーで配置を動かせます。
-2. 接続線をクリック（キーボードでは Enter / Space）すると、その接続の状態と削除ボタンを表示します。片側しか設定できていない線は破線で区別されます。
-3. ポート転送はすべて各ノードの「＋ ポート転送」から追加します。ポップアップが開き、1 画面に 1 つの質問だけを順に答えていく形式です（「戻る」で前の質問に戻っても入力は保持され、Esc・× で中止できます）。
-   1. **何をしますか？** 自分のノードでは次の 3 つから選びます。相手ノードのカードからは `serve` と `connect` のみです。
-      - **相手側のポートを使う**（`propose`）: 相手ノード（ルームに 1 台だけなら自動選択。一覧は常に完全な Node ID）→ 相手側のアドレス（例 `127.0.0.1:22`）と TCP/UDP → このノードで受けるアドレス `127.0.0.1:ポート` の順に聞かれます。送信すると相手に提案が届き、相手が承認するまで転送は開始しません。グラフ未対応のノードにも使えます。
-      - **相手が公開したサービスに接続**（`connect`）: 公開済みサービスの一覧から選び（プロトコルはサービスに従います）、このノードで受けるアドレスを指定します。
-      - **このノードのサービスを公開**（`serve`）: このノードで待ち受けているサービスの host:port と TCP/UDP を指定します。
-   このノードで受けるアドレスは入力中にデーモンが実際に待ち受けられるか確認します。他のプログラムが使用中なら「次へ」が押せず、空いているポートを提案します（デーモン側でも追加時に同じ確認をして拒否します）。
-   2. 最後に「このノード → 相手」の形で内容を確認し、「追加」（`propose` は「提案を送る」）で確定します。
-4. 追加したポート転送はノードカードの一覧に表示され、状態・アクティブな接続数・送受信バイト数が自動更新されます。各行の × から削除でき、削除前に確認ダイアログが出ます。自分のノードではすべての転送（グラフ管理下・従来形式を問わず）を × で削除できます。相手ノードでは、グラフが管理している転送のみ、権限がある場合に削除できます。
-5. 「相手側のポートを使う」の提案は、相手が承認するまで **「相手の承認待ち」** として自分のノードカードに表示されます（黄色の点滅ピル `⏳ <相手> の承認待ち`、行には `ローカル → 相手（リモートアドレス）` と完全な Node ID）。自分のノードと相手を結ぶ線も、明示的な線がなくても黄色の動く破線になります。行の × で提案を取り消せます（`tunnel.forward.propose.cancel`。相手にも取消が届き、相手の承認待ち一覧から消えます）。応答が来ると結果が必ず通知されます。承認されれば通常の転送行になり、拒否・無応答（5 分）・相手の退出ではトースト／ステータス行に理由が出ます。「あなたの判断待ち」カードには、自分が判断する必要のあるものだけが並び、自分の提案は入りません。
-6. 相手が公開したサービスへ接続したとき、相手側が接続ごとの承認を待たせている間は、接続元の転送行に `⏳ <相手> の接続承認待ち` が出ます。拒否されると約 2 分間 `✕ <相手> が接続を拒否しました` が残ります（下記「承認通知」）。
-7. 同じ相手から同じ転送への接続が同時に複数届いても、承認待ちは 1 件にまとめられ、1 回の承認で待っている接続すべてに適用されます。通信の承認が必要な場合は、相手ノード側で許可（`propose` への応答や、サービスへの接続承認）が必要です。線の編集権限と、サービスへの接続承認は別です。
+1. Drag from the round port at the right edge of one node to a port on another node. You can also click the ports one after the other to connect them. Drag a node header, or focus the header and use the arrow keys, to move the node.
+2. Click a link (or press Enter / Space with it focused) to show its status and a remove button. A link configured on only one side is shown as a dashed line.
+3. Add port forwards from `+ Port forward` on each node. A popup opens and asks one question at a time, one per screen. Answers are kept when you go `Back`; press Esc or click × to cancel.
+   1. **What do you want to do?** On your own node, choose from these three options. On another node's card, only `Publish a service on this node` and `Connect to a service a peer published` are available.
+      - **Use a port on a peer** (`propose`): Choose the peer node (selected automatically if there is only one node in the room; the list always shows the full Node ID), then the address on the peer (for example, `127.0.0.1:22`) and TCP/UDP, then the address on this node that will accept connections (`127.0.0.1:port`). Sending the proposal delivers it to the peer; forwarding does not start until the peer accepts. This also works with nodes that do not support the graph.
+      - **Connect to a service a peer published** (`connect`): Choose from the list of published services (the service determines the protocol), then specify the address on this node that will accept connections.
+      - **Publish a service on this node** (`serve`): Specify the host:port and TCP/UDP for a service listening on this node.
+   The daemon checks while you type whether it can listen on the address for this node. If another program is using it, `Next` stays disabled and an available port is suggested. The daemon also performs the same check when adding the forward and rejects it if the address is unavailable.
+   2. Finally, review the details in the form “this node → peer” and confirm with `Add` (`Send proposal` for `propose`).
+4. Added port forwards appear in each node card's list. Their status, active connection count, and bytes sent and received update automatically. Click × on a row to remove it; a confirmation dialog appears first. On your own node, you can remove any forward with ×, whether it is graph-managed or in the legacy format. On another node, you can remove only graph-managed forwards, and only if you have permission.
+5. A proposal from **Use a port on a peer** appears in your node card as **Waiting for approval** until the peer accepts it (a yellow animated pill, `⏳ Waiting for <peer> to accept`, and a row showing `local → peer (remote address)` with the full Node ID). The link between your node and the peer also becomes a yellow animated dashed line, even if there is no explicit link. Click × on the row to cancel the proposal (`tunnel.forward.propose.cancel`). The peer also receives the cancellation, and the proposal disappears from its pending list. The result is always reported when a response arrives. If accepted, the proposal becomes a regular forward row. If denied, unanswered (5 minutes), or the peer leaves, a toast or status row gives the reason. The `Waiting for your decision` card lists only items that require your decision; your own proposals are not included.
+6. When you connect to a service published by a peer, the forwarding row on the connecting node shows `⏳ Waiting for <peer> to approve the connection` while the peer waits for approval of that connection. If denied, `✕ <peer> denied the connection` remains for about 2 minutes (see “Approval notices”).
+7. If multiple connections to the same forward arrive from the same peer at once, they are grouped into one pending approval, and a single approval applies to all waiting connections. When communication requires approval, the peer node must allow it (by responding to a `propose` or approving a connection to a service). Permission to edit links is separate from approval to connect to a service.
 
-### 承認通知（接続時）
+### Approval notices (when connecting)
 
-サービスの所有者が接続を承認待ちにしたとき、所有者は接続元へ小さな通知 `{"t":"mistl-tunnel-auth-v1","state":"pending|allowed|denied","forward_key":..,"target":..,"proto":..,"ts":..}` を送ります（同じ接続元・転送・宛先の待ちは 1 行にまとまるので、通知も 1 回と、解決時の 1 回だけです）。`kind` / `type` / `v` を持たない `t` タグのメッセージなので、既存の `P2pPayload`・tc-chat・mistai の各ハンドラや古い mistl・`p2p` は無視します。
+When a service owner puts a connection on hold for approval, the owner sends the connecting node a small notice `{"t":"mistl-tunnel-auth-v1","state":"pending|allowed|denied","forward_key":..,"target":..,"proto":..,"ts":..}`. Waits from the same connecting node, forward, and destination are grouped into one row, so a notice is sent once while pending and once when resolved. This message uses a `t` tag and has no `kind` / `type` / `v`, so existing `P2pPayload`, tc-chat, and mistai handlers, as well as older mistl and `p2p`, ignore it.
 
-- 通知は表示専用です。受信側は、トランスポート上の送信元が自分の `connect` 転送の相手であり、`forward_key` が同じ転送を指す場合だけ受け付けます（ノードスコープ付き `…@<相手>` なら送信元と一致、スコープなしなら実際にその転送の接続先になりうる相手）。他のノードの通知で別の転送が「承認待ち」になることはありません。
-- 状態は件数・期限付き（承認待ちは所有者の判断期限 180 秒＋余裕、拒否の表示は 120 秒）で保持し、`tunnel.status` の `forwards[]`（`connect`）に `awaiting_approval` / `awaiting_since_ms` / `approval_peer_id` / `denied_at_ms` として出ます。
-- 提案の取消も `t` タグのメッセージ（`mistl-tunnel-propose-cancel-v1`）で、提案した本人（送信元）の `req_id` だけが取り消せます。
+- Notices are display-only. The receiver accepts one only if the transport sender is the peer of one of its `connect` forwards and `forward_key` identifies that same forward (`…@<peer>` with a node scope must match the sender; without a scope, the sender must be a peer that could actually be the destination of that forward). A notice from another node cannot put a different forward into “Waiting for approval”.
+- State is retained with count and time limits (pending approvals for the owner's 180-second decision window plus a margin; denied notices for 120 seconds) and appears in `tunnel.status` `forwards[]` (`connect`) as `awaiting_approval` / `awaiting_since_ms` / `approval_peer_id` / `denied_at_ms`.
+- Proposal cancellation also uses a `t`-tagged message (`mistl-tunnel-propose-cancel-v1`); only the `req_id` of the proposing sender can be cancelled.
 
-### 相手の名前
+### Peer names
 
-プロフィール機能（`window.MistlPeers`）があれば、ノードカード・提案ウィザード・承認待ちの表にアバターと表示名を出します。名前は相手の自己申告なので、**承認待ちの行や確認画面では常に完全な Node ID を名前の隣に表示**します。
+If the profile feature (`window.MistlPeers`) is available, node cards, the proposal wizard, and the pending approval table show avatars and display names. Names are self-reported by peers, so pending rows and confirmation screens always show the full Node ID next to the name.
 
-### Tunnel のチャットは廃止
+### Tunnel chat removed
 
-ルームのチャット（`tunnel.chat.send`、`mistl tunnel chat`、ダッシュボードのチャットタブ、TUI の `c`）は、ダイレクトメッセージ機能に置き換えて削除しました。古い mistl や `p2p` が送る `{"kind":"chat"}` は引き続き受信しても無視されます（`P2pPayload::Chat` は解析のために残しています）。「信頼と履歴」はグラフの下の折りたたみ表示です。
+Room chat (`tunnel.chat.send`, `mistl tunnel chat`, the dashboard chat tab, and TUI `c`) has been replaced by direct messaging and removed. Messages `{"kind":"chat"}` from older mistl or `p2p` are still received and ignored (`P2pPayload::Chat` remains for parsing). “Trust & history” is a collapsed section below the graph.
 
-ノードの配置だけをブラウザーに保存します。接続許可・編集権限・編集ロック・グラフから追加した転送は、デーモンのデータディレクトリー `tunnel/graphs/<room-hash>.json` にルーム別に保存されます。再開時に転送も復元します。
+Only node positions are saved in the browser. Connection permissions, link edit permissions, edit locks, and forwards added from the graph are saved per room in the daemon data directory at `tunnel/graphs/<room-hash>.json`. Forwards are restored when the session resumes.
 
-## Broadcast とロック
+## Broadcast and locking
 
-自分のノードカード右上の ⚙ から設定します。相手ノードのカードには、ON の項目だけがバッジで表示されます。
+Configure these settings from ⚙ at the top right of your own node card. Other node cards show badges only for settings that are ON.
 
-- **Broadcast ON**: ルームの全ノードとの通信を許可するモードです。既存の転送承認・信頼設定も引き続き適用されます。互換性のため初期値は ON です。
-- **Broadcast OFF**: 明示的に線を結んだ相手だけに通信を許可します。両端で相手を許可している必要があります。1 対 1 に限定するには両端で OFF にして線を結びます。
-- **編集ロック**: 他ノードからの線・転送設定の変更を拒否します。既存通信は継続し、所有者自身は編集できます。パスワード設定ではありません。
+- **Broadcast ON**: Allows communication with all nodes in the room. Existing forward approvals and trust settings still apply. ON is the default for compatibility.
+- **Broadcast OFF**: Allows communication only with peers connected by an explicit link. Both ends must allow the peer. To limit communication to one other node, turn OFF on both ends and connect them with a link.
+- **Edit lock**: Rejects changes to links and forward settings from other nodes. Existing communication continues, and the owner can still edit. This is not a password setting.
 
-Broadcast はルームへの公開・通信許可を意味します。同じ TCP/UDP データを全ノードへ複製する機能ではありません。線はトンネルの通信許可を表し、WebRTC の物理接続の変更や疎通完了を表すものではありません。
+Broadcast means making the node visible in the room and allowing communication. It does not replicate the same TCP/UDP data to every node. A link represents permission to communicate over the tunnel; it does not represent a change to the physical WebRTC connection or confirm connectivity.
 
-## 権限
+## Permissions
 
-自分のノードの ⚙ →「接続・編集権限」で、相手の Node ID ごとに次を個別に許可できます。初期値はすべて不許可です。
+On your own node, open ⚙ → “Connection permissions” to grant each of the following individually for a peer's Node ID. All are denied by default.
 
-- このノードに接する線の追加・削除
-- ポート転送の追加（このマシンから到達可能なサービスの公開を含む）
-- グラフで管理しているポート転送の削除
+- Change links involving this node
+- Add forwards (including publishing local services)
+- Remove forwards
 
-権限があれば、操作中のマシン以外のノード同士も配線できます。両側を変更するには、両所有者から線の編集権限が必要です。Broadcast・ロック・権限そのものの変更は所有者だけが行えます。検証は所有者のデーモンが、実際の送信元ノードの識別情報に基づいて実施します。
+With permission, you can connect nodes other than the one you are operating. Changes at both ends require link-edit permission from both owners. Only an owner can change Broadcast, the lock, or permissions themselves. The owner's daemon validates requests using the identity of the actual transport sender node.
 
-両端の変更は個別に確認するため、片方が拒否・切断すると一部だけ反映される場合があります。画面にエラーを表示するので、更新後の線を確認して再試行してください。応答がない場合も成功とは表示しません。
+Changes at each end are confirmed separately, so if one end rejects or disconnects, only part of the change may take effect. An error is shown; inspect the updated links and retry. A missing response is never reported as success.
 
-## 互換性と検証
+## Compatibility and verification
 
-グラフの共有・遠隔編集には相手も対応版である必要があります。従来の `p2p` の既存メッセージ形式は維持し、グラフ用の `kind: graph` を追加しています。未対応ノードは「グラフ未対応・状態待ち」と表示し、遠隔編集を無効にします。
+The peer must also run a compatible version to share the graph or edit it remotely. Existing `p2p` message formats are preserved, and `kind: graph` has been added for graph messages. An unsupported node is shown as “Graph unsupported or waiting for state”, and remote editing is disabled.
 
-検証コマンド:
+Verification commands:
 
 ```text
 npm test
 cargo test --offline tunnel:: -- --test-threads=1
 ```
 
-DOM の操作テストと、デーモン側の権限・ロック・保存失敗・承認待ち中の接続取消・ルーム分離・データ経路制御のテストを含みます。実ブラウザーの描画と複数実機間の通信は別途確認対象です。
+This includes DOM interaction tests and daemon tests for permissions, locks, save failures, cancellation of connections while awaiting approval, room isolation, and data-path control. Rendering in a real browser and communication between multiple real devices require separate verification.

@@ -1,622 +1,109 @@
+<div align="center">
+
 # MISTL
 
-**MISTL** (binary name: `mistl`) is a Rust daemon CLI that unifies tik-choco ecosystem features in a single binary.
-It integrates the [tc-storage](https://github.com/tik-choco/tc-storage) CLI and the
-[mistlink](https://github.com/tik-choco-lab/mistlink) CLI, built on top of
-[mistlib](https://github.com/tik-choco-lab/mistlib) (path dependencies).
+**One daemon for the tik-choco P2P ecosystem.**
 
-- **identity** — user profile and `did:key` Ed25519 key management (tc-storage compatible)
-- **store** — content-addressed storage (CIDv1 / sha2-256 / 1 MiB chunks, mistlib StorageEngine)
-- **stream** — screen-share RTSP server (playable by VRChat's AVPro video player; Rust
-  port of mistlink), from local screen capture or relayed from a
-  [tc-chat](https://github.com/tik-choco/tc-chat) screen share (video + audio) over the
-  p2p network
-- **chat_relay** — joins configured [tc-chat](https://github.com/tik-choco/tc-chat)
-  rooms server-lessly, verifies and persists signed `tc-chat:*` wires, and answers
-  other peers' history-request replays, so chat keeps arriving even with no tc-chat
-  browser tab open
-- **tunnel** — P2P port forwarding over the mist network (Rust port of
-  [p2p](https://github.com/tik-choco-lab/p2p)): tunnel TCP/UDP through NAT to a peer,
-  with per-connection approval, a persisted trust store, and an audit log. Wire-compatible
-  with the standalone `p2p` binary, so a `mistl` node and a `p2p` node can tunnel to
-  each other. The dashboard
-  shows plainly when a proposal or a connection is waiting for the peer's approval
-- **ui** — embedded web dashboard (`mistl` with no args, or `mistl ui`): operate all
-  of the above from a browser at `http://127.0.0.1:6480/`, bilingual EN/JA, with
-  drag-and-drop file storage and live settings
-- **ai** — p2p AI network, wire-compatible with
-  [mistai](https://github.com/tik-choco-lab/mistai) protocol v1 (tc-mistllm /
-  tc-translate peers can share the room): *provide* LLM inference to peers from any
-  OpenAI-compatible upstream, and/or *serve* a local OpenAI-compatible API endpoint
-  whose requests are answered by the network
+[![release](https://img.shields.io/github/v/release/tik-choco/mistl?include_prereleases&label=release&color=2f6feb)](https://github.com/tik-choco/mistl/releases/latest)
+[![build](https://img.shields.io/github/actions/workflow/status/tik-choco/mistl/release.yml?label=build)](https://github.com/tik-choco/mistl/actions/workflows/release.yml)
+[![license](https://img.shields.io/badge/license-MPL--2.0-blue)](LICENSE)
 
-The release build is a single, fully standalone `mistl.exe`: screen capture uses
-Windows.Graphics.Capture, H264 encoding uses OpenH264 compiled into the binary, and
-the MSVC runtime is statically linked — no external tools, DLLs, or installers.
+English · [日本語](README.ja.md) · [简体中文](README.zh.md)
 
-## Requirements
+</div>
 
-- Rust (edition 2024) and git (to clone the
-  [mistlib](https://github.com/tik-choco-lab/mistlib) and
-  [mistlib-consensus](https://github.com/tik-choco-lab/mistlib-consensus)
-  source repositories)
-- [just](https://github.com/casey/just) (optional but recommended task runner)
-- [cmake](https://cmake.org/) on PATH at build time (libopus is compiled from source
-  for the relay's audio pipeline). With cmake ≥ 4.0, also set
-  `CMAKE_POLICY_VERSION_MINIMUM=3.5` in the build environment.
-- Optional: [ffmpeg](https://ffmpeg.org/) on PATH, only if you switch
-  `stream.capture_backend` to `"ffmpeg"` (the default `"native"` backend has no
-  external dependencies)
+---
 
-## Build
+`mistl` is a single Rust binary that runs a background daemon on top of
+[mistlib](https://github.com/tik-choco-lab/mistlib). It keeps your identity,
+files, chat history, tunnels, screen shares and AI models available to peers on
+the mist network — with no server to run. Drive it from a web dashboard or the
+CLI.
 
-mistlib is a path dependency fetched into `.mistlib-src/` (a plain git clone,
-not committed) by `scripts/fetch-mistlib`, configured through `.env`:
+The Windows release is one standalone `mistl.exe`: screen capture, H264
+encoding and the C runtime are built in. No DLLs, no installers, no external
+tools.
 
-```console
-$ cp .env.example .env        # defaults to the public mistlib; no credentials needed
-$ just release                # fetches mistlib on first build, then cargo build --release
-```
+## Features
 
-`MISTLIB_REPO`/`MISTLIB_REF` in `.env` select the source: the public
-[mistlib](https://github.com/tik-choco-lab/mistlib) (`main`, the default) or
-the private `mistlib-dev` (`develop`) for unreleased upstream commits — the
-example file carries both, one commented out. Changing them re-points the
-existing `.mistlib-src/` clone on the next fetch, so there is no need to delete
-it. `MISTLIB_CONSENSUS_REPO`/`_REF` work the same way for
-`.mistlib-consensus-src/`.
+|  |  |
+| --- | --- |
+| **Identity** | `did:key` Ed25519 keys and a profile shared with tc-chat / tc-storage, plus root → leaf delegation for browser apps |
+| **Storage** | Content-addressed store (CIDv1, 1 MiB chunks), compatible with [tc-storage](https://github.com/tik-choco/tc-storage) |
+| **Screen share** | Serve your screen, or a [tc-chat](https://github.com/tik-choco/tc-chat) share, as RTSP for the VRChat video player |
+| **Chat relay** | Stays in tc-chat rooms and replays signed history to late joiners |
+| **Tunnel** | TCP/UDP port forwarding through NAT, with per-connection approval |
+| **AI network** | Share LLMs with peers ([mistai](https://github.com/tik-choco-lab/mistai) protocol), and a local OpenAI-compatible API |
+| **Agent** | `mistl agent`: a terminal AI assistant that can operate mistl and your workspace |
+| **Dashboard** | Everything above from the browser, in English and 日本語 |
 
-Without `just`: run `scripts/fetch-mistlib.sh` (or `scripts\fetch-mistlib.ps1`
-on Windows) once, then `cargo build --release`. Re-run `just fetch-mistlib`
-whenever you want to update to the latest `MISTLIB_REF`; the clone in
-`.mistlib-src/` is a normal git checkout, so you can also edit, branch, and
-push mistlib changes from there while developing against it.
+## Install
 
-### Building a Linux binary from Windows
+Download the binary for your platform from
+[Releases](https://github.com/tik-choco/mistl/releases/latest):
 
-```console
-$ just release-linux           # builds via WSL2, packages to dist/mistl-linux-x86_64
-```
+| Platform | Asset |
+| --- | --- |
+| Windows | `mistl-v<version>-x86_64-pc-windows-msvc.zip` |
+| Linux | `mistl-v<version>-x86_64-unknown-linux-gnu.tar.gz` / `aarch64-…` |
+| macOS | `mistl-v<version>-aarch64-apple-darwin.tar.gz` / `x86_64-…` |
 
-This runs `cargo build` inside WSL2 against the same checkout rather than
-true host cross-compiling, since mistlib links several C libraries
-(openh264/opus via cmake, fdk-aac via cc, OpenSSL for reqwest's native-tls)
-that need a real Linux toolchain/sysroot. Requires WSL2 with a distro that
-has a Rust toolchain plus `build-essential cmake pkg-config libssl-dev`
-(Ubuntu: `sudo apt install build-essential cmake pkg-config libssl-dev` and
-[rustup](https://rustup.rs/)). The Linux build lands in
-`target/x86_64-unknown-linux-gnu/release/`, kept separate from the Windows
-build's `target/release/`.
+`mistl install` copies it to a per-user location and enables start at login.
+`mistl update` keeps it current.
 
 ## Quick start
 
-Local builds use an isolated **dev** instance, with a version/build banner at the
-top of the dashboard. External connections initially start **OFF**; enable them
-using the dashboard, Windows tray, or `mistl network on`. The choice is saved
-immediately and restored after PC restart. Switching briefly restarts that
-instance. Login startup is a separate, instance-specific setting.
+Double-click `mistl.exe`, or run `mistl` with no arguments. The daemon starts in
+the background and the dashboard opens in your browser.
 
-Use `just dev` / `just watch` for development. `just release` only builds and no
-longer stops running daemons. See [runtime and connection controls](docs/runtime.md)
-for instance paths, migration, tray controls, and verification commands.
+> [!NOTE]
+> Network connections start **off**. Turn them on in the dashboard, from the
+> tray icon, or with `mistl network on`.
 
-Releases are tag-driven: pushing a `v*` tag makes CI build every target and
-publish a GitHub Release (a `-beta.N` tag becomes a prerelease, installed only
-with `update.prerelease = true`). `just publish` computes and creates the tag:
-
-```
-$ just publish status                 # current tags and the next versions; changes nothing
-$ just publish beta --push            # on develop: v0.1.16 -> v0.2.0-beta.1 -> v0.2.0-beta.2 ...
-$ just publish stable --push          # on main: v0.2.0-beta.N -> v0.2.0
-```
-
-Double-click `mistl.exe` (or run `mistl` with no arguments): the daemon starts in
-the background and the dashboard opens in your browser — everything below can be
-done from there, including settings. The dashboard is bilingual (English/日本語,
-following your browser language).
-
-## Usage (CLI)
-
-The CLI acts as a client to a resident daemon (IPC: loopback TCP with token auth).
-Client commands start the daemon automatically if it isn't running.
+The same things from the CLI:
 
 ```console
-# Daemon management
-$ mistl status                # combined overview (daemon, stream, ai)
-$ mistl daemon start          # start in the background (prints the dashboard URL)
-$ mistl daemon start --host 0.0.0.0  # also bind the dashboard for other devices on the LAN
-$ mistl daemon status
-$ mistl daemon stop
-
-# Configuration (no config.toml editing needed)
-$ mistl config show           # secrets masked
-$ mistl config set ai.default_ref '{"provider_id":"http","model":"example-model"}'
-$ mistl config set stream.room my-room
-
-# Profile / DID keys
-$ mistl key did               # generates a key on first call
-$ mistl key list
-
-# DID delegation (root/leaf chain): let a browser app's per-origin identity
-# be recognized as the same person as this mistl-held root identity
-$ mistl key delegate --leaf did:key:z6Mk...   # manual transfer: prints a DelegationV1 JSON to paste into the app
-$ mistl key delegations                       # list delegations issued so far
-$ mistl key pair                              # no-copy-paste: prints a pairing code, waits for the app to claim it
-
-$ mistl profile set display_name "yourname"
-$ mistl profile show
-
-# Storage
-$ mistl store put .\file.bin  # -> returns a CID
-$ mistl store ls
-$ mistl store get <cid> --output .\file.bin
-
-# Screen share (VRChat)
-$ mistl stream start          # local screen -> rtsp://<LAN IP>:8554/stream
-$ mistl stream start --room my-room   # ...and also publish it into a mistlib room (native capture, Windows)
-$ mistl stream relay --room my-room   # tc-chat share (video+audio) -> same URL
-$ mistl stream selftest --audio aac   # synthetic video+audio feed for local testing
-$ mistl stream status
-$ mistl stream stop
-
-# Chat relay
-$ mistl chat rooms            # rooms currently joined by the chat relay
-$ mistl chat log <room>       # replay persisted history for a room
-$ mistl chat log <room> --limit 50
-
-# Tunnel (P2P port forwarding)
-$ mistl tunnel start          # join the configured room (generates one on first run)
-$ mistl tunnel room           # show the room id to hand to the other side
-$ mistl tunnel room --new     # issue a fresh room id and switch to it
-$ mistl tunnel room --list    # recently used rooms
-$ mistl tunnel serve 22       # offer local port 22 to peers in the room
-$ mistl tunnel connect <room> 10022:22   # from the other machine: local 10022 -> peer's 22
-$ mistl tunnel status         # peers, forwards, pending approvals, trust list
-$ mistl tunnel approve <id> --remember   # allow a peer's connection, and remember it
-$ mistl tunnel tui            # interactive terminal UI (talks to the daemon)
-
-# Web dashboard
-$ mistl ui                    # starts the daemon if needed, opens the browser
-
-# AI network
-$ mistl ai provide start      # turn provide on for enabled Rooms with a nonempty shared list
-$ mistl ai provide stop       # turn provide off for every Room
-$ mistl ai serve start        # local OpenAI-compatible API -> http://127.0.0.1:6478/v1
-$ mistl ai chat "hello" --model mock-echo-1
-$ mistl ai models
-$ mistl ai status
-$ mistl ai external apply --owner my-app < registration.json
-$ mistl ai external get --owner my-app
-$ mistl ai external remove --owner my-app
+$ mistl status                          # daemon, stream and AI at a glance
+$ mistl store put ./file.bin            # -> CID
+$ mistl stream relay --room <room>      # tc-chat share -> rtsp://<LAN IP>:8554/stream
+$ mistl tunnel serve 22                 # offer local port 22 to the tunnel room
+$ mistl ai serve start                  # OpenAI-compatible API on http://127.0.0.1:6478/v1
+$ mistl agent                           # terminal AI agent
 ```
 
-With `ai serve` running, OpenAI clients use the configured `ai.default_ref` or
-resolve an explicit raw model id through the enabled providers' model caches.
-HTTP providers call their endpoint directly; Room providers use the p2p network:
+## Documentation
 
-```console
-$ curl http://127.0.0.1:6478/v1/chat/completions \
-    -H "Content-Type: application/json" \
-    -d '{"messages":[{"role":"user","content":"hi"}],"stream":true}'
-```
-
-OpenAI tool calling (`tools`, `tool_choice`, `tool_calls`, `role: "tool"`) works too:
-providers advertise a `tools` service next to `chat`, and the request is executed by the
-provider's upstream. If the selected network provider does not advertise `tools` (an
-older peer), the API answers `400` with `code: "tools_unsupported"` instead of
-sending the tool fields to it.
-
-Both default and room chat routes forward `reasoning_effort` (including the
-explicit `"none"` value) to the upstream. To select an enabled Room provider
-directly, use `GET /v1/rooms/{room}/models` or
-`POST /v1/rooms/{room}/chat/completions`, `/audio/speech` and
-`/audio/transcriptions` (the audio suffixes follow the same room prefix).
-URL-encode the room id; missing or disabled rooms return 404. Room chat supports
-JSON and SSE. Image content parts use a mistai-compatible `oai` tunnel, with
-buffered responses adapted to SSE when requested. Providers advertise `oai` for
-OpenAI chat, model-list and embedding requests. See
-[AI configuration and room API](docs/ai-config.md) for routes and limits.
-
-Local applications can register HTTP connections and rooms through `ai external`
-instead of editing mistl's configuration. Registrations are private, stored
-separately in `ai-external.json`, and merged live with user settings. A disabled
-user Room stays disabled. `get` masks API keys and reports room status; the
-dashboard shows each owner's contributions read-only and can unregister them.
-
-### Terminal AI agent
-
-`mistl agent` opens a terminal UI: ask in natural language to check status,
-manage stored files, or work on a project, and it runs tools and summarizes
-the results. It uses the LLM selected by mistl's `ai.default_ref` / `ai.providers`
-through the local OpenAI-compatible API, starting the daemon and API as needed.
-See [AI configuration](docs/ai-config.md) for model setup.
-
-```console
-$ mistl agent                              # interactive TUI
-$ mistl agent -p "Is the AI network up?"    # one prompt on stdout, then exit
-$ mistl agent -m model-id --reasoning-effort high
-$ mistl agent --list-models                 # list model ids from the local API
-```
-
-Flags: `-p` / `--prompt` runs without the TUI; `-m` / `--model` selects a model;
-`--reasoning-effort` overrides effort for this session; `-y` / `--yes` approves
-state-changing tools automatically. `--tool-mode native|prompt` selects OpenAI
-tools or fenced tool blocks (default: native, with automatic fallback when the
-provider reports tools unsupported).
-
-Read-only queries run directly; state-changing tools ask for `y` (yes), `n`
-(no), or `a` (approve all for this session). Headless `-p` refuses changes unless
-`-y` is given. Interactive or never-ending mistl commands are refused.
-
-The startup directory is the workspace. File tools (`list_dir`, `find_files`,
-`grep`, `read_file`) inspect files within it. With `just` on PATH, the agent
-discovers justfile recipes and can run builds, tests, or background dev servers.
-Model-requested recipes, shell commands, and background-process stops need
-approval; process listing and output do not. Background processes started by the
-agent are stopped on exit. Type `!<command>` to run a shell command yourself
-without approval; its output is shared with the model on your next message.
-
-| Command | Action |
+| Topic | |
 | --- | --- |
-| `/model [id]` | Pick a model from the local API, or set a raw model id |
-| `/effort [level]` | Pick or set session effort; `default` uses mistl's default |
-| `/mistl [start]` | Show instance info, or start the daemon |
-| `/just` | List workspace recipes |
-| `/clear`, `/help`, `/quit` | Clear the conversation, show help, or quit |
+| [CLI reference](docs/cli.md) | Every command, VRChat relay, chat relay, escrow, agent |
+| [Configuration](docs/configuration.md) | `config.toml` keys and where data lives |
+| [AI configuration](docs/ai-config.md) | Providers, rooms and the local API |
+| [Identity](docs/identity.md) | Profile document and DID delegation |
+| [Architecture](docs/architecture.md) | Modules, interop, bot delivery, known limitations |
+| [Runtime](docs/runtime.md) | Dev and stable instances, connection controls |
+| [Building from source](docs/building.md) | Requirements, build, releases |
 
-Typing `/` opens completion: `Up` / `Down` select, `Tab` completes, `Enter`
-runs, and `Esc` hides it. `!` also completes `!just <recipe>`.
+## Building from source
 
-| Key | Action |
-| --- | --- |
-| `Enter` | Send |
-| `Alt+Enter` / `Ctrl+J` | New line |
-| `Esc` | Cancel the running turn or user shell command |
-| `PgUp` / `PgDn` | Scroll |
-| `Ctrl+O` | Expand/collapse tool output |
-| `Ctrl+C` | Cancel, or quit when idle |
-
-### Sharing a tc-chat screen into VRChat
-
-Someone shares their screen in a [tc-chat](https://github.com/tik-choco/tc-chat) room
-(browser screen share, optionally with tab/system audio). On the machine that should
-feed VRChat, run:
+Requires Rust, git, cmake and (optionally) [just](https://github.com/casey/just).
 
 ```console
-$ mistl stream relay --room <the tc-chat room id>
-
-  Paste this URL into the VRChat video player:
-
-      rtsp://192.168.x.x:8554/stream
+$ cp .env.example .env    # selects the mistlib source
+$ just release            # fetches mistlib, then cargo build --release
 ```
 
-mistl joins the room as a WebRTC peer, receives the share (H264 video + Opus audio),
-transcodes the audio to AAC (what AVPro plays over RTSP), and serves both tracks on
-the RTSP URL. Paste the printed URL into any AVPro-based VRChat video player.
-Note: the p2p transport supports multiple simultaneous rooms per process, so
-`stream.room` (shared by both `stream relay` and `stream share`) can name its
-own room independent of `chat_relay.rooms` and AI Room providers -- or reuse one of
-them if you'd rather keep everything in one room.
+Local builds run as an isolated **dev** instance, separate from an installed
+release. See [Building from source](docs/building.md) for details.
 
-**Any number of viewers (mesh + cascade):** VRChat's AVPro can only play a URL,
-not join the p2p swarm, so the scalable and lowest-latency arrangement is for
-*each* viewer to run `mistl stream relay --room X` on their own machine and
-point their VRChat at their own `rtsp://127.0.0.1:8554/stream`. Everyone talks
-to their own loopback (no public IP or port-forwarding).
+## Status
 
-With `[stream] cascade = true` (the default), every relay node in the room
-runs a small Raft control plane to elect a **leader** among themselves (this
-is relay-node-only leader election — separate from, and invisible to, the
-tc-chat browser peers sharing the screen). The leader is the one that locks
-onto the sharer directly and re-publishes what it receives back into the
-room as its own tracks (raw passthrough, no re-encoding); every other relay
-node (**follower**) locks onto the leader's re-published tracks instead of
-the sharer. This means the sharer's browser only ever uplinks to one peer
-(the leader) no matter how many relays are watching, and it also reaches
-relays that have no direct p2p connection to the sharer, since mistlib's
-overlay is a selective mesh rather than a full one. If the leader goes away,
-the remaining relays elect a new one automatically and re-lock — no manual
-intervention. Set `cascade = false` to opt a node out and fall back to the
-original "lock onto the sharer directly" behavior.
-
-See [VERIFY.md](VERIFY.md) for the full topology, the log lines that confirm
-each stage (including cascade role/leader changes), and `mistl stream
-selftest` — a synthetic video+audio feed that exercises the exact two-track
-RTSP output VRChat consumes, so you can confirm the playback path locally
-(ffprobe/ffplay) without a live p2p share.
-
-### Standing tc-chat relay
-
-With `[chat_relay] enabled = true` and one or more `rooms`, the daemon joins
-those tc-chat rooms at startup (once per daemon run — changing either setting
-needs a restart) and stays in them for as long as it runs. It verifies every
-inbound signed `tc-chat:*` wire against the sender's `did:key`, appends it
-verbatim to a per-room log under `<data_dir>/relay/<room>/wirelog.jsonl`, and
-answers other peers' `tc-chat:history-request` broadcasts by replaying that
-log — so a tab joining later catches up even if nobody else was online.
-Replayed wires keep their original signature, so receivers re-verify them
-exactly like live traffic: the relay is never trusted, only present.
-
-`mistl chat rooms` shows the configured rooms and whether each is currently
-joined; `mistl chat log <room>` prints the tail of that room's stored wires
-(the same view the dashboard's tc-chat Relay panel renders).
-
-These two settings used to live in the (now removed) `[mailbox]` section as
-`chat_rooms`/`chat_relay`; a config.toml still carrying them is migrated to
-`[chat_relay]` on the next daemon start, and the old section is dropped.
-
-### Encrypted checkpoint escrow
-
-An opt-in [Raft replication prototype](docs/escrow-replication.md) can replicate
-new escrow rooms across a fixed set of storage nodes. It has bounded history and
-requires additional work before unattended long-running use.
-
-The optional tc-escrow v1 service keeps browser-encrypted application checkpoints
-for late joiners. Run `mistl escrow rooms add <room>`, restart the daemon, and enable
-network connections; configure that same escrow room in the application.
-`mistl escrow status` reports rooms, slots, and bytes without exposing contents.
-The dashboard's **Store → Escrow** page offers the same room controls, status,
-enabled switch and advanced capacity limits, with a daemon restart action. In
-tc-linkai, copy the auto-generated `tce-…` **mistl room** into **Add room**.
-Move encrypted checkpoints between nodes with `mistl escrow export <FILE>` and
-`mistl escrow import <FILE>` (optional repeated `--room`; export accepts `--force`),
-or use the dashboard's **Export** and **Import** buttons.
-Signed heads use CAS and a pinned writer, with durable current/previous blobs that
-remain downloadable after restart. See [escrow setup and protocol](docs/escrow.md).
-
-## Configuration
-
-Configuration lives in `%APPDATA%\tik-choco\mistl\config\config.toml` (created with
-defaults on first run) and can be changed with `mistl config set` or in the
-dashboard's Settings panel — changes hot-reload into the running daemon and apply
-the next time the affected service starts (room ids and `[ui]` need a daemon
-restart):
-
-```toml
-[identity]
-# display_name = "yourname"
-
-[storage]
-# blocks_dir = 'D:\mistl-blocks'
-capacity_bytes = 10737418240
-# room_ids = ["my-storage-room"]             # tc-chat room(s) for peer block exchange; default: local-only, no room joined
-
-[stream]
-rtsp_url = "rtsp://127.0.0.1:8554/stream"   # use 0.0.0.0 to expose on the LAN
-frame_rate = 30
-audio_capture = false                        # local capture audio: not implemented yet
-capture_backend = "native"                   # "native" (built-in) or "ffmpeg"
-max_width = 1920                             # native backend: downscale wider screens
-# room = "my-room"                           # tc-chat room for `stream relay`/`stream share`
-audio_codec = "aac"                          # relay audio track: "aac" (AVPro) or "opus"
-cascade = true                               # cascade distribution across relay nodes (see below)
-
-[chat_relay]
-enabled = false                              # join configured tc-chat rooms at daemon start (requires restart)
-rooms = []                                   # tc-chat room(s) to relay (requires restart)
-
-[tunnel]
-enabled = false                              # join the tunnel room automatically at daemon start
-# room_id = "a1b2c3d4"                      # default: generated on first `tunnel start` and saved here
-auto_accept = false                          # approve every inbound connection without asking (use with care)
-# allow_peers = ["<node-id>"]               # auto-approve only these peers; anything else still prompts
-stdio_enabled = false                        # let approved peers run `stdio_command` on this machine
-# stdio_command = ["pwsh", "-NoLogo"]       # only used when stdio_enabled = true
-
-[ai]
-# default_ref = { provider_id = "http", model = "example-model" }
-# tts = { provider_id = "http", model = "speech-model", voice = "speaker", lang_voices = { en = "english-speaker" } }
-# stt = { provider_id = "http", model = "transcription-model" }
-api_listen = "127.0.0.1:6478"                # local OpenAI-compatible API (serve)
-# api_allowed_origins = ["https://example.com"]  # web apps allowed to call that API (CORS)
-request_timeout_secs = 120                   # p2p inactivity timeout (resets per chunk)
-
-# [[ai.providers]]                          # HTTP endpoint
-# id = "http"
-# label = "My endpoint"
-# base_url = "http://127.0.0.1:8000/v1"
-# api_key = ""
-# enabled = true                            # absent = true; disabling preserves references
-# models = ["example-model"]                # discovery cache
-# models_fetched_at = "2026-10-01T00:00:00Z"
-# provide = false
-# shared = []
-
-# [[ai.providers]]                          # Room provider
-# id = "room"
-# label = "Team"
-# base_url = "mist-network://team-room"
-# api_key = ""
-# enabled = true
-# provide = true                            # automatically provide while this Room is enabled
-# shared = [{ provider_id = "http", model = "example-model" }]
-
-[ui]
-enabled = true                               # serve the dashboard from the daemon
-listen = "127.0.0.1:6480"                    # keep on loopback (no auth)
-```
-
-Note: storage, chat_relay, ai, and stream relay can each join their **own** room --
-the p2p transport supports multiple simultaneous rooms per process. AI rooms are
-providers with a mist-network://<room> URL. Each enabled room can share its own
-HTTP model references, and joins/leaves apply live. See [AI configuration](docs/ai-config.md)
-for model resolution, IPC shapes and automatic migration of legacy presets.
-`[storage] room_ids` has no such fallback -- leave it unset (or empty) to keep
-the store purely local (no network join at all). Unlike the other room
-settings, `room_ids` is a list: the store joins **all** listed rooms
-simultaneously, and the list can be changed at any time without a daemon
-restart. The legacy single-room form (`room_id =
-"my-room"`) still parses, loading as a one-element `room_ids` list.
-
-Data lives in `%APPDATA%\tik-choco\mistl\data\` (keys, blocks, spools, logs).
-
-## Profile document (ecosystem interop)
-
-The user profile is a small JSON document, persisted at
-`data\identity\profile.json` and returned (merged with the identity's `did`) by
-`profile.show`. It is designed to be read as-is by sibling apps (tc-chat,
-tc-storage) that share the same `did:key` identities and CID-addressed content
-store:
-
-```json
-{
-  "did": "did:key:z6Mk…",
-  "display_name": "Ada",
-  "bio": "Loves math",
-  "avatar_cid": "baf…",
-  "updated_at": "2026-07-06T12:34:56+00:00"
-}
-```
-
-- `did` — the owner's `did:key` (Ed25519), the stable key other apps index by.
-- `display_name`, `bio` — optional free-text fields.
-- `avatar_cid` — optional. The **root CID of the profile image in the shared
-  content store** (the same store as `store put` / `POST /api/store/upload`,
-  CIDv1 / sha2-256 / dag-cbor `FileManifest`). The image itself is *not* inlined;
-  any peer holding the block (or able to resolve it over the store) fetches the
-  bytes by this CID — e.g. `GET /api/store/download?cid=<avatar_cid>` locally.
-- `updated_at` — RFC 3339 timestamp of the last change, stamped on every
-  `profile.set`, so a peer that has seen several copies can pick the freshest.
-- Any additional string fields set via `profile.set` are preserved verbatim
-  (they round-trip through the top level of the document).
-
-Read/write it over the dashboard bridge or IPC:
-
-- `profile.show` `{}` → the document above.
-- `profile.set` `{field, value}` → sets one field (`display_name`, `bio`,
-  `avatar_cid`, or a custom name); an empty `value` clears it.
-
-The dashboard's **Profile** panel sets the avatar end-to-end: it downscales the
-chosen image to 256 px client-side, uploads it to the content store
-(`POST /api/store/upload`), and points `avatar_cid` at the returned CID.
-
-## DID delegation (root/leaf)
-
-A browser app's `did:key` is scoped to its own origin, so the same person looks
-like a different identity in every browser/tab/dev-port. mistl can hold a
-permanent **root** identity and sign short-lived delegations to an app's
-existing per-origin **leaf** key, so peers that understand the chain treat
-`leaf` messages as belonging to `root`. Chain depth is fixed at 1 (root → leaf,
-no sub-delegation) and there's no revocation list — delegations are short-lived
-(`exp`, recommended 60 days) and reissued rather than revoked. Full spec:
-`protocol/docs/data-contracts/docs/did-delegation.md` (shared byte-for-byte
-with the TypeScript implementation in mistai).
-
-Two issuance paths:
-
-- **Pairing** (`mistl key pair`, recommended): joins a short-lived,
-  code-derived mistlib room and prints a `XXXX-XXXX-XXXX-XXXX` code. Enter
-  that code in the browser app's "pair with mistl" flow; once it claims the
-  code (MAC-authenticated so only someone who read/typed the code can), mistl
-  signs and broadcasts a delegation, then leaves the room (one-shot — the code
-  can't be reused). `--ttl` sets the issued delegation's lifetime (default
-  60d), `--timeout` how long to wait for a claim (default 5m).
-- **Manual transfer** (`mistl key delegate --leaf <did:key> [--ttl 60d]`):
-  prints the signed `DelegationV1` JSON directly, to copy/paste (or QR) into
-  an app that supports importing one.
-
-`mistl key delegations` lists every delegation this identity has issued as
-root, including expired ones.
-
-IPC/dashboard bridge:
-
-- `key.delegate` `{leaf, ttl?}` → `DelegationV1` JSON
-- `key.delegations` `{}` → `[DelegationV1 & {expired: bool}, ...]`
-- `key.pair.start` `{ttl?, timeout?}` → `{code, formatted_code, room, expires_at}`
-- `key.pair.status` `{}` → `{status, code?, leaf?, app?, delegation?, expires_at?}`
-- `key.pair.cancel` `{}` → `{cancelled: bool}`
-
-## Architecture
-
-```
-mistl <subcommand>  --(JSON over loopback TCP)-->  mistl daemon run
-                                                     ├─ identity  (did:key ed25519, profile)
-                                                     │    ├─ crypto.rs      (tc-storage-compatible AES-GCM+PBKDF2 envelope)
-                                                     │    ├─ delegation.rs  (root -> leaf DID delegation: issue/verify)
-                                                     │    └─ pairing.rs     (mistlib-room code pairing, issuer side)
-                                                     ├─ storage   (mistlib StorageEngine + NativeBlockStore)
-                                                     ├─ stream    (screen capture or p2p WebRTC relay → RTP → RTSP server)
-                                                     ├─ chat_relay (verifies/persists tc-chat wires over net)
-                                                     ├─ ai        (mistai protocol v1 over net + local OpenAI-compatible HTTP)
-                                                     ├─ web       (embedded dashboard + /api/call bridge into the same router)
-                                                     └─ net       (shared mistlib WebRTC/Nostr transport: one engine, one room)
-```
-
-- IPC discovery info is written to `data\daemon.json` (port + random token); only the
-  local user can connect
-- tc-storage interop: DID format, AES-256-GCM + PBKDF2-SHA256 (210k) envelopes
-  (`identity::crypto`), CID semantics
-- DID delegation (`identity::delegation` + `identity::pairing`): root/leaf
-  chain issuance, byte-compatible with mistai's independent TypeScript
-  implementation of the same spec — see "DID delegation (root/leaf)" above
-- mistlink interop: AVPro-friendly dummy SPS/PPS RTSP keepalive, PT 96 / SSRC 0x12345678
-- `stream` backends: `native` captures via Windows.Graphics.Capture and encodes with
-  OpenH264 in-process; `ffmpeg` spawns ffmpeg (gdigrab → MPEG-TS → demux) as a fallback;
-  `relay` (via `stream relay`) receives a tc-chat WebRTC screen share over mistlib and
-  re-serves it (H264 passthrough, Opus→AAC transcode, RTCP sender reports for lipsync)
-- `ai` speaks mistai protocol v1 on the wire (`provider_hello` / `llm_request` /
-  `llm_response_chunk` with seq reordering / `llm_response_done`), so browser-based
-  mistai consumers and providers in the same room interoperate; the `net` module
-  multiplexes `ai`, `chat_relay`, and the other room protocols over mistlib's
-  single raw-message handler by message shape
-
-## Bot delivery and scheduled jobs
-
-Bot pipelines save transformed content and per-sink delivery receipts before
-marking an article processed. Failed or timed-out sinks retry on later pipeline
-runs, including after a daemon restart; successful sinks are skipped and LLM/TTS
-transformations are reused. A sink has a 120-second deadline. An incomplete
-delivery makes the run unsuccessful; inspect `mistl bot items` for individual
-sink errors and `mistl bot logs` for run outcomes.
-
-Pending deliveries are retained in `bot-outbox-<pipeline hash>.json` under the
-data directory (up to 100 per pipeline). A full queue stops new imports rather
-than deleting undelivered content. Restore the failed destination and run the
-pipeline again, or let its schedule retry. Current sink settings are used for
-retries; changing a sink configuration treats it as a new destination. Disabling
-a pipeline pauses its retries. Existing processed-item files remain compatible;
-items marked processed by older versions are not automatically replayed.
-
-Delivery is at-least-once: if a remote destination accepts a send just before a
-crash, timeout, or local checkpoint failure, a retry may duplicate that send.
-Successful local checkpoints prevent ordinary retries from resending to healthy
-sinks. Unavailable source CIDs rotate through the polling budget so an old failed
-prefix does not indefinitely block newer items.
-
-Scheduled jobs retain only the last 64 KiB of combined stdout/stderr while they
-run. The one-hour deadline includes waiting for output pipes to close. Timeout
-ends the scheduler's wait and kills the shell if it is still running; detached
-descendant processes are not yet fully supervised.
-
-## Known limitations (v0.1)
-
-- `stream` local capture is video-only (audio_capture is ignored); relayed shares carry
-  audio. Inbound NACK is not implemented (loss shows until the next keyframe; the relay
-  requests one every 5s)
-- Cascade (`[stream] cascade`) v1: a follower's own PLI targets the leader's
-  re-published track, which isn't forwarded back to the original sharer -- only the
-  leader's PLI actually reaches it, so a late-joining follower's keyframe wait is
-  bounded by the leader's ~5s PLI cadence rather than its own. A relay that's already
-  locked onto the sharer when a new leader is elected doesn't re-request the sharer's
-  tracks either; it relies on either already being connected to the new leader's
-  re-publish or receiving a fresh negotiation
-- No bot capability advertisement (every connected peer is treated as a bot candidate)
-- `ai` implements the mistai protocol's chat, and TTS/STT once `ai.tts`/
-  `ai.stt` are configured (otherwise voice requests get an immediate
-  `voice_error`); `raft_message` scheduling is passed through untouched
-- The local API server (`ai serve`) has no auth; keep `api_listen` on loopback unless
-  the network is trusted. Browser pages from other origins are refused unless listed
-  in `ai.api_allowed_origins`
-- The web dashboard requires a session. Open it with `mistl ui`, the tray, or the URL
-  shown by `mistl daemon status`; keep `[ui] listen` on loopback unless the network is
-  trusted
+Under active development. Releases are tagged; beta tags are prereleases.
 
 ## License
 
-[MPL-2.0](LICENSE)
+[Mozilla Public License 2.0](LICENSE)
 
 Binary builds statically link the
 [Fraunhofer FDK AAC Codec Library for Android](https://github.com/mstorsjo/fdk-aac)
-(via the `fdk-aac` crate) for the relay's Opus→AAC transcoding, which is licensed
-under its own terms (© Fraunhofer-Gesellschaft; see the fdk-aac NOTICE), and
+(under its own terms; see the fdk-aac NOTICE) and
 [libopus](https://opus-codec.org/) (BSD-3-Clause).
