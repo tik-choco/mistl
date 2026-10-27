@@ -4,9 +4,9 @@ mod client;
 mod portable;
 mod portable_io;
 mod protocol;
+mod provider;
 mod replication;
 mod repository;
-mod serving;
 #[cfg(test)]
 mod tests;
 mod transfer;
@@ -18,8 +18,9 @@ use anyhow::{Context, Result, bail};
 use protocol::{Delete, Error, Head, MAX_MESSAGE, hex_string};
 use repository::Repository;
 use serde_json::{Value, json};
-use serving::Serving;
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 use tokio::sync::{Mutex, OnceCell};
@@ -27,6 +28,9 @@ use tokio::sync::{Mutex, OnceCell};
 const SLOT_WAIT: Duration = Duration::from_secs(5);
 const REPLY_WAIT: Duration = Duration::from_secs(2);
 use transfer::Transfers;
+
+type ReplyFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
+type ReplySender = Arc<dyn Fn(String, String, Vec<u8>) -> ReplyFuture + Send + Sync>;
 
 static SERVICE: OnceCell<Arc<Service>> = OnceCell::const_new();
 
@@ -49,7 +53,8 @@ struct Service {
     slots: Vec<Mutex<()>>,
     transfers: Transfers,
     requests: Arc<Admission>,
-    serving: Serving,
+    block_provider: StdMutex<Option<mistlib::storage::BlockProviderHandle>>,
+    send_reply: ReplySender,
     pulling: StdMutex<HashSet<String>>,
     replication_root: std::path::PathBuf,
     clusters: StdMutex<HashMap<String, Arc<replication::Cluster>>>,
@@ -94,7 +99,10 @@ impl Service {
             slots: (0..256).map(|_| Mutex::new(())).collect(),
             transfers: Transfers::default(),
             requests: Arc::new(Admission::default()),
-            serving: Serving::default(),
+            block_provider: StdMutex::new(None),
+            send_reply: Arc::new(|room, from, bytes| {
+                Box::pin(async move { crate::net::send_direct_wait(&room, &from, bytes).await })
+            }),
             pulling: StdMutex::new(HashSet::new()),
             replication_root,
             clusters: StdMutex::new(HashMap::new()),
@@ -347,7 +355,7 @@ impl Service {
                 let bytes = serde_json::to_vec(&reply).unwrap();
                 if bytes.len() <= MAX_MESSAGE {
                     let _ =
-                        tokio::time::timeout(REPLY_WAIT, (service.serving.send)(room, from, bytes))
+                        tokio::time::timeout(REPLY_WAIT, (service.send_reply)(room, from, bytes))
                             .await;
                 }
             }
@@ -355,6 +363,7 @@ impl Service {
     }
 
     fn register(self: &Arc<Self>) {
+        self.register_block_provider();
         let service = self.clone();
         let rt = tokio::runtime::Handle::current();
         crate::net::register_room_handler(move |event, room, from, raw| {
@@ -378,15 +387,10 @@ impl Service {
             if event != crate::net::EVENT_RAW {
                 return;
             }
-            // Transfer parsing uses borrowed bytes and enforces the pending request's cap.
-            service.transfers.receive(room, from, raw);
             if service
                 .cluster(room)
                 .is_some_and(|cluster| cluster.receive(from, raw))
             {
-                return;
-            }
-            if service.enqueue_storage(&rt, room, from, raw) {
                 return;
             }
             if raw.len() > MAX_MESSAGE

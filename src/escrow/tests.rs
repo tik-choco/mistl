@@ -3,9 +3,11 @@ use super::repository::{validate_blob, validate_manifest};
 use super::*;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::{Signer, SigningKey};
+use mistlib::storage::BlockProvider;
 use mistlib_core::storage::cid::{MULTICODEC_DAG_CBOR, MULTICODEC_RAW, compute_cid};
 use mistlib_core::storage::{CHUNK_SIZE, FileManifest};
-use tokio::sync::Semaphore;
+use mistlib_core::types::NodeId;
+use provider::EscrowBlockProvider;
 
 #[path = "portable_tests.rs"]
 mod portable_tests;
@@ -160,23 +162,37 @@ async fn escrow_cas_tofu_idempotence_and_restart_serve_both_generations() {
     sign(&mut next, [7; 32]);
     accept(&service.repo, &next, b"second", &next_manifest);
     drop(service);
-    let restarted = Service::open(dir.clone(), cfg.clone()).unwrap();
+    let restarted = Arc::new(Service::open(dir.clone(), cfg.clone()).unwrap());
     assert_eq!(
         restarted.repo.head("test-room", &first.slot),
         Some(next.clone())
     );
+    let provider = EscrowBlockProvider(Arc::downgrade(&restarted));
+    let peer = NodeId("browser".into());
+    restarted.register_block_provider();
     for (head, manifest, data) in [
         (&first, &first_manifest, blob.as_slice()),
         (&next, &next_manifest, b"second".as_slice()),
     ] {
         assert_eq!(
-            restarted.repo.block("test-room", &head.cid).unwrap(),
+            provider
+                .get_block("test-room", &peer, &head.cid)
+                .await
+                .unwrap(),
             *manifest
         );
-        assert!(restarted.repo.block("other-room", &head.cid).is_none());
+        assert!(
+            provider
+                .get_block("other-room", &peer, &head.cid)
+                .await
+                .is_none()
+        );
         let m: FileManifest = serde_cbor::from_slice(manifest).unwrap();
         for (cid, chunk) in m.chunks.iter().zip(data.chunks(CHUNK_SIZE)) {
-            assert_eq!(restarted.repo.block("test-room", cid).unwrap(), chunk);
+            assert_eq!(
+                provider.get_block("test-room", &peer, cid).await.unwrap(),
+                chunk
+            );
         }
     }
     assert_eq!(
@@ -509,191 +525,385 @@ async fn escrow_cheap_put_rejections_precede_pull_admission() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-#[test]
-fn escrow_storage_queue_bounds_fairness_and_want_reserve() {
-    use super::serving::{MAX_PEER_REQUESTS, MAX_REQUESTS, MAX_SERVING, Queue, Request};
-    let request = |from: &str, query| Request {
-        room: "test-room".into(),
-        from: from.into(),
-        cid: "bounded".into(),
-        query,
+#[tokio::test]
+async fn escrow_provider_enforces_configuration_and_room_cid_membership() {
+    let dir = scratch();
+    let cfg = EscrowConfig {
+        rooms: vec!["test-room".into(), "empty-room".into()],
+        ..Default::default()
     };
-    let mut queue = Queue::default();
-    for _ in 0..MAX_PEER_REQUESTS {
-        assert!(queue.push(request("a", false)));
+    let service = Arc::new(Service::open(dir.clone(), cfg).unwrap());
+    let (head, manifest) = fixture(b"checkpoint", 1, None);
+    accept(&service.repo, &head, b"checkpoint", &manifest);
+    let reservation = service
+        .repo
+        .reserve("unconfigured", &head)
+        .unwrap()
+        .unwrap();
+    service
+        .repo
+        .commit("unconfigured", &head, b"checkpoint", &manifest)
+        .unwrap();
+    drop(reservation);
+    let provider = EscrowBlockProvider(Arc::downgrade(&service));
+    let peer = NodeId("browser".into());
+    assert!(provider.has_block("test-room", &peer, &head.cid).await);
+    for room in ["unconfigured", "empty-room", "unknown-room"] {
+        assert!(provider.get_block(room, &peer, &head.cid).await.is_none());
+        assert!(!provider.has_block(room, &peer, &head.cid).await);
     }
-    assert!(!queue.push(request("a", false)));
-    assert!(!queue.push(request("a", true)));
-    // Peer caps apply across rooms too.
-    let mut other_room = request("a", false);
-    other_room.room = "other-room".into();
-    assert!(!queue.push(other_room));
-    for from in ["b", "c", "d", "e"] {
-        assert!(queue.push(request(from, false)));
-    }
-    let active: Vec<_> = (0..MAX_SERVING).map(|_| queue.next().unwrap()).collect();
-    assert_eq!(
-        active.iter().map(|r| r.from.as_str()).collect::<Vec<_>>(),
-        ["a", "b", "c", "d"]
+    assert!(
+        provider
+            .get_block("test-room", &peer, "missing")
+            .await
+            .is_none()
     );
-    assert!(queue.next().is_none());
-    // A backlogged peer rejoins at the tail; the fifth peer gets the next free worker.
-    queue.finish("a");
-    assert_eq!(queue.next().unwrap().from, "e");
-    for from in ["b", "c", "d", "e"] {
-        queue.finish(from);
-    }
-    for _ in 1..MAX_PEER_REQUESTS {
-        assert_eq!(queue.next().unwrap().from, "a");
-        queue.finish("a");
-    }
-    assert!(queue.next().is_none());
-    // All capacity and peer bookkeeping is reclaimed.
-    for i in 0..MAX_REQUESTS {
-        assert!(queue.push(request(&format!("peer-{i}"), false)));
-    }
-    assert!(!queue.push(request("over-global-cap", false)));
-    assert!(!queue.push(request("query-over-cap", true)));
-    for _ in 0..MAX_REQUESTS {
-        let item = queue.next().unwrap();
-        assert!(!item.query);
-        queue.finish(&item.from);
-    }
-    assert!(queue.next().is_none());
-    // Discovery cannot consume the WANT reserve, either per peer or globally.
-    let mut queries = 0;
-    while queue.push(request("discoverer", true)) {
-        queries += 1;
-    }
-    assert!(queries < MAX_PEER_REQUESTS);
-    for _ in queries..MAX_PEER_REQUESTS {
-        assert!(queue.push(request("discoverer", false)));
-    }
-    let mut count = MAX_PEER_REQUESTS;
-    while queue.push(request(&format!("discoverer-{count}"), true)) {
-        count += 1;
-    }
-    assert!(count < MAX_REQUESTS);
-    for i in count..MAX_REQUESTS {
-        assert!(queue.push(request(&format!("want-{i}"), false)));
-    }
-    assert!(!queue.push(request("overflow", false)));
+    service.register_block_provider();
+    service.register_block_provider();
+    assert!(service.block_provider.lock().unwrap().is_some());
+    let weak = Arc::downgrade(&service);
+    drop(service);
+    assert!(
+        weak.upgrade().is_none(),
+        "registration must not keep the service alive"
+    );
+    assert!(
+        provider
+            .get_block("test-room", &peer, &head.cid)
+            .await
+            .is_none()
+    );
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
-#[tokio::test]
-async fn escrow_concurrent_wants_for_twelve_distinct_blocks_all_reply() {
-    use mistlib_core::storage::protocol::{MSG_WANT, parse_have_message};
-    use std::time::Duration;
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn escrow_provider_concurrently_returns_twelve_distinct_blocks() {
     let dir = scratch();
-    let mut service = Service::open(dir.clone(), EscrowConfig::default()).unwrap();
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
-    let gate = Arc::new(Semaphore::new(0));
-    service.serving.send = Arc::new({
-        let gate = gate.clone();
-        move |room, from, bytes| {
-            let (tx, started_tx, gate) = (tx.clone(), started_tx.clone(), gate.clone());
-            Box::pin(async move {
-                started_tx.send(()).unwrap();
-                let _permit = gate.acquire().await.unwrap();
-                tx.send((room, from, bytes)).unwrap();
-                Ok(())
-            })
-        }
-    });
-    let mut expected = std::collections::HashMap::new();
+    let service = Arc::new(
+        Service::open(
+            dir.clone(),
+            EscrowConfig {
+                rooms: vec!["test-room".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap(),
+    );
+    let mut expected = Vec::new();
     for i in 0..12 {
         let blob = vec![i as u8; 1024];
         let (mut head, manifest) = fixture(&blob, 1, None);
         head.slot = format!("{i:032x}");
         sign(&mut head, [7; 32]);
         accept(&service.repo, &head, &blob, &manifest);
-        expected.insert(head.cid, (format!("peer-{i}"), manifest));
+        expected.push((head.cid, manifest));
     }
-    let service = Arc::new(service);
-    let rt = tokio::runtime::Handle::current();
-    for (cid, (peer, _)) in &expected {
-        let mut want = vec![MSG_WANT];
-        want.extend_from_slice(cid.as_bytes());
-        assert!(service.enqueue_storage(&rt, "test-room", peer, &want));
+    let provider = Arc::new(EscrowBlockProvider(Arc::downgrade(&service)));
+    let lookups: Vec<_> = expected
+        .into_iter()
+        .map(|(cid, manifest)| {
+            let provider = provider.clone();
+            tokio::spawn(async move {
+                assert_eq!(
+                    provider
+                        .get_block("test-room", &NodeId("browser".into()), &cid)
+                        .await
+                        .unwrap(),
+                    manifest
+                );
+            })
+        })
+        .collect();
+    for lookup in lookups {
+        lookup.await.unwrap();
     }
-    // Hold four wire sends open so every other WANT must survive in the bounded queue.
-    for _ in 0..serving::MAX_SERVING {
-        tokio::time::timeout(Duration::from_secs(3), started_rx.recv())
+    drop(service);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+// Substitute only the public fetch API boundary, keeping the real PUT validation,
+// admission, quota reservation and durable commit path under test.
+fn fetch_blocks(service: &mut Service, head: &Head, manifest: &[u8], blob: &[u8]) {
+    let mut blocks: HashMap<_, _> = blob
+        .chunks(CHUNK_SIZE)
+        .map(|chunk| (compute_cid(chunk, MULTICODEC_RAW), chunk.to_vec()))
+        .collect();
+    blocks.insert(head.cid.clone(), manifest.to_vec());
+    service.transfers.fetch = Arc::new(move |_, cid, _| {
+        let data = blocks.get(&cid).cloned();
+        Box::pin(
+            async move { data.ok_or_else(|| mistlib::MistError::Network("missing block".into())) },
+        )
+    });
+}
+
+#[tokio::test]
+async fn escrow_put_fetches_only_sender_in_room_with_manifest_and_chunk_caps() {
+    let dir = scratch();
+    let mut service = Service::open(dir.clone(), EscrowConfig::default()).unwrap();
+    let blob: Vec<_> = (0..CHUNK_SIZE + 17).map(|n| (n % 251) as u8).collect();
+    let (head, manifest) = fixture(&blob, 1, None);
+    fetch_blocks(&mut service, &head, &manifest, &blob);
+    let fetch = service.transfers.fetch.clone();
+    let calls = Arc::new(StdMutex::new(Vec::new()));
+    service.transfers.fetch = Arc::new({
+        let calls = calls.clone();
+        move |room, cid, opts| {
+            assert_eq!(room, "test-room");
+            assert_eq!(opts.peer, Some(NodeId("put-sender".into())));
+            assert_eq!(opts.timeout, Duration::from_secs(30));
+            calls.lock().unwrap().push((cid.clone(), opts.max_bytes));
+            fetch(room, cid, opts)
+        }
+    });
+    assert_eq!(
+        service
+            .put("test-room", "put-sender", head.clone(), "put")
             .await
-            .unwrap()
-            .unwrap();
-    }
-    assert!(started_rx.try_recv().is_err());
-    gate.add_permits(serving::MAX_SERVING);
-    for _ in 0..12 {
-        let (room, peer, bytes) = tokio::time::timeout(Duration::from_secs(3), rx.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(room, "test-room");
-        let (cid, data) = parse_have_message(&bytes).unwrap();
-        let (expected_peer, manifest) = expected.remove(&cid).expect("one reply per distinct WANT");
-        assert_eq!(peer, expected_peer);
-        assert_eq!(data, manifest);
-    }
-    assert!(expected.is_empty());
+            .unwrap(),
+        head.ack("put")
+    );
+    let chunks: FileManifest = serde_cbor::from_slice(&manifest).unwrap();
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec![
+            (head.cid.clone(), repository::manifest_limit(head.size)),
+            (chunks.chunks[0].clone(), CHUNK_SIZE),
+            (chunks.chunks[1].clone(), 17),
+        ]
+    );
+    assert_eq!(
+        service.repo.block("test-room", &head.cid).unwrap(),
+        manifest
+    );
     drop(service);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[tokio::test]
-async fn escrow_served_chunks_fit_browser_ceiling_with_overlay_margin() {
-    use mistlib_core::storage::protocol::{MSG_WANT, parse_have_chunk_message};
-    use std::time::Duration;
+async fn escrow_put_real_fetch_api_without_room_session_is_fetch_failure() {
+    let dir = scratch();
+    let service = Service::open(dir.clone(), EscrowConfig::default()).unwrap();
+    let (head, _) = fixture(b"checkpoint", 1, None);
+    assert_eq!(
+        service
+            .put(
+                "no-active-escrow-test-session",
+                "sender",
+                head.clone(),
+                "put"
+            )
+            .await
+            .unwrap_err()
+            .code,
+        "fetch_failed"
+    );
+    assert!(
+        service
+            .repo
+            .head("no-active-escrow-test-session", &head.slot)
+            .is_none()
+    );
+    assert!(service.pulling.lock().unwrap().is_empty());
+    let mut bad_cid = head.clone();
+    // This passes the existing filename-safe CID shape check but has an invalid
+    // CID envelope. The real API rejects it before session lookup.
+    bad_cid.cid = "babc".into();
+    sign(&mut bad_cid, [7; 32]);
+    assert_eq!(
+        service
+            .put("no-active-escrow-test-session", "sender", bad_cid, "put")
+            .await
+            .unwrap_err()
+            .code,
+        "hash_mismatch"
+    );
+    drop(service);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn escrow_put_fetch_api_errors_preserve_classification_and_release_reservations() {
     let dir = scratch();
     let mut service = Service::open(dir.clone(), EscrowConfig::default()).unwrap();
-    let blob: Vec<_> = (0..CHUNK_SIZE).map(|i| (i % 251) as u8).collect();
-    let (head, manifest) = fixture(&blob, 1, None);
-    accept(&service.repo, &head, &blob, &manifest);
-    let manifest: FileManifest = serde_cbor::from_slice(&manifest).unwrap();
-    let cid = &manifest.chunks[0];
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    service.serving.send = Arc::new(move |room, from, bytes| {
-        let tx = tx.clone();
+    let (head, manifest) = fixture(b"checkpoint", 1, None);
+    for (message, code) in [
+        ("Block CID/hash mismatch", "hash_mismatch"),
+        (
+            "Block exceeds receive byte limit (observed 100 bytes)",
+            "hash_mismatch",
+        ),
+        ("Block fetch timeout", "fetch_failed"),
+        ("Block fetch room session closed", "fetch_failed"),
+        ("Block fetch registration closed", "fetch_failed"),
+        ("send failed", "fetch_failed"),
+    ] {
+        service.transfers.fetch = Arc::new(move |_, _, _| {
+            Box::pin(async move { Err(mistlib::MistError::Network(message.into())) })
+        });
+        assert_eq!(
+            service
+                .put("test-room", "sender", head.clone(), "put")
+                .await
+                .unwrap_err()
+                .code,
+            code
+        );
+        assert!(service.repo.head("test-room", &head.slot).is_none());
+        assert!(service.pulling.lock().unwrap().is_empty());
+    }
+    fetch_blocks(&mut service, &head, &manifest, b"checkpoint");
+    assert_eq!(
+        service
+            .put("test-room", "sender", head.clone(), "retry")
+            .await
+            .unwrap(),
+        head.ack("retry")
+    );
+    drop(service);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn escrow_put_validates_fetched_manifest_chunks_lengths_and_blob_hash() {
+    let dir = scratch();
+    let mut service = Service::open(dir.clone(), EscrowConfig::default()).unwrap();
+    let blob = b"checkpoint";
+    let (head, manifest) = fixture(blob, 1, None);
+    // These successful API returns exercise escrow's own validation as well as
+    // the CID and byte limits normally enforced by mistlib before returning.
+    for (mut bad_head, bad_manifest, bad_chunk, code) in [
+        (
+            head.clone(),
+            vec![0; repository::manifest_limit(head.size) + 1],
+            blob.to_vec(),
+            "hash_mismatch",
+        ),
+        (
+            head.clone(),
+            b"wrong manifest".to_vec(),
+            blob.to_vec(),
+            "hash_mismatch",
+        ),
+        (
+            head.clone(),
+            manifest.clone(),
+            b"short".to_vec(),
+            "hash_mismatch",
+        ),
+        (
+            head.clone(),
+            manifest.clone(),
+            vec![0; blob.len()],
+            "hash_mismatch",
+        ),
+        (
+            head.clone(),
+            manifest.clone(),
+            vec![0; blob.len() + 1],
+            "hash_mismatch",
+        ),
+    ] {
+        sign(&mut bad_head, [7; 32]);
+        let root = bad_head.cid.clone();
+        service.transfers.fetch = Arc::new(move |_, cid, _| {
+            let bytes = if cid == root {
+                bad_manifest.clone()
+            } else {
+                bad_chunk.clone()
+            };
+            Box::pin(async move { Ok(bytes) })
+        });
+        assert_eq!(
+            service
+                .put("test-room", "sender", bad_head, "put")
+                .await
+                .unwrap_err()
+                .code,
+            code
+        );
+        assert!(service.repo.head("test-room", &head.slot).is_none());
+    }
+    for (bytes, code) in [
+        (vec![0xff], "fetch_failed"),
+        (
+            serde_cbor::to_vec(&FileManifest {
+                name: "wrong-name".into(),
+                size: head.size,
+                chunks: vec![compute_cid(blob, MULTICODEC_RAW)],
+            })
+            .unwrap(),
+            "hash_mismatch",
+        ),
+    ] {
+        let mut bad_head = head.clone();
+        bad_head.cid = compute_cid(&bytes, MULTICODEC_DAG_CBOR);
+        sign(&mut bad_head, [7; 32]);
+        fetch_blocks(&mut service, &bad_head, &bytes, blob);
+        assert_eq!(
+            service
+                .put("test-room", "sender", bad_head, "put")
+                .await
+                .unwrap_err()
+                .code,
+            code
+        );
+    }
+    let mut bad_hash = head.clone();
+    bad_hash.sha256 = "00".repeat(32);
+    sign(&mut bad_hash, [7; 32]);
+    fetch_blocks(&mut service, &bad_hash, &manifest, blob);
+    assert_eq!(
+        service
+            .put("test-room", "sender", bad_hash, "put")
+            .await
+            .unwrap_err()
+            .code,
+        "hash_mismatch"
+    );
+    fetch_blocks(&mut service, &head, &manifest, blob);
+    assert!(
+        service
+            .put("test-room", "sender", head, "retry")
+            .await
+            .is_ok()
+    );
+    drop(service);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn escrow_put_timeout_bounds_whole_pull_across_multiple_blocks() {
+    let dir = scratch();
+    let mut service = Service::open(dir.clone(), EscrowConfig::default()).unwrap();
+    let (head, manifest) = fixture(b"checkpoint", 1, None);
+    fetch_blocks(&mut service, &head, &manifest, b"checkpoint");
+    let fetch = service.transfers.fetch.clone();
+    service.transfers.fetch = Arc::new(move |room, cid, opts| {
+        let result = fetch(room, cid, opts);
         Box::pin(async move {
-            tx.send((room, from, bytes)).unwrap();
-            Ok(())
+            tokio::time::sleep(Duration::from_secs(16)).await;
+            result.await
         })
     });
-    let service = Arc::new(service);
-    let mut want = vec![MSG_WANT];
-    want.extend_from_slice(cid.as_bytes());
-    assert!(service.enqueue_storage(
-        &tokio::runtime::Handle::current(),
-        "test-room",
-        "browser",
-        &want
-    ));
-    let mut received = Vec::new();
-    let mut count = None;
-    let mut index = 0;
-    loop {
-        let (room, peer, bytes) = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+    let started = tokio::time::Instant::now();
+    assert_eq!(
+        service
+            .put("test-room", "sender", head.clone(), "put")
             .await
-            .unwrap()
-            .unwrap();
-        assert_eq!((room.as_str(), peer.as_str()), ("test-room", "browser"));
-        assert!(
-            bytes.len() + 512 <= 16 * 1024,
-            "frame must fit after overlay wrapping"
-        );
-        let (parsed_cid, parsed_index, total, payload) = parse_have_chunk_message(&bytes).unwrap();
-        assert_eq!(&parsed_cid, cid);
-        assert_eq!(parsed_index, index);
-        assert_eq!(*count.get_or_insert(total), total);
-        received.extend_from_slice(&payload);
-        index += 1;
-        if index == total {
-            break;
-        }
-    }
-    assert_eq!(received, blob);
+            .unwrap_err()
+            .code,
+        "fetch_failed"
+    );
+    assert_eq!(started.elapsed(), Duration::from_secs(30));
+    assert!(service.repo.head("test-room", &head.slot).is_none());
+    fetch_blocks(&mut service, &head, &manifest, b"checkpoint");
+    assert!(
+        service
+            .put("test-room", "sender", head, "retry")
+            .await
+            .is_ok()
+    );
     drop(service);
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -912,7 +1122,7 @@ async fn escrow_slot_wait_flood_keeps_get_hello_and_retry_responsive() {
     }
     sign(&mut blocked, [7; 32]);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    service.serving.send = Arc::new(move |room, from, bytes| {
+    service.send_reply = Arc::new(move |room, from, bytes| {
         let tx = tx.clone();
         Box::pin(async move {
             tx.send((room, from, serde_json::from_slice::<Value>(&bytes).unwrap()))
@@ -1042,151 +1252,6 @@ async fn escrow_slot_wait_flood_keeps_get_hello_and_retry_responsive() {
     assert!(service.requests.acquire("attacker", Class::Put).is_some());
     drop(held);
     drop(slot);
-    drop(service);
-    std::fs::remove_dir_all(dir).unwrap();
-}
-
-#[tokio::test(start_paused = true)]
-async fn escrow_four_parallel_megabyte_downloads_fit_stalled_peer_queue() {
-    use mistlib_core::storage::protocol::{MSG_WANT, parse_have_chunk_message};
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    let dir = scratch();
-    let mut service = Service::open(dir.clone(), EscrowConfig::default()).unwrap();
-    let mut expected = std::collections::HashMap::new();
-    for i in 0..4 {
-        let blob = vec![i as u8; CHUNK_SIZE];
-        let (mut head, bytes) = fixture(&blob, 1, None);
-        head.slot = format!("{i:032x}");
-        sign(&mut head, [7; 32]);
-        accept(&service.repo, &head, &blob, &bytes);
-        let manifest: FileManifest = serde_cbor::from_slice(&bytes).unwrap();
-        expected.insert(manifest.chunks[0].clone(), blob);
-    }
-    // Model net::send_direct: enqueue success is returned even when the native
-    // downstream try_send loses the frame. The drainer starts one second later.
-    let (tx, mut rx) = tokio::sync::mpsc::channel(256);
-    let dropped = Arc::new(AtomicUsize::new(0));
-    let high_water = Arc::new(AtomicUsize::new(0));
-    let times = Arc::new(StdMutex::new(Vec::new()));
-    service.serving.send = Arc::new({
-        let (dropped, high_water, times) = (dropped.clone(), high_water.clone(), times.clone());
-        move |room, from, bytes| {
-            let (tx, dropped, high_water, times) = (
-                tx.clone(),
-                dropped.clone(),
-                high_water.clone(),
-                times.clone(),
-            );
-            Box::pin(async move {
-                assert_eq!((room.as_str(), from.as_str()), ("test-room", "browser"));
-                times.lock().unwrap().push(tokio::time::Instant::now());
-                if tx.try_send(bytes).is_err() {
-                    dropped.fetch_add(1, Ordering::SeqCst);
-                }
-                high_water.fetch_max(256 - tx.capacity(), Ordering::SeqCst);
-                Ok(())
-            })
-        }
-    });
-    let service = Arc::new(service);
-    let rt = tokio::runtime::Handle::current();
-    for cid in expected.keys() {
-        let mut want = vec![MSG_WANT];
-        want.extend_from_slice(cid.as_bytes());
-        assert!(service.enqueue_storage(&rt, "test-room", "browser", &want));
-    }
-    let mut received: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
-    let start = tokio::time::Instant::now();
-    for _ in 0..800 {
-        tokio::task::yield_now().await;
-        tokio::time::advance(Duration::from_millis(10)).await;
-        tokio::task::yield_now().await;
-        if tokio::time::Instant::now() - start < Duration::from_secs(1) {
-            continue;
-        }
-        // Drain at the conservative producer rate, rather than acknowledging on enqueue.
-        if let Ok(bytes) = rx.try_recv() {
-            let (cid, index, _, payload) = parse_have_chunk_message(&bytes).unwrap();
-            let assembled = received.entry(cid).or_default();
-            if index == 0 {
-                assert!(assembled.is_empty());
-            }
-            assembled.extend_from_slice(&payload);
-        }
-        if received == expected {
-            break;
-        }
-    }
-    assert_eq!(
-        dropped.load(Ordering::SeqCst),
-        0,
-        "native queue overflow must not silently drop chunks"
-    );
-    assert!(
-        high_water.load(Ordering::SeqCst) < 128,
-        "keep headroom in the 256-frame peer queue"
-    );
-    assert_eq!(received, expected);
-    let sent = times.lock().unwrap();
-    assert!(
-        sent.len() > 256,
-        "exercise the original four-block overflow"
-    );
-    assert!(
-        sent.windows(2)
-            .all(|w| w[1] - w[0] >= serving::FRAME_SPACING),
-        "pacing must continue between WANTs"
-    );
-    drop(sent);
-    // Let the last pacing delay release its worker before removing durable data.
-    tokio::time::advance(serving::FRAME_SPACING).await;
-    tokio::task::yield_now().await;
-    drop(service);
-    std::fs::remove_dir_all(dir).unwrap();
-}
-
-#[tokio::test(start_paused = true)]
-async fn escrow_storage_retries_same_frame_on_observable_enqueue_failure() {
-    use mistlib_core::storage::protocol::{MSG_WANT, parse_have_message};
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    let dir = scratch();
-    let mut service = Service::open(dir.clone(), EscrowConfig::default()).unwrap();
-    let (head, manifest) = fixture(b"retry", 1, None);
-    accept(&service.repo, &head, b"retry", &manifest);
-    let attempts = Arc::new(AtomicUsize::new(0));
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    service.serving.send = Arc::new({
-        let attempts = attempts.clone();
-        move |_, _, bytes| {
-            let (attempts, tx) = (attempts.clone(), tx.clone());
-            Box::pin(async move {
-                if attempts.fetch_add(1, Ordering::SeqCst) < 3 {
-                    anyhow::bail!("temporarily full");
-                }
-                tx.send(bytes).unwrap();
-                Ok(())
-            })
-        }
-    });
-    let service = Arc::new(service);
-    let mut want = vec![MSG_WANT];
-    want.extend_from_slice(head.cid.as_bytes());
-    service.enqueue_storage(
-        &tokio::runtime::Handle::current(),
-        "test-room",
-        "browser",
-        &want,
-    );
-    let bytes = tokio::time::timeout(Duration::from_secs(1), rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    let (cid, data) = parse_have_message(&bytes).unwrap();
-    assert_eq!(cid, head.cid);
-    assert_eq!(data, manifest);
-    assert_eq!(attempts.load(Ordering::SeqCst), 4);
-    tokio::time::advance(serving::FRAME_SPACING).await;
-    tokio::task::yield_now().await;
     drop(service);
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -1404,7 +1469,7 @@ async fn escrow_delete_uses_put_admission_and_slot_lock() {
     let request = delete_request(&head, [7; 32]);
     let msg = json!({"v":1,"type":"escrow_delete","id":"delete","slot":request.slot,"seq":request.seq,"head":request.head,"sig":request.sig});
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    service.serving.send = Arc::new(move |_, _, bytes| {
+    service.send_reply = Arc::new(move |_, _, bytes| {
         let tx = tx.clone();
         Box::pin(async move {
             tx.send(serde_json::from_slice::<Value>(&bytes).unwrap())

@@ -7,7 +7,7 @@ use std::sync::Weak;
 use tokio::sync::Notify;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn replicated_export_uses_local_current_heads_and_pins_their_archive() {
+async fn replicated_provider_serves_retained_blocks_and_export_pins_current_archive() {
     let harness = Harness::new();
     let first = harness.network.fixture(b"first", 1, None);
     assert_eq!(harness.put_acked(&first, None).await, first.ack("put"));
@@ -37,13 +37,56 @@ async fn replicated_export_uses_local_current_heads_and_pins_their_archive() {
         let service_dir = harness
             .dir
             .join(format!("export-test-{}", node.identity.node_id()));
-        let service =
-            crate::escrow::Service::open(service_dir.clone(), EscrowConfig::default()).unwrap();
+        let service = Arc::new(
+            crate::escrow::Service::open(
+                service_dir.clone(),
+                EscrowConfig {
+                    rooms: vec!["test-room".into(), "empty-room".into()],
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        );
         service
             .clusters
             .lock()
             .unwrap()
             .insert("test-room".into(), node.clone());
+        use mistlib::storage::BlockProvider;
+        let provider = crate::escrow::provider::EscrowBlockProvider(Arc::downgrade(&service));
+        let browser = mistlib_core::types::NodeId("browser".into());
+        for head in [&first, &current] {
+            let (blob, manifest) = node.export_bytes(head).unwrap();
+            assert_eq!(
+                provider
+                    .get_block("test-room", &browser, &head.cid)
+                    .await
+                    .unwrap(),
+                manifest
+            );
+            assert!(
+                provider
+                    .get_block("empty-room", &browser, &head.cid)
+                    .await
+                    .is_none()
+            );
+            assert!(
+                provider
+                    .get_block("unconfigured", &browser, &head.cid)
+                    .await
+                    .is_none()
+            );
+            let manifest: FileManifest = serde_cbor::from_slice(&manifest).unwrap();
+            for (cid, chunk) in manifest.chunks.iter().zip(blob.chunks(CHUNK_SIZE)) {
+                assert_eq!(
+                    provider
+                        .get_block("test-room", &browser, cid)
+                        .await
+                        .unwrap(),
+                    chunk
+                );
+            }
+        }
         let mut exported = Vec::new();
         let result = crate::escrow::portable_io::export_to(&service, &mut exported, &None).unwrap();
         assert_eq!(result["slots"], 1);

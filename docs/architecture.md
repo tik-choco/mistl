@@ -32,6 +32,28 @@ mistl <subcommand>  --(JSON over loopback TCP)-->  mistl daemon run
   multiplexes `ai`, `chat_relay`, and the other room protocols over mistlib's
   single raw-message handler by message shape
 
+## Storage block exchange
+
+mistl keeps its blocks in `NativeBlockStore` and file metadata in
+`store-index.json`. A process-wide `mistlib::storage::BlockProvider` registration
+serves local blocks to peers in every joined room, including rooms joined by
+bots, folder shares or other features outside `storage.room_ids`. Serving a
+missing block never triggers another remote fetch.
+
+`RoomPeerResolver` uses `mistlib::storage::fetch_block` for missing manifests and
+chunks. `Store::get` uses the configured storage rooms; `Store::get_remote` uses
+only the caller's rooms. Room attempts run concurrently and share one budget
+per missing block (five seconds by default), with an 8 MiB receive ceiling per
+block. The first successful attempt wins; failures in one room do not prevent
+another from succeeding, and remaining attempts are cancelled on success or
+timeout. A local hit needs no room or network budget.
+
+mistlib handles discovery, response chunking, sender/room binding, cancellation
+and CID verification for native and browser peers. Storage frames do not pass
+through mistl's raw event handlers. `fetch_block` does not write to mistlib's
+separate storage cache; mistl's `StorageEngine` retains fetched blocks in its
+own store.
+
 ## Bot delivery and scheduled jobs
 
 Bot pipelines save transformed content and per-sink delivery receipts before

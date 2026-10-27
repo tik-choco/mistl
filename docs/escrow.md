@@ -193,18 +193,27 @@ Deletion I/O failures disable subsequent mutations until restart reconciliation,
 including identical current/previous PUT retries: their in-memory records may no
 longer exist on disk. Healthy retained-head retries still ACK without a blob pull.
 
-PUT pulls the root manifest and chunks using ordinary QUERY/WANT/HAVE/HAVE_CHUNK
-frames directed exclusively to the sending transport peer in the request's room.
-It validates manifest CID, the constant tc-escrow.bin name, size, chunk count,
-each raw chunk CID, the complete byte length, and SHA-256. A CID-matching manifest
-that cannot be decoded as bounded CBOR returns fetch_failed (the blob pull could not
-be completed); a CID, manifest metadata, length, or content mismatch returns
-hash_mismatch. These content failures do not disable repository writes. It never invokes the
-ordinary StorageEngine::get on an untrusted manifest, avoiding that engine's
-unbounded whole-file allocation. No storage resolver change is required: escrow
-registers its own room-scoped storage handler and serves the original manifest and
-chunk slices directly from the durable blob. Browser storage_get(cid) therefore
-uses the normal storage protocol, including after daemon restart.
+PUT pulls the root manifest and chunks through `mistlib::storage::fetch_block`,
+with `FetchOptions.peer` fixed to the sending transport peer and the request's room.
+The receive limit is the bounded manifest allowance for the root and the exact
+expected length for each chunk. mistlib verifies the fetched CID without writing
+it to its ordinary storage cache. Escrow also validates manifest CID, the constant
+tc-escrow.bin name, size, chunk count, each raw chunk CID, the complete byte length,
+and SHA-256. A CID-matching manifest that cannot be decoded as bounded CBOR returns
+fetch_failed; a CID, manifest metadata, receive-limit, length, or content mismatch
+returns hash_mismatch. Transport failures and timeouts return fetch_failed. These
+content failures do not disable repository writes. The entire pull has a 30-second
+deadline across all blocks. It never invokes the ordinary StorageEngine::get on an
+untrusted manifest, avoiding that engine's whole-file allocation.
+
+At service startup, escrow registers a `mistlib::storage::BlockProvider` and keeps
+its registration handle for the service lifetime; dropping the handle unregisters
+it. The provider returns original manifests and chunk slices from durable storage
+only for configured rooms and CIDs indexed in that room. Replicated rooms also use
+their room's archive. Data imported into an unconfigured room is unavailable through
+this provider. Browser `storage_get(cid)` uses mistlib's normal storage service,
+including after daemon restart; storage frames no longer pass through escrow's
+raw room handler.
 
 Blob and manifest writes use statefile::write_private (temporary file, fsync,
 atomic replacement); only then is the combined current/previous head record
@@ -231,33 +240,15 @@ the GET/HELLO reserve. Slot waits have a 5-second deadline and return busy on ex
 reply sends have a 2-second deadline. A flood of PUTs therefore cannot occupy all
 response permits. GET/HELLO remain subject to their own bounded admission under a
 separate flood of those messages.
-The entire blob pull has a 30-second deadline. Manifest size is capped at 128 KiB,
-chunks at 1 MiB, and incoming chunk assemblies at 1024 pieces. Transfers only accept
-solicited CIDs from the original room and sender. JSON requests and storage responses
-have separate bounded task pools. Storage serving queues at most 256 requests globally
-and 64 per transport peer, including active requests, across all escrow rooms. Up to
-four peers are served concurrently, one request per peer, with round-robin scheduling.
-QUERY admission stops at 192 global / 48 per-peer requests to reserve space for WANTs;
-over-cap discovery advertises nothing and never evicts accepted WANTs. Requests beyond
-the hard WANT caps cannot be accepted. Queued requests contain only identifiers; blocks
-are read by active workers. Storage frames use the core size helper with a 16 KiB
-ceiling, subtracting the header, CID, and 512-byte overlay margin.
 
-Serving retains the peer worker for a 10 ms delay after every frame, including the
-last frame of a WANT and QUERY status replies. Consecutive WANTs across rooms share
-the same peer worker, so four parallel 1 MiB downloads (268 frames) cannot become
-a single enqueue burst: their frames take at least 2.67 seconds to enter the queue.
-Observable enqueue errors retry the same frame, with a 5-second deadline per frame.
-The pacing signal is elapsed monotonic time: net::send_direct only reports admission
-to the app queue, and exposes neither the native 256-frame peer queue capacity nor
-wire completion. At at most 100 frames/second, a one-second drainer pause leaves
-about 100 frames queued, with room for other traffic. Regression tests model that
-pause and subsequent draining at the producer rate, checking all four blocks.
-This conservative fallback is not a delivery acknowledgement or a strict capacity
-guarantee: a longer transport stall, slower drain, or competing non-escrow traffic
-can still fill the downstream queue without an observable error. A transport
-capacity/completion API would be needed to remove that limitation; no mistlib source
-or storage wire format is changed here.
+Manifest size is capped at 128 KiB and chunks at 1 MiB. mistlib binds each fetch
+to the requested room, CID and sender and enforces receive limits before copying or
+reassembling data. JSON control requests retain escrow's own admission limits.
+Storage serving admission, per-peer fairness, frame sizing and CP50 backpressure
+are handled by mistlib's per-peer SERVING path. Escrow has no separate storage
+serving queue, frame retries or elapsed-time pacing. In particular, there is no
+escrow-specific four-worker serving limit or fixed 10 ms inter-frame delay.
+
 Stored data plus in-flight reservations must fit the total quota; a reservation includes
 blob bytes and a bounded manifest allowance.
 This conservatively includes the transient new generation before old data is deleted,
@@ -291,11 +282,13 @@ Tests include the byte-exact shared derivation/encryption/signature/head-hash an
 delete-signature vectors, deletion writer/CAS checks, absent-slot idempotence,
 quota release and TOFU recreation, shared-CID preservation and interrupted-delete recovery,
 CAS conflicts, TOFU writer mismatch, idempotence, bad signatures, size/hash failures,
-quota reservations, sender/room-bound transfer assembly, and restart recovery with
-both retained generations served through the normal block representation, crash temporary
-file cleanup, identical PUT retries under pull saturation, bounded/fair serving queues,
-twelve simultaneous distinct WANT replies, frames that fit a 16 KiB browser ceiling,
-reserved commits after publication failure, a sync error after head replacement,
-retained previous-head retries, malformed CID-matching CBOR, bounded JSON admission,
-slot-wait floods with responsive GET/HELLO, and four parallel 1 MiB downloads through
-a paced 256-frame peer queue with a temporary drainer stall.
+quota reservations, sender-pinned fetch options and receive limits, fetch failure
+classification, the whole-pull deadline, and restart recovery with both retained
+generations available through the room-scoped BlockProvider, crash temporary file
+cleanup, identical PUT retries under pull saturation, concurrent distinct provider
+lookups, reserved commits after publication failure, a sync error after head
+replacement, retained previous-head retries, malformed CID-matching CBOR, bounded
+JSON admission, and slot-wait floods with responsive GET/HELLO. Fetch tests replace
+the public fetch API boundary to exercise escrow validation and durable PUTs;
+transport chunk assembly, frame sizing, serving admission and CP50 are owned and
+tested by mistlib rather than simulated by an escrow-specific queue.

@@ -1,118 +1,70 @@
-//! Bounded QUERY/WANT/HAVE transfers, bound to transport room and sender.
+//! Bounded block fetches pinned to the PUT transport room and sender.
 use super::{
     protocol::{Error, Head},
     repository::{manifest_limit, validate_blob, validate_manifest},
 };
+use mistlib::storage::{FetchOptions, fetch_block};
+use mistlib_core::storage::CHUNK_SIZE;
 use mistlib_core::storage::cid::{MULTICODEC_RAW, verify_cid};
-use mistlib_core::storage::{CHUNK_SIZE, protocol::*};
-use std::collections::HashMap;
+use mistlib_core::types::NodeId;
 use std::future::Future;
-use std::sync::Mutex;
-use tokio::sync::oneshot;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::Duration;
 
-type Key = (String, String, String);
-struct Pending {
-    cap: usize,
-    total: Option<u16>,
-    chunks: HashMap<u16, Vec<u8>>,
-    bytes: usize,
-    tx: Option<oneshot::Sender<Result<Vec<u8>, Error>>>,
-}
-#[derive(Default)]
+const PULL_TIMEOUT: Duration = Duration::from_secs(30);
+type FetchFuture = Pin<Box<dyn Future<Output = mistlib::Result<Vec<u8>>> + Send>>;
+type Fetcher = Arc<dyn Fn(String, String, FetchOptions) -> FetchFuture + Send + Sync>;
+
 pub struct Transfers {
-    pending: Mutex<HashMap<Key, Pending>>,
+    pub(super) fetch: Fetcher,
+}
+
+impl Default for Transfers {
+    fn default() -> Self {
+        Self {
+            fetch: Arc::new(|room, cid, opts| {
+                Box::pin(async move { fetch_block(&room, &cid, opts).await })
+            }),
+        }
+    }
+}
+
+// fetch_block reports these failures as string-bearing errors. Keep the escrow
+// error contract even though CID validation now happens inside fetch_block.
+fn fetch_error(error: mistlib::MistError) -> Error {
+    let content_failure = match &error {
+        mistlib::MistError::Network(message) => {
+            message == "Block CID/hash mismatch"
+                || message.starts_with("Block exceeds receive byte limit (observed ")
+        }
+        mistlib::MistError::Config(message) => message == "Invalid or unsupported block CID",
+        _ => false,
+    };
+    Error::new(if content_failure {
+        "hash_mismatch"
+    } else {
+        "fetch_failed"
+    })
 }
 
 impl Transfers {
-    /// Parse only solicited frames; no allocation based on unsolicited chunk counts.
-    pub fn receive(&self, room: &str, from: &str, raw: &[u8]) {
-        if raw.len() < 2 || !matches!(raw[0], MSG_HAVE | MSG_HAVE_CHUNK) {
-            return;
-        }
-        let chunked = raw[0] == MSG_HAVE_CHUNK;
-        let start = if chunked { 6 } else { 2 };
-        let end = start + raw[1] as usize;
-        if raw.len() < end {
-            return;
-        }
-        let Ok(cid) = std::str::from_utf8(&raw[start..end]) else {
-            return;
-        };
-        let mut pending = self.pending.lock().unwrap();
-        let key = (room.into(), from.into(), cid.into());
-        let Some(request) = pending.get_mut(&key) else {
-            return;
-        };
-        let payload = &raw[end..];
-        if payload.len() > request.cap {
-            if let Some(tx) = request.tx.take() {
-                let _ = tx.send(Err(Error::new("hash_mismatch")));
-            }
-            return;
-        }
-        if !chunked {
-            if let Some(tx) = request.tx.take() {
-                let _ = tx.send(Ok(payload.to_vec()));
-            }
-            return;
-        }
-        let index = u16::from_be_bytes([raw[2], raw[3]]);
-        let total = u16::from_be_bytes([raw[4], raw[5]]);
-        // A block is at most 1 MiB (manifest <=128 KiB); bound tiny-chunk attacks too.
-        if total == 0
-            || index >= total
-            || total as usize > 1024
-            || request.total.is_some_and(|t| t != total)
-            || request.chunks.contains_key(&index)
-            || request.bytes.saturating_add(payload.len()) > request.cap
-        {
-            return;
-        }
-        request.total = Some(total);
-        request.bytes += payload.len();
-        request.chunks.insert(index, payload.to_vec());
-        if request.chunks.len() == total as usize {
-            let mut bytes = Vec::with_capacity(request.bytes);
-            for i in 0..total {
-                bytes.extend_from_slice(request.chunks.get(&i).unwrap());
-            }
-            if let Some(tx) = request.tx.take() {
-                let _ = tx.send(Ok(bytes));
-            }
-            request.chunks.clear();
-        }
-    }
-
     async fn block(&self, room: &str, from: &str, cid: &str, cap: usize) -> Result<Vec<u8>, Error> {
-        let key = (room.into(), from.into(), cid.into());
-        let (tx, rx) = oneshot::channel();
-        {
-            let mut pending = self.pending.lock().unwrap();
-            if pending.len() >= 4 || pending.contains_key(&key) {
-                return Err(Error::new("busy"));
-            }
-            pending.insert(
-                key.clone(),
-                Pending {
-                    cap,
-                    total: None,
-                    chunks: HashMap::new(),
-                    bytes: 0,
-                    tx: Some(tx),
-                },
-            );
+        let bytes = (self.fetch)(
+            room.into(),
+            cid.into(),
+            FetchOptions {
+                peer: Some(NodeId(from.into())),
+                max_bytes: cap,
+                timeout: PULL_TIMEOUT,
+            },
+        )
+        .await
+        .map_err(fetch_error)?;
+        if bytes.len() > cap {
+            return Err(Error::new("hash_mismatch"));
         }
-        let _guard = PendingGuard {
-            transfers: self,
-            key,
-        };
-        let _ = crate::net::send_direct(room, from, build_query_message(cid)).await;
-        let mut want = vec![MSG_WANT];
-        want.extend_from_slice(cid.as_bytes());
-        crate::net::send_direct(room, from, want)
-            .await
-            .map_err(|_| Error::new("fetch_failed"))?;
-        rx.await.map_err(|_| Error::new("fetch_failed"))?
+        Ok(bytes)
     }
 
     pub async fn pull(
@@ -121,7 +73,7 @@ impl Transfers {
         from: &str,
         head: &Head,
     ) -> Result<(Vec<u8>, Vec<u8>), Error> {
-        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        tokio::time::timeout(PULL_TIMEOUT, async {
             let bytes = self
                 .block(room, from, &head.cid, manifest_limit(head.size))
                 .await?;
@@ -178,57 +130,10 @@ where
     Ok(Some((blob, bytes)))
 }
 
-struct PendingGuard<'a> {
-    transfers: &'a Transfers,
-    key: Key,
-}
-impl Drop for PendingGuard<'_> {
-    fn drop(&mut self) {
-        self.transfers.pending.lock().unwrap().remove(&self.key);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn escrow_transfer_binds_sender_room_and_bounds_assembly() {
-        let transfers = Transfers::default();
-        let key = ("room".into(), "sender".into(), "bcid".into());
-        let (tx, mut rx) = oneshot::channel();
-        transfers.pending.lock().unwrap().insert(
-            key.clone(),
-            Pending {
-                cap: 4,
-                total: None,
-                chunks: HashMap::new(),
-                bytes: 0,
-                tx: Some(tx),
-            },
-        );
-        transfers.receive("wrong", "sender", &build_have_message("bcid", b"test"));
-        transfers.receive("room", "other", &build_have_message("bcid", b"test"));
-        transfers.receive(
-            "room",
-            "sender",
-            &build_have_chunk_message("bcid", 0, 65535, b"x"),
-        );
-
-        assert!(rx.try_recv().is_err());
-        assert!(transfers.pending.lock().unwrap()[&key].chunks.is_empty());
-        transfers.receive(
-            "room",
-            "sender",
-            &build_have_chunk_message("bcid", 1, 2, b"st"),
-        );
-        transfers.receive(
-            "room",
-            "sender",
-            &build_have_chunk_message("bcid", 0, 2, b"te"),
-        );
-        assert_eq!(rx.try_recv().unwrap().unwrap(), b"test");
-    }
-
+    use std::collections::HashMap;
     fn signed(head: &mut Head) {
         use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
         use ed25519_dalek::{Signer, SigningKey};

@@ -5,15 +5,12 @@
 //!
 //! The block backend is `mistlib`'s (mistlib-native's) `NativeBlockStore`
 //! (one file per CID under `config.storage.blocks_dir`, default
-//! `<data_dir>/blocks`). Peer resolution is [`resolver::RoomPeerResolver`]:
-//! a block missing from the local store is resolved over p2p, using the
-//! same QUERY/WANT/HAVE(_CHUNK) wire protocol
-//! (`mistlib_core::storage::protocol`) mistlib-native's and mistlib-wasm's
-//! own resolvers speak, so this interoperates with browser tabs (tc-news,
-//! tc-chat, tc-storage) sharing a room -- see the `resolver` module doc
-//! comment for why this reimplements the wire protocol on `crate::net`
-//! rather than reusing mistlib-native's built-in (but internally-wired,
-//! inaccessible from here) P2P storage. [`Store::get`] resolves over
+//! `<data_dir>/blocks`). [`resolver::RoomPeerResolver`] fetches missing blocks
+//! through `mistlib::storage::fetch_block`, while a registered `BlockProvider`
+//! serves local blocks to peers in every joined room. mistlib handles discovery,
+//! chunking and CID verification, including browser peers (tc-news, tc-chat,
+//! tc-storage), without using mistl's raw event handlers or mistlib's separate
+//! storage cache. [`Store::get`] resolves over
 //! whichever rooms are currently joined via `storage.room_ids`;
 //! [`Store::get_remote`] lets a caller pick specific rooms/timeout instead
 //! (e.g. a bot pipeline resolving a CID from a room it joined itself,
@@ -196,7 +193,7 @@ impl Store {
     /// Local-only lookup: reads `cid` from this node's own block store
     /// without triggering peer resolution, even for a manifest root the
     /// local index doesn't know about (this only touches the block store,
-    /// not `store-index.json`). Used to answer inbound QUERY/WANT (serving
+    /// not `store-index.json`). Used by the registered block provider (serving
     /// a request must never trigger our *own* remote resolution -- two
     /// nodes both missing a block and asking each other for it would
     /// otherwise loop) and could equally back a future "do we have this
@@ -247,11 +244,8 @@ pub async fn store(state: &Arc<AppState>) -> Result<Arc<Store>> {
             Store::open(&storage_cfg, data_dir).await.map(Arc::new)
         })
         .await?;
-    // Idempotent (registers once per process); done after `STORE` is
-    // populated so the handler's `super::STORE.get()` local-block lookups
-    // (answering inbound QUERY/WANT) can actually find it -- see
-    // `resolver::ensure_wire_handler_registered`'s doc comment.
-    resolver::ensure_wire_handler_registered();
+    // Register once, keeping the provider handle alive for the process lifetime.
+    resolver::ensure_block_provider_registered(store);
     if state.network.permitted() {
         store
             .sync_rooms(state, &state.config().storage.room_ids)
@@ -484,12 +478,12 @@ pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Val
                     downloads.join(&name)
                 }
             };
-            if let Some(parent) = output_path.parent() {
-                if !parent.as_os_str().is_empty() {
-                    tokio::fs::create_dir_all(parent)
-                        .await
-                        .with_context(|| format!("creating {}", parent.display()))?;
-                }
+            if let Some(parent) = output_path.parent()
+                && !parent.as_os_str().is_empty()
+            {
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .with_context(|| format!("creating {}", parent.display()))?;
             }
             tokio::fs::write(&output_path, &data)
                 .await
@@ -1198,7 +1192,7 @@ mod tests {
     /// Minimal self-cleaning temp directory (the `tempfile` crate is only a
     /// transitive dependency here, not a direct one mistl can `use`; see the
     /// deviation note in the storage module report).
-    struct TempDir(PathBuf);
+    pub(super) struct TempDir(PathBuf);
 
     impl TempDir {
         fn new(label: &str) -> Self {
@@ -1238,7 +1232,7 @@ mod tests {
         }
     }
 
-    async fn temp_store(label: &str) -> (Store, TempDir) {
+    pub(super) async fn temp_store(label: &str) -> (Store, TempDir) {
         let dir = TempDir::new(label);
         let store = Store::open(&test_config(), dir.path())
             .await
