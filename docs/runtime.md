@@ -15,6 +15,7 @@ provenance is reported as unknown, not inferred from the current checkout.
 ```console
 just dev
 just watch
+just stop
 mistl --instance repro-123 daemon start
 mistl --instance repro-123 network status
 ```
@@ -31,6 +32,10 @@ instance's files. Existing configuration is not automatically copied into dev.
 `just watch` stop only the worktree's own recognized daemon. Old executables that
 cannot identify their instance must be stopped with their original CLI before
 rebuilding; no process is killed by name.
+
+`just stop` stops the worktree's development daemon without building or starting
+it. It uses the debug binary, falling back to the release binary if needed, and
+waits for the daemon to shut down. An already stopped daemon is a no-op.
 
 ## External connections ON/OFF
 

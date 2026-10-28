@@ -4,7 +4,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
@@ -265,10 +265,26 @@ async fn handle_connection(
 /// Send one request to the running daemon (synchronous; used from the CLI
 /// process which has no tokio runtime).
 pub fn client_request(cmd: &str, args: Value) -> Result<Value> {
-    let path = info_path()?;
-    let info: DaemonInfo = match std::fs::read(&path) {
+    client_request_at(&info_path()?, cmd, args)
+}
+
+fn client_request_at(path: &Path, cmd: &str, args: Value) -> Result<Value> {
+    let info: DaemonInfo = match std::fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes).context("parsing daemon.json")?,
         Err(_) => bail!("daemon is not running (start it with `mistl daemon start`)"),
+    };
+
+    // Check liveness before compatibility: a stale legacy discovery file must
+    // not block startup. Never send credentials to an incompatible listener.
+    let stream = match TcpStream::connect(("127.0.0.1", info.port)) {
+        Ok(stream) => stream,
+        Err(_) => {
+            // Stale discovery file from a crashed daemon.
+            if crate::runtime::same_file_owner(path, &info.run_id) {
+                let _ = std::fs::remove_file(path);
+            }
+            bail!("daemon is not running (start it with `mistl daemon start`)");
+        }
     };
 
     if info.channel != crate::runtime::CHANNEL
@@ -289,16 +305,6 @@ pub fn client_request(cmd: &str, args: Value) -> Result<Value> {
         );
     }
 
-    let stream = match TcpStream::connect(("127.0.0.1", info.port)) {
-        Ok(stream) => stream,
-        Err(_) => {
-            // Stale discovery file from a crashed daemon.
-            if crate::runtime::same_file_owner(&path, &info.run_id) {
-                let _ = std::fs::remove_file(&path);
-            }
-            bail!("daemon is not running (start it with `mistl daemon start`)");
-        }
-    };
     stream.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
     stream.set_write_timeout(Some(std::time::Duration::from_secs(30)))?;
 
@@ -335,6 +341,61 @@ pub fn client_request(cmd: &str, args: Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct LegacyDiscovery(PathBuf);
+
+    impl LegacyDiscovery {
+        fn new(port: u16) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "mistl-legacy-discovery-{:016x}.json",
+                rand::random::<u64>()
+            ));
+            crate::statefile::write_private(
+                &path,
+                &serde_json::to_vec(&serde_json::json!({
+                    "pid": std::process::id(), "port": port, "token": "test-token"
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for LegacyDiscovery {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    #[test]
+    fn stale_legacy_discovery_does_not_block_startup() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let discovery = LegacyDiscovery::new(listener.local_addr().unwrap().port());
+        drop(listener);
+
+        let error = client_request_at(&discovery.0, "daemon.status", Value::Null).unwrap_err();
+        assert!(error.to_string().contains("daemon is not running"));
+        // Legacy entries have no run_id, so they are left for startup to replace.
+        assert!(discovery.0.exists());
+    }
+
+    #[test]
+    fn live_legacy_discovery_is_rejected_without_sending_credentials() {
+        use std::io::Read;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let discovery = LegacyDiscovery::new(listener.local_addr().unwrap().port());
+
+        let error = client_request_at(&discovery.0, "daemon.stop", Value::Null).unwrap_err();
+        assert!(error.to_string().contains("identity/protocol mismatch"));
+        assert!(discovery.0.exists());
+        let (mut socket, _) = listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        assert_eq!(socket.read(&mut [0; 1]).unwrap(), 0);
+    }
 
     #[test]
     fn token_eq_matches_only_identical_tokens() {

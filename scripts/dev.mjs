@@ -8,26 +8,33 @@ const bin = path.join(root, 'target', 'debug', process.platform === 'win32' ? 'm
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const run = (exe, args) => spawnSync(exe, args, { cwd: root, encoding: 'utf8', windowsHide: true });
 
-async function rebuild() {
-  if (existsSync(bin)) {
-    const identity = run(bin, ['build-info']);
+async function stopDaemon(exe = bin) {
+  if (existsSync(exe)) {
+    const identity = run(exe, ['build-info']);
     let build;
     try { build = JSON.parse(identity.stdout); } catch { /* legacy binary: do not invoke stop */ }
     if (build && build.channel === 'dev' && build.instance.startsWith('worktree-')) {
-      const status = run(bin, ['daemon', 'status']);
+      const status = run(exe, ['daemon', 'status']);
       if (status.status === 0) {
-        const stopped = run(bin, ['daemon', 'stop']);
+        const stopped = run(exe, ['daemon', 'stop']);
         if (stopped.status !== 0) throw new Error(stopped.stderr);
         const deadline = Date.now() + 10000;
-        while (run(bin, ['daemon', 'status']).status === 0) {
+        while (run(exe, ['daemon', 'status']).status === 0) {
           if (Date.now() >= deadline) throw new Error('Development daemon did not stop; no process was force-killed.');
           await sleep(150);
         }
         // Native threads exit with the process, shortly after IPC closes.
         await sleep(500);
       }
+    } else if (process.argv.includes('--stop')) {
+      throw new Error('Cannot identify this worktree\'s development instance; stop it with its original CLI.');
     }
+  } else if (process.argv.includes('--stop')) {
+    throw new Error('No local mistl binary found; stop the daemon with its original CLI.');
   }
+}
+async function rebuild() {
+  await stopDaemon();
   const ok = await new Promise(resolve => {
     const child = spawn('cargo', ['build', '--locked'], { cwd: root, stdio: 'inherit', windowsHide: true,
       env: { ...process.env, MISTL_BUILD_CHANNEL: 'dev' } });
@@ -50,17 +57,23 @@ function snapshot() {
   return files.join('\n');
 }
 const watch = process.argv.includes('--watch');
-let ok = await rebuild();
-if (!watch) process.exitCode = ok ? 0 : 1;
-else {
-  console.log('Watching this worktree. Ctrl+C leaves its last daemon running.');
-  let previous = snapshot();
-  for (;;) {
-    await sleep(1000);
-    const next = snapshot();
-    if (next !== previous) {
-      try { ok = await rebuild(); } catch (error) { console.error(error.message); }
-      previous = snapshot();
+if (process.argv.includes('--stop')) {
+  const releaseBin = path.join(root, 'target', 'release', path.basename(bin));
+  await stopDaemon(existsSync(bin) ? bin : releaseBin);
+  console.log('This worktree\'s development daemon is stopped.');
+} else {
+  let ok = await rebuild();
+  if (!watch) process.exitCode = ok ? 0 : 1;
+  else {
+    console.log('Watching this worktree. Ctrl+C leaves its last daemon running.');
+    let previous = snapshot();
+    for (;;) {
+      await sleep(1000);
+      const next = snapshot();
+      if (next !== previous) {
+        try { ok = await rebuild(); } catch (error) { console.error(error.message); }
+        previous = snapshot();
+      }
     }
   }
 }

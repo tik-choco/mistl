@@ -152,6 +152,10 @@ _copy-linux-exe:
 dev: _ensure-mistlib _ensure-mistlib-consensus
     node scripts/dev.mjs
 
+# Stop this worktree's development daemon without rebuilding
+stop:
+    node scripts/dev.mjs --stop
+
 # Debug build
 build: _ensure-mistlib _ensure-mistlib-consensus
     cargo build
