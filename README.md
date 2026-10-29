@@ -77,6 +77,7 @@ $ mistl agent                           # terminal AI agent
 | --- | --- |
 | [CLI reference](docs/cli.md) | Every command, VRChat relay, chat relay, escrow, agent |
 | [Configuration](docs/configuration.md) | `config.toml` keys and where data lives |
+| [Vault](docs/vault.md) | Encrypted replicated storage and recovery |
 | [AI configuration](docs/ai-config.md) | Providers, rooms and the local API |
 | [Identity](docs/identity.md) | Profile document and DID delegation |
 | [Architecture](docs/architecture.md) | Modules, interop, bot delivery, known limitations |

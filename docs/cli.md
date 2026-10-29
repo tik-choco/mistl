@@ -38,6 +38,23 @@ $ mistl store put .\file.bin  # -> returns a CID
 $ mistl store ls
 $ mistl store get <cid> --output .\file.bin
 
+# Encrypted replicated storage
+$ mistl vault init            # save the recovery code offline
+$ mistl vault invite          # create a one-use invite for another node
+$ mistl vault join <CODE>     # save this node's recovery code offline too
+$ mistl vault members
+$ mistl vault status
+$ mistl vault put ./file.bin --name backup.bin
+$ mistl vault ls              # add --owner <DID> to select a dataset
+$ mistl vault get backup.bin -o ./restored.bin
+$ mistl vault rm backup.bin
+$ mistl vault sync
+$ mistl vault key             # show recovery code; keep it offline
+$ mistl vault restore <CODE>
+$ mistl vault remove-member <DID>
+$ mistl vault leave
+$ mistl vault status --json   # machine-readable response
+
 # Screen share (VRChat)
 $ mistl stream start          # local screen -> rtsp://<LAN IP>:8554/stream
 $ mistl stream start --room my-room   # ...and also publish it into a mistlib room (native capture, Windows)
@@ -250,3 +267,9 @@ Move encrypted checkpoints between nodes with `mistl escrow export <FILE>` and
 or use the dashboard's **Export** and **Import** buttons.
 Signed heads use CAS and a pinned writer, with durable current/previous blobs that
 remain downloadable after restart. See [escrow setup and protocol](escrow.md).
+
+### Encrypted replicated vault
+
+Vault replicates each member's encrypted dataset to other group members. Save
+each owner's recovery code offline and check confirmed copies with
+`mistl vault status`. See [Vault](vault.md) for setup, recovery, and capacity limits.

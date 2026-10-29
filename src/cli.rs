@@ -78,6 +78,14 @@ pub enum Command {
         #[command(subcommand)]
         action: EscrowAction,
     },
+    /// Encrypted, replicated storage group
+    Vault {
+        /// Print machine-readable JSON
+        #[arg(long, global = true)]
+        json: bool,
+        #[command(subcommand)]
+        action: VaultAction,
+    },
     /// P2P AI network: consume or provide LLM inference (mistai compatible)
     Ai {
         #[command(subcommand)]
@@ -534,6 +542,49 @@ pub enum EscrowRoomsAction {
     Add { room: String },
     Remove { room: String },
     List,
+}
+
+#[derive(Subcommand)]
+pub enum VaultAction {
+    /// Show group members and replica status
+    Status,
+    /// Create a storage group
+    Init,
+    /// Create a single-use invite
+    Invite,
+    /// Join a storage group using an invite
+    Join { code: String },
+    /// Show group members
+    Members,
+    /// Remove a group member by DID
+    RemoveMember { did: String },
+    /// Leave the group
+    Leave,
+    /// List files in a dataset
+    Ls {
+        #[arg(long)]
+        owner: Option<String>,
+    },
+    /// Encrypt and store a local file
+    Put {
+        file: String,
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Recover a file to the current directory or a chosen path
+    Get {
+        name: String,
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+    /// Remove a file from your dataset
+    Rm { name: String },
+    /// Show your recovery code
+    Key,
+    /// Adopt a dataset using its recovery code
+    Restore { code: String },
+    /// Start a replication tick now
+    Sync,
 }
 
 #[derive(Subcommand)]
@@ -1185,6 +1236,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
                 EscrowRoomsAction::List => client_call("escrow.rooms.list", json!({})),
             },
         },
+        Command::Vault { json, action } => vault_call(action, json),
         Command::Chat { action } => match action {
             ChatAction::Rooms => client_call("chat.rooms", json!({})),
             ChatAction::Log { room, limit } => {
@@ -1672,6 +1724,201 @@ fn client_call(cmd: &str, args: Value) -> Result<()> {
     let response = request(cmd, args)?;
     println!("{}", serde_json::to_string_pretty(&response)?);
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum VaultOutput {
+    Status,
+    Members,
+    Files,
+    Secret,
+    Invite,
+    General,
+}
+
+fn vault_request(action: VaultAction) -> Result<(&'static str, Value, VaultOutput)> {
+    use VaultAction as A;
+    use VaultOutput as O;
+    Ok(match action {
+        A::Status => ("vault.status", json!({}), O::Status),
+        A::Members => ("vault.status", json!({}), O::Members),
+        A::Init => ("vault.init", json!({}), O::Secret),
+        A::Invite => ("vault.invite", json!({}), O::Invite),
+        A::Join { code } => ("vault.join", json!({"code": code}), O::Secret),
+        A::RemoveMember { did } => ("vault.members.remove", json!({"did": did}), O::General),
+        A::Leave => ("vault.leave", json!({}), O::General),
+        A::Ls { owner } => {
+            let args = owner.map_or_else(|| json!({}), |owner| json!({"owner": owner}));
+            ("vault.ls", args, O::Files)
+        }
+        A::Put { file, name } => {
+            let path = std::fs::canonicalize(&file).context("cannot resolve vault input file")?;
+            let path = path
+                .to_str()
+                .context("vault input path is not valid Unicode")?;
+            let mut args = json!({"path": path});
+            if let Some(name) = name {
+                args["name"] = json!(name);
+            }
+            ("vault.put", args, O::General)
+        }
+        A::Get { name, output } => {
+            let output = vault_output_path(&name, output.as_deref())?;
+            let output = output
+                .to_str()
+                .context("vault output path is not valid Unicode")?;
+            (
+                "vault.get",
+                json!({"name": name, "output": output}),
+                O::General,
+            )
+        }
+        A::Rm { name } => ("vault.rm", json!({"name": name}), O::General),
+        A::Key => ("vault.key.show", json!({}), O::Secret),
+        A::Restore { code } => ("vault.restore", json!({"code": code}), O::General),
+        A::Sync => ("vault.sync", json!({}), O::General),
+    })
+}
+
+fn vault_output_path(name: &str, output: Option<&str>) -> Result<std::path::PathBuf> {
+    if output.is_none() {
+        anyhow::ensure!(
+            !name.is_empty()
+                && name.chars().count() <= 255
+                && name != "."
+                && name != ".."
+                && !name
+                    .chars()
+                    .any(|c| c == '/' || c == '\\' || c.is_control()),
+            "invalid vault file name"
+        );
+    }
+    let path = std::path::Path::new(output.unwrap_or(name));
+    let absolute = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    anyhow::ensure!(absolute.is_absolute(), "vault output path must be absolute");
+    Ok(absolute)
+}
+
+fn vault_call(action: VaultAction, json: bool) -> Result<()> {
+    let (cmd, args, output) = vault_request(action)?;
+    let response = request(cmd, args)?;
+    if json {
+        if matches!(output, VaultOutput::Secret) && response.get("recovery_code").is_some() {
+            eprintln!("Keep the recovery code offline; it grants access to your data.");
+        }
+        println!("{}", serde_json::to_string_pretty(&response)?);
+    } else {
+        println!("{}", render_vault(&response, output));
+    }
+    Ok(())
+}
+
+fn render_vault(response: &Value, output: VaultOutput) -> String {
+    let value = |item: &Value, key: &str| {
+        item.get(key)
+            .map(|v| {
+                v.as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| v.to_string())
+            })
+            .unwrap_or_else(|| "-".to_owned())
+    };
+    let mut lines = Vec::new();
+    match output {
+        VaultOutput::Status | VaultOutput::Members => {
+            if let Some(group) = response.get("group").filter(|g| !g.is_null()) {
+                lines.push(format!("Group: {}", value(group, "id")));
+                if let Some(members) = group.get("members").and_then(Value::as_array) {
+                    lines.push("Members:".into());
+                    for member in members {
+                        lines.push(format!(
+                            "  {}  {}  free {} bytes{}",
+                            value(member, "did"),
+                            if member.get("online").and_then(Value::as_bool) == Some(true) {
+                                "online"
+                            } else {
+                                "offline"
+                            },
+                            value(member, "free"),
+                            if member.get("self").and_then(Value::as_bool) == Some(true) {
+                                " (self)"
+                            } else {
+                                ""
+                            },
+                        ));
+                    }
+                }
+            } else {
+                lines.push("No vault group.".into());
+            }
+            if matches!(output, VaultOutput::Status) {
+                if let Some(owners) = response.get("owners").and_then(Value::as_array) {
+                    lines.push("Owners:".into());
+                    for owner in owners {
+                        lines.push(format!(
+                            "  {}  {}/{} copies, {} ({} files, {} bytes)",
+                            value(owner, "owner"),
+                            value(owner, "confirmed"),
+                            value(owner, "target"),
+                            value(owner, "state"),
+                            value(owner, "files"),
+                            value(owner, "bytes")
+                        ));
+                    }
+                }
+                if let Some(error) = response
+                    .get("last_error")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                {
+                    lines.push(format!("Error: {error}"));
+                }
+            }
+        }
+        VaultOutput::Files => {
+            if let Some(files) = response.get("files").and_then(Value::as_array) {
+                for file in files {
+                    lines.push(format!(
+                        "{}\t{} bytes",
+                        value(file, "name"),
+                        value(file, "size")
+                    ));
+                }
+            }
+            if lines.is_empty() {
+                lines.push("No files.".into());
+            }
+        }
+        VaultOutput::Secret => {
+            if let Some(code) = response.get("recovery_code").and_then(Value::as_str) {
+                if let Some(group) = response.get("group").and_then(Value::as_str) {
+                    lines.push(format!("Group: {group}"));
+                }
+                if let Some(owner) = response.get("owner").and_then(Value::as_str) {
+                    lines.push(format!("Owner: {owner}"));
+                }
+                lines.push(format!("Recovery code: {code}"));
+                lines.push(
+                    "Keep this code offline. It is required to decrypt and restore your data."
+                        .into(),
+                );
+            } else {
+                lines.push(serde_json::to_string_pretty(response).unwrap_or_default());
+            }
+        }
+        VaultOutput::Invite => {
+            lines.push(format!("Invite code: {}", value(response, "code")));
+            lines.push(format!("Expires at: {}", value(response, "expires_at")));
+        }
+        VaultOutput::General => {
+            lines.push(serde_json::to_string_pretty(response).unwrap_or_default())
+        }
+    }
+    lines.join("\n")
 }
 
 // -- `mistl store`: tc-storage-cli-style human output --------------------
@@ -2950,5 +3197,117 @@ mod escrow_membership_cli_tests {
         assert_eq!(voters.len(), 3);
         assert_eq!(learners.len(), 2);
         assert!(Cli::try_parse_from(["mistl", "escrow", "membership", "room-a"]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod vault_cli_tests {
+    use super::*;
+
+    #[test]
+    fn vault_commands_parse_and_map_to_ipc() {
+        for (args, expected) in [
+            (vec!["status"], "vault.status"),
+            (vec!["members"], "vault.status"),
+            (vec!["init"], "vault.init"),
+            (vec!["invite"], "vault.invite"),
+            (vec!["join", "code"], "vault.join"),
+            (vec!["remove-member", "did:key:z"], "vault.members.remove"),
+            (vec!["leave"], "vault.leave"),
+            (vec!["ls", "--owner", "did:key:z"], "vault.ls"),
+            (vec!["rm", "report"], "vault.rm"),
+            (vec!["key"], "vault.key.show"),
+            (vec!["restore", "code"], "vault.restore"),
+            (vec!["sync"], "vault.sync"),
+        ] {
+            let mut argv = vec!["mistl", "vault"];
+            argv.extend(args);
+            argv.push("--json");
+            let Some(Command::Vault { json: true, action }) =
+                Cli::try_parse_from(argv).unwrap().command
+            else {
+                panic!("expected vault command")
+            };
+            assert_eq!(vault_request(action).unwrap().0, expected);
+        }
+        assert!(Cli::try_parse_from(["mistl", "vault", "join"]).is_err());
+    }
+
+    #[test]
+    fn vault_paths_are_absolute_and_default_name_is_safe() {
+        let (cmd, args, _) = vault_request(VaultAction::Put {
+            file: "Cargo.toml".into(),
+            name: Some("renamed".into()),
+        })
+        .unwrap();
+        assert_eq!(cmd, "vault.put");
+        assert!(std::path::Path::new(args["path"].as_str().unwrap()).is_absolute());
+        assert_eq!(args["name"], "renamed");
+        let (_, args, _) = vault_request(VaultAction::Get {
+            name: "file.txt".into(),
+            output: None,
+        })
+        .unwrap();
+        assert!(std::path::Path::new(args["output"].as_str().unwrap()).is_absolute());
+        assert!(args["output"].as_str().unwrap().ends_with("file.txt"));
+        assert!(vault_output_path("../outside", None).is_err());
+        assert!(vault_output_path("..", None).is_err());
+        assert!(vault_output_path("x\\y", None).is_err());
+        assert!(vault_output_path("x\0y", None).is_err());
+        assert!(vault_output_path("", None).is_err());
+        assert!(vault_output_path(&"x".repeat(256), None).is_err());
+        assert!(
+            vault_output_path("file", Some("other.txt"))
+                .unwrap()
+                .is_absolute()
+        );
+    }
+
+    #[test]
+    fn vault_cli_preserves_option_values() {
+        let parsed = Cli::try_parse_from([
+            "mistl",
+            "vault",
+            "--json",
+            "get",
+            "report",
+            "-o",
+            "result.txt",
+        ])
+        .unwrap();
+        let Some(Command::Vault { json: true, action }) = parsed.command else {
+            panic!("expected vault get")
+        };
+        let (cmd, args, _) = vault_request(action).unwrap();
+        assert_eq!(cmd, "vault.get");
+        assert_eq!(args["name"], "report");
+        assert!(args["output"].as_str().unwrap().ends_with("result.txt"));
+        let (_, args, _) = vault_request(VaultAction::Ls {
+            owner: Some("did:key:owner".into()),
+        })
+        .unwrap();
+        assert_eq!(args["owner"], "did:key:owner");
+        let (_, args, _) = vault_request(VaultAction::Join {
+            code: "invite".into(),
+        })
+        .unwrap();
+        assert_eq!(args["code"], "invite");
+    }
+
+    #[test]
+    fn vault_status_and_recovery_are_human_readable() {
+        let status = json!({"group":{"id":"group-id","members":[
+            {"did":"did:key:member","online":true,"free":42,"self":true}
+        ]},"owners":[{"owner":"owner-id","confirmed":1,"target":2,"state":"degraded","files":3,"bytes":100}]});
+        let text = render_vault(&status, VaultOutput::Status);
+        assert!(text.contains("group-id") && text.contains("online") && text.contains("free 42"));
+        assert!(text.contains("1/2 copies, degraded"));
+        let members = render_vault(&status, VaultOutput::Members);
+        assert!(!members.contains("Owners:"));
+        let key = render_vault(&json!({"recovery_code":"mvk1-test"}), VaultOutput::Secret);
+        assert!(key.contains("mvk1-test") && key.contains("offline"));
+        assert!(
+            render_vault(&json!({"group":null}), VaultOutput::Status).contains("No vault group")
+        );
     }
 }

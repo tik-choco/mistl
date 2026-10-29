@@ -19,6 +19,10 @@
 //! - `POST /api/escrow/import?room=...` -> raw escrow export file, streamed to
 //!   disk and validated before import; `room` selects rooms like the export.
 //!   Answers 200 `{"ok":...}` like `/api/call`.
+//! - `POST /api/vault/upload` (raw body, name in `x-file-name`) and
+//!   `GET /api/vault/download?name=...` -> `vault.put` / `vault.get` through a
+//!   daemon-chosen temp file, so dashboard transfers are not limited by the
+//!   `/api/call` body cap. Upload needs `x-mistl-ui` like the other uploads.
 //! - `POST /api/store/sandbox-upload` -> identical protocol to
 //!   `/api/store/upload`, but the file lands in the path-jailed content
 //!   sandbox via `store.sandbox.import` instead of the content store via
@@ -94,6 +98,8 @@ const MAX_CONNECTIONS: usize = 64;
 /// Uploads (content store + sandbox) streamed concurrently.
 const MAX_CONCURRENT_UPLOADS: usize = 2;
 static UPLOAD_SLOTS: Semaphore = Semaphore::const_new(MAX_CONCURRENT_UPLOADS);
+/// Vault downloads decrypt into a temp file first; bound the plaintext copies.
+static VAULT_DOWNLOAD_SLOTS: Semaphore = Semaphore::const_new(2);
 
 /// Content-Security-Policy for HTML responses. The dashboard is one page with
 /// inline script/style plus same-origin feature assets; nothing external.
@@ -778,6 +784,8 @@ async fn handle_connection_inner(
         ("POST", "/api/store/upload") => handle_store_upload(stream, &head, leftover, state).await,
         ("GET", "/api/store/download") => handle_store_download(stream, &head, state).await,
         ("GET", "/api/escrow/export") => handle_escrow_export(stream, &head, state).await,
+        ("POST", "/api/vault/upload") => handle_vault_upload(stream, &head, leftover, state).await,
+        ("GET", "/api/vault/download") => handle_vault_download(stream, &head, state).await,
         ("POST", "/api/escrow/import") => {
             handle_escrow_import(stream, &head, leftover, state).await
         }
@@ -1064,6 +1072,168 @@ async fn handle_escrow_import(
     .await;
     if let Err(error) = tokio::fs::remove_dir_all(&dir).await {
         debug!(%error, "removing escrow import temp dir failed");
+    }
+    result
+}
+
+/// `POST /api/vault/upload`: like the store upload, but the temp file is
+/// handed to `vault.put` under the browser-supplied name.
+async fn handle_vault_upload(
+    stream: &mut TcpStream,
+    head: &RequestHead,
+    leftover: Vec<u8>,
+    state: Arc<AppState>,
+) -> io::Result<()> {
+    if is_guard_denied(head, &stream.local_addr()?, true) {
+        return write_error(stream, 403, "Forbidden", "forbidden").await;
+    }
+    let Some(name) = head.header("x-file-name").and_then(percent_decode) else {
+        return write_error(stream, 400, "Bad Request", "x-file-name header required").await;
+    };
+    let Ok(_slot) = UPLOAD_SLOTS.try_acquire() else {
+        return write_error(
+            stream,
+            503,
+            "Service Unavailable",
+            "too many uploads in progress",
+        )
+        .await;
+    };
+    let content_length: u64 = match head.header("content-length").map(|v| v.trim().parse()) {
+        Some(Ok(n)) => n,
+        Some(Err(_)) => {
+            return write_error(stream, 400, "Bad Request", "invalid Content-Length").await;
+        }
+        None => {
+            return write_error(stream, 411, "Length Required", "Content-Length required").await;
+        }
+    };
+    if content_length > MAX_UPLOAD_BYTES {
+        return write_error(stream, 413, "Payload Too Large", "upload too large").await;
+    }
+    let dir =
+        std::env::temp_dir().join(format!("mistl-vault-upload-{:016x}", rand::random::<u64>()));
+    // Plaintext lands here before encryption: keep it private to this user.
+    if let Err(error) = crate::statefile::create_private_dir(&dir) {
+        warn!(%error, "creating vault upload temp dir failed");
+        return write_error(
+            stream,
+            500,
+            "Internal Server Error",
+            "failed to create temp directory",
+        )
+        .await;
+    }
+    let path = dir.join("payload");
+    let result = async {
+        let mut file = match File::create(&path).await {
+            Ok(file) => file,
+            Err(error) => {
+                return write_error(stream, 500, "Internal Server Error", &format!("{error:#}"))
+                    .await;
+            }
+        };
+        if let Err(error) = read_body_to_file(stream, leftover, content_length, &mut file).await {
+            debug!(%error, "reading vault upload body failed");
+            return write_error(stream, 400, "Bad Request", "incomplete request body").await;
+        }
+        drop(file);
+        let response = match crate::daemon::dispatch(
+            "vault.put",
+            json!({"path": path.to_string_lossy(), "name": name}),
+            &state,
+        )
+        .await
+        {
+            Ok(data) => json!({"ok": true, "data": data}),
+            Err(error) => json!({"ok": false, "error": format!("{error:#}")}),
+        };
+        write_json_response(stream, 200, "OK", &response).await
+    }
+    .await;
+    if let Err(error) = tokio::fs::remove_dir_all(&dir).await {
+        debug!(%error, "removing vault upload temp dir failed");
+    }
+    result
+}
+
+/// `GET /api/vault/download?name=...[&owner=...]`: decrypts through
+/// `vault.get` into a temp file and streams it back.
+async fn handle_vault_download(
+    stream: &mut TcpStream,
+    head: &RequestHead,
+    state: Arc<AppState>,
+) -> io::Result<()> {
+    if is_guard_denied(head, &stream.local_addr()?, false) {
+        return write_error(stream, 403, "Forbidden", "forbidden").await;
+    }
+    let query = head.path.split_once('?').map(|(_, q)| q).unwrap_or("");
+    let Some(name) = parse_query_param(query, "name").filter(|n| !n.is_empty()) else {
+        return write_error(stream, 400, "Bad Request", "name query parameter required").await;
+    };
+    let Ok(_slot) = VAULT_DOWNLOAD_SLOTS.try_acquire() else {
+        return write_error(
+            stream,
+            503,
+            "Service Unavailable",
+            "too many downloads in progress",
+        )
+        .await;
+    };
+    let mut args = json!({"name": name});
+    if let Some(owner) = parse_query_param(query, "owner").filter(|o| !o.is_empty()) {
+        args["owner"] = json!(owner);
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "mistl-vault-download-{:016x}",
+        rand::random::<u64>()
+    ));
+    if let Err(error) = crate::statefile::create_private_dir(&dir) {
+        warn!(%error, "creating vault download temp dir failed");
+        return write_error(
+            stream,
+            500,
+            "Internal Server Error",
+            "failed to create temp directory",
+        )
+        .await;
+    }
+    let path = dir.join("payload");
+    args["output"] = json!(path.to_string_lossy());
+    let result = async {
+        if let Err(error) = crate::daemon::dispatch("vault.get", args, &state).await {
+            return write_error(stream, 404, "Not Found", &format!("{error:#}")).await;
+        }
+        let mut file = match File::open(&path).await {
+            Ok(file) => file,
+            Err(error) => {
+                return write_error(stream, 500, "Internal Server Error", &format!("{error:#}"))
+                    .await;
+            }
+        };
+        let len = match file.metadata().await {
+            Ok(metadata) => metadata.len(),
+            Err(error) => {
+                return write_error(stream, 500, "Internal Server Error", &format!("{error:#}"))
+                    .await;
+            }
+        };
+        stream
+            .write_all(download_response_head(len, &name).as_bytes())
+            .await?;
+        let mut chunk = [0u8; STREAM_CHUNK_BYTES];
+        loop {
+            let n = file.read(&mut chunk).await?;
+            if n == 0 {
+                break;
+            }
+            stream.write_all(&chunk[..n]).await?;
+        }
+        stream.flush().await
+    }
+    .await;
+    if let Err(error) = tokio::fs::remove_dir_all(&dir).await {
+        debug!(%error, "removing vault download temp dir failed");
     }
     result
 }

@@ -16,6 +16,8 @@ pub struct Config {
     pub chat_relay: ChatRelayConfig,
     #[serde(default)]
     pub escrow: EscrowConfig,
+    #[serde(default)]
+    pub vault: VaultConfig,
     /// Legacy `[mailbox]` section, from before the p2p store-and-forward
     /// mail feature was removed and the tc-chat relay became its own
     /// module. Deserializable (so an old config.toml keeps loading, and its
@@ -316,6 +318,58 @@ pub struct ChatRelayConfig {
     /// of `enabled`. Joined once at daemon start; requires a daemon restart
     /// to take effect.
     pub rooms: Vec<String>,
+}
+
+/// Distributed encrypted storage across a vault group. The group itself
+/// (membership, invites, owner key) is runtime state under `<data_dir>/vault`.
+/// All settings require a daemon restart.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VaultConfig {
+    /// Target copies of each dataset, including the owner's own.
+    pub replicas: usize,
+    /// Maximum bytes this node holds (its own data plus other owners').
+    pub capacity_bytes: u64,
+    /// Free space to leave on the volume holding the vault directory.
+    pub min_free_bytes: u64,
+    /// Largest single file accepted by `vault put`.
+    pub max_object_bytes: u64,
+    /// A member unseen for this long is replaced in placement.
+    pub dead_after_secs: u64,
+}
+
+impl Default for VaultConfig {
+    fn default() -> Self {
+        Self {
+            replicas: 3,
+            capacity_bytes: 10 * 1024 * 1024 * 1024,
+            min_free_bytes: 1024 * 1024 * 1024,
+            max_object_bytes: 4 * 1024 * 1024 * 1024,
+            dead_after_secs: 24 * 60 * 60,
+        }
+    }
+}
+
+impl VaultConfig {
+    pub fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            (1..=8).contains(&self.replicas),
+            "vault.replicas: expected 1..8"
+        );
+        anyhow::ensure!(
+            self.capacity_bytes >= 1024 * 1024,
+            "vault.capacity_bytes: expected at least 1048576"
+        );
+        anyhow::ensure!(
+            (1..=8 * 1024 * 1024 * 1024).contains(&self.max_object_bytes),
+            "vault.max_object_bytes: expected 1..8589934592"
+        );
+        anyhow::ensure!(
+            self.dead_after_secs >= 60,
+            "vault.dead_after_secs: expected at least 60"
+        );
+        Ok(())
+    }
 }
 
 /// Durable encrypted checkpoint escrow. All settings require a daemon restart.
@@ -1349,6 +1403,7 @@ pub fn set_by_path(config: &Config, path: &str, value: serde_json::Value) -> Res
     updated.network.validate()?;
     updated.ai.validate()?;
     updated.escrow.validate()?;
+    updated.vault.validate()?;
     Ok(updated)
 }
 
@@ -1359,7 +1414,7 @@ pub fn set_by_path(config: &Config, path: &str, value: serde_json::Value) -> Res
 pub fn applies_when(path: &str) -> &'static str {
     match path {
         "ui.enabled" | "ui.listen" => "daemon restart",
-        path if path.starts_with("escrow.") => "daemon restart",
+        path if path.starts_with("escrow.") || path.starts_with("vault.") => "daemon restart",
         // The background updater re-reads config each tick, but its cadence
         // and enabled state are simplest to reason about across a restart.
         "update.auto_check" | "update.check_interval_hours" => "daemon restart",
@@ -1477,6 +1532,7 @@ impl Config {
         }
         let mut config: Self = tree.try_into()?;
         config.escrow.validate()?;
+        config.vault.validate()?;
         config.ai.discard_invalid_options();
         let migrated = config.migrate_legacy();
         config.ai.discard_invalid_options();

@@ -19,6 +19,8 @@ pub(super) fn spawn(state: Arc<AppState>) {
     // while nobody is asking.
     crate::chat_relay::spawn_background(state.clone());
     crate::escrow::spawn_background(state.clone());
+    // Vault group replication: a no-op until `mistl vault init/join`.
+    crate::vault::spawn_background(state.clone());
 
     // mistl-to-mistl direct messages: registers the inbound handler so
     // messages from verified peers are received while nobody is asking.

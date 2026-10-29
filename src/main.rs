@@ -23,6 +23,7 @@ mod topology;
 mod tray;
 mod tunnel;
 mod update;
+mod vault;
 mod web;
 mod wiresign;
 

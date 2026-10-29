@@ -15,6 +15,13 @@ restart):
 capacity_bytes = 10737418240
 # room_ids = ["my-storage-room"]             # tc-chat room(s) for peer block exchange; default: local-only, no room joined
 
+[vault]
+replicas = 3                                 # copies including the owner; 1–8
+capacity_bytes = 10737418240                 # total vault capacity, including own data
+min_free_bytes = 1073741824                  # free disk space to reserve
+max_object_bytes = 4294967296                # maximum file size
+dead_after_secs = 86400                      # replace a member after this long unseen
+
 [stream]
 rtsp_url = "rtsp://127.0.0.1:8554/stream"   # use 0.0.0.0 to expose on the LAN
 frame_rate = 30
@@ -83,3 +90,6 @@ restart. The legacy single-room form (`room_id =
 "my-room"`) still parses, loading as a one-element `room_ids` list.
 
 Data lives in `%APPDATA%\tik-choco\mistl\data\` (keys, blocks, spools, logs).
+Vault settings apply after daemon restart. Its group, recovery key, and encrypted
+blocks are runtime state in the data directory, not configuration. See
+[Vault](vault.md) for setup and recovery.
