@@ -12,7 +12,7 @@ document.body.innerHTML = html.slice(start, end);
 window.eval(fs.readFileSync(new URL('../src/web/assets/features/storage.js', import.meta.url), 'utf8'));
 
 const root = document.getElementById('panel-store');
-assert.equal(root.querySelectorAll('.store-main > .subtab-page').length, 5, 'All five storage destinations stay in the workspace');
+assert.equal(root.querySelectorAll('.store-main > .subtab-page').length, 4, 'All four storage destinations stay in the workspace');
 assert.ok(root.contains(document.getElementById('store-sync-form')), 'Folder sync remains in its original panel');
 const copies = [], saves = [];
 let uploads = 0;

@@ -79,15 +79,6 @@ impl Identity {
     }
 }
 
-/// Build an identity from an independently derived signing key.
-pub(crate) fn from_signing_key(signing_key: SigningKey) -> Identity {
-    Identity {
-        did: did_from_pubkey(&signing_key.verifying_key().to_bytes()),
-        signing_key,
-        created_at: String::new(),
-    }
-}
-
 /// Derive the mistlib node id from a DID: first 16 hex chars of `sha256(did)`.
 ///
 /// Public so peer-authentication code (`crate::net::peer_auth`,

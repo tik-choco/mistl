@@ -599,11 +599,9 @@ fn authorize(caller: Caller, cmd: &str, args: &Value) -> Result<()> {
         "store.put" | "store.put-file" if has("path") => Some("reads an arbitrary local path"),
         "store.sandbox.import" => Some("reads an arbitrary local path"),
         "escrow.import" => Some("reads an arbitrary local path"),
-        "vault.put" if has("path") => Some("reads an arbitrary local path"),
         "store.folder-share" => Some("publishes an arbitrary local directory"),
         // Writes to a caller-chosen local path.
         "escrow.export" => Some("writes to an arbitrary local path"),
-        "vault.get" if has("output") => Some("writes to an arbitrary local path"),
         "store.get" | "store.get-file" | "store.fetch-share" | "store.sandbox.export"
             if has("output") =>
         {
@@ -612,13 +610,6 @@ fn authorize(caller: Caller, cmd: &str, args: &Value) -> Result<()> {
         // Directory listing of the daemon host's filesystem.
         "store.browse-dirs" if has("path") => Some("lists an arbitrary local directory"),
         "store.folder-sync" if has("dir") => Some("writes to an arbitrary local directory"),
-        "vault.init"
-        | "vault.invite"
-        | "vault.join"
-        | "vault.members.remove"
-        | "vault.leave"
-        | "vault.key.show"
-        | "vault.restore" => Some("changes vault trust or exposes a recovery secret"),
         "config.set"
             if args
                 .get("path")
@@ -669,18 +660,12 @@ pub async fn dispatch_as(
         && !matches!(
             cmd,
             "escrow.status"
+                | "escrow.auto.slots"
                 | "escrow.rooms.list"
                 | "escrow.rooms.add"
                 | "escrow.rooms.remove"
                 | "escrow.export"
                 | "escrow.import"
-                | "vault.status"
-                | "vault.ls"
-                | "vault.put"
-                | "vault.get"
-                | "vault.rm"
-                | "vault.key.show"
-                | "vault.init"
         )
     {
         state.network.require_online()?;
@@ -814,7 +799,6 @@ pub async fn dispatch_as(
             Some("stream") => crate::stream::handle(cmd, args, state).await,
             Some("chat") => crate::chat_relay::handle(cmd, args, state).await,
             Some("escrow") => crate::escrow::handle(cmd, args, state).await,
-            Some("vault") => crate::vault::handle(cmd, args, state).await,
             Some("dm") => crate::dm::handle(cmd, args, state).await,
             Some("peers") => crate::net::peer_profile::handle(cmd, args, state).await,
             Some("sched") => crate::scheduler::handle(cmd, args, state).await,
@@ -983,7 +967,7 @@ mod tests {
     #[test]
     fn escrow_dashboard_commands_follow_config_policy() {
         for caller in [LOCAL, REMOTE, Caller::Ipc, Caller::Internal] {
-            for cmd in ["escrow.status", "escrow.rooms.list"] {
+            for cmd in ["escrow.status", "escrow.auto.slots", "escrow.rooms.list"] {
                 authorize(caller, cmd, &json!({})).unwrap();
             }
             let rooms_allowed =
@@ -1084,48 +1068,6 @@ mod tests {
             ("config.show", json!({})),
         ];
         for (cmd, args) in allowed {
-            authorize(REMOTE, cmd, &args).unwrap_or_else(|e| panic!("{cmd}: {e}"));
-        }
-    }
-
-    #[test]
-    fn vault_remote_authorization_separates_trust_and_paths_from_data() {
-        for cmd in [
-            "vault.init",
-            "vault.invite",
-            "vault.join",
-            "vault.members.remove",
-            "vault.leave",
-            "vault.key.show",
-            "vault.restore",
-        ] {
-            assert!(authorize(REMOTE, cmd, &json!({})).is_err(), "{cmd}");
-            for caller in [LOCAL, Caller::Ipc, Caller::Internal] {
-                authorize(caller, cmd, &json!({})).unwrap();
-            }
-        }
-        for (cmd, args) in [
-            ("vault.put", json!({"path": "/private/file", "name": "x"})),
-            ("vault.get", json!({"name": "x", "output": "/private/file"})),
-        ] {
-            assert!(authorize(REMOTE, cmd, &args).is_err(), "{cmd}");
-            for caller in [LOCAL, Caller::Ipc, Caller::Internal] {
-                authorize(caller, cmd, &args).unwrap();
-            }
-        }
-        for (cmd, args) in [
-            ("vault.status", json!({})),
-            ("vault.ls", json!({})),
-            ("vault.put", json!({"name": "x", "data_b64": "eA=="})),
-            (
-                "vault.put",
-                json!({"path": null, "name": "x", "data_b64": "eA=="}),
-            ),
-            ("vault.get", json!({"name": "x"})),
-            ("vault.get", json!({"name": "x", "output": null})),
-            ("vault.rm", json!({"name": "x"})),
-            ("vault.sync", json!({})),
-        ] {
             authorize(REMOTE, cmd, &args).unwrap_or_else(|e| panic!("{cmd}: {e}"));
         }
     }

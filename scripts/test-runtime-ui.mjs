@@ -30,5 +30,5 @@ context.currentLang='en'; context.state.daemon.network={enabled:true,state:'on',
 context.renderRuntime(); assert.equal(networkLabel.textContent,'External connections: ON');assert.equal(button['aria-checked'],'true');
 context.state.daemon.build={...build,channel:'stable'}; context.renderRuntime();
 assert.equal(banner.hidden,true,'stable does not retain a development banner');
-assert.equal((html.match(/setRequestHeader\("x-mistl-instance", pageIdentity\(\)\)/g)||[]).length,4,'all upload paths must identify their source page');
+assert.equal((html.match(/setRequestHeader\("x-mistl-instance", pageIdentity\(\)\)/g)||[]).length,3,'all upload paths must identify their source page');
 console.log('PASS: pre-poll development banner, optimized dev identity, ON/OFF accessibility, shared toggle API, pending state, save errors, language change, stable banner, upload guards');

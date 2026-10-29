@@ -1,6 +1,7 @@
 //! Config-driven tc-escrow v1 service. Settings take effect on daemon restart.
 mod admission;
 mod client;
+mod mesh;
 mod portable;
 mod portable_io;
 mod protocol;
@@ -58,6 +59,7 @@ struct Service {
     pulling: StdMutex<HashSet<String>>,
     replication_root: std::path::PathBuf,
     clusters: StdMutex<HashMap<String, Arc<replication::Cluster>>>,
+    mesh: StdMutex<Option<Arc<mesh::Mesh>>>,
 }
 
 impl Service {
@@ -106,11 +108,25 @@ impl Service {
             pulling: StdMutex::new(HashSet::new()),
             replication_root,
             clusters: StdMutex::new(HashMap::new()),
+            mesh: StdMutex::new(None),
         })
     }
 
     fn provider(&self) -> Value {
         json!({"v":1,"type":"escrow_provider","maxBlob":self.cfg.max_blob_bytes,"version":1,"features":["delete"]})
+    }
+
+    fn mesh_room(&self, room: &str) -> bool {
+        self.cfg.auto_replicas >= 2
+            && self.cfg.rooms.iter().any(|r| r == room)
+            && !self.cfg.replication.iter().any(|r| r.room == room)
+    }
+
+    fn mesh(&self, room: &str) -> Option<Arc<mesh::Mesh>> {
+        if !self.mesh_room(room) {
+            return None;
+        }
+        self.mesh.lock().unwrap().clone()
     }
 
     fn cluster(&self, room: &str) -> Option<Arc<replication::Cluster>> {
@@ -127,6 +143,8 @@ impl Service {
                 "membership",
                 "delete-continue"
             ]);
+        } else if self.mesh(room).is_some() {
+            provider["features"] = json!(["delete", "delete-continue"]);
         }
         provider
     }
@@ -240,6 +258,17 @@ impl Service {
             .await
             .map_err(|_| Error::new("busy"))?;
         let Some(_reservation) = self.repo.reserve(room, &head)? else {
+            if let Some(mesh) = self.mesh(room) {
+                if self
+                    .repo
+                    .mesh_records(room)
+                    .iter()
+                    .any(|r| r.head == head && r.home.is_none())
+                {
+                    self.repo.set_home(room, &head, mesh.did())?;
+                    mesh.notify();
+                }
+            }
             return Ok(head.ack(id));
         };
         // No waiting task queue: at most four PUTs and one per transport peer globally.
@@ -255,6 +284,11 @@ impl Service {
         };
         let (blob, manifest) = self.transfers.pull(room, from, &head).await?;
         self.repo.commit(room, &head, &blob, &manifest)?;
+        if let Some(mesh) = self.mesh(room) {
+            self.repo.set_home(room, &head, mesh.did())?;
+            mesh.advertise(room, &head.slot, None).await;
+            mesh.notify();
+        }
         Ok(head.ack(id))
     }
 
@@ -264,7 +298,13 @@ impl Service {
         let _slot = tokio::time::timeout(SLOT_WAIT, self.slots[stripe].lock())
             .await
             .map_err(|_| Error::new("busy"))?;
-        self.repo.delete(room, &request)?;
+        if let Some(mesh) = self.mesh(room) {
+            self.repo.mesh_delete(room, &request)?;
+            mesh.advertise(room, &request.slot, None).await;
+            mesh.notify();
+        } else {
+            self.repo.delete(room, &request)?;
+        }
         Ok(request.reply(id))
     }
 
@@ -377,6 +417,10 @@ impl Service {
                 let (service, room) = (service.clone(), room.to_string());
                 rt.spawn(async move {
                     let _permit = permit;
+                    if let Some(mesh) = service.mesh(&room) {
+                        mesh.hello(&room, None).await;
+                        mesh.notify();
+                    }
                     let bytes = serde_json::to_vec(&service.provider_for(&room)).unwrap();
                     let _ =
                         tokio::time::timeout(REPLY_WAIT, crate::net::send_broadcast(&room, bytes))
@@ -385,6 +429,12 @@ impl Service {
                 return;
             }
             if event != crate::net::EVENT_RAW {
+                return;
+            }
+            if service
+                .mesh(room)
+                .is_some_and(|mesh| mesh.receive(room, from, raw))
+            {
                 return;
             }
             if service
@@ -435,6 +485,10 @@ async fn local(state: &Arc<AppState>) -> Result<Arc<Service>> {
                 state.config().escrow,
             )?);
             service.configure_replication(state).await?;
+            if service.cfg.rooms.iter().any(|room| service.mesh_room(room)) {
+                let identity = crate::identity::current(state).await?;
+                *service.mesh.lock().unwrap() = Some(mesh::Mesh::new(&service, identity));
+            }
             Ok::<_, anyhow::Error>(service)
         })
         .await?
@@ -456,10 +510,16 @@ async fn start(state: &Arc<AppState>) -> Result<()> {
     let service = local(state).await?;
     service.register();
     service.start_replication(state)?;
+    if let Some(mesh) = service.mesh.lock().unwrap().clone() {
+        mesh.start();
+    }
     for room in &service.cfg.rooms {
         match crate::net::ensure_started(state, room.clone()).await {
             Ok(_) => {
                 service.joined.lock().unwrap().insert(room.clone());
+                if let Some(mesh) = service.mesh(room) {
+                    mesh.notify();
+                }
             }
             Err(error) => tracing::warn!(%error, "escrow: room join failed"),
         }
@@ -475,6 +535,17 @@ async fn start(state: &Arc<AppState>) -> Result<()> {
 
 pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Value> {
     match cmd {
+        "escrow.auto.slots" => {
+            let room = args["room"]
+                .as_str()
+                .context("escrow.auto.slots requires room")?;
+            anyhow::ensure!(valid_room(room), "invalid escrow room");
+            let service = local(state).await?;
+            let mesh = service
+                .mesh(room)
+                .context("room does not use automatic replication")?;
+            Ok(mesh.slots(room))
+        }
         "escrow.export" | "escrow.import" => {
             let service = local(state).await?;
             let configured = state.config().escrow.rooms;
@@ -523,6 +594,8 @@ pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Val
                     status["slots"] = replication["slots"].clone();
                     status["bytes"] = json!(cluster.total_bytes());
                     status["replication"] = replication;
+                } else if let Some(mesh) = service.mesh(room) {
+                    status["auto"] = mesh.status(room);
                 }
                 status
             }).collect();

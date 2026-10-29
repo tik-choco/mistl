@@ -71,7 +71,6 @@ $ mistl agent                           # terminal AI agent
 | --- | --- |
 | [CLI 参考](docs/cli.md) | 所有命令、VRChat 中继、聊天中继、托管、智能体 |
 | [配置](docs/configuration.md) | `config.toml` 配置键和数据存放位置 |
-| [Vault](docs/vault.md) | 加密副本存储和恢复 |
 | [AI 配置](docs/ai-config.md) | 提供商、房间和本地 API |
 | [身份](docs/identity.md) | 个人资料文档和 DID 委托 |
 | [架构](docs/architecture.md) | 模块、互操作、机器人投递、已知限制 |

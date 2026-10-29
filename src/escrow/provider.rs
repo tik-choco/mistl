@@ -9,16 +9,20 @@ pub(super) struct EscrowBlockProvider(pub Weak<Service>);
 
 #[async_trait::async_trait]
 impl BlockProvider for EscrowBlockProvider {
-    async fn get_block(&self, room_id: &str, _from: &NodeId, cid: &str) -> Option<Vec<u8>> {
+    async fn get_block(&self, room_id: &str, from: &NodeId, cid: &str) -> Option<Vec<u8>> {
         let service = self.0.upgrade()?;
         if !service.cfg.rooms.iter().any(|room| room == room_id) {
             return None;
         }
-        service.repo.block(room_id, cid).or_else(|| {
+        let local = service.repo.block(room_id, cid).or_else(|| {
             service
                 .cluster(room_id)
                 .and_then(|cluster| cluster.block(cid))
-        })
+        });
+        if local.is_some() {
+            return local;
+        }
+        service.mesh(room_id)?.proxy(room_id, &from.0, cid).await
     }
 }
 

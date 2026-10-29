@@ -10,7 +10,7 @@ const scripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/g)];
 const longName = '\u8a2d\u8a08\u8cc7\u6599\u3068\u30ec\u30d3\u30e5\u30fc\u7528\u306e\u9577\u3044\u30d5\u30a1\u30a4\u30eb\u540d'.repeat(8) + '<img src=x onerror=alert(1)>.txt';
 const longId = 'did:key:z6Mk' + 'sample-long-node-identifier'.repeat(8);
 const room = 'design-review';
-const calls = [], intervals = [], errors = [];
+const calls = [], intervals = [], errors = [], archives = [];
 const modelFailures=new Set();let rejectSetting=null;
 const modelGates=new Map(), modelResults=new Map();
 let modelNow=Date.now();
@@ -56,7 +56,19 @@ window.localStorage.setItem('mistl-lang', 'ja');
 window.mistlRuntime = build;
 window.setInterval = (callback, ms) => { intervals.push({callback,ms}); return intervals.length; };
 window.clearInterval = () => {};
+window.confirm = () => true;
+window.URL.createObjectURL = () => 'blob:escrow-test';
+window.URL.revokeObjectURL = () => {};
+window.HTMLAnchorElement.prototype.click = function () {};
 window.fetch = async (url, options) => {
+  if (url.startsWith('/api/escrow/export')) {
+    archives.push({url, options});
+    return {ok:true,headers:{get:()=>''},blob:async()=>new window.Blob(['test'])};
+  }
+  if (url.startsWith('/api/escrow/import')) {
+    archives.push({url, options});
+    return {ok:true,json:async()=>({ok:true,data:{imported:1,unchanged:0,skipped:[],rooms:[]}})};
+  }
   assert.equal(url, '/api/call', 'no feature makes an unexpected network request');
   const request = JSON.parse(options.body);
   calls.push(request);
@@ -107,8 +119,12 @@ window.fetch = async (url, options) => {
 };
 const flush = async () => { await new Promise(resolve=>setTimeout(resolve,5)); for (let i=0; i<15; i++) await new Promise(resolve => setImmediate(resolve)); };
 let failEscrow=false;
-fixtures["config.show"].escrow={enabled:false,rooms:["configured"],max_blob_bytes:33554432,max_total_bytes:1073741824,max_slots_per_room:1024};
-fixtures["escrow.status"]={enabled:false,running:true,applies:"daemon restart",bytes:5000,rooms:[{room:"configured",configured:true,joined:false,slots:2,bytes:400},{room:"old/<img src=x>",configured:false,joined:true,slots:3,bytes:500}],head:{secret:"HEAD-SECRET"},blob:"BLOB-SECRET"};
+fixtures["config.show"].escrow={enabled:false,rooms:["configured"],max_blob_bytes:33554432,max_total_bytes:1073741824,max_slots_per_room:1024,auto_replicas:3,dead_after_secs:86400};
+fixtures["escrow.status"]={enabled:false,running:true,applies:"daemon restart",bytes:5000,rooms:[
+  {room:"configured",configured:true,joined:false,slots:2,bytes:400,auto:{target:3,slots:2,healthy:1,replicating:1,degraded:0,conflicts:0,held:1,insufficient_capacity:false,providers:[{did:'did:key:self',node:'self',self:true,online:true},{did:'did:key:<img src=x>',node:'peer',self:false,online:false}]}},
+  {room:"old/<img src=x>",configured:false,joined:true,slots:3,bytes:500},
+  {room:"raft",configured:false,joined:true,slots:0,bytes:0,replication:{role:'leader'}}
+],head:{secret:"HEAD-SECRET"},blob:"BLOB-SECRET"};
 fixtures["daemon.restart"]={restarting:true};
 try {
   document.write(html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, ''));
@@ -122,16 +138,46 @@ try {
   assert.equal(q('#settings-escrow-max_blob_bytes').value,'0.03125');
   assert.equal(q('#settings-escrow-max_total_bytes').value,'1');
   assert.equal(q('#settings-escrow-max_slots_per_room').value,'1024');
+  assert.equal(q('#settings-escrow-auto_replicas').value,'3');
+  assert.equal(q('#settings-escrow-dead_after_secs').value,'86400');
   window.location.hash='#panel-escrow';window.dispatchEvent(new window.Event('hashchange'));await flush();
   assert.ok(q('#panel-store').classList.contains('active'));
   assert.ok(page.classList.contains('active'));
-  assert.equal(page.querySelectorAll('tbody tr').length,2);
+  assert.equal(page.querySelectorAll('tbody tr').length,3);
   assert.match(page.querySelector('[data-escrow-summary]').textContent,/5000 B|4.9 KB/);
   assert.equal(page.querySelector('[data-escrow-restart-notice]').hidden,false);
   assert.equal(page.querySelectorAll('img').length,0);
   assert.ok(page.textContent.includes('old/<img src=x>'));
   assert.ok(!page.textContent.includes('HEAD-SECRET') && !page.textContent.includes('BLOB-SECRET'));
-  assert.equal(page.querySelectorAll('tbody button:not([hidden])').length,1);
+  assert.equal(page.querySelectorAll('tbody button:not([hidden])').length,7);
+  const initialRows=[...page.querySelectorAll('tbody tr')], meshRow=initialRows[0], copies=meshRow.cells[5];
+  assert.equal(meshRow.cells.length,7);
+  assert.ok(copies.textContent.includes('1/2') && copies.querySelector('.escrow-providers').textContent.includes('1/2'));
+  assert.equal(copies.querySelector('.escrow-copy-state').dataset.state,'replicating');
+  assert.ok(copies.title.includes('did:key:self') && copies.title.includes('did:key:<img src=x>'));
+  assert.ok(copies.getAttribute('aria-label').includes('did:key:self'));
+  assert.equal(initialRows[1].cells[5].textContent,'');
+  assert.equal(initialRows[2].cells[5].textContent,'');
+  assert.equal(meshRow.querySelectorAll('.escrow-actions button').length,3);
+  assert.equal(initialRows[2].querySelector('.escrow-actions button').disabled,true);
+  meshRow.querySelectorAll('.escrow-actions button')[0].click();await flush();
+  assert.equal(archives.at(-1).url,'/api/escrow/export?room=configured');
+  meshRow.querySelectorAll('.escrow-actions button')[1].click();
+  const archiveInput=page.querySelector('[data-escrow-file]');
+  const file=new window.File(['checkpoint'],'checkpoints.mistl-escrow');
+  Object.defineProperty(archiveInput,'files',{value:[file],configurable:true});
+  archiveInput.dispatchEvent(new window.Event('change'));await flush();
+  assert.equal(archives.at(-1).url,'/api/escrow/import?room=configured');
+  assert.equal(archives.at(-1).options.headers['x-mistl-ui'],'1');
+  assert.equal(archives.at(-1).options.headers['x-mistl-instance'],build.instance_id+'/'+build.build_id);
+  assert.equal(archives.at(-1).options.body,file);
+  const auto=fixtures['escrow.status'].rooms[0].auto;
+  for(const [changes,state] of [[{healthy:2,replicating:0,degraded:0,conflicts:0},'healthy'],[{healthy:1,replicating:1},'replicating'],[{degraded:1},'degraded'],[{conflicts:1},'conflict']]) {
+    Object.assign(auto,changes);page.querySelector('[data-escrow-refresh]').click();await flush();
+    assert.equal(copies.querySelector('.escrow-copy-state').dataset.state,state);
+  }
+  auto.insufficient_capacity=true;page.querySelector('[data-escrow-refresh]').click();await flush();
+  assert.ok(copies.title.includes('容量不足'));
   const input=q('#escrow-room'),form=page.querySelector('form'),error=page.querySelector('[data-escrow-error]');
   for(const value of ['', 'bad room', '日本語', 'x'.repeat(97), 'x\n']) assert.equal(window.MistlEscrow.validRoom(value),false,value);
   assert.equal(window.MistlEscrow.validRoom('A-z0_./:-'),true);
@@ -143,21 +189,25 @@ try {
   assert.ok(calls.some(c=>c.cmd==='escrow.rooms.add'&&c.args.room==='tce-new'));
   assert.equal(input.value,'');assert.equal(q('#settings-escrow-enabled').checked,true);
   assert.ok([...q('#settings-drawer-body-escrow').querySelectorAll('.chip-text')].some(c=>c.textContent==='tce-new'));
-  input.value='draft-room';input.focus();const row=[...page.querySelectorAll('tbody tr')].find(r=>r.cells[0].textContent==='tce-new'),remove=row.querySelector('button');
+  input.value='draft-room';input.focus();const row=[...page.querySelectorAll('tbody tr')].find(r=>r.cells[0].textContent==='tce-new'),remove=row.querySelector('button.danger');
   page.querySelector('[data-escrow-refresh]').click();await flush();
-  assert.equal(input.value,'draft-room');assert.equal(document.activeElement,input);assert.equal(row.querySelector('button'),remove);
+  assert.equal(input.value,'draft-room');assert.equal(document.activeElement,input);assert.equal(row.querySelector('button.danger'),remove);
   remove.click();await flush();assert.ok(calls.some(c=>c.cmd==='escrow.rooms.remove'&&c.args.room==='tce-new'));
-  assert.equal(row.querySelector('button').hidden,true,'retained room remains read-only');
+  assert.equal(row.querySelector('button.danger').hidden,true,'retained room remains read-only');
   failEscrow=true;input.value='failed';form.dispatchEvent(new window.Event('submit',{cancelable:true}));await flush();assert.equal(input.value,'failed');assert.match(error.textContent,/room rejected/);assert.equal(page.querySelector('[data-escrow-add]').disabled,false);failEscrow=false;
   const chips=q('#settings-escrow-rooms');chips.value='invalid room';const before=calls.length;chips.dispatchEvent(new window.KeyboardEvent('keydown',{key:'Enter',bubbles:true}));await flush();assert.equal(calls.length,before);
   chips.value='valid-chip';chips.dispatchEvent(new window.KeyboardEvent('keydown',{key:'Enter',bubbles:true}));await flush();assert.ok(calls.some(c=>c.cmd==='config.set'&&c.args.path==='escrow.rooms'&&c.args.value.includes('valid-chip')));
   const blob=q('#settings-escrow-max_blob_bytes');blob.value='0.0625';blob.dispatchEvent(new window.Event('blur'));await flush();assert.ok(calls.some(c=>c.cmd==='config.set'&&c.args.path==='escrow.max_blob_bytes'&&c.args.value===67108864));
   assert.equal(blob.closest('.settings-field').querySelector('.badge.restart').style.display,'inline-block');
+  for(const [key,value] of [['auto_replicas','4'],['dead_after_secs','120']]) {
+    const field=q('#settings-escrow-'+key);field.value=value;field.dispatchEvent(new window.Event('blur'));await flush();
+    assert.ok(calls.some(c=>c.cmd==='config.set'&&c.args.path==='escrow.'+key&&c.args.value===Number(value)));
+  }
   const enabled=q('#settings-escrow-enabled');enabled.checked=false;enabled.dispatchEvent(new window.Event('change'));await flush();assert.ok(calls.some(c=>c.cmd==='config.set'&&c.args.path==='escrow.enabled'&&c.args.value===false));
-  for(const language of ['en','zh','ja']) {q('#lang-'+language+'-btn').click();await flush();assert.ok(!page.textContent.includes('escrow.configured'));assert.ok(page.textContent.includes('Escrow'));}
+  for(const language of ['en','zh','ja']) {q('#lang-'+language+'-btn').click();await flush();assert.ok(!page.textContent.includes('escrow.configured'));assert.ok(page.textContent.includes('Escrow'));assert.ok(!copies.textContent.includes('escrow.state.'));assert.ok(!copies.textContent.includes('escrow.providersOnline'));}
   window.__mistlViewSwitchUntil=0;const count=calls.filter(c=>c.cmd==='escrow.status').length;intervals.find(i=>i.ms===5000).callback();await flush();assert.ok(calls.filter(c=>c.cmd==='escrow.status').length>count);
   page.querySelector('[data-escrow-restart]').click();await flush();assert.ok(calls.some(c=>c.cmd==='daemon.restart'));
-  console.log('PASS: Escrow assembled dashboard status/safe text/validation/add/remove/retained rooms/config chips/toggle/GiB/restart badges/polling draft and focus/all locales/restart API');
+  console.log('PASS: Escrow status/mesh states and providers/safe text/row export-import/validation/add-remove/config settings/all locales/polling/restart');
 } finally {
   process.removeListener('unhandledRejection', onUnhandled);
   window.happyDOM.abort();

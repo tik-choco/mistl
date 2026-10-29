@@ -1,8 +1,9 @@
 # Encrypted checkpoint escrow
 
-An opt-in, fixed-voter [Raft replication prototype](escrow-replication.md) is also
-available for new rooms. It is intended for evaluation and has explicit lifetime,
-membership, and deletion limits. The behavior below describes standalone rooms.
+Configured rooms use automatic replication across providers by default. An opt-in,
+fixed-voter [Raft replication prototype](escrow-replication.md) is also available
+for rooms that need its stronger consistency model. Raft rooms follow their own
+membership and deletion rules and do not participate in automatic replication.
 
 The optional daemon service implements tc-escrow v1. It stores encrypted application
 checkpoints and signed mutable heads. Encryption and key derivation happen in the
@@ -39,6 +40,8 @@ rooms = []
 max_blob_bytes = 33554432
 max_total_bytes = 1073741824
 max_slots_per_room = 1024
+auto_replicas = 3
+dead_after_secs = 86400
 ~~~
 
 Use mistl config set escrow.<field> <value> to edit individual settings. Room IDs
@@ -46,6 +49,41 @@ contain 1–96 ASCII characters from [A-Za-z0-9_./:-]. Configuration accepts at 
 64 rooms, blobs up to 1 GiB, a total limit up to 1 TiB, and up to 65536 slots per room.
 The service additionally caps persisted slots globally at 65536. Defaults are 32 MiB,
 1 GiB total, and 1024 slots per room.
+
+## Automatic replication
+
+Configure the same non-Raft escrow room on several providers and enable their
+external connections. Providers discover each other in the room; no voter list or
+invitation is needed. The target is `auto_replicas` copies per slot (default 3,
+range 1–8), limited to the number of live providers. Providers exchange signed
+head and deletion metadata; encrypted blobs are stored on the selected holders.
+A single provider keeps its own copy. Capacity limits still apply, and a provider
+without enough space cannot hold a copy.
+
+A PUT ACK means that the accepting provider durably stored the data. Additional
+copies are made asynchronously; an ACK does not guarantee that the target has
+already been reached. `mistl escrow status` and the dashboard's **Copies** column
+show healthy, replicating, degraded, and conflicting slots, while
+`mistl escrow slots <room>` shows individual confirmation counts. A healthy slot
+has confirmed copies on all target holders. Replication needs connected providers
+with enough capacity, and does not replace independent backups.
+
+Export from a holder or from each provider: omitted local copies are counted as
+`not_held` in the export result, and with at most `auto_replicas` providers every
+provider holds every slot once replication completes and capacity permits.
+
+Providers not seen for `dead_after_secs` (default 86400, minimum 60) are excluded
+from placement and replacement copies are made when capacity is available. Former
+holders retain their copies until the selected holders confirm, plus a 24-hour
+grace period. A mesh deletion is retained as a tombstone and propagated; recreating
+that slot uses the same writer, the next sequence, and the deleted head as parent
+(the `delete-continue` feature). Offline copies may persist until their holders
+reconnect and reconcile.
+
+Set `escrow.auto_replicas = 1` on each provider to disable automatic mesh
+replication and use the standalone local-copy behavior. Configured Raft rooms
+instead use their fixed membership and durable-majority ACKs; see [Raft replication](escrow-replication.md).
+Room and replication settings take effect after daemon restart.
 
 ## Web dashboard
 
@@ -62,9 +100,9 @@ retained data; removed rooms with stored data remain visible. Global bytes inclu
 storage manifests and data for removed rooms. No head contents or blobs are shown.
 
 The **Escrow settings** drawer uses room-list chips and an enabled toggle.
-**Advanced** contains maximum blob size and total capacity (GiB), and slots per
-room. All changes require a daemon restart; use the view's **Restart daemon**
-button or the existing restart badge after saving. Room additions also enable
+**Advanced** contains maximum blob size and total capacity (GiB), slots per
+room, target copies, and provider expiry. All changes require a daemon restart;
+use the view's **Restart daemon** button or the existing restart badge after saving. Room additions also enable
 Escrow. External connections must be enabled for configured rooms to be joined.
 
 These controls use `escrow.status`, `escrow.rooms.add/remove` and `config.set`.
@@ -134,8 +172,9 @@ UTF-8 JSON control messages have v:1 and are capped at 16 KiB. The service direc
 answers escrow_hello with escrow_provider, and broadcasts provider advertisements
 on peer joins. escrow_get returns escrow_head (current signed head or null).
 escrow_put returns escrow_ack only after durable persistence, or escrow_error.
-Provider advertisements include `"features":["delete"]`; absent features mean slot
-deletion is unsupported. Unknown message types and additional fields are ignored.
+Provider advertisements include the `delete` feature; absent features mean slot
+deletion is unsupported. Mesh and Raft rooms also advertise `delete-continue`.
+Unknown message types and additional fields are ignored.
 
 A deletion request has `{v:1,type:"escrow_delete",id,slot,seq,head,sig}`. Here `head`
 is the SHA-256 hash of the complete current canonical head and `seq` is its sequence.
@@ -143,9 +182,12 @@ The pinned writer signs UTF-8 `"tc-escrow/v1/delete\n"` followed by
 `stable_stringify({slot,seq,head})`. A stale sequence or hash returns `conflict`
 with the current head; an invalid writer signature returns `bad_signature`.
 Success replies with `{v:1,type:"escrow_deleted",id,slot}`; repeating a deletion
-of an absent slot returns the same reply. A later PUT may recreate it with
-parent=null and pins its writer anew. This extension keeps protocol v:1; old
-providers ignore the new messages, so clients check the feature before sending.
+of an absent slot returns the same reply. In standalone rooms with automatic
+replication disabled, a later PUT may recreate it with parent=null and pins its
+writer anew. Mesh and Raft rooms advertise `delete-continue` and require a
+same-writer successor with the next sequence and the deleted head as parent.
+This extension keeps protocol v:1; old providers ignore the new messages, so
+clients check the feature before sending.
 
 The portable client tracks all providers for each canonical head hash: verified
 GETs add a provider, and PUT attempts record their target before sending. Failed
@@ -180,18 +222,20 @@ are scoped to the mistlib room. Conflicts return the current head, or null if ab
 
 ## Durable storage and browser downloads
 
-The authoritative copy lives under <data_dir>/escrow/blobs/, outside the ordinary
+Locally held blobs live under <data_dir>/escrow/blobs/, outside the ordinary
 LRU block store and outside mistlib-native's TEMP store. Each generation contains
 the exact original CBOR file manifest and encrypted blob bytes. Slot records under
 <data_dir>/escrow/heads/ atomically reference the current and previous generation.
-Both generations are retained and served; older generations are removed after commit.
-DELETE atomically removes the head record and syncs its directory before removing
-both blob/manifest generations. It then rebuilds quotas and room-scoped block indices
+For standalone local-copy rooms, both generations are retained and served; older
+generations are removed after commit. DELETE atomically removes the head record
+and syncs its directory before removing both blob/manifest generations. It then rebuilds quotas and room-scoped block indices
 from retained records, preserving CIDs shared with other slots. A crash between head
 removal and blob cleanup leaves only orphan generations, removed at restart.
 Deletion I/O failures disable subsequent mutations until restart reconciliation,
 including identical current/previous PUT retries: their in-memory records may no
 longer exist on disk. Healthy retained-head retries still ACK without a blob pull.
+Mesh rooms instead retain deletion tombstones and distribute their head metadata;
+blobs can reside on selected peers rather than every provider.
 
 PUT pulls the root manifest and chunks through `mistlib::storage::fetch_block`,
 with `FetchOptions.peer` fixed to the sending transport peer and the request's room.
@@ -209,9 +253,9 @@ untrusted manifest, avoiding that engine's whole-file allocation.
 At service startup, escrow registers a `mistlib::storage::BlockProvider` and keeps
 its registration handle for the service lifetime; dropping the handle unregisters
 it. The provider returns original manifests and chunk slices from durable storage
-only for configured rooms and CIDs indexed in that room. Replicated rooms also use
-their room's archive. Data imported into an unconfigured room is unavailable through
-this provider. Browser `storage_get(cid)` uses mistlib's normal storage service,
+only for configured rooms and CIDs indexed in that room. Mesh providers can fetch
+a missing known block from a holder; Raft rooms also use their room's archive.
+Data imported into an unconfigured room is unavailable through this provider. Browser `storage_get(cid)` uses mistlib's normal storage service,
 including after daemon restart; storage frames no longer pass through escrow's
 raw room handler.
 
@@ -220,8 +264,9 @@ atomic replacement); only then is the combined current/previous head record
 replaced durably. Unix directories are also synced before publication. Restart
 verifies signed records and all retained blob/manifest content, rebuilds the block
 index, and removes unreferenced generations and temporary head/blob/manifest files
-left by interrupted writes. Corrupt retained state fails startup rather than silently
-forgetting the pinned writer.
+left by interrupted writes. Standalone corrupt retained state fails startup rather
+than silently forgetting the pinned writer; mesh scrubbing drops corrupt blob copies
+so they can be fetched again.
 If a durable write or obsolete-generation cleanup fails, subsequent writes fail
 closed until restart reconciles disk, including PUTs reserved before the failure.
 The failure flag is set under the same index lock as publication, and no subsequent
@@ -256,8 +301,9 @@ so a nearly full service may reject replacement writes with quota.
 
 ## IPC and verification
 
-IPC commands are escrow.status, escrow.rooms.list, escrow.rooms.add {room}, and
-escrow.rooms.remove {room}. The CLI exposes the same operations.
+IPC commands are escrow.status, escrow.rooms.list, escrow.rooms.add {room},
+escrow.rooms.remove {room}, and escrow.auto.slots {room}. The CLI exposes the
+same operations, with `mistl escrow slots <room>` showing at most 1024 rows.
 
 Local IPC also supports `escrow.export` with
 `{"path":"<absolute file path>","rooms":["room"],"overwrite":false}` and

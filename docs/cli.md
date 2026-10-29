@@ -38,22 +38,11 @@ $ mistl store put .\file.bin  # -> returns a CID
 $ mistl store ls
 $ mistl store get <cid> --output .\file.bin
 
-# Encrypted replicated storage
-$ mistl vault init            # save the recovery code offline
-$ mistl vault invite          # create a one-use invite for another node
-$ mistl vault join <CODE>     # save this node's recovery code offline too
-$ mistl vault members
-$ mistl vault status
-$ mistl vault put ./file.bin --name backup.bin
-$ mistl vault ls              # add --owner <DID> to select a dataset
-$ mistl vault get backup.bin -o ./restored.bin
-$ mistl vault rm backup.bin
-$ mistl vault sync
-$ mistl vault key             # show recovery code; keep it offline
-$ mistl vault restore <CODE>
-$ mistl vault remove-member <DID>
-$ mistl vault leave
-$ mistl vault status --json   # machine-readable response
+# Encrypted checkpoint escrow
+$ mistl escrow status            # configured rooms and automatic replication status
+$ mistl escrow status-json       # machine-readable status
+$ mistl escrow slots <room>      # automatic replication status for each slot
+$ mistl escrow rooms add <room>
 
 # Screen share (VRChat)
 $ mistl stream start          # local screen -> rtsp://<LAN IP>:8554/stream
@@ -258,7 +247,9 @@ requires additional work before unattended long-running use.
 The optional tc-escrow v1 service keeps browser-encrypted application checkpoints
 for late joiners. Run `mistl escrow rooms add <room>`, restart the daemon, and enable
 network connections; configure that same escrow room in the application.
-`mistl escrow status` reports rooms, slots, and bytes without exposing contents.
+`mistl escrow status` reports rooms, slots, bytes, and automatic replication without
+exposing contents. Use `mistl escrow status-json` for JSON. For per-slot replica
+counts, use `mistl escrow slots <room>`.
 The dashboard's **Store → Escrow** page offers the same room controls, status,
 enabled switch and advanced capacity limits, with a daemon restart action. In
 tc-linkai, copy the auto-generated `tce-…` **mistl room** into **Add room**.
@@ -267,9 +258,3 @@ Move encrypted checkpoints between nodes with `mistl escrow export <FILE>` and
 or use the dashboard's **Export** and **Import** buttons.
 Signed heads use CAS and a pinned writer, with durable current/previous blobs that
 remain downloadable after restart. See [escrow setup and protocol](escrow.md).
-
-### Encrypted replicated vault
-
-Vault replicates each member's encrypted dataset to other group members. Save
-each owner's recovery code offline and check confirmed copies with
-`mistl vault status`. See [Vault](vault.md) for setup, recovery, and capacity limits.

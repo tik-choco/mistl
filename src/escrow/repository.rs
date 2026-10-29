@@ -10,6 +10,10 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+#[path = "repository_mesh.rs"]
+mod mesh;
+pub(super) use mesh::MeshRecord;
+
 pub const MAX_MANIFEST: usize = 128 * 1024;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -17,6 +21,30 @@ struct Record {
     room: String,
     current: Head,
     previous: Option<Head>,
+    #[serde(default = "default_held")]
+    previous_held: bool,
+    #[serde(default)]
+    home: Option<String>,
+    #[serde(default)]
+    deleted: Option<Delete>,
+    #[serde(default = "default_held")]
+    held: bool,
+}
+
+fn default_held() -> bool {
+    true
+}
+
+impl Record {
+    fn held_heads(&self) -> impl Iterator<Item = &Head> {
+        std::iter::once(&self.current)
+            .filter(|_| self.held && self.deleted.is_none())
+            .chain(
+                self.previous
+                    .iter()
+                    .filter(|_| self.previous_held && self.deleted.is_none()),
+            )
+    }
 }
 
 #[derive(Clone)]
@@ -153,7 +181,7 @@ impl Repository {
                 entry.metadata()?.len() <= 32 * 1024,
                 "escrow: oversized state file"
             );
-            let record: Record = serde_json::from_slice(&std::fs::read(entry.path())?)?;
+            let mut record: Record = serde_json::from_slice(&std::fs::read(entry.path())?)?;
             ensure!(
                 super::valid_room(&record.room),
                 "escrow: invalid persisted room"
@@ -163,6 +191,8 @@ impl Repository {
                 entry.file_name().to_string_lossy() == format!("{k}.json"),
                 "escrow: invalid state filename"
             );
+            let mut corrupt_current = false;
+            let mut corrupt_previous = false;
             for head in std::iter::once(&record.current).chain(record.previous.iter()) {
                 head.validate(1024 * 1024 * 1024)
                     .map_err(|e| anyhow::anyhow!(e.code))?;
@@ -171,13 +201,53 @@ impl Repository {
                     head.slot == record.current.slot && head.writer == record.current.writer,
                     "escrow: invalid backup"
                 );
-                let dir = repo.generation(&k, head);
-                let blob = read_bounded(&dir.join("blob.bin"), head.size as usize)?;
-                validate_blob(head, &blob).map_err(|e| anyhow::anyhow!(e.code))?;
-                let bytes = read_bounded(&dir.join("manifest.bin"), MAX_MANIFEST)?;
-                let manifest =
-                    validate_manifest(head, &bytes).map_err(|e| anyhow::anyhow!(e.code))?;
-                repo.index_generation(&mut index, &record.room, &k, head, &manifest, bytes.len());
+                let held = if head == &record.current {
+                    record.held
+                } else {
+                    record.previous_held
+                };
+                if !held || record.deleted.is_some() {
+                    continue;
+                }
+                let verified = (|| -> Result<_> {
+                    let dir = repo.generation(&k, head);
+                    let blob = read_bounded(&dir.join("blob.bin"), head.size as usize)?;
+                    validate_blob(head, &blob).map_err(|e| anyhow::anyhow!(e.code))?;
+                    let bytes = read_bounded(&dir.join("manifest.bin"), MAX_MANIFEST)?;
+                    let manifest =
+                        validate_manifest(head, &bytes).map_err(|e| anyhow::anyhow!(e.code))?;
+                    for (cid, chunk) in manifest.chunks.iter().zip(blob.chunks(CHUNK_SIZE)) {
+                        ensure!(
+                            verify_cid(cid, chunk, MULTICODEC_RAW),
+                            "invalid retained chunk"
+                        );
+                    }
+                    Ok((manifest, bytes.len()))
+                })();
+                match verified {
+                    Ok((manifest, len)) => {
+                        repo.index_generation(&mut index, &record.room, &k, head, &manifest, len)
+                    }
+                    Err(_) if record.home.is_some() => {
+                        if head == &record.current {
+                            corrupt_current = true;
+                        } else {
+                            corrupt_previous = true;
+                        }
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            if let Some(request) = &record.deleted {
+                mesh::validate_delete(request, &record.current)
+                    .map_err(|e| anyhow::anyhow!(e.code))?;
+                ensure!(
+                    !record.held && record.previous.is_none(),
+                    "invalid tombstone storage"
+                );
+            }
+            if let Some(home) = &record.home {
+                crate::identity::pubkey_from_did(home)?;
             }
             // An imported current head may omit intermediate history. When a
             // backup exists it must still be the signed direct parent.
@@ -188,8 +258,21 @@ impl Repository {
                     "escrow: duplicate backup generation"
                 );
             }
+            if corrupt_current || corrupt_previous {
+                if corrupt_current {
+                    record.held = false;
+                }
+                if corrupt_previous {
+                    record.previous = None;
+                    record.previous_held = false;
+                }
+                crate::statefile::write_private(&entry.path(), &serde_json::to_vec(&record)?)?;
+                sync_dir(&repo.root.join("heads"))?;
+                tracing::info!(room=%record.room, slot=%record.current.slot, "escrow mesh: corrupt holding removed at restart");
+            }
             index.records.insert(k, record);
         }
+        repo.rebuild_index(&mut index);
         // A crash before the head replacement may leave unreferenced generations.
         // Only our validated hash/slot directory names are eligible for cleanup.
         repo.cleanup(&index)?;
@@ -246,6 +329,7 @@ impl Repository {
             .unwrap()
             .records
             .get(&key(room, slot))
+            .filter(|r| r.deleted.is_none())
             .map(|r| r.current.clone())
     }
 
@@ -254,7 +338,7 @@ impl Repository {
         let mut heads: Vec<_> = index
             .records
             .values()
-            .filter(|record| record.room == room)
+            .filter(|record| record.room == room && record.deleted.is_none())
             .map(|record| record.current.clone())
             .collect();
         heads.sort_by(|a, b| a.slot.cmp(&b.slot));
@@ -292,17 +376,31 @@ impl Repository {
         let Some(record) = index.records.get(&k) else {
             return Ok(None);
         };
-        if record.current != *head && record.previous.as_ref() != Some(head) {
+        if record.deleted.is_some()
+            || !((record.current == *head && record.held)
+                || (record.previous.as_ref() == Some(head) && record.previous_held))
+        {
             return Ok(None);
         }
+        self.read_generation(room, head).map(Some)
+    }
+
+    // Scrub uses this without holding the index lock, then re-checks its snapshot.
+    fn read_generation(&self, room: &str, head: &Head) -> Result<(Vec<u8>, Vec<u8>), Error> {
+        let k = key(room, &head.slot);
         let dir = self.generation(&k, head);
         let blob = read_bounded(&dir.join("blob.bin"), head.size as usize)
             .map_err(|_| Error::new("fetch_failed"))?;
         let manifest = read_bounded(&dir.join("manifest.bin"), MAX_MANIFEST)
             .map_err(|_| Error::new("fetch_failed"))?;
         validate_blob(head, &blob)?;
-        validate_manifest(head, &manifest)?;
-        Ok(Some((blob, manifest)))
+        let decoded = validate_manifest(head, &manifest)?;
+        for (cid, chunk) in decoded.chunks.iter().zip(blob.chunks(CHUNK_SIZE)) {
+            if !verify_cid(cid, chunk, MULTICODEC_RAW) {
+                return Err(Error::new("hash_mismatch"));
+            }
+        }
+        Ok((blob, manifest))
     }
 
     /// Export only a still-current generation under the same index lock as reads.
@@ -313,7 +411,11 @@ impl Repository {
     ) -> Result<Option<(Vec<u8>, Vec<u8>)>, Error> {
         let index = self.index.lock().unwrap();
         let k = key(room, &head.slot);
-        if index.records.get(&k).is_none_or(|r| r.current != *head) {
+        if index
+            .records
+            .get(&k)
+            .is_none_or(|r| r.current != *head || !r.held || r.deleted.is_some())
+        {
             return Ok(None);
         }
         let dir = self.generation(&k, head);
@@ -329,7 +431,7 @@ impl Repository {
         let records: Vec<_> = index.records.values().filter(|r| r.room == room).collect();
         let bytes = records
             .iter()
-            .flat_map(|r| std::iter::once(&r.current).chain(r.previous.iter()))
+            .flat_map(|r| r.held_heads())
             .map(|h| h.size)
             .sum();
         (records.len(), bytes)
@@ -364,10 +466,17 @@ impl Repository {
         }
         let k = key(room, &head.slot);
         let record = index.records.get(&k);
+        if record.is_some_and(|r| r.deleted.is_none() && r.previous.as_ref() == Some(head)) {
+            return Ok(None);
+        }
         // Retained accepted heads are retries, never a request to roll back the slot.
-        if record.is_some_and(|r| r.previous.as_ref() == Some(head))
-            || check_cas(head, record.map(|r| &r.current))?
-        {
+        let retry = if let Some(record) = record.filter(|r| r.deleted.is_some()) {
+            super::mesh::decision::successor(head, &record.current)?;
+            false
+        } else {
+            check_cas(head, record.map(|r| &r.current))?
+        };
+        if retry && record.is_some_and(|r| r.held) {
             return Ok(None);
         }
         let slots = index.records.values().filter(|r| r.room == room).count()
@@ -418,15 +527,23 @@ impl Repository {
         if index.write_failed {
             return Err(Error::new("quota"));
         }
-        let previous = index
+        let old = index
             .records
             .get(&key(room, &head.slot))
-            .map(|r| r.current.clone());
+            .filter(|r| r.deleted.is_none());
+        let (previous, previous_held) = match old {
+            Some(r) if r.current == *head => (r.previous.clone(), r.previous_held),
+            Some(r) if matches!(check_cas(head, Some(&r.current)), Ok(false)) => {
+                (Some(r.current.clone()), r.held)
+            }
+            _ => (None, false),
+        };
         self.commit_inner(
             &mut index,
             room,
             head,
             previous,
+            previous_held,
             blob,
             manifest_bytes,
             &manifest,
@@ -466,8 +583,15 @@ impl Repository {
         }
         let k = key(room, &head.slot);
         let mut previous = None;
+        let mut previous_held = false;
         if let Some(record) = index.records.get(&k) {
-            if record.current == *head || record.previous.as_ref() == Some(head) {
+            if record.deleted.is_some() {
+                if let Err(error) = super::mesh::decision::successor(head, &record.current) {
+                    return Ok(ImportOutcome::Skipped(error.code));
+                }
+            } else if record.held
+                && (record.current == *head || record.previous.as_ref() == Some(head))
+            {
                 return Ok(ImportOutcome::Unchanged);
             }
             if record.current.writer != head.writer {
@@ -476,13 +600,18 @@ impl Repository {
             if head.seq < record.current.seq {
                 return Ok(ImportOutcome::Skipped("older"));
             }
-            if head.seq == record.current.seq {
+            if head.seq == record.current.seq && record.current != *head {
                 return Ok(ImportOutcome::Skipped("conflict"));
             }
-            if record.current.seq.checked_add(1) == Some(head.seq)
+            if record.deleted.is_none() && record.current == *head {
+                previous = record.previous.clone();
+                previous_held = record.previous_held;
+            } else if record.deleted.is_none()
+                && record.current.seq.checked_add(1) == Some(head.seq)
                 && head.parent.as_deref() == Some(record.current.hash().as_str())
             {
                 previous = Some(record.current.clone());
+                previous_held = record.held;
             }
         } else {
             let slots = index.records.values().filter(|r| r.room == room).count()
@@ -511,6 +640,7 @@ impl Repository {
             room,
             head,
             previous,
+            previous_held,
             blob,
             manifest_bytes,
             &manifest,
@@ -529,6 +659,7 @@ impl Repository {
         room: &str,
         head: &Head,
         previous: Option<Head>,
+        previous_held: bool,
         blob: &[u8],
         bytes: &[u8],
         manifest: &FileManifest,
@@ -544,6 +675,10 @@ impl Repository {
             room: room.into(),
             current: head.clone(),
             previous,
+            previous_held,
+            home: index.records.get(&k).and_then(|r| r.home.clone()),
+            deleted: None,
+            held: true,
         };
         crate::statefile::write_private(
             &self.root.join("heads").join(format!("{k}.json")),
@@ -577,10 +712,12 @@ impl Repository {
             .collect();
         let mut retained = HashSet::new();
         for (k, record) in records {
-            for h in std::iter::once(&record.current).chain(record.previous.iter()) {
+            for h in record.held_heads() {
                 let cache_key = (k.clone(), h.hash());
                 retained.insert(cache_key.clone());
-                let (manifest, len) = index.manifests[&cache_key].clone();
+                let Some((manifest, len)) = index.manifests.get(&cache_key).cloned() else {
+                    continue;
+                };
                 self.index_generation(index, &record.room, &k, h, &manifest, len);
             }
         }
@@ -643,8 +780,7 @@ impl Repository {
             .records
             .iter()
             .flat_map(|(k, r)| {
-                std::iter::once(&r.current)
-                    .chain(r.previous.iter())
+                r.held_heads()
                     .map(|head| self.generation(k, head).file_name().unwrap().to_owned())
             })
             .collect();
@@ -680,6 +816,14 @@ impl Repository {
         file.seek(SeekFrom::Start(block.offset)).ok()?;
         let mut data = vec![0; block.len];
         file.read_exact(&mut data).ok()?;
+        let codec = if block.path.file_name()?.to_str()? == "manifest.bin" {
+            MULTICODEC_DAG_CBOR
+        } else {
+            MULTICODEC_RAW
+        };
+        if !verify_cid(cid, &data, codec) {
+            return None;
+        }
         Some(data)
     }
 }

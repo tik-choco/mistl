@@ -77,7 +77,6 @@ $ mistl agent                           # terminal AI agent
 | --- | --- |
 | [CLI リファレンス](docs/cli.md) | 全コマンド、VRChat リレー、チャットリレー、エスクロー、エージェント |
 | [設定](docs/configuration.md) | `config.toml` のキーとデータの保存場所 |
-| [Vault](docs/vault.md) | 暗号化された複製ストレージと復旧 |
 | [AI 設定](docs/ai-config.md) | プロバイダ、ルーム、ローカル API |
 | [アイデンティティ](docs/identity.md) | プロフィールドキュメントと DID 委任 |
 | [アーキテクチャ](docs/architecture.md) | モジュール、相互運用、ボットの配信、既知の制約 |

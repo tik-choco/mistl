@@ -78,20 +78,6 @@
     line-height: 1.45;
   }
   code, .mono { font-family: var(--mono); }
-  .vault-toolbar, .vault-join, .vault-code { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-  .vault-card { border: 1px solid var(--panel-border); border-radius: var(--radius); padding: 14px; margin: 12px 0; }
-  .vault-card h4 { margin: 0 0 10px; }
-  .vault-members { list-style: none; margin: 8px 0 0; padding: 0; }
-  .vault-members li { margin: 4px 0; overflow-wrap: anywhere; }
-  .vault-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--text-faint); margin-right: 6px; }
-  .vault-dot.online { background: var(--ok); }
-  .vault-code-value { overflow-wrap: anywhere; min-width: 0; }
-  .vault-error { color: var(--err); }
-  .vault-actions { display: flex; gap: 6px; flex-wrap: wrap; }
-  .vault-state { display: inline-block; border-radius: 999px; padding: 2px 8px; background: var(--bg-alt); color: var(--text-dim); }
-  .vault-state[data-state="healthy"] { background: var(--ok-dim); color: var(--ok); }
-  .vault-state[data-state="degraded"], .vault-state[data-state="conflict"], .vault-state[data-state="insufficient_capacity"] { background: var(--warn-dim); color: var(--warn); }
-
   .topbar {
     position: sticky;
     top: 0;
@@ -2092,7 +2078,6 @@
         <button type="button" data-subtab-target="sandbox"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 4h16v16H4zM4 14h5l1 3h4l1-3h5M12 7v6m-3-3 3 3 3-3"/></svg><span data-i18n="store.tabs.sandbox">Sandbox</span></button>
         <button type="button" data-subtab-target="sync"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M20 8a8 8 0 0 0-14-3L3 8m0-5v5h5M4 16a8 8 0 0 0 14 3l3-3m0 5v-5h-5"/></svg><span data-i18n="store.tabs.sync">Folder sync</span></button>
         <button type="button" data-subtab-target="escrow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3"/></svg><span data-i18n="escrow.title">Escrow</span></button>
-        <button type="button" data-subtab-target="vault"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="12" cy="12" r="3"/><path d="M12 8v8M8 12h8"/></svg><span data-i18n="vault.title">Vault</span></button>
       </div>
       <div class="store-sidebar-summary" data-store-summary></div>
     </aside>
@@ -2221,60 +2206,6 @@
       <div id="store-folder-share"></div>
       <div class="store-folder-access" id="store-folder-access" hidden></div>
     </div>
-    <div class="subtab-page" data-subtab="vault" id="panel-vault">
-      <div class="vault-toolbar">
-        <h3 data-i18n="vault.title">Vault</h3>
-        <button type="button" data-vault-refresh data-i18n="common.refresh">Refresh</button>
-        <button type="button" data-vault-sync data-i18n="vault.sync">Sync now</button>
-      </div>
-      <p class="vault-error" data-vault-error role="alert" hidden></p>
-      <div class="vault-card" data-vault-setup hidden>
-        <p data-i18n="vault.noGroup">Create or join a storage group.</p>
-        <div class="vault-join">
-          <button type="button" class="primary" data-vault-init data-i18n="vault.init">Create group</button>
-          <label for="vault-invite-input" data-i18n="vault.inviteInput">Invite code</label>
-          <input id="vault-invite-input" data-vault-invite-input maxlength="4096" autocomplete="off">
-          <button type="button" data-vault-join data-i18n="vault.join">Join</button>
-        </div>
-      </div>
-      <div class="vault-code vault-card" data-vault-code-box hidden>
-        <p data-vault-code-label></p>
-        <code class="vault-code-value" data-vault-code></code>
-        <button type="button" data-vault-copy data-i18n="common.copy">Copy</button>
-        <button type="button" data-vault-dismiss data-i18n="common.dismiss">Dismiss</button>
-      </div>
-      <div data-vault-group hidden>
-        <div class="vault-card">
-          <div class="vault-toolbar">
-            <h4 data-i18n="vault.group">Group</h4>
-            <span class="mono" data-vault-group-id></span>
-            <button type="button" data-vault-invite data-i18n="vault.invite">Invite</button>
-            <button type="button" data-vault-key data-i18n="vault.key">Recovery code</button>
-          </div>
-          <ul class="vault-members" data-vault-members></ul>
-        </div>
-        <div class="vault-card">
-          <h4 data-i18n="vault.owners">Datasets</h4>
-          <div class="table-wrap"><table><thead><tr>
-            <th data-i18n="vault.owner">Owner</th><th data-i18n="vault.files">Files</th>
-            <th data-i18n="vault.size">Size</th><th data-i18n="vault.copies">Copies</th>
-            <th data-i18n="vault.state">State</th>
-          </tr></thead><tbody data-vault-owners></tbody></table></div>
-        </div>
-        <div class="vault-card">
-          <div class="vault-toolbar">
-            <h4 data-i18n="vault.myFiles">My files</h4>
-            <label for="vault-file" data-i18n="vault.upload">Upload</label>
-            <input type="file" id="vault-file" data-vault-file>
-          </div>
-          <div class="table-wrap"><table><thead><tr>
-            <th data-i18n="vault.name">Name</th><th data-i18n="vault.size">Size</th>
-            <th data-i18n="store.col.actions">Actions</th>
-          </tr></thead><tbody data-vault-files></tbody></table>
-          <div class="empty-note" data-vault-empty data-i18n="vault.empty">No files.</div></div>
-        </div>
-      </div>
-    </div>
     <div class="subtab-page" data-subtab="escrow" id="panel-escrow">
       <div class="escrow-head">
         <h3 data-i18n="escrow.title">Escrow</h3>
@@ -2306,6 +2237,7 @@
             <th data-i18n="escrow.joined">Joined</th>
             <th data-i18n="escrow.slots">Slots</th>
             <th data-i18n="escrow.bytes">Stored bytes</th>
+            <th data-i18n="escrow.copies">Copies</th>
             <th data-i18n="store.col.actions">Actions</th>
           </tr></thead>
           <tbody></tbody>
@@ -2914,7 +2846,6 @@
 <script src="/assets/features/topology.js"></script>
 <script src="/assets/features/storage.js"></script>
 <script src="/assets/features/escrow.js"></script>
-<script src="/assets/features/vault.js"></script>
 <script src="/assets/features/chat.js"></script>
 <script src="/assets/features/tunnel-graph.js"></script>
 <script src="/assets/features/messenger.js"></script>
@@ -2926,43 +2857,6 @@
 
   var T = {
     en: {
-      "vault.title": "Vault",
-      "vault.unavailable": "Vault view is unavailable.",
-      "vault.sync": "Sync now",
-      "vault.noGroup": "Create or join a storage group.",
-      "vault.init": "Create group",
-      "vault.inviteInput": "Invite code",
-      "vault.join": "Join",
-      "vault.group": "Group",
-      "vault.invite": "Invite",
-      "vault.key": "Recovery code",
-      "vault.owners": "Datasets",
-      "vault.owner": "Owner",
-      "vault.files": "Files",
-      "vault.size": "Size",
-      "vault.copies": "Copies",
-      "vault.state": "State",
-      "vault.myFiles": "My files",
-      "vault.upload": "Upload",
-      "vault.name": "Name",
-      "vault.empty": "No files.",
-      "vault.online": "Online",
-      "vault.offline": "Offline",
-      "vault.free": "{size} free",
-      "vault.self": "you",
-      "vault.download": "Download",
-      "vault.delete": "Delete",
-      "vault.deleteConfirm": "Delete {name} from your vault?",
-      "vault.codeMissing": "The daemon did not return a code.",
-      "vault.inviteRequired": "Enter an invite code.",
-      "vault.inviteCode": "Single-use invite code:",
-      "vault.recoveryCode": "Recovery code: keep it offline. Anyone with this code can read and write your data.",
-      "vault.state.local_only": "Local only",
-      "vault.state.replicating": "Replicating",
-      "vault.state.healthy": "Healthy",
-      "vault.state.degraded": "Degraded",
-      "vault.state.conflict": "Conflict",
-      "vault.state.insufficient_capacity": "Insufficient capacity",
       "escrow.title": "Escrow",
       "escrow.export": "Export",
       "escrow.import": "Import",
@@ -2991,6 +2885,16 @@
       "escrow.configured": "Configured",
       "escrow.joined": "Joined",
       "escrow.slots": "Slots",
+      "escrow.copies": "Copies",
+      "escrow.state.healthy": "Healthy",
+      "escrow.state.replicating": "Replicating",
+      "escrow.state.degraded": "Degraded",
+      "escrow.state.conflict": "Conflict",
+      "escrow.providersOnline": "{online}/{total} providers online",
+      "escrow.providerOnline": "online",
+      "escrow.providerOffline": "offline",
+      "escrow.providerSelf": "you",
+      "escrow.insufficientCapacity": "Insufficient local capacity",
       "escrow.bytes": "Stored bytes",
       "escrow.empty": "No escrow rooms. Add the app's mistl room to start.",
       "escrow.invalidRoom": "Room IDs must be 1–96 characters using only A–Z, a–z, 0–9, _ . / : -",
@@ -3007,6 +2911,10 @@
       "settings.field.escrow.max_total_bytes.desc": "GiB for all retained data (default 1 GiB; maximum 1024 GiB). Requires daemon restart.",
       "settings.field.escrow.max_slots_per_room.label": "Slots per room",
       "settings.field.escrow.max_slots_per_room.desc": "Maximum slots per room (default 1024; range 1–65536). Requires daemon restart.",
+      "settings.field.escrow.auto_replicas.label": "Target copies",
+      "settings.field.escrow.auto_replicas.desc": "Target encrypted copies per slot (1–8; default 3). Set to 1 to turn automatic replication off. Requires daemon restart.",
+      "settings.field.escrow.dead_after_secs.label": "Provider expiry (seconds)",
+      "settings.field.escrow.dead_after_secs.desc": "Replace providers unseen for this many seconds (minimum 60; default 86400). Requires daemon restart.",
       "ai.sharing.toggle": "Share {model} with {room}",
       "ai.sharing.noHttp": "Add an enabled HTTP connection in Connections to share its models.",
       "ai.sharing.noRooms": "Add a room to share models.",
@@ -3797,43 +3705,6 @@
       "tunnel.toast.stopped": "Tunnel stopped.",
     },
     ja: {
-      "vault.title": "Vault",
-      "vault.unavailable": "Vault 画面を利用できません。",
-      "vault.sync": "今すぐ同期",
-      "vault.noGroup": "ストレージグループを作成するか参加してください。",
-      "vault.init": "グループを作成",
-      "vault.inviteInput": "招待コード",
-      "vault.join": "参加",
-      "vault.group": "グループ",
-      "vault.invite": "招待",
-      "vault.key": "復旧コード",
-      "vault.owners": "データセット",
-      "vault.owner": "所有者",
-      "vault.files": "ファイル数",
-      "vault.size": "サイズ",
-      "vault.copies": "コピー数",
-      "vault.state": "状態",
-      "vault.myFiles": "自分のファイル",
-      "vault.upload": "アップロード",
-      "vault.name": "名前",
-      "vault.empty": "ファイルはありません。",
-      "vault.online": "オンライン",
-      "vault.offline": "オフライン",
-      "vault.free": "空き {size}",
-      "vault.self": "自分",
-      "vault.download": "ダウンロード",
-      "vault.delete": "削除",
-      "vault.deleteConfirm": "Vault から {name} を削除しますか？",
-      "vault.codeMissing": "デーモンからコードが返されませんでした。",
-      "vault.inviteRequired": "招待コードを入力してください。",
-      "vault.inviteCode": "一度だけ使える招待コード:",
-      "vault.recoveryCode": "復旧コードはオフラインで保管してください。このコードを持つ人はデータを読み書きできます。",
-      "vault.state.local_only": "ローカルのみ",
-      "vault.state.replicating": "複製中",
-      "vault.state.healthy": "正常",
-      "vault.state.degraded": "コピー不足",
-      "vault.state.conflict": "競合",
-      "vault.state.insufficient_capacity": "容量不足",
       "escrow.title": "Escrow",
       "escrow.export": "エクスポート",
       "escrow.import": "インポート",
@@ -3862,6 +3733,16 @@
       "escrow.configured": "設定済み",
       "escrow.joined": "参加済み",
       "escrow.slots": "スロット数",
+      "escrow.copies": "コピー",
+      "escrow.state.healthy": "正常",
+      "escrow.state.replicating": "複製中",
+      "escrow.state.degraded": "コピー不足",
+      "escrow.state.conflict": "競合",
+      "escrow.providersOnline": "プロバイダー {online}/{total} がオンライン",
+      "escrow.providerOnline": "オンライン",
+      "escrow.providerOffline": "オフライン",
+      "escrow.providerSelf": "自分",
+      "escrow.insufficientCapacity": "ローカルの容量不足",
       "escrow.bytes": "保存容量",
       "escrow.empty": "Escrow ルームがありません。アプリの mistl room を追加してください。",
       "escrow.invalidRoom": "ルーム ID は A–Z、a–z、0–9、_ . / : - のみで 1〜96 文字にしてください。",
@@ -3878,6 +3759,10 @@
       "settings.field.escrow.max_total_bytes.desc": "保存データ全体の GiB 上限（既定 1 GiB、最大 1024 GiB）。デーモンの再起動が必要です。",
       "settings.field.escrow.max_slots_per_room.label": "ルームごとのスロット上限",
       "settings.field.escrow.max_slots_per_room.desc": "ルームごとの最大スロット数（既定 1024、範囲 1〜65536）。デーモンの再起動が必要です。",
+      "settings.field.escrow.auto_replicas.label": "目標コピー数",
+      "settings.field.escrow.auto_replicas.desc": "スロットごとの暗号化コピーの目標数（1〜8、既定 3）。1 にすると自動複製を停止します。デーモンの再起動が必要です。",
+      "settings.field.escrow.dead_after_secs.label": "プロバイダーの期限（秒）",
+      "settings.field.escrow.dead_after_secs.desc": "この秒数以上確認できないプロバイダーを置き換えます（最小 60、既定 86400）。デーモンの再起動が必要です。",
       "ai.sharing.toggle": "{model}を{room}に共有",
       "ai.sharing.noHttp": "接続先で有効なHTTP接続先を追加してください。",
       "ai.sharing.noRooms": "ルームを追加すると、モデルを提供できます。",
@@ -4668,43 +4553,6 @@
       "tunnel.toast.stopped": "トンネルを停止しました。",
     },
     zh: {
-      "vault.title": "Vault",
-      "vault.unavailable": "Vault 页面不可用。",
-      "vault.sync": "立即同步",
-      "vault.noGroup": "创建或加入存储组。",
-      "vault.init": "创建组",
-      "vault.inviteInput": "邀请码",
-      "vault.join": "加入",
-      "vault.group": "组",
-      "vault.invite": "邀请",
-      "vault.key": "恢复码",
-      "vault.owners": "数据集",
-      "vault.owner": "所有者",
-      "vault.files": "文件数",
-      "vault.size": "大小",
-      "vault.copies": "副本数",
-      "vault.state": "状态",
-      "vault.myFiles": "我的文件",
-      "vault.upload": "上传",
-      "vault.name": "名称",
-      "vault.empty": "没有文件。",
-      "vault.online": "在线",
-      "vault.offline": "离线",
-      "vault.free": "剩余 {size}",
-      "vault.self": "自己",
-      "vault.download": "下载",
-      "vault.delete": "删除",
-      "vault.deleteConfirm": "从 Vault 删除 {name}？",
-      "vault.codeMissing": "守护进程未返回代码。",
-      "vault.inviteRequired": "请输入邀请码。",
-      "vault.inviteCode": "一次性邀请码：",
-      "vault.recoveryCode": "请离线保管恢复码。持有恢复码的人可以读写您的数据。",
-      "vault.state.local_only": "仅本地",
-      "vault.state.replicating": "复制中",
-      "vault.state.healthy": "正常",
-      "vault.state.degraded": "副本不足",
-      "vault.state.conflict": "冲突",
-      "vault.state.insufficient_capacity": "容量不足",
       "escrow.title": "Escrow",
       "escrow.export": "导出",
       "escrow.import": "导入",
@@ -4733,6 +4581,16 @@
       "escrow.configured": "已配置",
       "escrow.joined": "已加入",
       "escrow.slots": "槽位数",
+      "escrow.copies": "副本",
+      "escrow.state.healthy": "正常",
+      "escrow.state.replicating": "复制中",
+      "escrow.state.degraded": "副本不足",
+      "escrow.state.conflict": "冲突",
+      "escrow.providersOnline": "{online}/{total} 个提供者在线",
+      "escrow.providerOnline": "在线",
+      "escrow.providerOffline": "离线",
+      "escrow.providerSelf": "自己",
+      "escrow.insufficientCapacity": "本地容量不足",
       "escrow.bytes": "已存储容量",
       "escrow.empty": "暂无 Escrow 房间。请添加应用的 mistl room。",
       "escrow.invalidRoom": "房间 ID 必须为 1–96 个字符，只能使用 A–Z、a–z、0–9、_ . / : -",
@@ -4749,6 +4607,10 @@
       "settings.field.escrow.max_total_bytes.desc": "所有保留数据的 GiB 上限（默认 1 GiB，最大 1024 GiB）。需要重启守护进程。",
       "settings.field.escrow.max_slots_per_room.label": "每个房间的槽位上限",
       "settings.field.escrow.max_slots_per_room.desc": "每个房间的最大槽位数（默认 1024，范围 1–65536）。需要重启守护进程。",
+      "settings.field.escrow.auto_replicas.label": "目标副本数",
+      "settings.field.escrow.auto_replicas.desc": "每个槽位的加密副本目标数（1–8，默认 3）。设为 1 可关闭自动复制。需要重启守护进程。",
+      "settings.field.escrow.dead_after_secs.label": "提供者失效时间（秒）",
+      "settings.field.escrow.dead_after_secs.desc": "超过此秒数未出现时替换提供者（最小 60，默认 86400）。需要重启守护进程。",
       "ai.model.voice": "音色",
       "ai.model.empty": "没有匹配的模型",
       "ai.model.roomAuto": "由{provider}选择",
@@ -5871,7 +5733,6 @@
     renderChatRelayRooms(state.chatRelayRooms);
     renderStore(state.storeItems);
     escrowView.refreshLanguage();
-    if (vaultView) vaultView.refreshLanguage();
     renderSandbox(state.sandboxItems);
     renderSchedulerJobs(state.schedulerJobs);
     renderSchedulerRuns(state.schedulerRuns);
@@ -7881,58 +7742,6 @@
         return Promise.all([pollEscrow(), pollConfig()]);
       });
     });
-  }
-
-  /* ---------- vault (Storage sub-page) ---------- */
-
-  var vaultPoll = null;
-  var vaultView = window.MistlVault ? window.MistlVault.create({
-    root: document.getElementById("panel-vault"), t: t, formatBytes: fmtBytes,
-    call: api, copy: copyToClipboard, upload: uploadVaultFile,
-    refresh: function () { return Promise.resolve(vaultPoll).catch(function () {}).then(pollVault); }
-  }) : null;
-  if (!vaultView) {
-    var vaultUnavailable = document.querySelector("[data-vault-error]");
-    vaultUnavailable.setAttribute("data-i18n", "vault.unavailable");
-    vaultUnavailable.textContent = t("vault.unavailable"); vaultUnavailable.hidden = false;
-    document.querySelectorAll("#panel-vault button, #panel-vault input").forEach(function (control) { control.disabled = true; });
-  }
-
-  function uploadVaultFile(file) {
-    return new Promise(function (resolve, reject) {
-      var xhr = new XMLHttpRequest();
-      xhr.open("POST", "/api/vault/upload");
-      xhr.setRequestHeader("x-mistl-ui", "1");
-      xhr.setRequestHeader("x-mistl-instance", pageIdentity());
-      xhr.setRequestHeader("x-file-name", encodeURIComponent(file.name));
-      xhr.onload = function () {
-        var json = null;
-        try { json = JSON.parse(xhr.responseText); } catch (parseErr) { json = null; }
-        if (json && json.ok === true) resolve(json.data);
-        else reject(new Error((json && json.error) || ("upload failed (" + xhr.status + ")")));
-      };
-      xhr.onerror = function () { reject(new Error("upload failed")); };
-      xhr.send(file);
-    });
-  }
-
-  function pollVault() {
-    if (!vaultView) return Promise.resolve();
-    if (vaultPoll) return vaultPoll;
-    vaultPoll = api("vault.status", {}).then(function (status) {
-      vaultView.render(status);
-      if (!status.group) return;
-      return api("vault.ls", {}).then(function (listing) { vaultView.render(status, listing); });
-    }).catch(function (err) {
-      vaultView.setError(err.message || String(err));
-      throw err;
-    }).finally(function () { vaultPoll = null; });
-    return vaultPoll;
-  }
-
-  function vaultVisible() {
-    return !document.hidden && document.getElementById("panel-store").classList.contains("active") &&
-      document.getElementById("panel-vault").classList.contains("active");
   }
 
   /* ---------- store ---------- */
@@ -10373,7 +10182,9 @@
       { key: "enabled", labelKey: "settings.field.escrow.enabled.label", descKey: "settings.field.escrow.enabled.desc", type: "toggle" },
       { key: "max_blob_bytes", labelKey: "settings.field.escrow.max_blob_bytes.label", descKey: "settings.field.escrow.max_blob_bytes.desc", type: "gib", advanced: true },
       { key: "max_total_bytes", labelKey: "settings.field.escrow.max_total_bytes.label", descKey: "settings.field.escrow.max_total_bytes.desc", type: "gib", advanced: true },
-      { key: "max_slots_per_room", labelKey: "settings.field.escrow.max_slots_per_room.label", descKey: "settings.field.escrow.max_slots_per_room.desc", type: "number", advanced: true }
+      { key: "max_slots_per_room", labelKey: "settings.field.escrow.max_slots_per_room.label", descKey: "settings.field.escrow.max_slots_per_room.desc", type: "number", advanced: true },
+      { key: "auto_replicas", labelKey: "settings.field.escrow.auto_replicas.label", descKey: "settings.field.escrow.auto_replicas.desc", type: "number", advanced: true },
+      { key: "dead_after_secs", labelKey: "settings.field.escrow.dead_after_secs.label", descKey: "settings.field.escrow.dead_after_secs.desc", type: "number", advanced: true }
     ] },
     { section: "chat_relay", titleKey: "settings.section.chat_relay", container: "settings-drawer-body-chat-relay", fields: [
       { key: "rooms", labelKey: "settings.field.chat_relay.rooms.label", descKey: "settings.field.chat_relay.rooms.desc", type: "list" },
@@ -12124,9 +11935,6 @@
     pollChatRelayRooms();
     // Start escrow polling when first opened, then keep its last-known state fresh.
     if (escrowRequested) pollEscrow().catch(function () { /* retain last-known state */ });
-    if (vaultVisible()) {
-      pollVault().catch(function () { /* retain last-known state */ });
-    }
     /* folder sync entries change in the background (daemon-side
        connect/retry loop), so poll them on the same unconditional cycle as
        everything else above rather than gating on panel visibility --
@@ -12226,8 +12034,7 @@
   var PANEL_ALIASES = {
     "panel-stream": { panel: "panel-chat", tab: "stream" },
     "panel-chat-relay": { panel: "panel-chat", tab: "rooms" },
-    "panel-escrow": { panel: "panel-store", tab: "escrow" },
-    "panel-vault": { panel: "panel-store", tab: "vault" }
+    "panel-escrow": { panel: "panel-store", tab: "escrow" }
   };
 
   function panelFromHash() {
@@ -12277,9 +12084,6 @@
       if (on) a.setAttribute("aria-current", "page");
       else a.removeAttribute("aria-current");
     });
-    if (vaultVisible()) {
-      pollVault().catch(function () {});
-    }
   }
 
   function routeFromHash() {
@@ -12390,9 +12194,6 @@
         }
         if (panel.id === "panel-store" && name === "escrow") {
           pollEscrow().catch(function (err) { showToast(err.message || String(err), "error"); });
-        }
-        if (panel.id === "panel-store" && name === "vault" && vaultVisible()) {
-          pollVault().catch(function () {});
         }
         if (panel.id === "panel-ai" && name === "sharing" && panel.classList.contains("active")) aiRefreshModels(false);
         try { localStorage.setItem(storeKey, name); } catch (e) { /* ignore */ }

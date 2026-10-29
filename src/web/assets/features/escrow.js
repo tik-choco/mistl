@@ -116,7 +116,7 @@
         var key = String(room.room), row = rows.get(key);
         if (!row) {
           row = document.createElement("tr");
-          for (var i = 0; i < 6; i++) row.appendChild(document.createElement("td"));
+          for (var i = 0; i < 7; i++) row.appendChild(document.createElement("td"));
           row.cells[0].className = "mono escrow-room-name";
           var remove = document.createElement("button"); remove.type = "button"; remove.className = "danger";
           remove.addEventListener("click", function () {
@@ -131,8 +131,9 @@
           exportRoom.addEventListener("click", function () { exportArchive(key); });
           importInto.addEventListener("click", function () { chooseImport(key); });
           row.archive = [exportRoom, importInto];
-          row.cells[5].className = "escrow-actions";
-          row.cells[5].append(exportRoom, importInto, remove); rows.set(key, row);
+          row.cells[5].className = "escrow-copies";
+          row.cells[6].className = "escrow-actions";
+          row.cells[6].append(exportRoom, importInto, remove); rows.set(key, row);
         }
         kept.add(key);
         row.cells[0].textContent = key; row.cells[0].title = key;
@@ -140,13 +141,34 @@
         row.cells[2].textContent = t(room.joined ? "update.yes" : "update.no");
         row.cells[3].textContent = Number(room.slots) || 0;
         row.cells[4].textContent = formatBytes(room.bytes);
+        var copies = row.cells[5], auto = room.auto;
+        copies.replaceChildren(); copies.removeAttribute("title"); copies.removeAttribute("aria-label"); copies.removeAttribute("tabindex");
+        if (auto && typeof auto === "object") {
+          var providers = Array.isArray(auto.providers) ? auto.providers : [];
+          var online = providers.filter(function (p) { return p.online; }).length;
+          var state = Number(auto.conflicts) > 0 ? "conflict" : Number(auto.degraded) > 0 ? "degraded" :
+            Number(auto.replicating) > 0 ? "replicating" : "healthy";
+          var count = document.createElement("span"), badge = document.createElement("span"), providerCount = document.createElement("span");
+          count.textContent = (Number(auto.healthy) || 0) + "/" + (Number(auto.slots) || 0);
+          badge.className = "escrow-copy-state"; badge.dataset.state = state; badge.textContent = t("escrow.state." + state);
+          providerCount.className = "escrow-providers"; providerCount.textContent = t("escrow.providersOnline", { online: online, total: providers.length });
+          copies.append(count, " ", badge, " ", providerCount);
+          var details = providers.map(function (p) {
+            return String(p.did || p.node || "-") + (p.node && p.did ? " (" + p.node + ")" : "") +
+              ": " + t(p.online ? "escrow.providerOnline" : "escrow.providerOffline") + (p.self ? " (" + t("escrow.providerSelf") + ")" : "");
+          });
+          if (auto.insufficient_capacity) details.push(t("escrow.insufficientCapacity"));
+          copies.title = details.join("\n");
+          copies.setAttribute("aria-label", copies.textContent + (details.length ? ". " + details.join("; ") : ""));
+          copies.tabIndex = 0;
+        }
         row.archive[0].textContent = t("escrow.export");
         row.archive[0].setAttribute("aria-label", t("escrow.exportRoomAria", { room: key }));
         row.archive[0].disabled = archiveBusy || !(Number(room.slots) > 0);
         row.archive[1].textContent = t("escrow.import");
         row.archive[1].setAttribute("aria-label", t("escrow.importRoomAria", { room: key }));
         row.archive[1].disabled = archiveBusy;
-        var remove = row.cells[5].lastChild;
+        var remove = row.cells[6].lastChild;
         remove.textContent = t("escrow.removeRoom");
         remove.setAttribute("aria-label", t("settings.list.removeAria", { item: key }));
         remove.hidden = !room.configured;

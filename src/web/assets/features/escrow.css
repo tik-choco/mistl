@@ -18,3 +18,12 @@
 /* Export/Import/Remove wrap instead of pushing Actions out of the scroll area. */
 #panel-escrow td.escrow-actions { white-space: normal; }
 #panel-escrow .escrow-actions button { margin: 2px 6px 2px 0; }
+
+#panel-escrow .escrow-copy-state { display: inline-block; border-radius: 999px; padding: 2px 8px; margin: 0 5px; background: var(--bg-alt); color: var(--text-dim); }
+#panel-escrow .escrow-copy-state[data-state="healthy"] { background: var(--ok-dim); color: var(--ok); }
+#panel-escrow .escrow-copy-state[data-state="degraded"], #panel-escrow .escrow-copy-state[data-state="conflict"] { background: var(--warn-dim); color: var(--warn); }
+#panel-escrow .escrow-providers { color: var(--text-dim); font-size: 12px; }
+/* Count, state and providers stack so the column stays narrow. */
+#panel-escrow td.escrow-copies { white-space: nowrap; }
+#panel-escrow td.escrow-copies .escrow-copy-state { display: table; margin: 3px 0; }
+#panel-escrow td.escrow-copies .escrow-providers { display: block; }

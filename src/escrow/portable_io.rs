@@ -155,6 +155,7 @@ pub(super) fn export_to(
     let mut rooms = Vec::new();
     let mut skipped = Vec::new();
     let (mut slots, mut bytes) = (0u64, 0u64);
+    let mut not_held = 0u64;
     for room in names.into_iter().filter(|r| selected(filter, r)) {
         let (mut count, mut size) = (0u64, 0u64);
         if let Some(cluster) = service.cluster(&room) {
@@ -178,7 +179,15 @@ pub(super) fn export_to(
                     count += 1;
                     size += head.size;
                 } else {
-                    skipped.push(json!({"room":room,"slot":head.slot,"reason":"changed"}));
+                    let reason = if service.repo.head(&room, &head.slot).as_ref() == Some(&head)
+                        && !service.repo.held(&room, &head)
+                    {
+                        not_held += 1;
+                        "not_held"
+                    } else {
+                        "changed"
+                    };
+                    skipped.push(json!({"room":room,"slot":head.slot,"reason":reason}));
                 }
             }
         }
@@ -187,7 +196,7 @@ pub(super) fn export_to(
         rooms.push(json!({"room":room,"slots":count,"bytes":size}));
     }
     writer.finish()?;
-    Ok(json!({"slots":slots,"bytes":bytes,"rooms":rooms,"skipped":skipped}))
+    Ok(json!({"slots":slots,"bytes":bytes,"rooms":rooms,"skipped":skipped,"not_held":not_held}))
 }
 
 struct CopyRead<'a> {
