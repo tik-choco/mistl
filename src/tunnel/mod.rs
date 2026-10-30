@@ -85,6 +85,7 @@ pub mod forward_store;
 pub mod graph;
 pub mod negotiation;
 pub mod notice;
+pub mod proposal_rules;
 pub mod proxy;
 pub mod room_store;
 pub mod rtc;
@@ -372,6 +373,14 @@ async fn status(state: &Arc<AppState>) -> Result<Value> {
     };
     value["enabled"] = json!(cfg.enabled);
     value["running"] = json!(guard.is_some());
+    // A rules file that cannot be read must not take the whole status down.
+    value["proposal_rules"] = match proposal_rules::store().await {
+        Ok(store) => json!(store.list().await),
+        Err(error) => {
+            warn!(%error, "tunnel: could not load proposal rules");
+            json!([])
+        }
+    };
     Ok(value)
 }
 
@@ -497,8 +506,8 @@ async fn forward_add(args: Value) -> Result<Value> {
     // Best-effort persistence: a forward that starts working this session
     // but fails to save to disk (full disk, permissions) still works now --
     // it just won't be restored automatically on the next `tunnel.start`,
-    // exactly like `SessionContext::resolve_forward`/`apply_forward_outcome`
-    // treat their own `forward_store.add` calls upstream.
+    // exactly like `SessionContext::apply_forward_outcome` treats its own
+    // `forward_store.add` call upstream.
     if let Err(error) = ctx.forward_store.add(&spec).await {
         warn!(%error, forward_target = %spec.target, "tunnel: forward added but failed to persist; it will not survive a restart");
     }
@@ -514,8 +523,8 @@ async fn forward_add(args: Value) -> Result<Value> {
 ///   `listen_port` is parsed out of `local` via
 ///   [`crate::tunnel::session::parse_addr_port`] (rejecting anything that
 ///   isn't `host:port`), and `target` is built as
-///   `crate::tunnel::forward_args::node_scoped_target(&format!("{proto}:{remote}"),
-///   &peer_id)` so the proposal is pinned to whichever peer ends up
+///   `node_scoped_target(&forward_key(&proto, remote), &peer_id)`
+///   (`proto:port@peer`) so the proposal is pinned to whichever peer ends up
 ///   handling it. When `peer_id` is omitted or blank it is resolved from
 ///   [`crate::tunnel::rtc::RTCManager::connected_peers`] instead of making
 ///   the caller look it up first: exactly one connected peer is used
@@ -593,8 +602,14 @@ async fn forward_propose(args: Value) -> Result<Value> {
             }
         };
 
-        let target =
-            crate::tunnel::forward_args::node_scoped_target(&format!("{proto}:{remote}"), &peer_id);
+        // The target is a forward key (`proto:port@node`), not `proto:host:port`:
+        // the receiver only accepts that grammar (it becomes a trust-store
+        // key) and silently drops anything else. The host still travels in
+        // `remote_addr`.
+        let target = crate::tunnel::forward_args::node_scoped_target(
+            &crate::tunnel::forward_args::forward_key(&proto, remote),
+            &peer_id,
+        );
         OutgoingForward {
             peer_id,
             proto,
@@ -615,6 +630,20 @@ async fn forward_propose(args: Value) -> Result<Value> {
             .and_then(Value::as_str)
             .context("tunnel.forward.propose requires `local`/`remote` or `target`")?
             .to_string();
+        // `mistl tunnel propose` sends only the target; without an address the
+        // peer's serve forward would have nothing to connect to, so default
+        // to the target port on the peer's loopback.
+        let remote_addr = args
+            .get("remote_addr")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                let (base, _) = crate::tunnel::forward_args::split_node_scope(&target);
+                let port = base.rsplit(':').next().unwrap_or_default();
+                format!("127.0.0.1:{port}")
+            });
         OutgoingForward {
             peer_id,
             proto,
@@ -627,11 +656,7 @@ async fn forward_propose(args: Value) -> Result<Value> {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string(),
-            remote_addr: args
-                .get("remote_addr")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
+            remote_addr,
             target,
             ..Default::default()
         }
@@ -644,6 +669,14 @@ async fn forward_propose(args: Value) -> Result<Value> {
         &draft.local_addr,
         draft.listen_port,
     )?;
+    // The peer drops a proposal whose target it would refuse without
+    // answering, so refuse it here where the caller can see why.
+    if !crate::tunnel::forward_args::is_valid_remote_target(&draft.target) {
+        bail!(
+            "tunnel.forward.propose: invalid target {:?} (expected proto:port[@node])",
+            draft.target
+        );
+    }
     let peer_id = draft.peer_id.clone();
     let target = draft.target.clone();
     let message = ctx
@@ -812,6 +845,32 @@ async fn trust_revoke(args: Value) -> Result<Value> {
     Ok(json!({ "ok": removed }))
 }
 
+/// Rule edits work while stopped and immediately re-evaluate a live queue.
+async fn rules_edit(args: Value, update: bool) -> Result<Value> {
+    let patch: proposal_rules::RulePatch = serde_json::from_value(args.clone())?;
+    let store = proposal_rules::store().await?;
+    let rule = if update {
+        let id = args
+            .get("id")
+            .and_then(Value::as_str)
+            .context("tunnel.rules.update requires `id`")?
+            .trim();
+        store.update(id, patch).await?
+    } else {
+        store.add(patch).await?
+    };
+    let ctx = SESSION
+        .lock()
+        .await
+        .as_ref()
+        .map(|session| session.ctx.clone());
+    let applied = match ctx {
+        Some(ctx) => ctx.apply_proposal_rules().await,
+        None => 0,
+    };
+    Ok(json!({ "rule": rule, "applied": applied }))
+}
+
 /// IPC entry point for every `tunnel.*` command (see the integration
 /// contract's frozen `tunnel.*` list -- W6's dashboard panel and W7's `mistl
 /// tunnel tui` are both plain clients of exactly this list, so every
@@ -819,6 +878,17 @@ async fn trust_revoke(args: Value) -> Result<Value> {
 pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Value> {
     match cmd {
         "tunnel.status" => status(state).await,
+        "tunnel.rules.list" => Ok(json!({ "rules": proposal_rules::store().await?.list().await })),
+        "tunnel.rules.add" => rules_edit(args, false).await,
+        "tunnel.rules.update" => rules_edit(args, true).await,
+        "tunnel.rules.remove" => {
+            let id = args
+                .get("id")
+                .and_then(Value::as_str)
+                .context("tunnel.rules.remove requires `id`")?
+                .trim();
+            Ok(json!({ "ok": proposal_rules::store().await?.remove(id).await? }))
+        }
         "tunnel.graph.command" => {
             let ctx = running_ctx().await?;
             let node_id = args

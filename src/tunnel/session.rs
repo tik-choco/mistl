@@ -62,7 +62,7 @@
 //!   "forwards": [ /* crate::tunnel::controller::ForwardStatus::to_json; connect forwards also
 //!                    "awaiting_approval":bool, "awaiting_since_ms", "approval_peer_id", "denied_at_ms" */ ],
 //!   "pending_auth": [{"id":0,"peer_id":"..","forward_key":"..","target_addr":"..","proto":".."}],
-//!   "pending_forwards": [{"id":0,"req_id":"..","peer_id":"..","proto":"..","remote_addr":"..","target":".."}],
+//!   "pending_forwards": [{"id":0,"req_id":"..","peer_id":"..","proto":"..","remote_addr":"..","target":"..","verified":false}],
 //!   "pending_outgoing": [{"req_id":"..","sent_at_ms":0,"peer_id":"..","proto":"..","listen_port":0,"local_addr":"..","remote_addr":"..","target":".."}],
 //!   "trust": [{"key":"..","peer_id":"..","forward_key":"..","decision":"allow|deny"}],
 //!   "events": [{"sequence":0,"timestamp_ms":0,"peer_id":"..","forward_key":"..","target_addr":"..","proto":"..","decision":"allow|deny|allow_always|deny_always","source":"policy|trust_store|pending"}],
@@ -94,6 +94,7 @@ use crate::tunnel::negotiation::{
     REASON_TIMEOUT,
 };
 use crate::tunnel::notice::{self, ApprovalBook, ApprovalMark, ApprovalState, ScopeMatch};
+use crate::tunnel::proposal_rules::{self, Decision, RuleStore};
 use crate::tunnel::rtc::RTCManager;
 
 /// How many notices [`SessionContext::push_notice`] retains before dropping
@@ -114,7 +115,8 @@ pub struct SessionNotice {
     pub text: String,
     /// Machine-readable event (`proposal_denied`, `proposal_timeout`,
     /// `proposal_peer_left`, `proposal_failed`, `proposal_accepted`,
-    /// `proposal_add_failed`) so a front end can localize the message and
+    /// `proposal_add_failed`, `proposal_auto_accepted`, `proposal_auto_denied`)
+    /// so a front end can localize the message and
     /// link it to a peer; empty for plain-text notices.
     pub code: &'static str,
     /// Peer and target the event is about (empty when not applicable).
@@ -323,6 +325,7 @@ impl SessionContext {
     /// dashboard, `mistl tunnel tui`) goes through, via the daemon's
     /// `crate::tunnel::handle`/`spawn_background` (W5).
     pub async fn build(state: &Arc<AppState>, room: String, is_server: bool) -> Result<Self> {
+        let rules = proposal_rules::store().await?.clone();
         let manager = RTCManager::new(state, room.clone(), is_server).await?;
         if let Err(error) = manager.graph().load_room(&room).await {
             manager.close().await;
@@ -414,42 +417,6 @@ impl SessionContext {
             }
         }
 
-        // Surface incoming forward proposals into the negotiator queue.
-        {
-            let neg = negotiator.clone();
-            manager
-                .on_forward_request(move |peer_id, ev| {
-                    if super::forward_args::is_link_local_host(&ev.remote_addr) {
-                        warn!(
-                            "ignoring forward request from {} targeting link-local address {}",
-                            peer_id, ev.remote_addr
-                        );
-                        return;
-                    }
-                    // The target becomes a trust-store key on approval; only
-                    // the real forward-key grammar is accepted so a peer
-                    // cannot pick a key that collides with another feature.
-                    if !super::forward_args::is_valid_remote_target(&ev.target) {
-                        warn!(
-                            "ignoring forward request from {} with invalid target",
-                            peer_id
-                        );
-                        return;
-                    }
-                    let neg = neg.clone();
-                    tokio::spawn(async move {
-                        neg.record_incoming(
-                            ev.req_id,
-                            peer_id,
-                            ev.proto,
-                            ev.remote_addr,
-                            ev.target,
-                        )
-                        .await;
-                    });
-                })
-                .await;
-        }
         {
             let neg = negotiator.clone();
             manager
@@ -481,6 +448,56 @@ impl SessionContext {
             notices: Arc::new(Mutex::new(Vec::new())),
             approvals,
         };
+        {
+            let ctx = context.clone();
+            // Keep tasks bounded too: peers can repeat a pending req_id while
+            // its automatic resolution is waiting for transport or disk I/O.
+            let slots = Arc::new(tokio::sync::Semaphore::new(
+                super::negotiation::MAX_INCOMING_TOTAL,
+            ));
+            context
+                .manager
+                .on_forward_request(move |peer_id, ev| {
+                    if super::forward_args::is_link_local_host(&ev.remote_addr) {
+                        warn!(
+                            "ignoring forward request from {} targeting link-local address {}",
+                            peer_id, ev.remote_addr
+                        );
+                        return;
+                    }
+                    // The target becomes a trust-store key on approval.
+                    if !super::forward_args::is_valid_remote_target(&ev.target) {
+                        warn!(
+                            "ignoring forward request from {} with invalid target",
+                            peer_id
+                        );
+                        return;
+                    }
+                    let Ok(slot) = slots.clone().try_acquire_owned() else {
+                        warn!(%peer_id, "too many forward proposal tasks; ignoring request");
+                        return;
+                    };
+                    let ctx = ctx.clone();
+                    let rules = rules.clone();
+                    tokio::spawn(async move {
+                        let _slot = slot;
+                        if let Some(id) = ctx
+                            .negotiator
+                            .record_incoming(
+                                ev.req_id,
+                                peer_id,
+                                ev.proto,
+                                ev.remote_addr,
+                                ev.target,
+                            )
+                            .await
+                        {
+                            ctx.apply_proposal_rule(id, &rules).await;
+                        }
+                    });
+                })
+                .await;
+        }
         context.restore_graph_forwards().await;
         Ok(context)
     }
@@ -560,7 +577,27 @@ impl SessionContext {
     /// [`SessionContext::resolve_forward_by_req_id`] if only the
     /// protocol-level `req_id` is on hand.
     pub async fn resolve_forward(&self, id: u64, allow: bool) -> Result<String, SessionError> {
-        let Some(req) = self.negotiator.take_incoming(id).await else {
+        let _guard = self.negotiator.resolution.lock().await;
+        self.resolve_forward_locked(id, allow).await
+    }
+
+    async fn resolve_forward_locked(&self, id: u64, allow: bool) -> Result<String, SessionError> {
+        let graph = self.manager.graph();
+        let _graph_guard = graph.mutation.lock().await;
+        if graph.closed.load(std::sync::atomic::Ordering::Acquire)
+            || graph.suspended.load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(SessionError::Invalid(
+                "tunnel session is unavailable".into(),
+            ));
+        }
+        let Some(req) = self
+            .negotiator
+            .list_incoming()
+            .await
+            .into_iter()
+            .find(|req| req.id == id)
+        else {
             return Err(SessionError::NotFound(
                 "forward request no longer exists".into(),
             ));
@@ -576,6 +613,7 @@ impl SessionContext {
                         e
                     ))
                 })?;
+            self.negotiator.take_incoming(id).await;
             return Ok(format!("denied forward {}", req.target));
         }
 
@@ -596,26 +634,40 @@ impl SessionContext {
             listen_port: -1,
             target: req.target.clone(),
         };
-        self.controller
-            .add_forward(spec.clone())
-            .await
-            .map_err(|e| SessionError::Invalid(format!("add failed: {}", e)))?;
-        let _ = self.forward_store.add(&spec).await;
+        // A previous attempt may have established the forward but failed to
+        // notify the peer. Retrying that same proposal must still be possible.
+        let exists = self.controller.list_forwards().await.iter().any(|fwd| {
+            fwd.spec.direction == spec.direction
+                && fwd.spec.proto == spec.proto
+                && fwd.spec.addr == spec.addr
+                && fwd.spec.target == spec.target
+        });
+        if !exists {
+            self.controller
+                .add_forward(spec.clone())
+                .await
+                .map_err(|e| SessionError::Invalid(format!("add failed: {}", e)))?;
+        }
+        self.forward_store.add(&spec).await.map_err(|error| {
+            SessionError::Invalid(format!("forward added, but failed to persist: {error}"))
+        })?;
         // Approving the forward also trusts subsequent connections for it --
         // but only for a DID-verified peer, keyed on its DID. An unverified
         // peer's approval stays one-off (the forward exists; later
         // connections from it are prompted individually).
         let room = self.manager.current_room().await;
         let did = verified_did_for_peer(Some(&room), &req.peer_id);
-        let _ = self
-            .trust_store
+        self.trust_store
             .remember_for(
                 &req.peer_id,
                 did.as_deref(),
                 &req.target,
                 TrustDecision::Allow,
             )
-            .await;
+            .await
+            .map_err(|error| {
+                SessionError::Invalid(format!("failed to persist forward trust: {error}"))
+            })?;
         // The local forward/trust bookkeeping above already succeeded and is
         // intentionally not rolled back here: if notifying the peer fails,
         // the forward still works locally, and the caller learns via the
@@ -629,7 +681,72 @@ impl SessionContext {
                     e
                 ))
             })?;
+        self.negotiator.take_incoming(id).await;
         Ok(format!("accepted forward {}", req.target))
+    }
+
+    /// Re-evaluate the bounded pending queue after adding or updating a rule.
+    pub async fn apply_proposal_rules(&self) -> usize {
+        match proposal_rules::store().await {
+            Ok(store) => self.apply_proposal_rules_from(store).await,
+            Err(error) => {
+                warn!(%error, "could not evaluate proposal rules; leaving proposals pending");
+                0
+            }
+        }
+    }
+
+    async fn apply_proposal_rules_from(&self, store: &RuleStore) -> usize {
+        let mut applied = 0;
+        for req in self.negotiator.list_incoming().await {
+            applied += usize::from(self.apply_proposal_rule(req.id, store).await);
+        }
+        applied
+    }
+
+    async fn apply_proposal_rule(&self, id: u64, store: &RuleStore) -> bool {
+        let _guard = self.negotiator.resolution.lock().await;
+        let Some(req) = self
+            .negotiator
+            .list_incoming()
+            .await
+            .into_iter()
+            .find(|req| req.id == id)
+        else {
+            return false;
+        };
+        let room = self.manager.current_room().await;
+        let did = verified_did_for_peer(Some(&room), &req.peer_id);
+        let decision = proposal_rules::evaluate(
+            &store.list().await,
+            &req.peer_id,
+            did.as_deref(),
+            &req.proto,
+            &req.remote_addr,
+        );
+        let (allow, rule_id, code) = match decision {
+            Decision::AutoAllow(id) => (true, id, "proposal_auto_accepted"),
+            Decision::AutoDeny(id) => (false, id, "proposal_auto_denied"),
+            Decision::Ask => return false,
+        };
+        match self.resolve_forward_locked(id, allow).await {
+            Ok(message) => {
+                self.push_notice_coded(
+                    NoticeKind::Info,
+                    format!("{message} (rule {rule_id})"),
+                    code,
+                    &req.peer_id,
+                    &req.target,
+                    &rule_id,
+                )
+                .await;
+                true
+            }
+            Err(error) => {
+                warn!(%error, %rule_id, peer_id = %req.peer_id, target = %req.target, "automatic proposal resolution failed; leaving proposal pending");
+                false
+            }
+        }
     }
 
     /// Convenience wrapper around [`SessionContext::resolve_forward`] that
@@ -1344,7 +1461,7 @@ impl Snapshot {
             "peers": self.peers,
             "forwards": self.forwards_json(),
             "pending_auth": self.pending_auth.iter().map(pending_auth_json).collect::<Vec<_>>(),
-            "pending_forwards": self.pending_forwards.iter().map(incoming_forward_json).collect::<Vec<_>>(),
+            "pending_forwards": self.pending_forwards.iter().map(|item| incoming_forward_json(item, &self.room)).collect::<Vec<_>>(),
             "pending_outgoing": self.pending_outgoing.iter().map(outgoing_forward_json).collect::<Vec<_>>(),
             "trust": self.trust.iter().map(trust_entry_json).collect::<Vec<_>>(),
             "events": self.events.iter().map(auth_event_json).collect::<Vec<_>>(),
@@ -1367,7 +1484,7 @@ fn pending_auth_json(item: &PendingAuthorization) -> Value {
     })
 }
 
-fn incoming_forward_json(item: &IncomingForward) -> Value {
+fn incoming_forward_json(item: &IncomingForward, room: &str) -> Value {
     json!({
         "id": item.id,
         "req_id": item.req_id,
@@ -1375,6 +1492,7 @@ fn incoming_forward_json(item: &IncomingForward) -> Value {
         "proto": item.proto,
         "remote_addr": item.remote_addr,
         "target": item.target,
+        "verified": verified_did_for_peer(Some(room), &item.peer_id).is_some(),
     })
 }
 
@@ -1556,6 +1674,150 @@ mod tests {
             notices: Arc::new(Mutex::new(Vec::new())),
             approvals: ApprovalBook::new(),
         }
+    }
+
+    async fn proposal_for_test(ctx: &SessionContext, peer: &str) -> u64 {
+        ctx.negotiator
+            .record_incoming(
+                "proposal-1".into(),
+                peer.into(),
+                "tcp".into(),
+                "127.0.0.1:22".into(),
+                "tcp:22".into(),
+            )
+            .await
+            .unwrap()
+    }
+
+    fn verify_proposal_peer() -> crate::identity::Identity {
+        let identity = crate::identity::for_test();
+        let room = "test-room";
+        let now = crate::net::peer_auth::now_ms();
+        let bytes = crate::net::peer_auth::build_proof(
+            crate::net::peer_auth::HELLO_TAG,
+            room,
+            &identity,
+            now,
+            &crate::net::peer_auth::fresh_nonce(),
+            false,
+        );
+        let proof = crate::net::peer_auth::check_proof(
+            &bytes,
+            crate::net::peer_auth::HELLO_TAG,
+            room,
+            &identity.node_id(),
+            now,
+        )
+        .unwrap();
+        crate::net::peer_auth::accept_proof(room, &proof).unwrap();
+        identity
+    }
+
+    #[tokio::test]
+    async fn proposal_snapshot_reports_verified_transport_identity() {
+        let ctx = test_session_context().await;
+        proposal_for_test(&ctx, "unverified-peer").await;
+        let identity = verify_proposal_peer();
+        proposal_for_test(&ctx, &identity.node_id()).await;
+        let snapshot = ctx.snapshot().await.to_json();
+        let rows = snapshot["pending_forwards"].as_array().unwrap();
+        assert_eq!(rows[0]["verified"], false);
+        assert_eq!(rows[1]["verified"], true);
+        crate::net::peer_auth::forget_peer("test-room", &identity.node_id());
+    }
+
+    #[tokio::test]
+    async fn proposal_allow_rule_does_not_resolve_an_unverified_peer() {
+        let ctx = test_session_context().await;
+        proposal_for_test(&ctx, "unverified-peer").await;
+        let path = std::env::temp_dir()
+            .join(format!(
+                "mistl-proposal-unverified-{:016x}",
+                rand::random::<u64>()
+            ))
+            .join("rules.json");
+        let store = RuleStore::load(&path).await.unwrap();
+        store
+            .add(serde_json::from_value(json!({"action":"allow"})).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(ctx.apply_proposal_rules_from(&store).await, 0);
+        assert_eq!(ctx.negotiator.list_incoming().await.len(), 1);
+        assert!(ctx.controller.list_forwards().await.is_empty());
+        assert!(ctx.trust_store.list().await.is_empty());
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn proposal_resolution_failure_leaves_the_original_id_pending() {
+        let ctx = test_session_context().await;
+        let identity = verify_proposal_peer();
+        let id = proposal_for_test(&ctx, &identity.node_id()).await;
+        // The same forward key already belongs to a different address. A
+        // proposal must neither replace it nor disappear on add failure.
+        ctx.controller
+            .add_forward(ForwardSpec {
+                direction: Direction::Serve,
+                proto: Proto::Tcp,
+                addr: "127.0.0.1:80".into(),
+                listen_port: -1,
+                target: "tcp:22".into(),
+            })
+            .await
+            .unwrap();
+        let path = std::env::temp_dir()
+            .join(format!(
+                "mistl-proposal-failure-{:016x}",
+                rand::random::<u64>()
+            ))
+            .join("rules.json");
+        let store = RuleStore::load(&path).await.unwrap();
+        store
+            .add(serde_json::from_value(json!({"action":"allow"})).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(ctx.apply_proposal_rules_from(&store).await, 0);
+        assert_eq!(ctx.negotiator.list_incoming().await[0].id, id);
+        assert!(
+            ctx.resolve_forward(id, true)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("add failed")
+        );
+        assert_eq!(ctx.negotiator.list_incoming().await[0].id, id);
+        assert!(ctx.trust_store.list().await.is_empty());
+        assert!(ctx.notices.lock().await.is_empty());
+        crate::net::peer_auth::forget_peer("test-room", &identity.node_id());
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn proposal_persist_failure_stays_pending_without_remembering_trust() {
+        let mut ctx = test_session_context().await;
+        let identity = verify_proposal_peer();
+        let id = proposal_for_test(&ctx, &identity.node_id()).await;
+        let root = std::env::temp_dir().join(format!(
+            "mistl-proposal-persist-failure-{:016x}",
+            rand::random::<u64>()
+        ));
+        let store = RuleStore::load(root.join("rules.json")).await.unwrap();
+        store
+            .add(serde_json::from_value(json!({"action":"allow"})).unwrap())
+            .await
+            .unwrap();
+        let blocked = root.join("blocked");
+        ctx.forward_store = ForwardStore::load(blocked.join("forwards.json"))
+            .await
+            .unwrap();
+        std::fs::write(&blocked, b"not a directory").unwrap();
+        assert_eq!(ctx.apply_proposal_rules_from(&store).await, 0);
+        assert_eq!(ctx.negotiator.list_incoming().await[0].id, id);
+        assert_eq!(ctx.controller.list_forwards().await.len(), 1);
+        assert!(ctx.trust_store.list().await.is_empty());
+        assert!(ctx.notices.lock().await.is_empty());
+        crate::net::peer_auth::forget_peer("test-room", &identity.node_id());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn sample_outgoing_forward(target: &str) -> OutgoingForward {

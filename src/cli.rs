@@ -889,11 +889,48 @@ pub enum TunnelAction {
         #[arg(long)]
         revoke: Option<String>,
     },
+    /// Manage automatic decisions for incoming forward proposals
+    Rule {
+        #[command(subcommand)]
+        action: TunnelRuleAction,
+    },
     /// Open the interactive terminal UI. Talks to the daemon over the same
     /// IPC commands as every other `tunnel` subcommand (starts the daemon
     /// first if it isn't running yet, same as the rest of this CLI) rather
     /// than running an in-process session.
     Tui,
+}
+
+#[derive(Subcommand)]
+pub enum TunnelRuleAction {
+    /// List proposal rules
+    Ls,
+    /// Add an auto-allow or auto-deny proposal rule
+    Add {
+        /// Decision to apply to matching proposals
+        #[arg(value_parser = ["allow", "deny"])]
+        action: String,
+        /// Node id, verified did:key, or * (default: *)
+        #[arg(long)]
+        peer: Option<String>,
+        /// tcp, udp, or * (default: *)
+        #[arg(long)]
+        proto: Option<String>,
+        /// Port, range, comma-separated list, or * (default: *)
+        #[arg(long)]
+        ports: Option<String>,
+        /// loopback, comma-separated host list, or * (default: loopback)
+        #[arg(long)]
+        hosts: Option<String>,
+        /// Optional description
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Remove a proposal rule by its id
+    Rm {
+        /// Rule id (see `tunnel rule ls`)
+        id: String,
+    },
 }
 
 /// Dispatch a parsed CLI invocation: either run the daemon, or act as a
@@ -1446,6 +1483,17 @@ pub fn dispatch(cli: Cli) -> Result<()> {
                     Ok(())
                 }
             },
+            TunnelAction::Rule { action } => {
+                let is_list = matches!(&action, TunnelRuleAction::Ls);
+                let (cmd, args) = tunnel_rule_request(action);
+                if is_list {
+                    let response = request(cmd, args)?;
+                    println!("{}", render_tunnel_rules(&response));
+                    Ok(())
+                } else {
+                    client_call(cmd, args)
+                }
+            }
             TunnelAction::Tui => crate::tunnel::tui::run(),
         },
         Command::Agent(args) => crate::agent::run(args),
@@ -2541,14 +2589,11 @@ fn render_bot_run(run: &Value) -> String {
     lines.join("\n")
 }
 
-// -- `mistl tunnel`: human-readable forward/trust rendering ---------------
+// -- `mistl tunnel`: human-readable forward/trust/rule rendering ----------
 //
 // Same `render_sched_ls`-style tab-separated table shape as the renderers
-// above. Both read `tunnel.status`'s `Snapshot::to_json()` fields
-// defensively (`unwrap_or_default`) rather than asserting they're present,
-// since the exact snapshot shape is produced by `crate::tunnel::session`
-// (see its module doc for the authoritative field list); a missing field
-// here just renders as an empty column instead of a panic.
+// above. The renderers read IPC response fields defensively rather than
+// asserting they're present; a missing field renders as an empty column.
 
 /// `mistl tunnel ls`: one row per entry in `tunnel.status`'s `forwards` list.
 fn render_tunnel_forwards(response: &Value) -> String {
@@ -2626,6 +2671,161 @@ fn render_tunnel_trust(response: &Value) -> String {
     lines.push(String::new());
     lines.push("revoke with: mistl tunnel trust --revoke <peer_id>@<target>".to_string());
     lines.join("\n")
+}
+
+fn tunnel_rule_request(action: TunnelRuleAction) -> (&'static str, Value) {
+    match action {
+        TunnelRuleAction::Ls => ("tunnel.rules.list", json!({})),
+        TunnelRuleAction::Add {
+            action,
+            peer,
+            proto,
+            ports,
+            hosts,
+            note,
+        } => {
+            let mut args = serde_json::Map::new();
+            args.insert("action".to_string(), action.into());
+            for (key, value) in [
+                ("peer", peer),
+                ("proto", proto),
+                ("ports", ports),
+                ("hosts", hosts),
+                ("note", note),
+            ] {
+                if let Some(value) = value {
+                    args.insert(key.to_string(), value.into());
+                }
+            }
+            ("tunnel.rules.add", Value::Object(args))
+        }
+        TunnelRuleAction::Rm { id } => ("tunnel.rules.remove", json!({ "id": id })),
+    }
+}
+
+/// `mistl tunnel rule ls`: one row per entry in `tunnel.rules.list`.
+fn render_tunnel_rules(response: &Value) -> String {
+    let rules = response
+        .get("rules")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if rules.is_empty() {
+        return "no proposal rules".to_string();
+    }
+    let mut lines = vec!["ID\tACTION\tPEER\tPROTO\tPORTS\tHOSTS\tNOTE".to_string()];
+    lines.extend(rules.iter().map(|rule| {
+        ["id", "action", "peer", "proto", "ports", "hosts", "note"]
+            .iter()
+            .map(|key| {
+                let mut field = String::new();
+                for c in rule
+                    .get(*key)
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .chars()
+                {
+                    if c.is_control() {
+                        field.extend(c.escape_debug());
+                    } else {
+                        field.push(c);
+                    }
+                }
+                field
+            })
+            .collect::<Vec<_>>()
+            .join("\t")
+    }));
+    lines.join("\n")
+}
+
+#[cfg(test)]
+mod tunnel_rule_cli_tests {
+    use super::*;
+
+    fn parse_rule(args: &[&str]) -> TunnelRuleAction {
+        let parsed = Cli::try_parse_from(args).unwrap();
+        let Some(Command::Tunnel {
+            action: TunnelAction::Rule { action },
+        }) = parsed.command
+        else {
+            panic!("expected tunnel rule command");
+        };
+        action
+    }
+
+    #[test]
+    fn proposal_rule_commands_build_ipc_requests() {
+        assert_eq!(
+            tunnel_rule_request(parse_rule(&["mistl", "tunnel", "rule", "ls"])),
+            ("tunnel.rules.list", json!({}))
+        );
+        assert_eq!(
+            tunnel_rule_request(parse_rule(&["mistl", "tunnel", "rule", "add", "allow"])),
+            ("tunnel.rules.add", json!({ "action": "allow" }))
+        );
+        assert_eq!(
+            tunnel_rule_request(parse_rule(&[
+                "mistl",
+                "tunnel",
+                "rule",
+                "add",
+                "deny",
+                "--peer",
+                "0123456789abcdef",
+                "--proto",
+                "udp",
+                "--ports",
+                "22, 80,8000-8100",
+                "--hosts",
+                "host1,host2",
+                "--note",
+                "test rule",
+            ])),
+            (
+                "tunnel.rules.add",
+                json!({
+                    "action": "deny", "peer": "0123456789abcdef", "proto": "udp",
+                    "ports": "22, 80,8000-8100", "hosts": "host1,host2", "note": "test rule"
+                })
+            )
+        );
+        assert_eq!(
+            tunnel_rule_request(parse_rule(&["mistl", "tunnel", "rule", "rm", "r-1234"])),
+            ("tunnel.rules.remove", json!({ "id": "r-1234" }))
+        );
+        assert!(Cli::try_parse_from(["mistl", "tunnel", "rule", "add"]).is_err());
+        assert!(Cli::try_parse_from(["mistl", "tunnel", "rule", "add", "maybe"]).is_err());
+        assert!(Cli::try_parse_from(["mistl", "tunnel", "rule", "rm"]).is_err());
+    }
+
+    #[test]
+    fn proposal_rules_render_empty_and_missing_lists() {
+        assert_eq!(
+            render_tunnel_rules(&json!({ "rules": [] })),
+            "no proposal rules"
+        );
+        assert_eq!(render_tunnel_rules(&json!({})), "no proposal rules");
+    }
+
+    #[test]
+    fn proposal_rules_render_all_columns_and_escape_controls() {
+        let response = json!({ "rules": [
+            {
+                "id": "r-1234", "action": "allow", "peer": "0123456789abcdef",
+                "proto": "tcp", "ports": "22,80", "hosts": "loopback",
+                "note": "SSH\tand\nweb\u{1b}"
+            },
+            { "id": "r-5678", "action": "deny", "peer": "*", "proto": "*",
+              "ports": "*", "hosts": "*", "note": "日本語" }
+        ] });
+        assert_eq!(
+            render_tunnel_rules(&response),
+            "ID\tACTION\tPEER\tPROTO\tPORTS\tHOSTS\tNOTE\n\
+             r-1234\tallow\t0123456789abcdef\ttcp\t22,80\tloopback\tSSH\\tand\\nweb\\u{1b}\n\
+             r-5678\tdeny\t*\t*\t*\t*\t日本語"
+        );
+    }
 }
 
 #[cfg(test)]

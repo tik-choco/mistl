@@ -95,6 +95,9 @@ pub struct ForwardOutcome {
 #[derive(Debug, Clone, Default)]
 pub struct ForwardNegotiator {
     inner: Arc<Mutex<Inner>>,
+    /// Serializes manual and automatic resolution without consuming a
+    /// proposal before its side effects succeed.
+    pub(super) resolution: Arc<Mutex<()>>,
 }
 
 #[derive(Debug, Default)]

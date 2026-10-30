@@ -158,6 +158,15 @@ fn remote_targets_must_match_the_forward_key_grammar() {
     }
 }
 
+#[test]
+fn dashboard_proposal_target_passes_the_receiver_check() {
+    // `tunnel.forward.propose`'s `local`/`remote` shape builds its target
+    // this way; the receiver silently drops proposals that fail the check.
+    let target = node_scoped_target(&forward_key("tcp", "127.0.0.1:8080"), "peer-b");
+    assert_eq!(target, "tcp:8080@peer-b");
+    assert!(is_valid_remote_target(&target));
+}
+
 #[tokio::test]
 async fn connect_time_check_rejects_link_local_resolutions() {
     for addr in [

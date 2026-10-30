@@ -769,6 +769,16 @@
     padding: 2px 4px;
   }
   .modal-close:hover { color: var(--text); }
+  .tunnel-rules-card { margin: 20px 0; border: 1px solid var(--panel-border); border-radius: 10px; padding: 14px 16px; }
+  .tunnel-rules-head { display: flex; align-items: center; gap: 12px; justify-content: space-between; }
+  .tunnel-rules-head h3 { margin: 0; }
+  .tunnel-rules-card td { overflow-wrap: anywhere; }
+  .tunnel-rules-card .badge { white-space: nowrap; }
+  .tunnel-rules-note { max-width: 240px; white-space: pre-wrap; }
+  .tunnel-rules-remove { font-size: 18px; line-height: 1; padding: 3px 8px; }
+  .tunnel-rule-modal .tg-dialog-body input[type=text] { width: 100%; box-sizing: border-box; }
+  .tunnel-rule-modal .tunnel-rule-warning { margin: 0; color: var(--warn); font-size: 12px; line-height: 1.6; }
+  .tunnel-rule-modal .tunnel-rule-summary { overflow-wrap: anywhere; line-height: 1.6; }
   .store-picker-path {
     font-size: 12px;
     color: var(--text-dim);
@@ -2623,7 +2633,7 @@
     <h2><span data-i18n="tunnel.title">Tunnel</span> <span class="spacer"></span>
       <button data-role="refresh" data-target="tunnel" data-i18n="common.refresh">Refresh</button>
     </h2>
-    <p class="muted" style="font-size: 12px;" data-i18n="tunnel.subtitle">Forward TCP/UDP ports between nodes in the same room. Nothing reaches this node until you approve it here.</p>
+    <p class="muted" style="font-size: 12px;" data-i18n="tunnel.subtitle">Forward TCP/UDP ports between nodes in the same room. Approve proposals manually or with automatic rules.</p>
 
     <!-- One place for the session: state, ids, and the single room form
          (join / switch / new room). The form is the "Start" action too. -->
@@ -2675,6 +2685,29 @@
     </div>
 
     <div class="tunnel-graph" id="tunnel-graph"></div>
+
+    <div class="tunnel-rules-card" id="tunnel-rules-section">
+      <div class="tunnel-rules-head">
+        <h3 data-i18n="tunnel.rules.title">Proposal rules</h3>
+        <button type="button" class="primary" id="btn-tunnel-rule-add" data-i18n="tunnel.rules.add">+ Add rule</button>
+      </div>
+      <p class="muted" style="font-size: 12px;" data-i18n="tunnel.rules.hint">Deny rules take priority. Auto-approval applies only to verified peers.</p>
+      <div class="table-wrap">
+        <table id="tunnel-rules-table">
+          <thead><tr>
+            <th data-i18n="tunnel.rules.action">Action</th>
+            <th data-i18n="tunnel.table.peer">Peer</th>
+            <th data-i18n="tunnel.rules.protocol">Protocol</th>
+            <th data-i18n="tunnel.rules.ports">Ports</th>
+            <th data-i18n="tunnel.rules.hosts">Hosts</th>
+            <th data-i18n="tunnel.rules.note">Note</th>
+            <th data-i18n="tunnel.table.actions">Actions</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="empty-note" id="tunnel-rules-empty" data-i18n="tunnel.rules.empty">No rules. Every proposal asks you.</div>
+      </div>
+    </div>
 
     <!-- Trust, notices and the audit log: the only secondary content left now
          that the room chat is gone (direct messages live in the Messenger). -->
@@ -3648,6 +3681,63 @@
       "settings.field.storage.blocks_dir.desc": "Directory for content-addressed blocks. Leave empty to use the default, <data_dir>/blocks.",
 
       "tunnel.title": "Tunnel",
+      "tunnel.rules.title": "Proposal rules",
+      "tunnel.rules.add": "+ Add rule",
+      "tunnel.rules.hint": "Deny rules take priority. Auto-approval applies only to verified peers.",
+      "tunnel.rules.action": "Action",
+      "tunnel.rules.protocol": "Protocol",
+      "tunnel.rules.ports": "Ports",
+      "tunnel.rules.hosts": "Hosts",
+      "tunnel.rules.note": "Note",
+      "tunnel.rules.empty": "No rules. Every proposal asks you.",
+      "tunnel.rules.allow": "Auto-approve",
+      "tunnel.rules.deny": "Auto-deny",
+      "tunnel.rules.anyNode": "Any node",
+      "tunnel.rules.allPorts": "All ports",
+      "tunnel.rules.loopback": "This node only (localhost)",
+      "tunnel.rules.anyHost": "Any host",
+      "tunnel.rules.both": "Both",
+      "tunnel.rules.askAction": "What should happen?",
+      "tunnel.rules.allowHelp": "Approve matching proposals from verified peers.",
+      "tunnel.rules.denyHelp": "Deny matching proposals, including from unverified peers.",
+      "tunnel.rules.askPeer": "Which node?",
+      "tunnel.rules.roomNodes": "Nodes in this room",
+      "tunnel.rules.noNodes": "No other nodes are currently in the room.",
+      "tunnel.rules.enterNode": "Enter a node ID or did:key",
+      "tunnel.rules.peerPlaceholder": "Node ID or did:key",
+      "tunnel.rules.badPeer": "Enter a 16-character hexadecimal node ID or a valid did:key.",
+      "tunnel.rules.askPorts": "Which ports?",
+      "tunnel.rules.specificPorts": "Specific ports",
+      "tunnel.rules.portsPlaceholder": "22, 80, 8000-8100",
+      "tunnel.rules.badPorts": "Enter up to 32 ports or ranges from 1 to 65535, such as 22, 80, 8000-8100.",
+      "tunnel.rules.askProtocol": "Protocol?",
+      "tunnel.rules.askHosts": "Which host on this node may be reached?",
+      "tunnel.rules.hostWarning": "Warning: LAN hosts become reachable.",
+      "tunnel.rules.specificHosts": "Specific hosts",
+      "tunnel.rules.hostsPlaceholder": "host1, host2",
+      "tunnel.rules.badHosts": "Enter up to 16 hosts without spaces, each no longer than 253 characters.",
+      "tunnel.rules.askConfirm": "Confirm this rule",
+      "tunnel.rules.summary": "{action} {proto} {ports} from {peer} to {hosts}.",
+      "tunnel.rules.summaryPort": "port {ports}",
+      "tunnel.rules.summaryPorts": "ports {ports}",
+      "tunnel.rules.summaryAllPorts": "all ports",
+      "tunnel.rules.summaryBoth": "TCP and UDP",
+      "tunnel.rules.optionalNote": "Note (optional)",
+      "tunnel.rules.noteTooLong": "The note must be at most 200 characters.",
+      "tunnel.rules.step": "{current} / 6",
+      "tunnel.rules.back": "Back",
+      "tunnel.rules.next": "Next",
+      "tunnel.rules.create": "Add rule",
+      "tunnel.rules.confirmRemove": "Remove rule {id}?",
+      "tunnel.rules.remove": "Remove rule",
+      "tunnel.rules.removed": "Rule removed.",
+      "tunnel.rules.removeMissing": "The rule no longer exists.",
+      "tunnel.rules.added": "Rule added.",
+      "tunnel.rules.addedApplied": "Rule added. {count} pending proposal(s) resolved.",
+      "tunnel.rules.badAddress": "The proposal's remote address is invalid; approve it manually instead.",
+      "tunnel.rules.acceptFailed": "The rule was added, but the proposal could not be accepted: {error}",
+      "tunnel.rules.alwaysAllow": "Approve & always allow",
+      "tunnel.rules.unverifiedHint": "Auto-approval does not apply to an unverified peer.",
       "tunnel.room.switch": "Switch",
       "tunnel.room.switchNew": "Switch to a new room",
       "tunnel.room.hint": "Nodes that enter the same room id can see each other. Share the id only with people you trust.",
@@ -3656,7 +3746,7 @@
       "tunnel.pending.kind.incoming": "Forward proposal",
       "tunnel.table.request": "Request",
       "tunnel.tabs.history": "Trust & history",
-      "tunnel.subtitle": "Forward TCP/UDP ports between nodes in the same room. Nothing reaches this node until you approve it here.",
+      "tunnel.subtitle": "Forward TCP/UDP ports between nodes in the same room. Approve proposals manually or with automatic rules.",
       "tunnel.state.unknown": "unknown",
       "tunnel.state.running": "running",
       "tunnel.state.stopped": "stopped",
@@ -4496,6 +4586,63 @@
       "settings.field.storage.blocks_dir.desc": "コンテンツアドレス方式のブロックを保存するディレクトリです。空欄の場合はデフォルトの <data_dir>/blocks が使われます。",
 
       "tunnel.title": "トンネル",
+      "tunnel.rules.title": "提案の自動ルール",
+      "tunnel.rules.add": "+ ルールを追加",
+      "tunnel.rules.hint": "拒否ルールが優先されます。自動承認は検証済みのピアにのみ適用されます。",
+      "tunnel.rules.action": "操作",
+      "tunnel.rules.protocol": "プロトコル",
+      "tunnel.rules.ports": "ポート",
+      "tunnel.rules.hosts": "ホスト",
+      "tunnel.rules.note": "メモ",
+      "tunnel.rules.empty": "ルールはありません。提案はすべて確認します。",
+      "tunnel.rules.allow": "自動承認",
+      "tunnel.rules.deny": "自動拒否",
+      "tunnel.rules.anyNode": "全ノード",
+      "tunnel.rules.allPorts": "全ポート",
+      "tunnel.rules.loopback": "このノードのみ (localhost)",
+      "tunnel.rules.anyHost": "任意のホスト",
+      "tunnel.rules.both": "両方",
+      "tunnel.rules.askAction": "どうしますか？",
+      "tunnel.rules.allowHelp": "検証済みピアからの一致する提案を承認します。",
+      "tunnel.rules.denyHelp": "未検証ピアを含め、一致する提案を拒否します。",
+      "tunnel.rules.askPeer": "どのノードですか？",
+      "tunnel.rules.roomNodes": "ルーム内のノード",
+      "tunnel.rules.noNodes": "現在ルーム内に他のノードはありません。",
+      "tunnel.rules.enterNode": "ノード ID または did:key を入力",
+      "tunnel.rules.peerPlaceholder": "ノード ID または did:key",
+      "tunnel.rules.badPeer": "16 桁の 16 進数のノード ID または有効な did:key を入力してください。",
+      "tunnel.rules.askPorts": "どのポートですか？",
+      "tunnel.rules.specificPorts": "ポートを指定",
+      "tunnel.rules.portsPlaceholder": "22, 80, 8000-8100",
+      "tunnel.rules.badPorts": "1〜65535 のポートまたは範囲を 32 個以内で入力してください。例: 22, 80, 8000-8100",
+      "tunnel.rules.askProtocol": "プロトコルは？",
+      "tunnel.rules.askHosts": "このノード上のどのホストに接続できますか？",
+      "tunnel.rules.hostWarning": "注意: LAN 内のホストにも接続できるようになります。",
+      "tunnel.rules.specificHosts": "ホストを指定",
+      "tunnel.rules.hostsPlaceholder": "host1, host2",
+      "tunnel.rules.badHosts": "空白を含まないホストを 16 個以内で入力してください。各ホストは 253 文字以内です。",
+      "tunnel.rules.askConfirm": "ルールを確認",
+      "tunnel.rules.summary": "{peer} から {hosts} の {proto} {ports} への提案を{action}します。",
+      "tunnel.rules.summaryPort": "ポート {ports}",
+      "tunnel.rules.summaryPorts": "ポート {ports}",
+      "tunnel.rules.summaryAllPorts": "全ポート",
+      "tunnel.rules.summaryBoth": "TCP/UDP",
+      "tunnel.rules.optionalNote": "メモ（任意）",
+      "tunnel.rules.noteTooLong": "メモは 200 文字以内で入力してください。",
+      "tunnel.rules.step": "{current} / 6",
+      "tunnel.rules.back": "戻る",
+      "tunnel.rules.next": "次へ",
+      "tunnel.rules.create": "ルールを追加",
+      "tunnel.rules.confirmRemove": "ルール {id} を削除しますか？",
+      "tunnel.rules.remove": "ルールを削除",
+      "tunnel.rules.removed": "ルールを削除しました。",
+      "tunnel.rules.removeMissing": "ルールは既に存在しません。",
+      "tunnel.rules.added": "ルールを追加しました。",
+      "tunnel.rules.addedApplied": "ルールを追加し、保留中の提案 {count} 件を処理しました。",
+      "tunnel.rules.badAddress": "提案の接続先アドレスが無効です。手動で承認してください。",
+      "tunnel.rules.acceptFailed": "ルールは追加されましたが、提案を承認できませんでした: {error}",
+      "tunnel.rules.alwaysAllow": "承認して今後も自動承認",
+      "tunnel.rules.unverifiedHint": "未検証のピアには自動承認が適用されません。",
       "tunnel.room.switch": "切り替え",
       "tunnel.room.switchNew": "新しいルームへ切り替え",
       "tunnel.room.hint": "同じルームIDに入ったノード同士がつながります。IDは信頼できる相手とだけ共有してください。",
@@ -4504,7 +4651,7 @@
       "tunnel.pending.kind.incoming": "転送の提案",
       "tunnel.table.request": "要求",
       "tunnel.tabs.history": "信頼と履歴",
-      "tunnel.subtitle": "同じルームのノード同士で TCP/UDP ポートを転送します。このノードへの接続は、ここで承認するまで通りません。",
+      "tunnel.subtitle": "同じルームのノード同士で TCP/UDP ポートを転送します。提案は手動または自動ルールで承認できます。",
       "tunnel.state.unknown": "不明",
       "tunnel.state.running": "稼働中",
       "tunnel.state.stopped": "停止中",
@@ -5344,6 +5491,63 @@
       "settings.field.storage.blocks_dir.desc": "存放内容寻址区块的目录。留空则使用默认值 <data_dir>/blocks。",
 
       "tunnel.title": "隧道",
+      "tunnel.rules.title": "提议自动规则",
+      "tunnel.rules.add": "+ 添加规则",
+      "tunnel.rules.hint": "拒绝规则优先。自动批准仅适用于已验证的节点。",
+      "tunnel.rules.action": "操作",
+      "tunnel.rules.protocol": "协议",
+      "tunnel.rules.ports": "端口",
+      "tunnel.rules.hosts": "主机",
+      "tunnel.rules.note": "备注",
+      "tunnel.rules.empty": "没有规则。每个提议都需要你确认。",
+      "tunnel.rules.allow": "自动批准",
+      "tunnel.rules.deny": "自动拒绝",
+      "tunnel.rules.anyNode": "所有节点",
+      "tunnel.rules.allPorts": "所有端口",
+      "tunnel.rules.loopback": "仅此节点 (localhost)",
+      "tunnel.rules.anyHost": "任意主机",
+      "tunnel.rules.both": "两者",
+      "tunnel.rules.askAction": "如何处理？",
+      "tunnel.rules.allowHelp": "批准来自已验证节点且符合规则的提议。",
+      "tunnel.rules.denyHelp": "拒绝符合规则的提议，包括来自未验证节点的提议。",
+      "tunnel.rules.askPeer": "哪个节点？",
+      "tunnel.rules.roomNodes": "房间中的节点",
+      "tunnel.rules.noNodes": "房间中目前没有其他节点。",
+      "tunnel.rules.enterNode": "输入节点 ID 或 did:key",
+      "tunnel.rules.peerPlaceholder": "节点 ID 或 did:key",
+      "tunnel.rules.badPeer": "请输入 16 位十六进制节点 ID 或有效的 did:key。",
+      "tunnel.rules.askPorts": "哪些端口？",
+      "tunnel.rules.specificPorts": "指定端口",
+      "tunnel.rules.portsPlaceholder": "22, 80, 8000-8100",
+      "tunnel.rules.badPorts": "请输入最多 32 个 1 至 65535 的端口或范围，例如 22, 80, 8000-8100。",
+      "tunnel.rules.askProtocol": "使用哪种协议？",
+      "tunnel.rules.askHosts": "允许访问此节点上的哪些主机？",
+      "tunnel.rules.hostWarning": "警告：局域网中的主机也会变得可访问。",
+      "tunnel.rules.specificHosts": "指定主机",
+      "tunnel.rules.hostsPlaceholder": "host1, host2",
+      "tunnel.rules.badHosts": "请输入最多 16 个不含空格的主机，每个不超过 253 个字符。",
+      "tunnel.rules.askConfirm": "确认此规则",
+      "tunnel.rules.summary": "{action}来自 {peer} 到 {hosts} 的 {proto} {ports} 的提议。",
+      "tunnel.rules.summaryPort": "端口 {ports}",
+      "tunnel.rules.summaryPorts": "端口 {ports}",
+      "tunnel.rules.summaryAllPorts": "所有端口",
+      "tunnel.rules.summaryBoth": "TCP/UDP",
+      "tunnel.rules.optionalNote": "备注（可选）",
+      "tunnel.rules.noteTooLong": "备注不能超过 200 个字符。",
+      "tunnel.rules.step": "{current} / 6",
+      "tunnel.rules.back": "返回",
+      "tunnel.rules.next": "下一步",
+      "tunnel.rules.create": "添加规则",
+      "tunnel.rules.confirmRemove": "删除规则 {id}？",
+      "tunnel.rules.remove": "删除规则",
+      "tunnel.rules.removed": "规则已删除。",
+      "tunnel.rules.removeMissing": "该规则已不存在。",
+      "tunnel.rules.added": "规则已添加。",
+      "tunnel.rules.addedApplied": "规则已添加，处理了 {count} 个待处理提议。",
+      "tunnel.rules.badAddress": "提议的远程地址无效，请手动批准。",
+      "tunnel.rules.acceptFailed": "规则已添加，但无法接受提议：{error}",
+      "tunnel.rules.alwaysAllow": "批准并始终自动允许",
+      "tunnel.rules.unverifiedHint": "自动批准不适用于未验证的节点。",
       "tunnel.room.switch": "切换",
       "tunnel.room.switchNew": "切换到新房间",
       "tunnel.room.hint": "进入同一房间 ID 的节点可以互相看到。请只与信任的人分享该 ID。",
@@ -5352,7 +5556,7 @@
       "tunnel.pending.kind.incoming": "转发提议",
       "tunnel.table.request": "请求",
       "tunnel.tabs.history": "信任与记录",
-      "tunnel.subtitle": "在同一房间的节点之间转发 TCP/UDP 端口。在此处批准之前，任何连接都无法到达此节点。",
+      "tunnel.subtitle": "在同一房间的节点之间转发 TCP/UDP 端口。提议可由你手动批准，也可由自动规则批准。",
       "tunnel.state.unknown": "未知",
       "tunnel.state.running": "运行中",
       "tunnel.state.stopped": "已停止",
@@ -9592,6 +9796,9 @@
   var tunnelPendingSection = document.getElementById("tunnel-pending-section");
   var tunnelPendingCountEl = document.getElementById("tunnel-pending-count");
   var tunnelPendingTbody = document.querySelector("#tunnel-pending-table tbody");
+  var tunnelRulesTbody = document.querySelector("#tunnel-rules-table tbody");
+  var tunnelRulesEmpty = document.getElementById("tunnel-rules-empty");
+  var tunnelRuleAddBtn = document.getElementById("btn-tunnel-rule-add");
   var tunnelTrustTbody = document.querySelector("#tunnel-trust-table tbody");
   var tunnelTrustEmpty = document.getElementById("tunnel-trust-empty");
   var tunnelNoticesEl = document.getElementById("tunnel-notices");
@@ -9641,6 +9848,70 @@
     return btn;
   }
 
+  function tunnelRuleNormalizeHost(value) {
+    var host = value.trim();
+    if (host.charAt(0) === "[" && host.charAt(host.length - 1) === "]") host = host.slice(1, -1);
+    if (!host || new TextEncoder().encode(host).length > 253 || /[\s\x00-\x1f\x7f-\x9f]/.test(host)
+      || ["[", "]", "/", "\\", "@", "*", "?", "#", ","].some(function (char) { return host.indexOf(char) !== -1; })) return null;
+    if (host.indexOf(":") !== -1) {
+      try { new URL("http://[" + host + "]/"); } catch (_) { return null; }
+    } else if (value.trim().charAt(0) === "[") return null;
+    return host.toLowerCase();
+  }
+
+  function tunnelProposalAddress(value) {
+    var match = /^\[([^\]]+)\]:(\d+)$/.exec(value || "") || /^([^:]+):(\d+)$/.exec(value || "");
+    if (!match || Number(match[2]) < 1 || Number(match[2]) > 65535) return null;
+    var host = tunnelRuleNormalizeHost(match[1]);
+    // "loopback" is a reserved rule value, not an exact hostname match.
+    if (!host || host === "loopback") return null;
+    return { host: host, port: String(Number(match[2])) };
+  }
+
+  function tunnelLoopbackHost(host) {
+    if (host === "localhost") return true;
+    var octets = host.split(".");
+    if (octets.length === 4 && octets.every(function (part) { return /^(0|[1-9]\d{0,2})$/.test(part) && Number(part) <= 255; })) {
+      return Number(octets[0]) === 127;
+    }
+    if (host.indexOf(":") === -1) return false;
+    try { return new URL("http://[" + host + "]/").hostname === "[::1]"; } catch (_) { return false; }
+  }
+
+  var tunnelAlwaysAllowBusy = new Set();
+  function tunnelAlwaysAllowButton(item) {
+    var btn = el("button", { type: "button", text: t("tunnel.rules.alwaysAllow") });
+    btn.disabled = tunnelAlwaysAllowBusy.has(item.req_id);
+    btn.addEventListener("click", function () {
+      if (tunnelAlwaysAllowBusy.has(item.req_id)) return;
+      var addr = tunnelProposalAddress(item.remote_addr);
+      if (!addr) { showToast(t("tunnel.rules.badAddress"), "error"); return; }
+      var args = { action: "allow", peer: item.peer_id, proto: item.proto, ports: addr.port,
+        hosts: tunnelLoopbackHost(addr.host) ? "loopback" : addr.host };
+      tunnelAlwaysAllowBusy.add(item.req_id);
+      withBusy(btn, function () {
+        return api("tunnel.rules.add", args).then(function (result) {
+          if (Number(result.applied) === 0) {
+            return api("tunnel.forward.accept", { req_id: item.req_id }).then(function () { return result; }, function (err) {
+              throw new Error(t("tunnel.rules.acceptFailed", { error: err.message || String(err) }));
+            });
+          }
+          return result;
+        });
+      }).then(function (result) {
+        tunnelAlwaysAllowBusy.delete(item.req_id);
+        showToast(Number(result.applied) > 0
+          ? t("tunnel.rules.addedApplied", { count: result.applied }) : t("tunnel.rules.added"), "success");
+        pollTunnelStatus();
+      }, function (err) {
+        tunnelAlwaysAllowBusy.delete(item.req_id);
+        showToast(err.message || String(err), "error");
+        pollTunnelStatus();
+      });
+    });
+    return btn;
+  }
+
   function renderTunnelPending(auth, incoming) {
     tunnelPendingTbody.innerHTML = "";
     // A peer wants to reach a target on this node.
@@ -9673,12 +9944,321 @@
       item = item || {};
       var row = tunnelPendingRow("tunnel.pending.kind.incoming", item.peer_id, item.target,
         [item.proto, item.remote_addr].filter(Boolean).join(" · "));
+      if (item.verified === true) {
+        row.actionCell.appendChild(tunnelAlwaysAllowButton(item));
+      } else {
+        row.peerCell.appendChild(document.createTextNode(" "));
+        row.peerCell.appendChild(el("span", { class: "badge deposited", text: t("tunnel.table.unverified"), title: t("tunnel.rules.unverifiedHint") }));
+      }
       row.actionCell.appendChild(tunnelDecisionButton("tunnel.action.accept", "primary", "tunnel.forward.accept", { req_id: item.req_id }, "tunnel.toast.accepted"));
       row.actionCell.appendChild(tunnelDecisionButton("tunnel.action.reject", "danger", "tunnel.forward.reject", { req_id: item.req_id }, "tunnel.toast.rejected"));
     });
     // This node's own proposals (and connections the owner has parked) are
     // NOT decisions for this user: they are shown on the graph, on the
     // self node card, as "Waiting for <peer> to accept" (tunnel-graph.js).
+  }
+
+  function tunnelRulePeerName(id) {
+    var peers = window.MistlPeers;
+    var known = peers && typeof peers.byNode === "function" ? peers.byNode(id) : null;
+    return known && known.name && typeof peers.label === "function" ? peers.label(id) : "";
+  }
+
+  function tunnelRulePeerText(id) {
+    if (id === "*") return t("tunnel.rules.anyNode");
+    var name = tunnelRulePeerName(id);
+    return name && name !== id ? name + " (" + id + ")" : (id || "-");
+  }
+
+  function tunnelRulePortsText(ports) {
+    return ports === "*" ? t("tunnel.rules.allPorts") : ports;
+  }
+
+  function tunnelRuleHostsText(hosts) {
+    if (hosts === "loopback") return t("tunnel.rules.loopback");
+    return hosts === "*" ? t("tunnel.rules.anyHost") : hosts;
+  }
+
+  var tunnelRulesSignature = "";
+  function renderTunnelRules(items) {
+    items = Array.isArray(items) ? items : [];
+    var names = items.map(function (item) { return item && tunnelRulePeerName(item.peer); });
+    var signature = JSON.stringify([items, names, currentLang]);
+    if (signature === tunnelRulesSignature) return;
+    tunnelRulesSignature = signature;
+    var focusedId = document.activeElement && document.activeElement.dataset.ruleId;
+    tunnelRulesTbody.innerHTML = "";
+    tunnelRulesEmpty.style.display = items.length ? "none" : "block";
+    items.forEach(function (item) {
+      item = item || {};
+      var tr = el("tr", {});
+      var action = el("td", {});
+      action.appendChild(el("span", { class: "badge " + (item.action === "allow" ? "ok-badge" : "status-error"),
+        text: t(item.action === "allow" ? "tunnel.rules.allow" : "tunnel.rules.deny") }));
+      tr.appendChild(action);
+      tr.appendChild(el("td", { class: "mono tunnel-grant-peer", text: tunnelRulePeerText(item.peer) }));
+      tr.appendChild(el("td", { text: item.proto === "*" ? t("tunnel.rules.both") : String(item.proto || "-").toUpperCase() }));
+      tr.appendChild(el("td", { text: tunnelRulePortsText(item.ports || "*") }));
+      tr.appendChild(el("td", { text: tunnelRuleHostsText(item.hosts || "loopback") }));
+      tr.appendChild(el("td", { class: "tunnel-rules-note", text: item.note || "" }));
+      var actionCell = el("td", {});
+      var remove = el("button", { type: "button", class: "danger tunnel-rules-remove",
+        "aria-label": t("tunnel.rules.remove") + " " + (item.id || ""), title: t("tunnel.rules.remove"), text: "×" });
+      remove.dataset.ruleId = item.id || "";
+      remove.addEventListener("click", function () {
+        if (!confirm(t("tunnel.rules.confirmRemove", { id: item.id || "" }))) return;
+        runAction(remove, "tunnel.rules.remove", { id: item.id }, function (result) {
+          showToast(t(result && result.ok ? "tunnel.rules.removed" : "tunnel.rules.removeMissing"), result && result.ok ? "success" : "error");
+          pollTunnelStatus();
+        });
+      });
+      actionCell.appendChild(remove);
+      tr.appendChild(actionCell);
+      tunnelRulesTbody.appendChild(tr);
+      if (focusedId && focusedId === item.id) remove.focus({ preventScroll: true });
+    });
+  }
+
+  // The rule wizard shares the graph editor's modal and choice-row styling.
+  var tunnelRuleOverlay = el("div", { class: "modal-overlay tg-modal tunnel-rule-modal", hidden: "" });
+  var tunnelRuleDialog = el("div", { class: "modal-panel tg-dialog", role: "dialog", "aria-modal": "true", "aria-labelledby": "tunnel-rule-dialog-title" });
+  var tunnelRuleHeader = el("div", { class: "modal-header" });
+  var tunnelRuleTitle = el("h3", { id: "tunnel-rule-dialog-title" });
+  var tunnelRuleClose = el("button", { type: "button", class: "modal-close", text: "×" });
+  var tunnelRuleBody = el("div", { class: "tg-dialog-body" });
+  var tunnelRuleStatus = el("p", { class: "tg-dialog-status", role: "status", "aria-live": "polite" });
+  tunnelRuleHeader.append(tunnelRuleTitle, tunnelRuleClose);
+  tunnelRuleDialog.append(tunnelRuleHeader, tunnelRuleBody, tunnelRuleStatus);
+  tunnelRuleOverlay.appendChild(tunnelRuleDialog);
+  document.body.appendChild(tunnelRuleOverlay);
+  var tunnelRuleWizard = null;
+  var tunnelRuleOpener = null;
+  var tunnelRuleSaving = false;
+
+  function closeTunnelRuleWizard() {
+    if (tunnelRuleOverlay.hidden || tunnelRuleSaving) return;
+    tunnelRuleOverlay.hidden = true;
+    tunnelRuleWizard = null;
+    tunnelRuleBody.replaceChildren();
+    if (tunnelRuleOpener && tunnelRuleOpener.isConnected) tunnelRuleOpener.focus({ preventScroll: true });
+    tunnelRuleOpener = null;
+  }
+
+  tunnelRuleClose.addEventListener("click", closeTunnelRuleWizard);
+  tunnelRuleOverlay.addEventListener("pointerdown", function (e) {
+    if (e.target === tunnelRuleOverlay) closeTunnelRuleWizard();
+  });
+  tunnelRuleOverlay.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeTunnelRuleWizard(); return; }
+    if (e.key !== "Tab") return;
+    var focusable = Array.from(tunnelRuleDialog.querySelectorAll("button,input,select,[tabindex]")).filter(function (node) {
+      return !node.disabled && !node.closest("[hidden]");
+    });
+    if (!focusable.length) return;
+    var first = focusable[0], last = focusable[focusable.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  });
+
+  tunnelRuleAddBtn.addEventListener("click", function () {
+    tunnelRuleOpener = document.activeElement;
+    tunnelRuleWizard = { step: 0, action: "", peer: "*", peerMode: "any", peerInput: "",
+      ports: "*", portMode: "all", portInput: "", proto: "*",
+      hosts: "loopback", hostMode: "loopback", hostInput: "", note: "" };
+    tunnelRuleOverlay.hidden = false;
+    renderTunnelRuleStep();
+  });
+
+  function tunnelRulePeers() {
+    var data = state.tunnel || {};
+    var nodes = Array.isArray(data.peers) ? data.peers.slice() : [];
+    if (data.graph && Array.isArray(data.graph.nodes)) {
+      data.graph.nodes.forEach(function (node) { if (node && node.id) nodes.push(node.id); });
+    }
+    return Array.from(new Set(nodes.filter(function (id) { return typeof id === "string" && id && id !== data.self_id; })));
+  }
+
+  function tunnelRuleChoice(title, help, value, selected, choose) {
+    var btn = el("button", { type: "button", class: "tg-choice" + (selected ? " tg-chosen" : ""), "aria-pressed": selected ? "true" : "false" });
+    btn.dataset.value = value;
+    btn.appendChild(el("strong", { text: title }));
+    if (help) btn.appendChild(el("small", { text: help }));
+    btn.addEventListener("click", choose);
+    return btn;
+  }
+
+  function tunnelRuleInput(value, placeholder, label) {
+    var input = el("input", { type: "text", placeholder: placeholder, "aria-label": label, autocomplete: "off", spellcheck: "false" });
+    input.value = value;
+    return input;
+  }
+
+  function tunnelRuleValidPeer(value) {
+    value = value.trim();
+    if (/^[0-9a-f]{16}$/i.test(value)) return value.toLowerCase();
+    if (/^did:key:z[1-9A-HJ-NP-Za-km-z]+$/.test(value) && value.length <= 256) return value;
+    return null;
+  }
+
+  function tunnelRuleValidPorts(value) {
+    var parts = value.split(",").map(function (part) { return part.trim(); });
+    if (!parts.length || parts.length > 32) return null;
+    var normalized = parts.map(function (part) {
+      var match = /^(\d+)(?:\s*-\s*(\d+))?$/.exec(part);
+      if (!match) return null;
+      var low = Number(match[1]), high = match[2] === undefined ? low : Number(match[2]);
+      if (low < 1 || high > 65535 || low > high) return null;
+      return match[2] === undefined ? String(low) : low + "-" + high;
+    });
+    return normalized.some(function (part) { return part === null; }) ? null : normalized.join(",");
+  }
+
+  function tunnelRuleValidHosts(value) {
+    var parts = value.split(",");
+    if (!parts.length || parts.length > 16) return null;
+    var normalized = parts.map(tunnelRuleNormalizeHost);
+    return normalized.some(function (host) { return host === null; }) ? null : normalized.join(",");
+  }
+
+  function tunnelRuleError(key, input) {
+    tunnelRuleStatus.textContent = t(key);
+    tunnelRuleStatus.classList.add("tg-error");
+    if (input) { input.setAttribute("aria-invalid", "true"); input.focus(); }
+  }
+
+  function renderTunnelRuleStep() {
+    var w = tunnelRuleWizard;
+    if (!w) return;
+    var steps = ["action", "peer", "ports", "protocol", "hosts", "confirm"];
+    var step = steps[w.step];
+    tunnelRuleTitle.textContent = t("tunnel.rules.title");
+    tunnelRuleClose.setAttribute("aria-label", t("common.close"));
+    tunnelRuleClose.title = t("common.close");
+    tunnelRuleBody.replaceChildren();
+    tunnelRuleBody.dataset.step = step;
+    tunnelRuleStatus.textContent = "";
+    tunnelRuleStatus.classList.remove("tg-error");
+    tunnelRuleBody.appendChild(el("p", { class: "tg-step", text: t("tunnel.rules.step", { current: w.step + 1 }) }));
+    var form = el("form", { class: "tg-wizard", novalidate: "" });
+    var foot = el("div", { class: "tg-dialog-foot" });
+    var input = null, onNext = null;
+    function ask(key) { form.appendChild(el("h4", { class: "tg-question", text: t(key) })); }
+    function go() { w.step++; renderTunnelRuleStep(); }
+    function choice(key, help, value, selected, choose) {
+      form.appendChild(tunnelRuleChoice(t(key), help ? t(help) : "", value, selected, choose));
+    }
+    if (step === "action") {
+      ask("tunnel.rules.askAction");
+      ["allow", "deny"].forEach(function (action) {
+        choice("tunnel.rules." + action, "tunnel.rules." + action + "Help", action, w.action === action, function () { w.action = action; go(); });
+      });
+    } else if (step === "peer") {
+      ask("tunnel.rules.askPeer");
+      choice("tunnel.rules.anyNode", "", "*", w.peerMode === "any", function () { w.peerMode = "any"; w.peer = "*"; go(); });
+      var peers = tunnelRulePeers();
+      form.appendChild(el("p", { class: "tg-help", text: t(peers.length ? "tunnel.rules.roomNodes" : "tunnel.rules.noNodes") }));
+      peers.forEach(function (id) {
+        var name = tunnelRulePeerName(id);
+        form.appendChild(tunnelRuleChoice(name || id, name && name !== id ? id : "", id, w.peerMode === "picked" && w.peer === id,
+          function () { w.peerMode = "picked"; w.peer = id; go(); }));
+      });
+      choice("tunnel.rules.enterNode", "", "manual", w.peerMode === "manual", function () { w.peerMode = "manual"; renderTunnelRuleStep(); });
+      if (w.peerMode === "manual") {
+        input = tunnelRuleInput(w.peerInput, t("tunnel.rules.peerPlaceholder"), t("tunnel.rules.enterNode"));
+        input.addEventListener("input", function () { w.peerInput = input.value; });
+        form.appendChild(input);
+        onNext = function () {
+          var peer = tunnelRuleValidPeer(input.value);
+          if (!peer) return tunnelRuleError("tunnel.rules.badPeer", input);
+          w.peerInput = input.value; w.peer = peer; go();
+        };
+      }
+    } else if (step === "ports") {
+      ask("tunnel.rules.askPorts");
+      choice("tunnel.rules.allPorts", "", "*", w.portMode === "all", function () { w.portMode = "all"; w.ports = "*"; go(); });
+      choice("tunnel.rules.specificPorts", "", "specific", w.portMode === "specific", function () { w.portMode = "specific"; renderTunnelRuleStep(); });
+      if (w.portMode === "specific") {
+        input = tunnelRuleInput(w.portInput, t("tunnel.rules.portsPlaceholder"), t("tunnel.rules.specificPorts"));
+        input.addEventListener("input", function () { w.portInput = input.value; });
+        form.appendChild(input);
+        onNext = function () {
+          var ports = tunnelRuleValidPorts(input.value);
+          if (!ports) return tunnelRuleError("tunnel.rules.badPorts", input);
+          w.portInput = input.value; w.ports = ports; go();
+        };
+      }
+    } else if (step === "protocol") {
+      ask("tunnel.rules.askProtocol");
+      ["tcp", "udp", "*"].forEach(function (proto) {
+        form.appendChild(tunnelRuleChoice(proto === "*" ? t("tunnel.rules.both") : proto.toUpperCase(), "", proto, w.proto === proto,
+          function () { w.proto = proto; go(); }));
+      });
+    } else if (step === "hosts") {
+      ask("tunnel.rules.askHosts");
+      choice("tunnel.rules.loopback", "", "loopback", w.hostMode === "loopback", function () { w.hostMode = "loopback"; w.hosts = "loopback"; go(); });
+      choice("tunnel.rules.anyHost", "tunnel.rules.hostWarning", "*", w.hostMode === "any", function () { w.hostMode = "any"; w.hosts = "*"; go(); });
+      choice("tunnel.rules.specificHosts", "", "specific", w.hostMode === "specific", function () { w.hostMode = "specific"; renderTunnelRuleStep(); });
+      if (w.hostMode === "specific") {
+        input = tunnelRuleInput(w.hostInput, t("tunnel.rules.hostsPlaceholder"), t("tunnel.rules.specificHosts"));
+        input.addEventListener("input", function () { w.hostInput = input.value; });
+        form.appendChild(input);
+        onNext = function () {
+          var hosts = tunnelRuleValidHosts(input.value);
+          if (!hosts) return tunnelRuleError("tunnel.rules.badHosts", input);
+          w.hostInput = input.value; w.hosts = hosts; go();
+        };
+      }
+    } else {
+      ask("tunnel.rules.askConfirm");
+      var summaryPorts = w.ports === "*" ? t("tunnel.rules.summaryAllPorts")
+        : t(/^\d+$/.test(w.ports) ? "tunnel.rules.summaryPort" : "tunnel.rules.summaryPorts", { ports: w.ports });
+      form.appendChild(el("p", { class: "tunnel-rule-summary", text: t("tunnel.rules.summary", {
+        action: t("tunnel.rules." + w.action), proto: w.proto === "*" ? t("tunnel.rules.summaryBoth") : w.proto.toUpperCase(),
+        ports: summaryPorts, peer: tunnelRulePeerText(w.peer), hosts: tunnelRuleHostsText(w.hosts)
+      }) }));
+      form.appendChild(el("p", { class: "tg-help", text: t("tunnel.rules.hint") }));
+      if (w.hosts === "*") form.appendChild(el("p", { class: "tunnel-rule-warning", text: t("tunnel.rules.hostWarning") }));
+      form.appendChild(el("label", { for: "tunnel-rule-note", text: t("tunnel.rules.optionalNote") }));
+      input = tunnelRuleInput(w.note, "", t("tunnel.rules.optionalNote"));
+      input.id = "tunnel-rule-note"; input.maxLength = 400;
+      input.addEventListener("input", function () { w.note = input.value; });
+      form.appendChild(input);
+      onNext = function () {
+        if (tunnelRuleSaving) return;
+        if (Array.from(w.note.trim()).length > 200) return tunnelRuleError("tunnel.rules.noteTooLong", input);
+        tunnelRuleSaving = true; tunnelRuleClose.disabled = true;
+        var submit = foot.querySelector(".primary");
+        var backButton = foot.querySelector(".tg-back");
+        if (backButton) backButton.disabled = true;
+        input.disabled = true;
+        withBusy(submit, function () {
+          return api("tunnel.rules.add", { action: w.action, peer: w.peer, proto: w.proto, ports: w.ports, hosts: w.hosts, note: w.note });
+        }).then(function (result) {
+          tunnelRuleSaving = false; tunnelRuleClose.disabled = false;
+          closeTunnelRuleWizard();
+          showToast(Number(result.applied) > 0
+            ? t("tunnel.rules.addedApplied", { count: result.applied }) : t("tunnel.rules.added"), "success");
+          pollTunnelStatus();
+        }, function (err) {
+          tunnelRuleSaving = false; tunnelRuleClose.disabled = false;
+          if (backButton) backButton.disabled = false;
+          input.disabled = false;
+          tunnelRuleStatus.textContent = err.message || String(err);
+          tunnelRuleStatus.classList.add("tg-error");
+          showToast(err.message || String(err), "error");
+        });
+      };
+    }
+    if (w.step > 0) {
+      var back = el("button", { type: "button", class: "tg-back", text: t("tunnel.rules.back") });
+      back.addEventListener("click", function () { w.step--; renderTunnelRuleStep(); });
+      foot.appendChild(back);
+    }
+    if (onNext) foot.appendChild(el("button", { type: "submit", class: "primary", text: t(step === "confirm" ? "tunnel.rules.create" : "tunnel.rules.next") }));
+    form.appendChild(foot);
+    form.addEventListener("submit", function (e) { e.preventDefault(); if (onNext && !tunnelRuleSaving) onNext(); });
+    tunnelRuleBody.appendChild(form);
+    (input || form.querySelector(".tg-chosen") || form.querySelector("button") || tunnelRuleClose).focus();
   }
 
   function renderTunnelTrust(items) {
@@ -9808,6 +10388,7 @@
     tunnelPendingCountEl.textContent = actionable > 0 ? String(actionable) : "";
     renderTunnelPending(pendingAuth, pendingForwards);
 
+    renderTunnelRules(data.proposal_rules || []);
     renderTunnelTrust(data.trust || []);
     renderTunnelNotices(data.notices || []);
     renderTunnelEvents(data.events || []);

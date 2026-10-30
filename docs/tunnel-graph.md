@@ -14,9 +14,40 @@ Enter a Room ID in the Tunnel panel and click Connect to start a session. The gr
    The daemon checks while you type whether it can listen on the address for this node. If another program is using it, `Next` stays disabled and an available port is suggested. The daemon also performs the same check when adding the forward and rejects it if the address is unavailable.
    2. Finally, review the details in the form “this node → peer” and confirm with `Add` (`Send proposal` for `propose`).
 4. Added port forwards appear in each node card's list. Their status, active connection count, and bytes sent and received update automatically. Click × on a row to remove it; a confirmation dialog appears first. On your own node, you can remove any forward with ×, whether it is graph-managed or in the legacy format. On another node, you can remove only graph-managed forwards, and only if you have permission.
-5. A proposal from **Use a port on a peer** appears in your node card as **Waiting for approval** until the peer accepts it (a yellow animated pill, `⏳ Waiting for <peer> to accept`, and a row showing `local → peer (remote address)` with the full Node ID). The link between your node and the peer also becomes a yellow animated dashed line, even if there is no explicit link. Click × on the row to cancel the proposal (`tunnel.forward.propose.cancel`). The peer also receives the cancellation, and the proposal disappears from its pending list. The result is always reported when a response arrives. If accepted, the proposal becomes a regular forward row. If denied, unanswered (5 minutes), or the peer leaves, a toast or status row gives the reason. The `Waiting for your decision` card lists only items that require your decision; your own proposals are not included.
+5. A proposal from **Use a port on a peer** appears in your node card as **Waiting for approval** until the peer accepts it, manually or through a proposal rule (a yellow animated pill, `⏳ Waiting for <peer> to accept`, and a row showing `local → peer (remote address)` with the full Node ID). The link between your node and the peer also becomes a yellow animated dashed line, even if there is no explicit link. Click × on the row to cancel the proposal (`tunnel.forward.propose.cancel`). The peer also receives the cancellation, and the proposal disappears from its pending list. The result is always reported when a response arrives. If accepted, the proposal becomes a regular forward row. If denied, unanswered (5 minutes), or the peer leaves, a toast or status row gives the reason. The `Waiting for your decision` card lists only items that require your decision; your own proposals are not included.
 6. When you connect to a service published by a peer, the forwarding row on the connecting node shows `⏳ Waiting for <peer> to approve the connection` while the peer waits for approval of that connection. If denied, `✕ <peer> denied the connection` remains for about 2 minutes (see “Approval notices”).
 7. If multiple connections to the same forward arrive from the same peer at once, they are grouped into one pending approval, and a single approval applies to all waiting connections. When communication requires approval, the peer node must allow it (by responding to a `propose` or approving a connection to a service). Permission to edit links is separate from approval to connect to a service.
+
+### Proposal rules
+
+Proposal rules automatically approve or deny incoming forward proposals. Manage
+them in the tunnel dashboard or with the CLI, even while the tunnel session is
+stopped. With no matching rule, the proposal waits for a manual decision.
+
+A rule matches the proposing node, protocol, and the host and port on this node
+that the proposal asks to reach. A matching deny always wins over any matching
+allow, regardless of rule order. A matching allow only auto-approves a peer with
+a verified DID; an unverified peer still needs a manual decision unless a deny
+rule matches. Adding a rule also re-evaluates proposals already waiting for a
+decision. If automatic approval cannot complete, the proposal stays pending.
+
+By default, a rule matches any peer, protocol, and port, but only loopback
+hosts: `localhost`, addresses in `127.0.0.0/8`, or `::1`. A peer can be a
+16-character node ID, a verified `did:key`, or `*` for any node. Ports can be a
+number, an inclusive range, a comma-separated list of either, or `*`. Hosts can
+be `loopback`, a comma-separated list of exact host names or IP addresses, or
+`*`. Host list matching is case-insensitive. In an allow rule, `--hosts "*"`
+can permit access to non-loopback hosts, including LAN hosts.
+
+```console
+$ mistl tunnel rule ls
+$ mistl tunnel rule add allow --peer 0123456789abcdef --proto tcp --ports "22,80,8000-8100" --note "SSH and web"
+$ mistl tunnel rule add deny --peer 1234567890abcdef --hosts "*"
+$ mistl tunnel rule rm r-1a2b3c4d
+```
+
+The daemon assigns the rule ID shown by `ls`. The separate trust list governs
+connection authorization and is still managed with `mistl tunnel trust`.
 
 ### Approval notices (when connecting)
 
