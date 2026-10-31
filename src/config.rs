@@ -1019,8 +1019,9 @@ pub struct TunnelConfig {
     /// `room_id` (generating and persisting one first if blank) at daemon
     /// startup and restores any forwards saved under
     /// `<data_dir>/tunnel/forward-store.json`. `false` (the default) means
-    /// nothing auto-joins; `mistl tunnel start`/the dashboard's tunnel panel
-    /// still start the session manually regardless of this flag.
+    /// nothing auto-joins. `tunnel.start` (`mistl tunnel start`, the
+    /// dashboard's connect) sets it and `tunnel.stop` clears it, so a restart
+    /// resumes the last explicitly chosen state.
     pub enabled: bool,
     /// mistlib room id the tunnel session joins. Blank (the default) means
     /// "generate one on first start (`mistl tunnel start`/`tunnel room`) and

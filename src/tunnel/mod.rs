@@ -218,6 +218,24 @@ async fn persist_room(state: &Arc<AppState>, room: &str) -> Result<()> {
     Ok(())
 }
 
+/// Persists `[tunnel] enabled` so the next daemon start resumes whatever
+/// state the user last chose explicitly: `tunnel.start` sets it, `tunnel.stop`
+/// clears it. Best-effort, like the room-history write in [`persist_room`]:
+/// the live start/stop already happened and must not be reported as failed.
+fn persist_enabled(state: &Arc<AppState>, enabled: bool) {
+    let mut cfg = state.config();
+    if cfg.tunnel.enabled == enabled {
+        return;
+    }
+    cfg.tunnel.enabled = enabled;
+    match cfg.save() {
+        Ok(()) => state.set_config(cfg),
+        Err(error) => {
+            warn!(%error, enabled, "tunnel: failed to persist [tunnel] enabled; the session state will not survive a restart")
+        }
+    }
+}
+
 /// Maps a [`SessionError`] to the `anyhow::Error` shape the integration
 /// contract promises callers: `NotFound` messages are prefixed `not found: `
 /// so a client can tell "the id/target you asked about is already gone"
@@ -267,6 +285,7 @@ async fn start(state: &Arc<AppState>) -> Result<Value> {
         .context("tunnel: starting session")?;
 
     persist_room(state, &room).await?;
+    persist_enabled(state, true);
 
     // Remote command execution for peers, off unless `[tunnel]
     // stdio_enabled` is set and `stdio_command` is configured. Started here
@@ -302,7 +321,10 @@ async fn start(state: &Arc<AppState>) -> Result<Value> {
 /// `net::leave_room` -- see that method's own doc comment on why it must
 /// never touch `clear_raw_handler`) and aborts the background drain loop.
 /// A no-op (still reports `"running": false`) if nothing was running.
-async fn stop() -> Result<Value> {
+/// Either way `[tunnel] enabled` is cleared so the next daemon start stays
+/// stopped too.
+async fn stop(state: &Arc<AppState>) -> Result<Value> {
+    persist_enabled(state, false);
     let mut guard = SESSION.lock().await;
     match guard.take() {
         Some(session) => {
@@ -904,7 +926,7 @@ pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Val
             ctx.graph_command(node_id, action, room).await
         }
         "tunnel.start" => start(state).await,
-        "tunnel.stop" => stop().await,
+        "tunnel.stop" => stop(state).await,
         "tunnel.room.set" => room_set(state, args).await,
         "tunnel.room.new" => room_new(state).await,
         "tunnel.room.list" => room_list().await,

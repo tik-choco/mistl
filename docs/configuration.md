@@ -39,7 +39,7 @@ enabled = false                              # join configured tc-chat rooms at 
 rooms = []                                   # tc-chat room(s) to relay (requires restart)
 
 [tunnel]
-enabled = false                              # join the tunnel room automatically at daemon start
+enabled = false                              # join the tunnel room at daemon start (set by `tunnel start`, cleared by `tunnel stop`)
 # room_id = "a1b2c3d4"                      # default: generated on first `tunnel start` and saved here
 auto_accept = false                          # approve every inbound connection without asking (use with care)
 # allow_peers = ["<node-id>"]               # auto-approve only these peers; anything else still prompts
