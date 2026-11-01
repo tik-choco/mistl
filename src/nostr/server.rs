@@ -680,12 +680,21 @@ mod tests {
         async fn http(&self, request: &str) -> String {
             let mut stream = TcpStream::connect(self.addr).await.unwrap();
             stream.write_all(request.as_bytes()).await.unwrap();
-            let mut bytes = Vec::new();
-            timeout(Duration::from_secs(3), stream.read_to_end(&mut bytes))
+            // Early rejections can leave unread input and close with a TCP reset
+            // on macOS. Read the framed response rather than waiting for EOF.
+            let head = client_head(&mut stream).await;
+            let length = head
+                .lines()
+                .find_map(|line| line.strip_prefix("Content-Length: "))
+                .unwrap()
+                .parse::<usize>()
+                .unwrap();
+            let mut bytes = vec![0; length];
+            timeout(Duration::from_secs(3), stream.read_exact(&mut bytes))
                 .await
                 .unwrap()
                 .unwrap();
-            String::from_utf8(bytes).unwrap()
+            format!("{head}{}", String::from_utf8(bytes).unwrap())
         }
 
         async fn stop(self) {
