@@ -20,6 +20,14 @@ pub(super) fn feature_asset(path: &str) -> Option<(&'static str, &'static [u8])>
             "text/css; charset=utf-8",
             include_bytes!("assets/features/topology.css"),
         ),
+        "/assets/features/nostr.js" => (
+            "text/javascript; charset=utf-8",
+            include_bytes!("assets/features/nostr.js"),
+        ),
+        "/assets/features/nostr.css" => (
+            "text/css; charset=utf-8",
+            include_bytes!("assets/features/nostr.css"),
+        ),
         "/assets/features/escrow.js" => (
             "text/javascript; charset=utf-8",
             include_bytes!("assets/features/escrow.js"),
@@ -75,6 +83,7 @@ mod tests {
             "topology",
             "storage",
             "escrow",
+            "nostr",
             "chat",
             "tunnel-graph",
             "messenger",

@@ -39,6 +39,8 @@ pub struct Config {
     #[serde(default)]
     pub tunnel: TunnelConfig,
     #[serde(default)]
+    pub nostr: NostrConfig,
+    #[serde(default)]
     pub network: NetworkConfig,
 }
 
@@ -1063,6 +1065,80 @@ impl Default for TunnelConfig {
     }
 }
 
+/// Nostr relay (NIP-01 over WebSocket, `wss://` by default) hosted by the
+/// daemon, optionally replicating events with other mistl nodes in `rooms`
+/// (see `crate::nostr`). Everything is read when the relay starts, so
+/// changes apply on the next `nostr.start`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NostrConfig {
+    /// Start the relay at daemon startup. `nostr.start` sets it and
+    /// `nostr.stop` clears it, so a restart resumes the last chosen state.
+    pub enabled: bool,
+    /// `host:port` the relay listens on. Loopback by default; use
+    /// `0.0.0.0:<port>` to accept clients from other machines.
+    pub listen: String,
+    /// Serve `wss://` (TLS). `false` serves plain `ws://`, e.g. behind a
+    /// reverse proxy that terminates TLS.
+    pub tls: bool,
+    /// PEM certificate chain / private key. Both empty means a self-signed
+    /// certificate generated under `<data_dir>/nostr/tls/` (fine for local
+    /// clients that pin or accept it; public clients need a real one).
+    pub cert_path: String,
+    pub key_path: String,
+    /// Extra DNS names / IPs for the self-signed certificate's SANs
+    /// (`localhost`, `127.0.0.1` and `::1` are always included).
+    pub tls_hosts: Vec<String>,
+    /// mistl rooms whose nostr relays replicate events with this one.
+    /// Empty means a standalone relay.
+    pub rooms: Vec<String>,
+    /// Hex pubkeys allowed to publish (from clients and from the mesh).
+    /// Empty means anyone may publish.
+    pub write_pubkeys: Vec<String>,
+    /// NIP-11 relay information document fields.
+    pub name: String,
+    pub description: String,
+    pub contact: String,
+    /// Stored events kept; the oldest are evicted beyond this.
+    pub max_events: usize,
+    /// Largest accepted client message / event JSON, in bytes.
+    pub max_event_bytes: usize,
+    pub max_connections: usize,
+    /// Open subscriptions per connection.
+    pub max_subscriptions: usize,
+    /// Filters per REQ / COUNT.
+    pub max_filters: usize,
+    /// Cap on events returned for one REQ before EOSE.
+    pub max_limit: usize,
+    /// How far back (days) a peer sync asks for when a mesh peer connects.
+    pub sync_days: u64,
+}
+
+impl Default for NostrConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen: "127.0.0.1:7447".to_string(),
+            tls: true,
+            cert_path: String::new(),
+            key_path: String::new(),
+            tls_hosts: Vec::new(),
+            rooms: Vec::new(),
+            write_pubkeys: Vec::new(),
+            name: "mistl relay".to_string(),
+            description: "Nostr relay hosted by a mistl node".to_string(),
+            contact: String::new(),
+            max_events: 50_000,
+            max_event_bytes: 64 * 1024,
+            max_connections: 256,
+            max_subscriptions: 32,
+            max_filters: 16,
+            max_limit: 500,
+            sync_days: 7,
+        }
+    }
+}
+
 /// Per-user data directory (daemon state, keys, blocks, relay wirelogs).
 pub fn data_dir() -> Result<PathBuf> {
     crate::runtime::dirs(false)
@@ -1408,6 +1484,8 @@ pub fn applies_when(path: &str) -> &'static str {
         // `mistl tunnel start` (or the next connection attempt) already *is*
         // that "next start", no daemon restart required.
         "tunnel.enabled" => "daemon restart",
+        // Like `tunnel.enabled`: only read by the startup auto-start.
+        "nostr.enabled" => "daemon restart",
         // These feed the running AI provider's upstream/model resolution.
         // `daemon::dispatch`'s `config.set` handler reloads it live right
         // after a save (see `ai::reload_provider_if_running`) when one is

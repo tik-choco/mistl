@@ -84,6 +84,14 @@ release: fetch-mistlib fetch-mistlib-consensus
 release: fetch-mistlib fetch-mistlib-consensus
     cargo build --release --locked
 
+# Stamped stable with version `<latest tag>+local` so the self-updater keeps it
+# until the next release. Builds into target/install (target/release stays a
+# dev build) and restarts the installed daemon if it was running.
+# Args go to `mistl install`, e.g. `just install --no-autostart`.
+# Build this checkout as-is and install it as the per-user stable mistl
+install *args: _ensure-mistlib _ensure-mistlib-consensus
+    node scripts/install.mjs {{args}}
+
 # Validate the current dependency checkout without updating it.
 verify: _ensure-mistlib _ensure-mistlib-consensus fmt-check lint test test-fetch-safety
 

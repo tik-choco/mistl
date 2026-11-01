@@ -14,6 +14,7 @@ mod identity;
 mod install;
 mod net;
 mod network;
+mod nostr;
 mod runtime;
 mod scheduler;
 mod statefile;

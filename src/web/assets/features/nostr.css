@@ -1,0 +1,20 @@
+/* Scoped relay view using the shared dashboard theme. */
+#panel-nostr { min-width: 0; }
+#panel-nostr .nostr-card { border: 1px solid var(--panel-border); border-radius: 12px; padding: 18px; }
+#panel-nostr .nostr-head { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+#panel-nostr .nostr-head h3 { margin: 0; flex: 1; }
+#panel-nostr .nostr-state { color: var(--text-dim); }
+#panel-nostr .nostr-state[data-running="true"] { color: var(--ok); }
+#panel-nostr .nostr-url { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+#panel-nostr .nostr-url code { min-width: 0; overflow-wrap: anywhere; flex: 1; }
+#panel-nostr .nostr-help { color: var(--text-dim); font-size: 12px; line-height: 1.6; }
+#panel-nostr .nostr-fingerprint { display: block; overflow-wrap: anywhere; margin-top: 6px; }
+#panel-nostr .nostr-error { color: var(--err); overflow-wrap: anywhere; font-size: 12px; }
+#panel-nostr .nostr-counters { display: flex; flex-wrap: wrap; gap: 10px 18px; margin: 18px 0; }
+#panel-nostr .nostr-counters div { flex: 1; min-width: 100px; }
+#panel-nostr .nostr-counters dt { font-size: 12px; color: var(--text-dim); }
+#panel-nostr .nostr-counters dd { margin: 5px 0 0; font-size: 22px; }
+#panel-nostr .nostr-rooms { list-style: none; padding: 0; margin: 10px 0; }
+#panel-nostr .nostr-rooms li { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 12px; padding: 8px 0; border-bottom: 1px solid var(--panel-border); overflow-wrap: anywhere; }
+#panel-nostr .nostr-peers { color: var(--text-dim); font-size: 12px; }
+#panel-nostr .settings-drawer { margin-top: 18px; }

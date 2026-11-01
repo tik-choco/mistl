@@ -216,6 +216,8 @@ const READ_ONLY: &[&[&str]] = &[
     &["bot", "items"],
     &["bot", "status"],
     &["tunnel", "status"],
+    &["nostr", "status"],
+    &["nostr", "query"],
     &["tunnel", "ls"],
     &["config", "show"],
     &["update", "check"],

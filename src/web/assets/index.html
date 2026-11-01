@@ -1847,6 +1847,7 @@
 <link rel="stylesheet" href="/assets/features/topology.css">
 <link rel="stylesheet" href="/assets/features/storage.css">
 <link rel="stylesheet" href="/assets/features/escrow.css">
+<link rel="stylesheet" href="/assets/features/nostr.css">
 <link rel="stylesheet" href="/assets/features/chat.css">
 <link rel="stylesheet" href="/assets/features/tunnel-graph.css">
 <link rel="stylesheet" href="/assets/features/peers.css">
@@ -2088,6 +2089,7 @@
         <button type="button" data-subtab-target="sandbox"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 4h16v16H4zM4 14h5l1 3h4l1-3h5M12 7v6m-3-3 3 3 3-3"/></svg><span data-i18n="store.tabs.sandbox">Sandbox</span></button>
         <button type="button" data-subtab-target="sync"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M20 8a8 8 0 0 0-14-3L3 8m0-5v5h5M4 16a8 8 0 0 0 14 3l3-3m0 5v-5h-5"/></svg><span data-i18n="store.tabs.sync">Folder sync</span></button>
         <button type="button" data-subtab-target="escrow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3"/></svg><span data-i18n="escrow.title">Escrow</span></button>
+        <button type="button" data-subtab-target="nostr"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="12" cy="12" r="2"/><path d="M8 8a6 6 0 0 0 0 8m8-8a6 6 0 0 1 0 8M5 5a10 10 0 0 0 0 14M19 5a10 10 0 0 1 0 14"/></svg><span data-i18n="nostr.title">Nostr relay</span></button>
       </div>
       <div class="store-sidebar-summary" data-store-summary></div>
     </aside>
@@ -2263,6 +2265,37 @@
         </summary>
         <div class="settings-drawer-body" id="settings-drawer-body-escrow"></div>
       </details>
+    </div>
+    <div class="subtab-page" data-subtab="nostr" id="panel-nostr">
+      <div class="nostr-card">
+        <div class="nostr-head">
+          <h3 data-i18n="nostr.title">Nostr relay</h3>
+          <span class="nostr-state" data-nostr-state role="status"></span>
+          <button type="button" class="primary" data-nostr-toggle disabled></button>
+        </div>
+        <p class="nostr-error" data-nostr-error role="alert" hidden></p>
+        <h4 data-i18n="nostr.url">Relay URL</h4>
+        <div class="nostr-url"><code data-nostr-url>—</code><button type="button" data-nostr-copy data-i18n="nostr.copy" disabled>Copy URL</button></div>
+        <p><span data-nostr-tls>—</span><code class="nostr-fingerprint" data-nostr-fingerprint></code></p>
+        <p class="nostr-help" data-nostr-tls-hint data-i18n="nostr.tlsHint" hidden>Public clients need a trusted certificate. Set cert_path and key_path in settings.</p>
+        <dl class="nostr-counters">
+          <div><dt data-i18n="nostr.events">Events</dt><dd data-nostr-events>0</dd></div>
+          <div><dt data-i18n="nostr.connections">Connections</dt><dd data-nostr-connections>0</dd></div>
+          <div><dt data-i18n="nostr.subscriptions">Subscriptions</dt><dd data-nostr-subscriptions>0</dd></div>
+        </dl>
+        <h4 data-i18n="nostr.meshRooms">Replication rooms</h4>
+        <ul class="nostr-rooms" data-nostr-rooms hidden></ul>
+        <p class="nostr-help" data-nostr-rooms-hint data-i18n="nostr.roomsHint">Set rooms in settings to replicate events with other mistl nodes.</p>
+        <details class="settings-drawer" id="settings-drawer-nostr">
+          <summary>
+            <svg class="gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg>
+            <span data-i18n="settings.drawer.nostr">Nostr relay settings</span>
+            <span class="drawer-chevron" aria-hidden="true"></span>
+          </summary>
+          <p class="nostr-help" data-i18n="nostr.settingsHint">Settings apply the next time the relay starts. Stop and start the relay after making changes.</p>
+          <div class="settings-drawer-body" id="settings-drawer-body-nostr"></div>
+        </details>
+      </div>
     </div>
     </div>
     </div>
@@ -2879,6 +2912,7 @@
 <script src="/assets/features/topology.js"></script>
 <script src="/assets/features/storage.js"></script>
 <script src="/assets/features/escrow.js"></script>
+<script src="/assets/features/nostr.js"></script>
 <script src="/assets/features/chat.js"></script>
 <script src="/assets/features/tunnel-graph.js"></script>
 <script src="/assets/features/messenger.js"></script>
@@ -2890,6 +2924,48 @@
 
   var T = {
     en: {
+      "nostr.title": "Nostr relay",
+      "nostr.loading": "Loading…",
+      "nostr.running": "Running",
+      "nostr.stopped": "Stopped",
+      "nostr.start": "Start",
+      "nostr.stop": "Stop",
+      "nostr.url": "Relay URL",
+      "nostr.copy": "Copy URL",
+      "nostr.noTls": "ws (no TLS)",
+      "nostr.selfSigned": "TLS: self-signed certificate",
+      "nostr.pem": "TLS: PEM certificate",
+      "nostr.tlsHint": "Public clients need a trusted certificate. Set cert_path and key_path in settings.",
+      "nostr.events": "Events",
+      "nostr.connections": "Connections",
+      "nostr.subscriptions": "Subscriptions",
+      "nostr.meshRooms": "Replication rooms",
+      "nostr.peers": "{count} peers",
+      "nostr.meshWaiting": "Replication not connected",
+      "nostr.roomsHint": "Set rooms in settings to replicate events with other mistl nodes.",
+      "nostr.settingsHint": "Settings apply the next time the relay starts. Stop and start the relay after making changes.",
+      "nostr.certSetting": "Set both cert_path and key_path to PEM files; leave both empty for a self-signed certificate.",
+      "nostr.pubkeysSetting": "64-character hex public keys. Empty allows anyone to publish.",
+      "settings.section.nostr": "Nostr relay",
+      "settings.drawer.nostr": "Nostr relay settings",
+      "settings.field.nostr.enabled.label": "Start at daemon startup",
+      "settings.field.nostr.listen.label": "Listen address (host:port)",
+      "settings.field.nostr.tls.label": "Enable TLS (wss)",
+      "settings.field.nostr.cert_path.label": "Certificate path (cert_path)",
+      "settings.field.nostr.key_path.label": "Private key path (key_path)",
+      "settings.field.nostr.rooms.label": "Replication rooms",
+      "settings.field.nostr.tls_hosts.label": "Extra self-signed certificate hosts",
+      "settings.field.nostr.write_pubkeys.label": "Allowed publisher public keys",
+      "settings.field.nostr.name.label": "Relay name",
+      "settings.field.nostr.description.label": "Relay description",
+      "settings.field.nostr.contact.label": "Contact",
+      "settings.field.nostr.max_events.label": "Maximum stored events",
+      "settings.field.nostr.max_event_bytes.label": "Maximum message size (bytes)",
+      "settings.field.nostr.max_connections.label": "Maximum connections",
+      "settings.field.nostr.max_subscriptions.label": "Subscriptions per connection",
+      "settings.field.nostr.max_filters.label": "Filters per request",
+      "settings.field.nostr.max_limit.label": "Events per query",
+      "settings.field.nostr.sync_days.label": "Peer sync history (days)",
       "escrow.title": "Escrow",
       "escrow.export": "Export",
       "escrow.import": "Import",
@@ -3795,6 +3871,48 @@
       "tunnel.toast.stopped": "Tunnel stopped.",
     },
     ja: {
+      "nostr.title": "Nostr リレー",
+      "nostr.loading": "読み込み中…",
+      "nostr.running": "稼働中",
+      "nostr.stopped": "停止中",
+      "nostr.start": "開始",
+      "nostr.stop": "停止",
+      "nostr.url": "リレー URL",
+      "nostr.copy": "URL をコピー",
+      "nostr.noTls": "ws（TLS なし）",
+      "nostr.selfSigned": "TLS: 自己署名証明書",
+      "nostr.pem": "TLS: PEM 証明書",
+      "nostr.tlsHint": "公開クライアントには信頼された証明書が必要です。設定の cert_path と key_path を指定してください。",
+      "nostr.events": "イベント数",
+      "nostr.connections": "接続数",
+      "nostr.subscriptions": "購読数",
+      "nostr.meshRooms": "複製ルーム",
+      "nostr.peers": "ピア {count} 台",
+      "nostr.meshWaiting": "複製未接続",
+      "nostr.roomsHint": "設定の rooms にルームを追加すると、他の mistl ノードとイベントを複製できます。",
+      "nostr.settingsHint": "設定は次回のリレー開始時に反映されます。変更後はリレーを停止してから開始してください。",
+      "nostr.certSetting": "cert_path と key_path に PEM ファイルを両方指定します。両方空の場合は自己署名証明書を使用します。",
+      "nostr.pubkeysSetting": "64 文字の16進公開鍵を指定します。空の場合は誰でも投稿できます。",
+      "settings.section.nostr": "Nostr リレー",
+      "settings.drawer.nostr": "Nostr リレー設定",
+      "settings.field.nostr.enabled.label": "デーモン起動時に開始",
+      "settings.field.nostr.listen.label": "待受アドレス（host:port）",
+      "settings.field.nostr.tls.label": "TLS（wss）を有効化",
+      "settings.field.nostr.cert_path.label": "証明書パス（cert_path）",
+      "settings.field.nostr.key_path.label": "秘密鍵パス（key_path）",
+      "settings.field.nostr.rooms.label": "複製ルーム",
+      "settings.field.nostr.tls_hosts.label": "自己署名証明書の追加ホスト",
+      "settings.field.nostr.write_pubkeys.label": "投稿を許可する公開鍵",
+      "settings.field.nostr.name.label": "リレー名",
+      "settings.field.nostr.description.label": "リレーの説明",
+      "settings.field.nostr.contact.label": "連絡先",
+      "settings.field.nostr.max_events.label": "保存イベント数の上限",
+      "settings.field.nostr.max_event_bytes.label": "メッセージサイズの上限（バイト）",
+      "settings.field.nostr.max_connections.label": "接続数の上限",
+      "settings.field.nostr.max_subscriptions.label": "接続ごとの購読数の上限",
+      "settings.field.nostr.max_filters.label": "リクエストごとのフィルター数の上限",
+      "settings.field.nostr.max_limit.label": "クエリごとのイベント数の上限",
+      "settings.field.nostr.sync_days.label": "ピア同期の履歴（日数）",
       "escrow.title": "Escrow",
       "escrow.export": "エクスポート",
       "escrow.import": "インポート",
@@ -4700,6 +4818,48 @@
       "tunnel.toast.stopped": "トンネルを停止しました。",
     },
     zh: {
+      "nostr.title": "Nostr 中继",
+      "nostr.loading": "加载中…",
+      "nostr.running": "运行中",
+      "nostr.stopped": "已停止",
+      "nostr.start": "启动",
+      "nostr.stop": "停止",
+      "nostr.url": "中继 URL",
+      "nostr.copy": "复制 URL",
+      "nostr.noTls": "ws（无 TLS）",
+      "nostr.selfSigned": "TLS：自签名证书",
+      "nostr.pem": "TLS：PEM 证书",
+      "nostr.tlsHint": "公共客户端需要受信任的证书。请在设置中指定 cert_path 和 key_path。",
+      "nostr.events": "事件数",
+      "nostr.connections": "连接数",
+      "nostr.subscriptions": "订阅数",
+      "nostr.meshRooms": "复制房间",
+      "nostr.peers": "{count} 个节点",
+      "nostr.meshWaiting": "复制尚未连接",
+      "nostr.roomsHint": "在设置中的 rooms 添加房间，即可与其他 mistl 节点复制事件。",
+      "nostr.settingsHint": "设置在下次启动中继时生效。更改后请停止并重新启动中继。",
+      "nostr.certSetting": "cert_path 和 key_path 必须同时指定 PEM 文件；均留空时使用自签名证书。",
+      "nostr.pubkeysSetting": "64 位十六进制公钥。留空时允许任何人发布。",
+      "settings.section.nostr": "Nostr 中继",
+      "settings.drawer.nostr": "Nostr 中继设置",
+      "settings.field.nostr.enabled.label": "随守护进程启动",
+      "settings.field.nostr.listen.label": "监听地址（host:port）",
+      "settings.field.nostr.tls.label": "启用 TLS（wss）",
+      "settings.field.nostr.cert_path.label": "证书路径（cert_path）",
+      "settings.field.nostr.key_path.label": "私钥路径（key_path）",
+      "settings.field.nostr.rooms.label": "复制房间",
+      "settings.field.nostr.tls_hosts.label": "自签名证书的额外主机",
+      "settings.field.nostr.write_pubkeys.label": "允许发布的公钥",
+      "settings.field.nostr.name.label": "中继名称",
+      "settings.field.nostr.description.label": "中继说明",
+      "settings.field.nostr.contact.label": "联系方式",
+      "settings.field.nostr.max_events.label": "存储事件上限",
+      "settings.field.nostr.max_event_bytes.label": "消息大小上限（字节）",
+      "settings.field.nostr.max_connections.label": "连接数上限",
+      "settings.field.nostr.max_subscriptions.label": "每个连接的订阅上限",
+      "settings.field.nostr.max_filters.label": "每次请求的过滤器上限",
+      "settings.field.nostr.max_limit.label": "每次查询的事件上限",
+      "settings.field.nostr.sync_days.label": "节点同步历史（天）",
       "escrow.title": "Escrow",
       "escrow.export": "导出",
       "escrow.import": "导入",
@@ -5937,6 +6097,7 @@
     renderChatRelayRooms(state.chatRelayRooms);
     renderStore(state.storeItems);
     escrowView.refreshLanguage();
+    nostrView.refreshLanguage();
     renderSandbox(state.sandboxItems);
     renderSchedulerJobs(state.schedulerJobs);
     renderSchedulerRuns(state.schedulerRuns);
@@ -7947,6 +8108,42 @@
       });
     });
   }
+
+  /* ---------- Nostr relay (Storage sub-page) ---------- */
+
+  var nostrPoll = null, nostrChanging = false;
+  var nostrView = window.MistlNostr.create({
+    root: document.getElementById("panel-nostr"), t: t, copy: copyToClipboard,
+    setRunning: function (running) {
+      nostrChanging = true;
+      // Finish an older poll before changing state so it cannot overwrite the result.
+      return Promise.resolve(nostrPoll).catch(function () {}).then(function () {
+        return api(running ? "nostr.start" : "nostr.stop", {});
+      }).then(function (data) {
+        nostrView.setStatusError("");
+        pollConfig().catch(function () { /* keep the successful relay result */ });
+        return data;
+      }).finally(function () { nostrChanging = false; });
+    }
+  });
+
+  function nostrVisible() {
+    return !document.hidden && document.getElementById("panel-store").classList.contains("active") &&
+      document.getElementById("panel-nostr").classList.contains("active");
+  }
+
+  function pollNostr() {
+    if (nostrChanging) return Promise.resolve();
+    if (nostrPoll) return nostrPoll;
+    nostrPoll = api("nostr.status", {}).then(function (data) {
+      nostrView.render(data); nostrView.setStatusError("");
+    }).catch(function (err) {
+      nostrView.setStatusError(err.message || String(err));
+    }).finally(function () { nostrPoll = null; });
+    return nostrPoll;
+  }
+
+  document.addEventListener("visibilitychange", function () { if (nostrVisible()) pollNostr(); });
 
   /* ---------- store ---------- */
 
@@ -10767,6 +10964,26 @@
       { key: "auto_replicas", labelKey: "settings.field.escrow.auto_replicas.label", descKey: "settings.field.escrow.auto_replicas.desc", type: "number", advanced: true },
       { key: "dead_after_secs", labelKey: "settings.field.escrow.dead_after_secs.label", descKey: "settings.field.escrow.dead_after_secs.desc", type: "number", advanced: true }
     ] },
+    { section: "nostr", titleKey: "settings.section.nostr", container: "settings-drawer-body-nostr", fields: [
+      { key: "enabled", labelKey: "settings.field.nostr.enabled.label", descKey: "nostr.settingsHint", type: "toggle" },
+      { key: "listen", labelKey: "settings.field.nostr.listen.label", descKey: "nostr.settingsHint", type: "text" },
+      { key: "tls", labelKey: "settings.field.nostr.tls.label", descKey: "nostr.settingsHint", type: "toggle" },
+      { key: "cert_path", labelKey: "settings.field.nostr.cert_path.label", descKey: "nostr.certSetting", type: "text" },
+      { key: "key_path", labelKey: "settings.field.nostr.key_path.label", descKey: "nostr.certSetting", type: "text" },
+      { key: "rooms", labelKey: "settings.field.nostr.rooms.label", descKey: "nostr.roomsHint", type: "list" },
+      { key: "tls_hosts", labelKey: "settings.field.nostr.tls_hosts.label", descKey: "nostr.settingsHint", type: "list", advanced: true },
+      { key: "write_pubkeys", labelKey: "settings.field.nostr.write_pubkeys.label", descKey: "nostr.pubkeysSetting", type: "list", advanced: true },
+      { key: "name", labelKey: "settings.field.nostr.name.label", descKey: "nostr.settingsHint", type: "text", advanced: true },
+      { key: "description", labelKey: "settings.field.nostr.description.label", descKey: "nostr.settingsHint", type: "text", advanced: true },
+      { key: "contact", labelKey: "settings.field.nostr.contact.label", descKey: "nostr.settingsHint", type: "text", advanced: true },
+      { key: "max_events", labelKey: "settings.field.nostr.max_events.label", descKey: "nostr.settingsHint", type: "number", advanced: true },
+      { key: "max_event_bytes", labelKey: "settings.field.nostr.max_event_bytes.label", descKey: "nostr.settingsHint", type: "number", advanced: true },
+      { key: "max_connections", labelKey: "settings.field.nostr.max_connections.label", descKey: "nostr.settingsHint", type: "number", advanced: true },
+      { key: "max_subscriptions", labelKey: "settings.field.nostr.max_subscriptions.label", descKey: "nostr.settingsHint", type: "number", advanced: true },
+      { key: "max_filters", labelKey: "settings.field.nostr.max_filters.label", descKey: "nostr.settingsHint", type: "number", advanced: true },
+      { key: "max_limit", labelKey: "settings.field.nostr.max_limit.label", descKey: "nostr.settingsHint", type: "number", advanced: true },
+      { key: "sync_days", labelKey: "settings.field.nostr.sync_days.label", descKey: "nostr.settingsHint", type: "number", advanced: true }
+    ] },
     { section: "chat_relay", titleKey: "settings.section.chat_relay", container: "settings-drawer-body-chat-relay", fields: [
       { key: "rooms", labelKey: "settings.field.chat_relay.rooms.label", descKey: "settings.field.chat_relay.rooms.desc", type: "list" },
       { key: "enabled", labelKey: "settings.field.chat_relay.enabled.label", descKey: "settings.field.chat_relay.enabled.desc", type: "toggle" }
@@ -10805,6 +11022,7 @@
     chat_relay: "panel-chat-relay",
     storage: "panel-store",
     escrow: "panel-escrow",
+    nostr: "panel-nostr",
     identity: "panel-profile",
     scheduler: "panel-scheduler",
     bot: "panel-bot",
@@ -12516,6 +12734,7 @@
     pollChatRelayRooms();
     // Start escrow polling when first opened, then keep its last-known state fresh.
     if (escrowRequested) pollEscrow().catch(function () { /* retain last-known state */ });
+    if (nostrVisible()) pollNostr();
     /* folder sync entries change in the background (daemon-side
        connect/retry loop), so poll them on the same unconditional cycle as
        everything else above rather than gating on panel visibility --
@@ -12615,7 +12834,8 @@
   var PANEL_ALIASES = {
     "panel-stream": { panel: "panel-chat", tab: "stream" },
     "panel-chat-relay": { panel: "panel-chat", tab: "rooms" },
-    "panel-escrow": { panel: "panel-store", tab: "escrow" }
+    "panel-escrow": { panel: "panel-store", tab: "escrow" },
+    "panel-nostr": { panel: "panel-store", tab: "nostr" }
   };
 
   function panelFromHash() {
@@ -12665,6 +12885,7 @@
       if (on) a.setAttribute("aria-current", "page");
       else a.removeAttribute("aria-current");
     });
+    if (nostrVisible()) pollNostr();
   }
 
   function routeFromHash() {
@@ -12776,6 +12997,7 @@
         if (panel.id === "panel-store" && name === "escrow") {
           pollEscrow().catch(function (err) { showToast(err.message || String(err), "error"); });
         }
+        if (panel.id === "panel-store" && name === "nostr" && nostrVisible()) pollNostr();
         if (panel.id === "panel-ai" && name === "sharing" && panel.classList.contains("active")) aiRefreshModels(false);
         try { localStorage.setItem(storeKey, name); } catch (e) { /* ignore */ }
       }

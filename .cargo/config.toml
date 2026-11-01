@@ -3,6 +3,11 @@
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
 
+# audiopus_sys builds the bundled libopus with CMake; its CMakeLists predates
+# 3.5, which CMake 4 refuses to configure without this compatibility floor.
+[env]
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"
+
 # mistlib-consensus's git dependency on mistlib-core (unified with our path
 # dependency via the root Cargo.toml's [patch] section) still needs its
 # source resolved even though the patch redirects the actual checkout;

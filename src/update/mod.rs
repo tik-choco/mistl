@@ -851,6 +851,10 @@ y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+b
         // Prereleases order below their release per semver.
         assert!(is_update_available("0.1.0", "0.2.0-rc.1"));
         assert!(!is_update_available("0.2.0", "0.2.0-rc.1"));
+        // `just install` stamps `<tag>+local`: kept over that same release,
+        // replaced by the next one.
+        assert!(!is_update_available("0.2.0+local", "0.2.0"));
+        assert!(is_update_available("0.2.0+local", "0.2.1"));
         // Unparseable on either side = no update, not an error.
         assert!(!is_update_available("not-a-version", "0.2.0"));
         assert!(!is_update_available("0.1.0", "nightly"));

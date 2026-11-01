@@ -1212,7 +1212,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "tokio",
  "tower-service",
  "tracing",
@@ -1669,6 +1669,7 @@ dependencies = [
  "hex",
  "hmac",
  "ignore",
+ "k256",
  "libc",
  "minisign-verify",
  "mistlib-consensus-core",
@@ -1682,6 +1683,7 @@ dependencies = [
  "pbkdf2",
  "rand 0.8.6",
  "ratatui",
+ "rcgen",
  "regex",
  "reqwest",
  "rtp",
@@ -1691,10 +1693,13 @@ dependencies = [
  "serde",
  "serde_cbor",
  "serde_json",
+ "sha1",
  "sha2",
  "temp-env",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-rustls",
+ "tokio-tungstenite",
  "tokio-util",
  "toml",
  "tracing",
@@ -2511,6 +2516,7 @@ version = "0.23.41"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6b92b125634d9b795e7beca796cc790df15a7fb38323bf3196fda83292d06b1f"
 dependencies = [
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
@@ -3130,6 +3136,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbae76ab933c85776efabc971569dd6119c580d8f5d448769dec1764bf796ef2"
 dependencies = [
  "native-tls",
+ "tokio",
+]
+
+[[package]]
+name = "tokio-rustls"
+version = "0.26.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c9cc2678c2cdd569ef8215e2afd7954ada2ae20b4fdd2c5fe6139a3b02d105db"
+dependencies = [
+ "rustls",
  "tokio",
 ]
 
@@ -3856,7 +3872,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

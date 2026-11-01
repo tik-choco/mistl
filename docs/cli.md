@@ -57,6 +57,14 @@ $ mistl chat rooms            # rooms currently joined by the chat relay
 $ mistl chat log <room>       # replay persisted history for a room
 $ mistl chat log <room> --limit 50
 
+# Nostr relay
+$ mistl nostr start           # start the relay; persists the enabled setting
+$ mistl nostr status          # URL, TLS certificate, counters, rooms and mesh
+$ mistl nostr status --json   # full machine-readable status
+$ mistl nostr query --kind 1 --author <hex-pubkey> --limit 20
+$ mistl nostr query --filter '{"kinds":[1],"since":1700000000}' --json
+$ mistl nostr stop            # stop the relay and clear the enabled setting
+
 # Tunnel (P2P port forwarding)
 $ mistl tunnel start          # join the configured room (generates one on first run)
 $ mistl tunnel room           # show the room id to hand to the other side
@@ -217,6 +225,20 @@ each stage (including cascade role/leader changes), and `mistl stream
 selftest` — a synthetic video+audio feed that exercises the exact two-track
 RTSP output VRChat consumes, so you can confirm the playback path locally
 (ffprobe/ffplay) without a live p2p share.
+
+### Nostr relay
+
+`mistl nostr status`, `start` and `stop` print relay status; each also accepts
+`--json`. `mistl nostr query` prints matching stored events, or the full response
+with `--json`. Repeat `--filter` for multiple Nostr JSON filter objects, and
+repeat `--kind` or `--author` to add another filter containing those kinds and
+authors. Filters are alternatives; fields within one filter are combined.
+`--limit` caps the total returned events, up to the relay's configured
+`max_limit`. With no filters, the query returns recent stored events.
+
+The default listener uses a self-signed `wss://` certificate that clients must
+trust or pin. See [Nostr relay configuration](configuration.md#nostr-relay) for
+trusted certificates, reverse proxies, replication rooms and write policy.
 
 ### Standing tc-chat relay
 

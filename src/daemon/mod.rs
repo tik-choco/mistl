@@ -542,6 +542,8 @@ fn remote_config_denied(path: &str) -> bool {
         "ai.trusted_providers",
         "network.membership_allowlist",
         "escrow.replication",
+        // Who may publish to the hosted nostr relay.
+        "nostr.write_pubkeys",
         // Local paths.
         "storage.blocks_dir",
         "storage.export_dir",
@@ -807,6 +809,7 @@ pub async fn dispatch_as(
             Some("topology") => crate::topology::handle(cmd, args, state).await,
             Some("ai") => crate::ai::handle(cmd, args, state).await,
             Some("tunnel") => crate::tunnel::handle(cmd, args, state).await,
+            Some("nostr") => crate::nostr::handle(cmd, args, state).await,
             Some("update") => crate::update::handle(cmd, args, state).await,
             Some("install") | Some("autostart") => crate::install::handle(cmd, args, state).await,
             _ => bail!("unknown command: {cmd}"),

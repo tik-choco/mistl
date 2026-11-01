@@ -52,4 +52,8 @@ pub(super) fn spawn(state: Arc<AppState>) {
     // like `crate::scheduler`/`crate::bot`'s own `enabled` flags gate only
     // their background loops, not their manual commands.
     crate::tunnel::spawn_background(state.clone());
+
+    // Nostr relay: listens (wss by default) and joins its mesh rooms only
+    // if `[nostr] enabled = true`; `mistl nostr start` works regardless.
+    crate::nostr::spawn_background(state.clone());
 }

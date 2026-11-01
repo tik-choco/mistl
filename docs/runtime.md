@@ -89,6 +89,11 @@ Stable/default keeps the existing `mistl` login entry. Dev cannot install over o
 uninstall stable. Self-update is disabled in dev/preview, including manual apply.
 No autostart entry is created just by running the daemon.
 
+`just install [mistl install args]` builds the current checkout as a stable binary
+(version `<latest tag>+local`, in `target/install`) and installs it over the
+per-user install, restarting the installed daemon if it was running. Self-update
+keeps that build until a newer release is published.
+
 ## Verification
 
 ```console

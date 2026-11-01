@@ -145,6 +145,7 @@ pub fn offline_command_allowed(cmd: &str) -> bool {
             | "ai.external.get"
             | "stream.status"
             | "tunnel.status"
+            | "nostr.status"
             | "update.status"
             | "topology.status"
             | "consensus.status"

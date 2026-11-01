@@ -38,6 +38,26 @@ cascade = true                               # cascade distribution across relay
 enabled = false                              # join configured tc-chat rooms at daemon start (requires restart)
 rooms = []                                   # tc-chat room(s) to relay (requires restart)
 
+[nostr]
+enabled = false                              # start the relay with the daemon
+listen = "127.0.0.1:7447"                    # loopback by default
+tls = true                                   # serve wss://; false serves ws://
+cert_path = ""                               # PEM certificate chain; empty generates a self-signed certificate
+key_path = ""                                # PEM private key; set together with cert_path
+tls_hosts = []                               # extra DNS names or IPs on the self-signed certificate
+rooms = []                                   # mistl rooms for Nostr event replication
+write_pubkeys = []                           # permitted hex public keys; empty allows all authors
+name = "mistl relay"
+description = "Nostr relay hosted by a mistl node"
+contact = ""
+max_events = 50000
+max_event_bytes = 65536
+max_connections = 256
+max_subscriptions = 32                       # per connection
+max_filters = 16                             # per REQ / COUNT
+max_limit = 500                              # per query
+sync_days = 7                                # history requested when a mesh peer connects
+
 [tunnel]
 enabled = false                              # join the tunnel room at daemon start (set by `tunnel start`, cleared by `tunnel stop`)
 # room_id = "a1b2c3d4"                      # default: generated on first `tunnel start` and saved here
@@ -90,5 +110,23 @@ settings, `room_ids` is a list: the store joins **all** listed rooms
 simultaneously, and the list can be changed at any time without a daemon
 restart. The legacy single-room form (`room_id =
 "my-room"`) still parses, loading as a one-element `room_ids` list.
+
+### Nostr relay
+
+`mistl nostr start` serves Nostr over `wss://` by default, listening only on
+`127.0.0.1:7447`. Set `listen` to an appropriate network address to accept
+other machines, and add client-facing DNS names or IPs to `tls_hosts` when
+using the generated certificate. The self-signed certificate is persisted under
+`<data_dir>/nostr/tls/`; clients must explicitly trust or pin it. Public clients
+such as Damus and Amethyst reject self-signed certificates. For those clients,
+set both `cert_path` and `key_path` to a trusted PEM chain and key (for example,
+a Let's Encrypt certificate), or set `tls = false` and serve `ws://` behind a
+TLS-terminating reverse proxy that presents a trusted certificate.
+
+Relays configured with the same mistl `rooms` replicate accepted events over
+the P2P network. An empty list keeps the relay standalone. `write_pubkeys`
+restricts writes from both clients and mesh peers to the listed hexadecimal
+Nostr public keys; an empty list allows any author. Changes apply the next time
+the relay starts. See the [CLI reference](cli.md) for status and queries.
 
 Data lives in `%APPDATA%\tik-choco\mistl\data\` (keys, blocks, spools, logs).

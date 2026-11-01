@@ -97,6 +97,11 @@ pub enum Command {
         #[command(subcommand)]
         action: BotAction,
     },
+    /// Nostr relay: manage the listener and query stored events
+    Nostr {
+        #[command(subcommand)]
+        action: NostrAction,
+    },
     /// WebRTC P2P tunnel: TCP/UDP port forwarding and a stdio-command bridge
     /// to a peer over a mistlib room (ported from the standalone `p2p`
     /// tool). `serve`/`connect` add forwards directly (you already know you
@@ -789,6 +794,46 @@ pub enum BotAction {
 }
 
 #[derive(Subcommand)]
+pub enum NostrAction {
+    /// Show the relay status
+    Status {
+        /// Print the full JSON response
+        #[arg(long)]
+        json: bool,
+    },
+    /// Start the relay
+    Start {
+        /// Print the full JSON response
+        #[arg(long)]
+        json: bool,
+    },
+    /// Stop the relay
+    Stop {
+        /// Print the full JSON response
+        #[arg(long)]
+        json: bool,
+    },
+    /// Query stored events using one or more Nostr filters
+    Query {
+        /// Nostr filter as a JSON object (repeatable)
+        #[arg(long = "filter")]
+        filters: Vec<String>,
+        /// Event kind (repeatable)
+        #[arg(long = "kind")]
+        kinds: Vec<u32>,
+        /// Author public key in hexadecimal (repeatable)
+        #[arg(long = "author")]
+        authors: Vec<String>,
+        /// Maximum number of events across all filters
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Print the full JSON response
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum TunnelAction {
     /// Show tunnel status: room, self id, peers, forwards, pending prompts,
     /// trust list, and recent chat/notices
@@ -1352,6 +1397,63 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             ),
             BotAction::Status => client_call("bot.status", json!({})),
         },
+        Command::Nostr { action } => match action {
+            NostrAction::Status { json } => {
+                let response = request("nostr.status", json!({}))?;
+                println!("{}", render_nostr_status(&response, json)?);
+                Ok(())
+            }
+            NostrAction::Start { json } => {
+                let response = request("nostr.start", json!({}))?;
+                println!("{}", render_nostr_status(&response, json)?);
+                Ok(())
+            }
+            NostrAction::Stop { json } => {
+                let response = request("nostr.stop", json!({}))?;
+                println!("{}", render_nostr_status(&response, json)?);
+                Ok(())
+            }
+            NostrAction::Query {
+                filters,
+                kinds,
+                authors,
+                limit,
+                json,
+            } => {
+                let mut parsed = Vec::new();
+                for filter in filters {
+                    let value: Value =
+                        serde_json::from_str(&filter).context("invalid --filter JSON")?;
+                    if !value.is_object() {
+                        bail!("--filter must be a JSON object");
+                    }
+                    parsed.push(value);
+                }
+                if !kinds.is_empty() || !authors.is_empty() {
+                    let mut filter = serde_json::Map::new();
+                    if !kinds.is_empty() {
+                        filter.insert("kinds".into(), json!(kinds));
+                    }
+                    if !authors.is_empty() {
+                        filter.insert("authors".into(), json!(authors));
+                    }
+                    parsed.push(Value::Object(filter));
+                }
+                let mut args = serde_json::Map::new();
+                if !parsed.is_empty() {
+                    args.insert("filters".into(), Value::Array(parsed));
+                }
+                if let Some(limit) = limit {
+                    args.insert("limit".into(), json!(limit));
+                }
+                let response = request("nostr.query", Value::Object(args))?;
+                let rendered = render_nostr_events(&response, json)?;
+                if !rendered.is_empty() {
+                    println!("{rendered}");
+                }
+                Ok(())
+            }
+        },
         Command::Tunnel { action } => match action {
             TunnelAction::Status => client_call("tunnel.status", json!({})),
             TunnelAction::Start => client_call("tunnel.start", json!({})),
@@ -1736,6 +1838,236 @@ fn client_call(cmd: &str, args: Value) -> Result<()> {
     let response = request(cmd, args)?;
     println!("{}", serde_json::to_string_pretty(&response)?);
     Ok(())
+}
+
+fn render_nostr_status(response: &Value, json_only: bool) -> Result<String> {
+    if json_only {
+        return Ok(serde_json::to_string_pretty(response)?);
+    }
+    if !response
+        .get("running")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Ok("nostr relay: stopped".to_string());
+    }
+    let mut lines = vec!["nostr relay: running".to_string()];
+    if let Some(url) = response.get("url").and_then(Value::as_str) {
+        lines.push(format!("url: {url}"));
+    }
+    if let Some(tls) = response.get("tls").filter(|value| value.is_object()) {
+        let source = tls
+            .get("source")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let fingerprint = tls
+            .get("sha256")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let path = tls
+            .get("cert_path")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        lines.push(format!(
+            "tls: {source}\n  sha256: {fingerprint}\n  certificate: {path}"
+        ));
+        if source == "self-signed" {
+            lines.push("  Clients must trust or pin this certificate; public clients need cert_path and key_path.".to_string());
+        }
+    } else {
+        lines.push("tls: disabled".to_string());
+    }
+    let number = |name| response.get(name).and_then(Value::as_u64).unwrap_or(0);
+    lines.push(format!(
+        "events: {}  connections: {}  subscriptions: {}  accepted: {}  rejected: {}",
+        number("events"),
+        number("connections"),
+        number("subscriptions"),
+        number("accepted"),
+        number("rejected")
+    ));
+    let mesh = response.get("mesh").filter(|value| !value.is_null());
+    let peers = |room: &str| {
+        mesh.and_then(|mesh| mesh.get("rooms"))
+            .and_then(Value::as_array)
+            .and_then(|rooms| {
+                rooms
+                    .iter()
+                    .find(|entry| entry.get("room").and_then(Value::as_str) == Some(room))
+            })
+            .and_then(|entry| entry.get("peers"))
+            .and_then(Value::as_u64)
+    };
+    if let Some(rooms) = response.get("rooms").and_then(Value::as_array) {
+        if rooms.is_empty() {
+            lines.push("mesh rooms: (none)".to_string());
+        } else {
+            lines.push("mesh rooms:".to_string());
+            for room in rooms.iter().filter_map(Value::as_str) {
+                match peers(room) {
+                    Some(n) => lines.push(format!("  {room}  {n} peer(s)")),
+                    None => lines.push(format!("  {room}  (not joined)")),
+                }
+            }
+        }
+    }
+    if let Some(mesh) = mesh {
+        let count = |key: &str| mesh.get(key).and_then(Value::as_u64).unwrap_or(0);
+        lines.push(format!(
+            "mesh: sent {}  received {}  syncs requested {}  served {}",
+            count("sent"),
+            count("received"),
+            count("sync_requests"),
+            count("sync_served")
+        ));
+    }
+    Ok(lines.join("\n"))
+}
+
+fn render_nostr_events(response: &Value, json_only: bool) -> Result<String> {
+    if json_only {
+        return Ok(serde_json::to_string_pretty(response)?);
+    }
+    let mut lines = Vec::new();
+    if let Some(events) = response.get("events").and_then(Value::as_array) {
+        for event in events {
+            let timestamp = event.get("created_at").and_then(Value::as_i64);
+            let date = timestamp
+                .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
+                .map(|date| {
+                    date.with_timezone(&chrono::Local)
+                        .format("%Y-%m-%d %H:%M:%S %z")
+                        .to_string()
+                })
+                .unwrap_or_else(|| timestamp.map_or_else(|| "?".to_string(), |n| n.to_string()));
+            let kind = event.get("kind").and_then(Value::as_u64).unwrap_or(0);
+            let pubkey: String = event
+                .get("pubkey")
+                .and_then(Value::as_str)
+                .unwrap_or("?")
+                .chars()
+                .take(12)
+                .collect();
+            let mut content = String::new();
+            for c in event
+                .get("content")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .chars()
+                .take(80)
+            {
+                if c.is_control() {
+                    content.extend(c.escape_debug());
+                } else {
+                    content.push(c);
+                }
+            }
+            lines.push(format!("{date}  kind {kind}  {pubkey}  {content}"));
+        }
+    }
+    Ok(lines.join("\n"))
+}
+
+#[cfg(test)]
+mod nostr_cli_tests {
+    use super::*;
+
+    #[test]
+    fn parses_nostr_actions_and_repeated_query_options() {
+        let cli = Cli::try_parse_from(["mistl", "nostr", "status", "--json"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Nostr {
+                action: NostrAction::Status { json: true }
+            })
+        ));
+        let cli = Cli::try_parse_from([
+            "mistl",
+            "nostr",
+            "query",
+            "--filter",
+            "{}",
+            "--filter",
+            "{\"since\":1}",
+            "--kind",
+            "1",
+            "--kind",
+            "3",
+            "--author",
+            "abcd",
+            "--author",
+            "efgh",
+            "--limit",
+            "5",
+            "--json",
+        ])
+        .unwrap();
+        let Some(Command::Nostr {
+            action:
+                NostrAction::Query {
+                    filters,
+                    kinds,
+                    authors,
+                    limit,
+                    json,
+                },
+        }) = cli.command
+        else {
+            panic!("expected nostr query");
+        };
+        assert_eq!(filters, ["{}", "{\"since\":1}"]);
+        assert_eq!(kinds, [1, 3]);
+        assert_eq!(authors, ["abcd", "efgh"]);
+        assert_eq!(limit, Some(5));
+        assert!(json);
+    }
+
+    #[test]
+    fn renders_status_with_mesh_rooms_and_counters() {
+        let status = json!({"running":true, "url":"wss://127.0.0.1:7447", "tls":{"source":"self-signed","sha256":"AA:BB","cert_path":"cert.pem"}, "events":2, "connections":3, "subscriptions":4, "accepted":5, "rejected":6, "rooms":["room-a","room-b"], "mesh":{"rooms":[{"room":"room-a","peers":3}],"sent":7,"received":8,"sync_requests":9,"sync_served":10}});
+        let rendered = render_nostr_status(&status, false).unwrap();
+        for part in [
+            "running",
+            "wss://127.0.0.1:7447",
+            "AA:BB",
+            "cert.pem",
+            "trust or pin",
+            "events: 2",
+            "connections: 3",
+            "subscriptions: 4",
+            "accepted: 5",
+            "rejected: 6",
+            "room-a  3 peer(s)",
+            "room-b  (not joined)",
+            "mesh: sent 7  received 8  syncs requested 9  served 10",
+        ] {
+            assert!(rendered.contains(part), "missing {part}: {rendered}");
+        }
+        assert_eq!(
+            serde_json::from_str::<Value>(&render_nostr_status(&status, true).unwrap()).unwrap(),
+            status
+        );
+        assert!(
+            render_nostr_status(&json!({"running":false}), false)
+                .unwrap()
+                .contains("stopped")
+        );
+    }
+
+    #[test]
+    fn renders_events_without_splitting_unicode_or_lines() {
+        let content = format!("{}\n{}", "猫".repeat(78), "tail");
+        let response = json!({"events":[{"created_at":0,"kind":1,"pubkey":"abcdefghijklmnop","content":content}]});
+        let rendered = render_nostr_events(&response, false).unwrap();
+        assert_eq!(rendered.lines().count(), 1);
+        assert!(rendered.contains("kind 1  abcdefghijkl"));
+        assert!(rendered.contains("\\nt"));
+        assert!(!rendered.contains("tail"));
+        assert_eq!(
+            serde_json::from_str::<Value>(&render_nostr_events(&response, true).unwrap()).unwrap(),
+            response
+        );
+    }
 }
 
 fn escrow_slots_request(room: String) -> (&'static str, Value) {
