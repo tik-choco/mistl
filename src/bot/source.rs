@@ -115,7 +115,8 @@ const WIRE_HISTORY_REQUEST: &str = "tc-news:history-request";
 /// a replay log, so a little more headroom is fine.
 const BUFFER_CAP_PER_ROOM: usize = 500;
 /// Most buffered wires any single `fromId` may hold per room, so one sender
-/// can't evict every other sender's wires from the shared buffer.
+/// can't evict every other sender's wires from the shared buffer. This stays
+/// keyed by the leaf, the signing key, even when a root is delegated.
 const MAX_BUFFERED_PER_SENDER: usize = 50;
 /// Wires stamped further ahead than this are rejected. Only a future bound
 /// is enforced: the same handler also receives legitimate history replays
@@ -127,19 +128,24 @@ fn timestamp_too_far_ahead(timestamp_ms: i64, now_ms: i64) -> bool {
     timestamp_ms > now_ms.saturating_add(MAX_FUTURE_SKEW_MS)
 }
 
-/// True when `from_id` (a wire's signature-verified `fromId` DID) is allowed
-/// by `trusted`: an empty list allows everyone; otherwise an entry must equal
-/// the DID or the node id derived from it (first 16 hex of `sha256(did)`,
-/// case-insensitive). Never call this with an id that was not verified by
-/// [`crate::wiresign::verify_wire`].
-fn author_trusted(trusted: &[String], from_id: &str) -> bool {
+/// True when the signature-verified leaf or its verified delegation root is
+/// allowed by `trusted`. An empty list allows everyone; otherwise an entry
+/// must equal either DID or its node id (first 16 hex of `sha256(did)`,
+/// case-insensitive). The root must come from a verified delegation.
+fn author_trusted(trusted: &[String], from_id: &str, root: Option<&str>) -> bool {
     if trusted.is_empty() {
         return true;
     }
     let node_id = crate::identity::node_id_for_did(from_id);
+    let root_node_id = root.map(crate::identity::node_id_for_did);
     trusted.iter().any(|entry| {
         let entry = entry.trim();
-        entry == from_id || entry.eq_ignore_ascii_case(&node_id)
+        entry == from_id
+            || entry.eq_ignore_ascii_case(&node_id)
+            || root.is_some_and(|root| entry == root)
+            || root_node_id
+                .as_ref()
+                .is_some_and(|node_id| entry.eq_ignore_ascii_case(node_id))
     })
 }
 
@@ -222,6 +228,7 @@ const CHAT_BUFFER_CAP_PER_ROOM: usize = 500;
 struct BufferedWire {
     id: String,
     from_id: String,
+    root: Option<String>,
     cid: String,
     timestamp: i64,
 }
@@ -311,6 +318,30 @@ async fn ensure_hub() -> Arc<GlobalArticlesHub> {
     .clone()
 }
 
+/// Verifies an article announcement and prepares it for the receive buffer.
+fn buffered_article_wire(value: &Value) -> Option<BufferedWire> {
+    if value.get("type").and_then(Value::as_str) != Some(WIRE_ARTICLE)
+        || !matches!(crate::wiresign::verify_wire(value), Ok(true))
+    {
+        return None;
+    }
+    let id = value.get("id").and_then(Value::as_str)?;
+    let from_id = value.get("fromId").and_then(Value::as_str)?;
+    let cid = value.get("cid").and_then(Value::as_str)?;
+    let timestamp = value.get("timestamp").and_then(Value::as_i64).unwrap_or(0);
+    let now = chrono::Utc::now();
+    if timestamp_too_far_ahead(timestamp, now.timestamp_millis()) {
+        return None;
+    }
+    Some(BufferedWire {
+        id: id.to_string(),
+        from_id: from_id.to_string(),
+        root: crate::identity::resolve_verified_sender(value, from_id, now).root,
+        cid: cid.to_string(),
+        timestamp,
+    })
+}
+
 /// Registers the process-wide room handler exactly once (guarded by
 /// [`HUB`]'s `OnceCell`). Verifies and buffers `tc-news:article` wires;
 /// ignores everything else, including `tc-news:history-request` (this bot
@@ -324,28 +355,9 @@ fn register_handler(hub: Arc<GlobalArticlesHub>) {
         let Ok(value) = serde_json::from_slice::<Value>(data) else {
             return; // not JSON; not ours
         };
-        if value.get("type").and_then(Value::as_str) != Some(WIRE_ARTICLE) {
-            return;
-        }
-        let Ok(true) = crate::wiresign::verify_wire(&value) else {
-            return; // unsigned, malformed, or forged -- drop silently (untrusted peer input)
-        };
-        let (Some(id), Some(from_id), Some(cid)) = (
-            value.get("id").and_then(Value::as_str),
-            value.get("fromId").and_then(Value::as_str),
-            value.get("cid").and_then(Value::as_str),
-        ) else {
+        let Some(wire) = buffered_article_wire(&value) else {
             return;
         };
-        let wire = BufferedWire {
-            id: id.to_string(),
-            from_id: from_id.to_string(),
-            cid: cid.to_string(),
-            timestamp: value.get("timestamp").and_then(Value::as_i64).unwrap_or(0),
-        };
-        if timestamp_too_far_ahead(wire.timestamp, chrono::Utc::now().timestamp_millis()) {
-            return; // implausibly far in the future
-        }
         let room = room_id.to_string();
         let hub = hub.clone();
         runtime.spawn(async move {
@@ -503,7 +515,7 @@ pub(super) async fn poll_candidates(
                 if wire.from_id == own_did {
                     continue; // this bot's own article -- see the module doc
                 }
-                if !author_trusted(trusted_authors, &wire.from_id) {
+                if !author_trusted(trusted_authors, &wire.from_id, wire.root.as_deref()) {
                     continue;
                 }
                 if unresolved.iter().any(|(_, w)| w.id == wire.id) {
@@ -559,6 +571,7 @@ pub(super) async fn poll_candidates(
 struct BufferedChatWire {
     id: String,
     from_id: String,
+    root: Option<String>,
     from_name: String,
     cid: String,
     timestamp: i64,
@@ -593,6 +606,37 @@ async fn ensure_chat_hub() -> Arc<ChatHub> {
         .clone()
 }
 
+/// Verifies a room chat announcement and prepares it for the receive buffer.
+fn buffered_chat_wire(value: &Value) -> Option<BufferedChatWire> {
+    if value.get("type").and_then(Value::as_str) != Some(WIRE_CHAT_POST)
+        || !matches!(crate::wiresign::verify_wire(value), Ok(true))
+        || value.get("kind").and_then(Value::as_str) != Some("text")
+        || value.get("surface").and_then(Value::as_str) != Some(CHAT_POST_SURFACE)
+    {
+        return None;
+    }
+    let id = value.get("id").and_then(Value::as_str)?;
+    let from_id = value.get("fromId").and_then(Value::as_str)?;
+    let cid = value.get("cid").and_then(Value::as_str)?;
+    let timestamp = value.get("timestamp").and_then(Value::as_i64).unwrap_or(0);
+    let now = chrono::Utc::now();
+    if timestamp_too_far_ahead(timestamp, now.timestamp_millis()) {
+        return None;
+    }
+    Some(BufferedChatWire {
+        id: id.to_string(),
+        from_id: from_id.to_string(),
+        root: crate::identity::resolve_verified_sender(value, from_id, now).root,
+        from_name: value
+            .get("fromName")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        cid: cid.to_string(),
+        timestamp,
+    })
+}
+
 /// Registers the process-wide chat-room handler exactly once (guarded by
 /// [`CHAT_HUB`]'s `OnceCell`), mirroring [`register_handler`]. Verifies and
 /// buffers `tc-chat:post` wires that are both `kind:"text"` and
@@ -609,40 +653,9 @@ fn register_chat_handler(hub: Arc<ChatHub>) {
         let Ok(value) = serde_json::from_slice::<Value>(data) else {
             return; // not JSON; not ours
         };
-        if value.get("type").and_then(Value::as_str) != Some(WIRE_CHAT_POST) {
-            return;
-        }
-        let Ok(true) = crate::wiresign::verify_wire(&value) else {
-            return; // unsigned, malformed, or forged -- drop silently (untrusted peer input)
-        };
-        if value.get("kind").and_then(Value::as_str) != Some("text") {
-            return; // media/file/project/event -- useless to every pipeline (see module doc)
-        }
-        if value.get("surface").and_then(Value::as_str) != Some(CHAT_POST_SURFACE) {
-            return; // board/calendar/gallery, not a room chat message
-        }
-        let (Some(id), Some(from_id), Some(cid)) = (
-            value.get("id").and_then(Value::as_str),
-            value.get("fromId").and_then(Value::as_str),
-            value.get("cid").and_then(Value::as_str),
-        ) else {
+        let Some(wire) = buffered_chat_wire(&value) else {
             return;
         };
-        let from_name = value
-            .get("fromName")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        let wire = BufferedChatWire {
-            id: id.to_string(),
-            from_id: from_id.to_string(),
-            from_name,
-            cid: cid.to_string(),
-            timestamp: value.get("timestamp").and_then(Value::as_i64).unwrap_or(0),
-        };
-        if timestamp_too_far_ahead(wire.timestamp, chrono::Utc::now().timestamp_millis()) {
-            return; // implausibly far in the future
-        }
         let room = room_id.to_string();
         let hub = hub.clone();
         runtime.spawn(async move {
@@ -836,7 +849,7 @@ pub(super) async fn poll_chat_candidates(
                 if wire.from_id == own_did {
                     continue; // this bot's own post -- see the module doc
                 }
-                if !author_trusted(trusted_authors, &wire.from_id) {
+                if !author_trusted(trusted_authors, &wire.from_id, wire.root.as_deref()) {
                     continue;
                 }
                 unresolved.push(wire.clone());
@@ -964,20 +977,130 @@ mod tests {
 
     #[test]
     fn author_trusted_empty_list_allows_everyone() {
-        assert!(author_trusted(&[], "did:key:zAnyone"));
+        assert!(author_trusted(&[], "did:key:zAnyone", None));
     }
 
     #[test]
     fn author_trusted_matches_did_or_derived_node_id() {
         let did = "did:key:zAlice";
         let node_id = crate::identity::node_id_for_did(did);
-        assert!(author_trusted(&[did.to_string()], did));
-        assert!(author_trusted(&[format!(" {node_id} ")], did));
-        assert!(author_trusted(&[node_id.to_uppercase()], did));
-        assert!(!author_trusted(&["did:key:zBob".to_string()], did));
-        assert!(!author_trusted(&["0000000000000000".to_string()], did));
+        assert!(author_trusted(&[did.to_string()], did, None));
+        assert!(author_trusted(&[format!(" {node_id} ")], did, None));
+        assert!(author_trusted(&[node_id.to_uppercase()], did, None));
+        assert!(!author_trusted(&["did:key:zBob".to_string()], did, None));
+        assert!(!author_trusted(
+            &["0000000000000000".to_string()],
+            did,
+            None
+        ));
         // A prefix of the DID is not a match.
-        assert!(!author_trusted(&["did:key:z".to_string()], did));
+        assert!(!author_trusted(&["did:key:z".to_string()], did, None));
+    }
+
+    fn signed_source_wire(
+        wire_type: &str,
+        leaf: &crate::identity::Identity,
+        delegation: &Value,
+    ) -> Value {
+        let mut wire = json!({
+            "type": wire_type,
+            "id": "source-test",
+            "fromId": leaf.did(),
+            "cid": "bafy-test",
+            "timestamp": chrono::Utc::now().timestamp_millis(),
+            "kind": "text",
+            "surface": "chat",
+            "delegation": delegation,
+        });
+        crate::wiresign::sign_wire(&mut wire, leaf).unwrap();
+        wire
+    }
+
+    fn signed_delegation(
+        root: &crate::identity::Identity,
+        leaf: &str,
+        issued: chrono::DateTime<chrono::Utc>,
+    ) -> Value {
+        use base64::Engine as _;
+        let mut delegation = json!({
+            "v": 1,
+            "root": root.did(),
+            "leaf": leaf,
+            "iat": issued.to_rfc3339(),
+            "exp": (issued + chrono::Duration::days(1)).to_rfc3339(),
+        });
+        let payload = crate::wiresign::stable_stringify(&delegation);
+        delegation["sig"] = json!(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(root.sign(payload.as_bytes()))
+        );
+        delegation
+    }
+
+    fn source_sender(wire: &Value) -> Option<(String, Option<String>)> {
+        if wire.get("type").and_then(Value::as_str) == Some(WIRE_ARTICLE) {
+            let wire = buffered_article_wire(wire)?;
+            Some((wire.from_id, wire.root))
+        } else {
+            let wire = buffered_chat_wire(wire)?;
+            Some((wire.from_id, wire.root))
+        }
+    }
+
+    #[test]
+    fn source_wires_trust_valid_root_and_degrade_invalid_delegations_to_leaf() {
+        let root = crate::identity::for_test();
+        let leaf = crate::identity::for_test();
+        let other = crate::identity::for_test();
+        let now = chrono::Utc::now();
+        let valid = signed_delegation(&root, leaf.did(), now);
+        let expired = signed_delegation(&root, leaf.did(), now - chrono::Duration::days(3));
+        let foreign = signed_delegation(&root, other.did(), now);
+        let mut invalid = valid.clone();
+        invalid["sig"] = json!("not-a-signature");
+        let root_did = [root.did().to_string()];
+        let root_node = [crate::identity::node_id_for_did(root.did()).to_uppercase()];
+        let leaf_did = [leaf.did().to_string()];
+        let leaf_node = [crate::identity::node_id_for_did(leaf.did())];
+
+        for wire_type in [WIRE_ARTICLE, WIRE_CHAT_POST] {
+            let wire = signed_source_wire(wire_type, &leaf, &valid);
+            let (from_id, resolved_root) = source_sender(&wire).expect("valid wire is buffered");
+            assert_eq!(from_id, leaf.did());
+            assert_eq!(resolved_root.as_deref(), Some(root.did()));
+            for trusted in [&root_did, &root_node, &leaf_did, &leaf_node] {
+                assert!(author_trusted(trusted, &from_id, resolved_root.as_deref()));
+            }
+
+            for delegation in [&expired, &foreign, &invalid] {
+                let wire = signed_source_wire(wire_type, &leaf, delegation);
+                let (from_id, resolved_root) = source_sender(&wire).expect("wire stays valid");
+                assert!(resolved_root.is_none());
+                assert!(!author_trusted(
+                    &root_did,
+                    &from_id,
+                    resolved_root.as_deref()
+                ));
+                assert!(!author_trusted(
+                    &root_node,
+                    &from_id,
+                    resolved_root.as_deref()
+                ));
+                assert!(author_trusted(
+                    &leaf_did,
+                    &from_id,
+                    resolved_root.as_deref()
+                ));
+                assert!(author_trusted(
+                    &leaf_node,
+                    &from_id,
+                    resolved_root.as_deref()
+                ));
+            }
+
+            let mut forged = wire;
+            forged["cid"] = json!("bafy-tampered");
+            assert!(source_sender(&forged).is_none());
+        }
     }
 
     #[test]
@@ -1034,6 +1157,7 @@ mod tests {
         BufferedChatWire {
             id: id.to_string(),
             from_id: "did:key:zSender".to_string(),
+            root: None,
             from_name: from_name.to_string(),
             cid: "bafy-chat-body".to_string(),
             timestamp,

@@ -163,6 +163,35 @@ pub fn require_installable() -> Result<()> {
     }
     Ok(())
 }
+/// `std::env::current_exe`, minus the ` (deleted)` suffix Linux reports (via
+/// `/proc/self/exe`) once the running binary's file was unlinked or replaced
+/// -- e.g. by a staged self-update that hasn't been restarted into yet. The
+/// stripped path names the binary now on disk at the launch location, which
+/// is what relaunch/update/install want. Use [`running_image`] to read the
+/// bytes of the running binary itself.
+pub fn current_exe() -> std::io::Result<PathBuf> {
+    let exe = std::env::current_exe()?;
+    if cfg!(target_os = "linux") {
+        if let Some(stripped) = strip_deleted_suffix(&exe, |p| p.exists()) {
+            return Ok(stripped);
+        }
+    }
+    Ok(exe)
+}
+/// `path` without a trailing ` (deleted)`, unless a file literally named so
+/// exists. Non-UTF-8 paths are left alone.
+fn strip_deleted_suffix(path: &Path, exists: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    let stripped = path.to_str()?.strip_suffix(" (deleted)")?;
+    (!exists(path)).then(|| PathBuf::from(stripped))
+}
+/// A path that reads the running binary's bytes even after its file was
+/// unlinked or replaced (`/proc/self/exe` on Linux), else `current_exe`.
+pub fn running_image() -> std::io::Result<PathBuf> {
+    if cfg!(target_os = "linux") {
+        return Ok(PathBuf::from("/proc/self/exe"));
+    }
+    std::env::current_exe()
+}
 pub fn offline_listen(listen: &str) -> String {
     format!(
         "127.0.0.1:{}",
@@ -221,5 +250,19 @@ mod tests {
     #[test]
     fn offline_ui_stays_local() {
         assert_eq!(offline_listen("[::]:6481"), "127.0.0.1:6481");
+    }
+    #[test]
+    fn strips_linux_deleted_exe_suffix() {
+        let deleted = Path::new("/home/jo/.local/bin/mistl (deleted)");
+        assert_eq!(
+            strip_deleted_suffix(deleted, |_| false),
+            Some(PathBuf::from("/home/jo/.local/bin/mistl"))
+        );
+        // A file genuinely named "... (deleted)" is kept as-is.
+        assert_eq!(strip_deleted_suffix(deleted, |_| true), None);
+        assert_eq!(
+            strip_deleted_suffix(Path::new("/home/jo/.local/bin/mistl"), |_| false),
+            None
+        );
     }
 }

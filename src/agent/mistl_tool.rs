@@ -223,6 +223,7 @@ const READ_ONLY: &[&[&str]] = &[
     &["update", "check"],
     &["update", "status"],
     &["autostart", "status"],
+    &["path", "status"],
 ];
 
 /// Fail-closed help paths: only an exact subcommand path of mistl's own CLI
@@ -483,7 +484,7 @@ impl MistlRunner {
         cancel: &CancellationToken,
         on_output: &mut (dyn FnMut(&str) + Send),
     ) -> ToolOutput {
-        let bin = match std::env::current_exe() {
+        let bin = match crate::runtime::current_exe() {
             Ok(bin) => bin,
             Err(e) => {
                 return ToolOutput {

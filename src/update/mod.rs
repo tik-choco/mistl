@@ -89,7 +89,7 @@ pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Val
 fn cmd_status(state: &Arc<AppState>) -> Result<Value> {
     let update = state.config().update;
     // The exe updates replace is the one this process runs from.
-    let exe_path = std::env::current_exe()
+    let exe_path = crate::runtime::current_exe()
         .map(|path| path.display().to_string())
         .unwrap_or_default();
     let (last_check, last_result) = last_check();
@@ -103,6 +103,7 @@ fn cmd_status(state: &Arc<AppState>) -> Result<Value> {
         "installed": crate::install::is_installed(),
         "exe_path": exe_path,
         "autostart_enabled": crate::install::autostart_enabled(),
+        "cli_path_enabled": crate::install::cli_path_enabled(),
         "last_check": last_check,
         "last_result": last_result,
     }))
@@ -585,8 +586,16 @@ async fn stage(
 /// sibling temp file (same volume, so the swap is a rename), mark it
 /// executable on Unix, then `self_replace` -- which handles replacing a
 /// running exe on Windows. The temp file is removed on both paths.
+///
+/// On Unix the temp file is renamed over the exe directly: `self_replace`
+/// there resolves `std::env::current_exe`, which Linux reports as
+/// `mistl (deleted)` once an earlier staged update replaced the file, so a
+/// second update before a restart would fail.
 fn replace_current_exe(bytes: &[u8]) -> Result<()> {
-    let exe = std::env::current_exe().context("update: resolving current executable")?;
+    let exe = crate::runtime::current_exe().context("update: resolving current executable")?;
+    // Replace a symlink's target, not the link (matches `self_replace`).
+    #[cfg(unix)]
+    let exe = exe.canonicalize().unwrap_or(exe);
     let dir = exe
         .parent()
         .context("update: current executable has no parent directory")?;
@@ -618,6 +627,10 @@ fn replace_current_exe(bytes: &[u8]) -> Result<()> {
             .with_context(|| format!("update: marking {} executable", temp.display()))?;
     }
 
+    #[cfg(unix)]
+    let result = std::fs::rename(&temp, &exe)
+        .with_context(|| format!("update: replacing {}", exe.display()));
+    #[cfg(not(unix))]
     let result = self_replace::self_replace(&temp)
         .with_context(|| format!("update: replacing {}", exe.display()));
     let _ = std::fs::remove_file(&temp);

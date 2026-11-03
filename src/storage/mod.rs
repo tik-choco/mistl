@@ -22,7 +22,7 @@
 //! Other modules depend on the exact signatures of [`Store`] and [`store`];
 //! do not change them without updating callers.
 
-mod crypto;
+pub(crate) mod crypto;
 mod domain;
 pub mod folder_owner;
 mod folder_share;

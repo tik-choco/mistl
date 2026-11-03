@@ -18,7 +18,10 @@
 //! - macOS: LaunchAgent `~/Library/LaunchAgents/com.tik-choco.mistl.plist`
 //!   (picked up at the next login; not `launchctl load`ed immediately).
 //!
-//! Uninstall removes the shortcut, the autostart entry, and the installed
+//! The install dir is also added to the user's `PATH` (opt-out; see
+//! [`cli_path`]) so `mistl` works from any terminal.
+//!
+//! Uninstall removes the shortcut, the autostart entry, the `PATH` entry, and the installed
 //! binary -- best-effort when the daemon is running from the install dir
 //! (`self_delete` handles deleting a running exe on Windows; the dir
 //! itself may only clear once the process exits). On Unix the install dir
@@ -33,18 +36,24 @@ use tracing::{info, warn};
 
 use crate::daemon::AppState;
 
+mod cli_path;
+
+pub use cli_path::{cli_path_enabled, set_cli_path};
+
 /// Handle `install.*` and `autostart.*` IPC commands:
 /// - `install.status` `{}` -> `{installed, install_dir, exe_path,
-///   running_from, autostart_enabled}`.
-/// - `install.install` `{autostart?: bool}` (default true) ->
+///   running_from, autostart_enabled, cli_path_enabled}`.
+/// - `install.install` `{autostart?: bool, path?: bool}` (both default true) ->
 ///   `{installed: true, exe_path}`.
 /// - `install.uninstall` `{}` -> `{uninstalled: true}`.
 /// - `autostart.enable` / `autostart.disable` / `autostart.status` `{}` ->
 ///   `{autostart_enabled: bool}`.
+/// - `cli_path.enable` / `cli_path.disable` / `cli_path.status` `{}` ->
+///   `{cli_path_enabled: bool}` (install dir on the user's `PATH`).
 pub async fn handle(cmd: &str, args: Value, _state: &Arc<AppState>) -> Result<Value> {
     match cmd {
         "install.status" => {
-            let running_from = std::env::current_exe()
+            let running_from = crate::runtime::current_exe()
                 .map(|path| path.display().to_string())
                 .unwrap_or_default();
             Ok(json!({
@@ -53,6 +62,7 @@ pub async fn handle(cmd: &str, args: Value, _state: &Arc<AppState>) -> Result<Va
                 "exe_path": installed_exe_path()?.display().to_string(),
                 "running_from": running_from,
                 "autostart_enabled": autostart_enabled(),
+                "cli_path_enabled": cli_path_enabled(),
             }))
         }
         "install.install" => {
@@ -60,7 +70,8 @@ pub async fn handle(cmd: &str, args: Value, _state: &Arc<AppState>) -> Result<Va
                 .get("autostart")
                 .and_then(Value::as_bool)
                 .unwrap_or(true);
-            let exe = install(autostart)?;
+            let path = args.get("path").and_then(Value::as_bool).unwrap_or(true);
+            let exe = install(autostart, path)?;
             Ok(json!({ "installed": true, "exe_path": exe.display().to_string() }))
         }
         "install.uninstall" => {
@@ -76,6 +87,9 @@ pub async fn handle(cmd: &str, args: Value, _state: &Arc<AppState>) -> Result<Va
             Ok(json!({ "autostart_enabled": false }))
         }
         "autostart.status" => Ok(json!({ "autostart_enabled": autostart_enabled() })),
+        "cli_path.enable" => Ok(json!({ "cli_path_enabled": set_cli_path(true)? })),
+        "cli_path.disable" => Ok(json!({ "cli_path_enabled": set_cli_path(false)? })),
+        "cli_path.status" => Ok(json!({ "cli_path_enabled": cli_path_enabled() })),
         _ => bail!("unknown install command: {cmd}"),
     }
 }
@@ -105,7 +119,7 @@ pub fn installed_exe_path() -> Result<PathBuf> {
 /// canonicalizes to `installed_exe_path` (false when the installed copy
 /// doesn't exist).
 pub fn is_installed() -> bool {
-    let (Ok(current), Ok(installed)) = (std::env::current_exe(), installed_exe_path()) else {
+    let (Ok(current), Ok(installed)) = (crate::runtime::current_exe(), installed_exe_path()) else {
         return false;
     };
     match (current.canonicalize(), installed.canonicalize()) {
@@ -118,16 +132,22 @@ pub fn is_installed() -> bool {
 /// shortcut, and optionally enable autostart. Returns the installed exe
 /// path. Safe to re-run: an install from the installed copy itself skips
 /// the self-copy (copying a file over itself would fail) and just
-/// refreshes shortcut/autostart.
-pub fn install(enable_autostart: bool) -> Result<PathBuf> {
+/// refreshes shortcut/autostart. That includes a daemon whose installed
+/// binary was since replaced by a staged self-update (Linux reports it as
+/// `mistl (deleted)`): the newer binary on disk is kept, not overwritten
+/// with the older running one.
+///
+/// `add_to_path` puts the install dir on the user's `PATH` (Windows); a
+/// failure there is logged, never fatal, like the shortcut.
+pub fn install(enable_autostart: bool, add_to_path: bool) -> Result<PathBuf> {
     crate::runtime::require_installable()?;
-    let current = std::env::current_exe().context("install: resolving current executable")?;
+    let current = crate::runtime::current_exe().context("install: resolving current executable")?;
     let dir = install_dir()?;
     let dest = installed_exe_path()?;
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("install: creating {}", dir.display()))?;
 
-    if paths_equal(&current, &dest) {
+    if paths_equal(&current, &dest) && dest.exists() {
         info!(exe = %dest.display(), "install: already running from the install dir; skipping self-copy");
     } else {
         if dest.exists() {
@@ -147,7 +167,12 @@ pub fn install(enable_autostart: bool) -> Result<PathBuf> {
                 let _ = std::fs::remove_file(&old);
             }
         }
-        std::fs::copy(&current, &dest).with_context(|| {
+        // Read the running image, not `current`: on Linux the file at
+        // `current` may be gone (e.g. this is a reinstall after it was
+        // deleted) while `/proc/self/exe` still opens the running binary.
+        let source =
+            crate::runtime::running_image().context("install: resolving current executable")?;
+        std::fs::copy(&source, &dest).with_context(|| {
             format!(
                 "install: copying {} -> {}",
                 current.display(),
@@ -169,6 +194,13 @@ pub fn install(enable_autostart: bool) -> Result<PathBuf> {
         set_autostart(true)?;
     }
 
+    if add_to_path
+        && cfg!(windows)
+        && let Err(error) = set_cli_path(true)
+    {
+        warn!(%error, "install: could not add mistl to the user PATH");
+    }
+
     Ok(dest)
 }
 
@@ -185,14 +217,19 @@ pub fn uninstall() -> Result<()> {
     }
     #[cfg(windows)]
     {
+        if let Err(error) = set_cli_path(false) {
+            warn!(%error, "install: could not remove mistl from the user PATH");
+        }
         if let Err(error) = remove_start_menu_shortcut() {
             warn!(%error, "install: could not remove the Start Menu shortcut");
         }
     }
 
     let exe = installed_exe_path()?;
-    if is_installed() {
-        // Deleting the running exe needs the same rename dance as replacing it.
+    if cfg!(windows) && is_installed() {
+        // Deleting the running exe needs the same rename dance as replacing
+        // it. Unix can just unlink it (below); `self_delete` there would
+        // also fail on a `(deleted)` current_exe after a staged update.
         self_replace::self_delete().context("install: deleting the running executable")?;
     } else if exe.exists() {
         std::fs::remove_file(&exe)
@@ -345,7 +382,7 @@ fn autostart_exe() -> Result<PathBuf> {
     if crate::runtime::legacy_default() && installed.exists() {
         return Ok(installed);
     }
-    std::env::current_exe().context("install: resolving current executable")
+    crate::runtime::current_exe().context("install: resolving current executable")
 }
 
 /// Login command: quoted exe + `daemon run` (headless daemon, no

@@ -344,12 +344,14 @@ fn override_listen_host(listen: &str, host: &str) -> String {
 
 /// Relaunch the daemon from the current executable path, detached. The path
 /// is unchanged by a self-update (the bytes at it are swapped in place), so
-/// this starts the freshly-updated binary. Called from [`daemon_main`] once
+/// this starts the freshly-updated binary (on Linux `current_exe` would say
+/// `mistl (deleted)` by then; [`crate::runtime::current_exe`] strips that).
+/// Called from [`daemon_main`] once
 /// the IPC/web sockets have been released. `host`, if the daemon that's
 /// restarting was itself started with `--host`, is re-forwarded so the
 /// relaunched process keeps the same dashboard bind address.
 fn spawn_daemon(host: Option<&str>, append: bool) -> Result<std::process::Child> {
-    let exe = std::env::current_exe().context("resolving current executable")?;
+    let exe = crate::runtime::current_exe().context("resolving current executable")?;
     let log_path = config::data_dir()?.join("daemon.log");
     let log = std::fs::OpenOptions::new()
         .create(true)
@@ -811,7 +813,9 @@ pub async fn dispatch_as(
             Some("tunnel") => crate::tunnel::handle(cmd, args, state).await,
             Some("nostr") => crate::nostr::handle(cmd, args, state).await,
             Some("update") => crate::update::handle(cmd, args, state).await,
-            Some("install") | Some("autostart") => crate::install::handle(cmd, args, state).await,
+            Some("install") | Some("autostart") | Some("cli_path") => {
+                crate::install::handle(cmd, args, state).await
+            }
             _ => bail!("unknown command: {cmd}"),
         },
     }

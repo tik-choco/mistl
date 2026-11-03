@@ -48,8 +48,8 @@
 //!   block store. `chat.log` best-effort-resolves this for display;
 //!   see [`resolve_body_text`].
 //! - tc-chat peers' mistlib node ids are random per-session UUIDs unrelated
-//!   to their DID -- this module (like tc-chat itself) only ever identifies
-//!   senders by `fromId`, never by node id.
+//!   to their DID. Signed `fromId` identifies the leaf key; `chat.log`
+//!   reports a verified delegation's root as `senderId` when available.
 //!
 //! ## Room disambiguation
 //!
@@ -91,8 +91,9 @@ use crate::daemon::AppState;
 
 /// Handle `chat.*` IPC commands:
 /// - `chat.rooms` `{}` -> `{enabled, rooms: [{room, joined}]}` (relay status)
-/// - `chat.log` `{room, limit?}` -> `[{id, type, fromId, fromName, timestamp, ...}]`
-///   (relayed tc-chat wires for `room`, oldest first; see [`chat_log`])
+/// - `chat.log` `{room, limit?}` -> `[{id, type, fromId, senderId, delegated, ...}]`
+///   (relayed tc-chat wires for `room`, oldest first; `root` is present only
+///   for a valid delegation; see [`chat_log`])
 pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Value> {
     match cmd {
         "chat.rooms" => rooms_status(state).await,
@@ -459,7 +460,8 @@ async fn handle_wire(
         return Ok(());
     }
 
-    // The signed `fromId` is the rate key: it is what the signature binds.
+    // The signed `fromId` remains the rate key even for a delegation: each
+    // bucket is bound to the leaf key that actually signed the wire.
     let from_id = obj
         .get("fromId")
         .and_then(Value::as_str)
@@ -750,7 +752,8 @@ async fn rooms_status(state: &Arc<AppState>) -> Result<Value> {
 
 /// Backs `chat.log`: recently relayed posts/reactions/edits/deletes
 /// for `room`, oldest first (newest last). `limit` caps how many are
-/// returned, taken from the tail of the stored log.
+/// returned, taken from the tail of the stored log. Display sender identities
+/// are resolved at read time without changing the persisted signed wires.
 async fn chat_log(state: &Arc<AppState>, room: &str, limit: usize) -> Result<Value> {
     let service = ensure_started(state).await?.context(
         "chat relay is not enabled (set chat_relay.enabled = true and chat_relay.rooms, then restart the daemon)",
@@ -780,6 +783,10 @@ async fn chat_log(state: &Arc<AppState>, room: &str, limit: usize) -> Result<Val
 
 /// Builds one `chat.log` display item from a stored wire.
 async fn describe_entry(value: Value, resolve: bool) -> Value {
+    let sender = value
+        .get("fromId")
+        .and_then(Value::as_str)
+        .map(|leaf| crate::identity::resolve_verified_sender(&value, leaf, chrono::Utc::now()));
     let Value::Object(obj) = value else {
         return json!({});
     };
@@ -790,12 +797,17 @@ async fn describe_entry(value: Value, resolve: bool) -> Value {
         "type": wire_type,
         "id": str_field("id"),
         "fromId": str_field("fromId"),
+        "senderId": sender.as_ref().map(|sender| sender.id.as_str()),
+        "delegated": sender.as_ref().is_some_and(|sender| sender.delegated()),
         "fromName": str_field("fromName"),
         "timestamp": obj.get("timestamp").cloned().unwrap_or(Value::Null),
         // Only signature-verified wires are ever persisted (see
         // `handle_wire`), so anything read back from the log is verified.
         "verified": true,
     });
+    if let Some(root) = sender.and_then(|sender| sender.root) {
+        item["root"] = json!(root);
+    }
 
     match wire_type.as_str() {
         WIRE_POST => {
@@ -903,6 +915,23 @@ mod tests {
         fields
     }
 
+    fn signed_delegation(
+        root: &crate::identity::Identity,
+        leaf: &str,
+        issued: chrono::DateTime<chrono::Utc>,
+    ) -> Value {
+        let mut delegation = json!({
+            "v": 1,
+            "root": root.did(),
+            "leaf": leaf,
+            "iat": issued.to_rfc3339(),
+            "exp": (issued + chrono::Duration::days(1)).to_rfc3339(),
+        });
+        let payload = crate::wiresign::stable_stringify(&delegation);
+        delegation["sig"] = json!(URL_SAFE_NO_PAD.encode(root.sign(payload.as_bytes())));
+        delegation
+    }
+
     fn scratch_dir(name: &str) -> PathBuf {
         let mut suffix_bytes = [0u8; 8];
         rand::thread_rng().fill_bytes(&mut suffix_bytes);
@@ -995,6 +1024,61 @@ mod tests {
             "replayed bytes must be byte-identical to the original wire"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn stored_wires_resolve_delegation_for_log_without_changing_bytes() {
+        let root = crate::identity::for_test();
+        let (leaf, signing_key) = test_did_and_signer();
+        let (other_leaf, _) = test_did_and_signer();
+        let now = chrono::Utc::now();
+        let valid = signed_delegation(&root, &leaf, now);
+        let expired = signed_delegation(&root, &leaf, now - chrono::Duration::days(3));
+        let foreign = signed_delegation(&root, &other_leaf, now);
+        let mut invalid = valid.clone();
+        invalid["sig"] = json!("not-a-signature");
+        let dir = scratch_dir("delegated-log");
+        let service = test_service(dir.clone(), vec!["room-a".into()]);
+        let mut originals = Vec::new();
+
+        for (id, delegation) in [
+            ("valid", Some(valid)),
+            ("expired", Some(expired)),
+            ("foreign", Some(foreign)),
+            ("invalid", Some(invalid)),
+            ("plain", None),
+        ] {
+            let mut fields = sample_post_fields(&leaf);
+            fields.insert("id".into(), json!(id));
+            if let Some(delegation) = delegation {
+                fields.insert("delegation".into(), delegation);
+            }
+            let raw = sign_wire(&signing_key, fields);
+            let value = serde_json::from_slice(&raw).unwrap();
+            handle_wire(&service, "room-a", "peer", WIRE_POST, raw.clone(), value)
+                .await
+                .unwrap();
+            originals.push(raw);
+        }
+
+        let lines = read_wirelog_lines(&wirelog_path(&service.data_dir, "room-a")).unwrap();
+        assert_eq!(
+            lines, originals,
+            "the wirelog must preserve the signed bytes"
+        );
+        for (index, line) in lines.iter().enumerate() {
+            let item = describe_entry(serde_json::from_slice(line).unwrap(), false).await;
+            assert_eq!(item["fromId"], leaf);
+            assert_eq!(item["delegated"], index == 0);
+            if index == 0 {
+                assert_eq!(item["senderId"], root.did());
+                assert_eq!(item["root"], root.did());
+            } else {
+                assert_eq!(item["senderId"], leaf);
+                assert!(item.get("root").is_none());
+            }
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

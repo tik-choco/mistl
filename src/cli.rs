@@ -135,6 +135,9 @@ pub enum Command {
         /// Do not enable start-on-login
         #[arg(long)]
         no_autostart: bool,
+        /// Do not add the install dir to the user's PATH
+        #[arg(long)]
+        no_path: bool,
     },
     /// Remove the per-user install, Start Menu shortcut, and autostart entry
     Uninstall,
@@ -142,6 +145,12 @@ pub enum Command {
     Autostart {
         #[command(subcommand)]
         action: AutostartAction,
+    },
+    /// Manage the user PATH entry that makes `mistl` available in every
+    /// new terminal (Windows; on Unix only checks ~/.local/bin)
+    Path {
+        #[command(subcommand)]
+        action: PathAction,
     },
 }
 
@@ -167,6 +176,16 @@ pub enum AutostartAction {
     /// Stop starting the mistl daemon at login
     Disable,
     /// Show whether login autostart is enabled
+    Status,
+}
+
+#[derive(Subcommand)]
+pub enum PathAction {
+    /// Add the install dir to the user's PATH
+    Enable,
+    /// Remove the install dir from the user's PATH
+    Disable,
+    /// Show whether the install dir is on the user's PATH
     Status,
 }
 
@@ -230,6 +249,29 @@ pub enum KeyAction {
     List,
     /// Show the primary DID
     Did,
+    /// Export the identity as an encrypted tc-storage envelope
+    Export {
+        /// Output file (stdout if omitted)
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+        /// Encryption passphrase (or MISTL_KEY_PASSPHRASE)
+        #[arg(long)]
+        passphrase: Option<String>,
+    },
+    /// Import a plain or encrypted tc-storage identity
+    Import {
+        /// Identity JSON file, or - for stdin
+        file: String,
+        /// Decryption passphrase (or MISTL_KEY_PASSPHRASE)
+        #[arg(long)]
+        passphrase: Option<String>,
+        /// Replace a different identity, backing up the old key and metadata
+        #[arg(long)]
+        force: bool,
+        /// Validate and report without writing any files
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Sign a root -> leaf DID delegation (this identity becomes `root`),
     /// printed as JSON -- the manual-transfer path ("経路B") from
     /// did-delegation.md: paste the output into a browser app that
@@ -1023,6 +1065,13 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             KeyAction::Generate => client_call("key.generate", json!({})),
             KeyAction::List => client_call("key.list", json!({})),
             KeyAction::Did => client_call("key.did", json!({})),
+            KeyAction::Export { out, passphrase } => key_export(out, passphrase),
+            KeyAction::Import {
+                file,
+                passphrase,
+                force,
+                dry_run,
+            } => key_import(file, passphrase, force, dry_run),
             KeyAction::Delegate { leaf, ttl } => {
                 client_call("key.delegate", json!({ "leaf": leaf, "ttl": ttl }))
             }
@@ -1657,7 +1706,10 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             }
             UpdateAction::Status => client_call("update.status", json!({})),
         },
-        Command::Install { no_autostart } => install_cli(!no_autostart),
+        Command::Install {
+            no_autostart,
+            no_path,
+        } => install_cli(!no_autostart, !no_path),
         Command::Uninstall => {
             crate::install::uninstall()?;
             println!("mistl uninstalled (per-user install, shortcut, and autostart removed)");
@@ -1680,6 +1732,23 @@ pub fn dispatch(cli: Cli) -> Result<()> {
                 Ok(())
             }
         },
+        Command::Path { action } => match action {
+            PathAction::Enable => {
+                crate::install::set_cli_path(true)?;
+                println!("PATH: enabled (open a new terminal to use `mistl` anywhere)");
+                Ok(())
+            }
+            PathAction::Disable => {
+                crate::install::set_cli_path(false)?;
+                println!("PATH: disabled (takes effect in new terminals)");
+                Ok(())
+            }
+            PathAction::Status => {
+                let on = crate::install::cli_path_enabled();
+                println!("PATH: {}", if on { "enabled" } else { "disabled" });
+                Ok(())
+            }
+        },
     }
 }
 
@@ -1687,11 +1756,14 @@ pub fn dispatch(cli: Cli) -> Result<()> {
 /// Start Menu shortcut, and (unless opted out) enable login autostart. Runs
 /// in the client process directly -- it must work from a freshly-downloaded
 /// exe with no daemon running yet.
-fn install_cli(enable_autostart: bool) -> Result<()> {
-    let exe = crate::install::install(enable_autostart)?;
+fn install_cli(enable_autostart: bool, add_to_path: bool) -> Result<()> {
+    let exe = crate::install::install(enable_autostart, add_to_path)?;
     println!("installed: {}", exe.display());
     if enable_autostart {
         println!("autostart: enabled (the mistl daemon starts at login)");
+    }
+    if crate::install::cli_path_enabled() {
+        println!("PATH: enabled (open a new terminal to run `mistl` from anywhere)");
     }
     println!();
     println!("  Run `mistl` or use the Start Menu shortcut to open the dashboard.");
@@ -1715,6 +1787,160 @@ fn status_overview() -> Result<()> {
 }
 
 // -- `mistl key delegate`/`delegations`/`pair` --------------------------
+
+fn key_export(out: Option<std::path::PathBuf>, passphrase: Option<String>) -> Result<()> {
+    let passphrase = passphrase
+        .or_else(|| std::env::var("MISTL_KEY_PASSPHRASE").ok())
+        .context("provide --passphrase or set MISTL_KEY_PASSPHRASE")?;
+    let response = request("key.export", json!({"passphrase": passphrase}))?;
+    let envelope = response
+        .get("envelope")
+        .context("missing export envelope")?;
+    let text = format!("{}\n", serde_json::to_string_pretty(envelope)?);
+    if let Some(path) = out {
+        let path = std::path::absolute(path).context("resolving export output path")?;
+        crate::statefile::write_private(&path, text.as_bytes())
+            .with_context(|| format!("writing {}", path.display()))?;
+    } else {
+        print!("{text}");
+    }
+    eprintln!(
+        "DID: {}",
+        response
+            .get("did")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+    );
+    Ok(())
+}
+
+fn key_import(file: String, passphrase: Option<String>, force: bool, dry_run: bool) -> Result<()> {
+    let data = if file == "-" {
+        std::io::read_to_string(std::io::stdin()).context("reading identity from stdin")?
+    } else {
+        std::fs::read_to_string(&file).with_context(|| format!("reading {file}"))?
+    };
+    let passphrase = passphrase.or_else(|| std::env::var("MISTL_KEY_PASSPHRASE").ok());
+    let response = request(
+        "key.import",
+        json!({
+            "data": data, "passphrase": passphrase, "force": force, "dry_run": dry_run,
+        }),
+    )?;
+    println!("{}", render_key_import(&response, dry_run));
+    Ok(())
+}
+
+fn render_key_import(response: &Value, dry_run: bool) -> String {
+    let did = response
+        .get("did")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let previous = response.get("previous_did").and_then(Value::as_str);
+    let changed = response
+        .get("changed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut lines = vec![if !changed {
+        format!("Identity unchanged: {did}")
+    } else if dry_run {
+        format!(
+            "Dry run: would import {did} (previous: {}). No files written.",
+            previous.unwrap_or("none")
+        )
+    } else {
+        format!(
+            "Imported identity: {did} (previous: {})",
+            previous.unwrap_or("none")
+        )
+    }];
+    if let Some(backup) = response.get("backup_dir").and_then(Value::as_str) {
+        lines.push(format!("Backup: {backup}"));
+    }
+    if response
+        .get("restart_required")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        lines.push("Run `mistl daemon restart` to use the imported identity and node ID.".into());
+    }
+    lines.join("\n")
+}
+
+#[cfg(test)]
+mod identity_transfer_cli_tests {
+    use super::*;
+
+    #[test]
+    fn parses_identity_export_and_import_options() {
+        let parsed = Cli::try_parse_from([
+            "mistl",
+            "key",
+            "export",
+            "--out",
+            "identity.json",
+            "--passphrase",
+            "test passphrase",
+        ])
+        .unwrap();
+        let Some(Command::Key {
+            action: KeyAction::Export { out, passphrase },
+        }) = parsed.command
+        else {
+            panic!("expected key export");
+        };
+        assert_eq!(out, Some(std::path::PathBuf::from("identity.json")));
+        assert_eq!(passphrase.as_deref(), Some("test passphrase"));
+        let parsed = Cli::try_parse_from([
+            "mistl",
+            "key",
+            "import",
+            "-",
+            "--force",
+            "--dry-run",
+            "--passphrase",
+            "test passphrase",
+        ])
+        .unwrap();
+        let Some(Command::Key {
+            action:
+                KeyAction::Import {
+                    file,
+                    passphrase,
+                    force,
+                    dry_run,
+                },
+        }) = parsed.command
+        else {
+            panic!("expected key import");
+        };
+        assert_eq!(file, "-");
+        assert_eq!(passphrase.as_deref(), Some("test passphrase"));
+        assert!(force && dry_run);
+        assert!(Cli::try_parse_from(["mistl", "key", "import"]).is_err());
+    }
+
+    #[test]
+    fn identity_import_output_reports_backup_restart_and_dry_run() {
+        let result = json!({
+            "did": "new DID", "previous_did": "old DID", "changed": true,
+            "restart_required": true, "backup_dir": "identity/backup/example",
+        });
+        let output = render_key_import(&result, false);
+        assert!(output.contains("new DID") && output.contains("old DID"));
+        assert!(output.contains("identity/backup/example"));
+        assert!(output.contains("mistl daemon restart"));
+        let result = json!({"did": "new DID", "changed": true, "restart_required": false});
+        let output = render_key_import(&result, true);
+        assert!(output.contains("Dry run") && output.contains("No files written"));
+        assert!(!output.contains("restart"));
+        let result = json!({"did": "same DID", "changed": false, "restart_required": false});
+        assert_eq!(
+            render_key_import(&result, false),
+            "Identity unchanged: same DID"
+        );
+    }
+}
 
 /// `mistl key delegations`: one row per issued delegation (as returned by
 /// `key.delegations`, which already tags each entry with `expired`).

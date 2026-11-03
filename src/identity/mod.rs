@@ -7,11 +7,14 @@
 //! Other modules depend on the exact signatures of [`Identity`] and
 //! [`current`]; do not change them without updating callers.
 
-mod delegation;
+mod backup;
+pub(crate) mod delegation;
 mod pairing;
 
+pub use delegation::resolve_verified_sender;
+
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -168,13 +171,18 @@ fn profile_path() -> Result<PathBuf> {
 
 /// Load the identity from disk, if one has already been generated.
 fn load_identity() -> Result<Option<Identity>> {
-    let key_path = key_path()?;
-    let meta_path = meta_path()?;
+    let dir = identity_dir()?;
+    crate::statefile::restrict_existing(&dir.join("key.pkcs8.b64"));
+    load_identity_in(&dir)
+}
+
+fn load_identity_in(dir: &Path) -> Result<Option<Identity>> {
+    let key_path = dir.join("key.pkcs8.b64");
+    let meta_path = dir.join("meta.json");
     if !key_path.exists() || !meta_path.exists() {
         return Ok(None);
     }
 
-    crate::statefile::restrict_existing(&key_path);
     let key_b64 = std::fs::read_to_string(&key_path)
         .with_context(|| format!("reading {}", key_path.display()))?;
     let pkcs8_bytes = BASE64
@@ -377,6 +385,10 @@ fn profile_with_did(profile: &Profile, did: &str) -> Result<Value> {
 /// - `key.generate` `{}` -> `{did}` (errors if one already exists)
 /// - `key.list` `{}` -> `[{did, created_at}]`
 /// - `key.did` `{}` -> `{did}`
+/// - `key.export` `{passphrase}` -> `{did, envelope}` (encrypted tc-storage identity)
+/// - `key.import` `{data, passphrase?, force?, dry_run?}` ->
+///   `{did, previous_did, changed, restart_required, backup_dir?}`; replacing
+///   an existing identity requires `force` and backs up its key and metadata.
 /// - `key.delegate` `{leaf, ttl?}` -> `DelegationV1` JSON (root -> leaf
 ///   delegation, signed by this identity as root; see
 ///   `protocol/docs/data-contracts/docs/did-delegation.md`'s "経路B" --
@@ -434,6 +446,35 @@ pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Val
         "key.did" => {
             let identity = current(state).await?;
             Ok(json!({ "did": identity.did() }))
+        }
+        "key.export" => {
+            let passphrase = args
+                .get("passphrase")
+                .and_then(Value::as_str)
+                .context("missing `passphrase`")?
+                .to_string();
+            backup::validate_export_passphrase(&passphrase)?;
+            let identity = match load_identity()? {
+                Some(identity) => Arc::new(identity),
+                None => current(state).await?,
+            };
+            tokio::task::spawn_blocking(move || backup::export(&identity, &passphrase))
+                .await
+                .context("export task")?
+        }
+        "key.import" => {
+            let identity = backup::decode_import(&args).await?;
+            let dir = config::data_dir()?.join("identity");
+            let force = args.get("force").and_then(Value::as_bool).unwrap_or(false);
+            let dry_run = args
+                .get("dry_run")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            // Serialize replacement and backup so concurrent imports cannot
+            // overwrite one another's snapshot of the previous identity.
+            static IMPORT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+            let _guard = IMPORT_LOCK.lock().await;
+            backup::import_into(&dir, &identity, force, dry_run)
         }
         "key.delegate" => {
             let leaf = args

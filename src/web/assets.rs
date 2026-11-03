@@ -4,6 +4,14 @@
 
 pub(super) fn feature_asset(path: &str) -> Option<(&'static str, &'static [u8])> {
     let (content_type, body): (&str, &[u8]) = match path {
+        "/assets/features/identity.js" => (
+            "text/javascript; charset=utf-8",
+            include_bytes!("assets/features/identity.js"),
+        ),
+        "/assets/features/identity.css" => (
+            "text/css; charset=utf-8",
+            include_bytes!("assets/features/identity.css"),
+        ),
         "/assets/features/tunnel-graph.js" => (
             "text/javascript; charset=utf-8",
             include_bytes!("assets/features/tunnel-graph.js"),
@@ -80,6 +88,7 @@ mod tests {
     #[test]
     fn only_embedded_features_are_public() {
         for feature in [
+            "identity",
             "topology",
             "storage",
             "escrow",

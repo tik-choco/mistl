@@ -13,7 +13,7 @@
       noMatchesHint: "Try another word or sender name.", noRoomMatches: "No matching rooms", loading: "Loading conversation…",
       error: "Couldn't load the conversation. Try refreshing.", refresh: "Refresh", unknown: "Unknown sender",
       readOnly: "Conversation preview", readOnlyHint: "Use tc-chat to send messages and replies.", open: "Open in tc-chat ↗",
-      details: "Message details", close: "Close", author: "Sender", identity: "Sender ID", sent: "Sent", room: "Room",
+      details: "Message details", close: "Close", author: "Sender", identity: "Sender ID", delegated: "Paired identity", sent: "Sent", room: "Room",
       kind: "Type", technical: "Technical details", latest: "Latest messages ↓", today: "Today", yesterday: "Yesterday",
       post: "Message", media: "Media", file: "File", project: "Board post", event: "Calendar event", reaction: "Reaction",
       edit: "Message edited", deleted: "Message deleted", reactionAdded: "Reacted", reactionRemoved: "Removed reaction",
@@ -30,7 +30,7 @@
       noMatchesHint: "別の言葉や送信者の名前で検索してください。", noRoomMatches: "一致するルームはありません", loading: "会話を読み込み中…",
       error: "会話を読み込めませんでした。更新して再度お試しください。", refresh: "更新", unknown: "名前未設定",
       readOnly: "会話のプレビュー", readOnlyHint: "メッセージの送信や返信はtc-chatから行えます。", open: "tc-chatで開く ↗",
-      details: "メッセージの詳細", close: "閉じる", author: "送信者", identity: "送信者ID", sent: "送信日時", room: "ルーム",
+      details: "メッセージの詳細", close: "閉じる", author: "送信者", identity: "送信者ID", delegated: "ペアリング済みのID", sent: "送信日時", room: "ルーム",
       kind: "種類", technical: "技術情報", latest: "最新のメッセージ ↓", today: "今日", yesterday: "昨日",
       post: "メッセージ", media: "メディア", file: "ファイル", project: "ボードの投稿", event: "カレンダーの予定", reaction: "リアクション",
       edit: "メッセージを編集", deleted: "メッセージを削除", reactionAdded: "リアクション", reactionRemoved: "リアクションを解除",
@@ -47,7 +47,7 @@
       noMatchesHint: "请尝试其他关键词或发送者名称。", noRoomMatches: "没有匹配的房间", loading: "正在加载对话…",
       error: "无法加载对话。请刷新重试。", refresh: "刷新", unknown: "未设置名称",
       readOnly: "对话预览", readOnlyHint: "请使用 tc-chat 发送消息和回复。", open: "在 tc-chat 中打开 ↗",
-      details: "消息详情", close: "关闭", author: "发送者", identity: "发送者 ID", sent: "发送时间", room: "房间",
+      details: "消息详情", close: "关闭", author: "发送者", identity: "发送者 ID", delegated: "已配对身份", sent: "发送时间", room: "房间",
       kind: "类型", technical: "技术信息", latest: "最新消息 ↓", today: "今天", yesterday: "昨天",
       post: "消息", media: "媒体", file: "文件", project: "看板帖子", event: "日历事件", reaction: "回应",
       edit: "消息已编辑", deleted: "消息已删除", reactionAdded: "添加回应", reactionRemoved: "移除回应",
@@ -97,7 +97,7 @@
       if (typeof value !== "number" || !Number.isFinite(value)) return null;
       var date = new Date(value); return Number.isNaN(date.getTime()) ? null : date;
     }
-    function sender(item) { return String(item.fromName || item.fromId || t("unknown")); }
+    function sender(item) { return String(item.fromName || item.senderId || item.fromId || t("unknown")); }
     function kind(item) {
       if (item.type === "tc-chat:reaction") return t("reaction");
       if (item.type === "tc-chat:post-edit") return t("edit");
@@ -258,7 +258,7 @@
       detailBody.appendChild(el("p", "mc-detail-text", content(item)));
       var fields = el("dl");
       var date = validDate(item.timestamp);
-      [["author", sender(item)], ["identity", item.fromId], ["sent", date ? date.toLocaleString(language()) : "—"], ["room", selected], ["kind", kind(item)], ["target", item.targetId]].forEach(function (pair) {
+      [["author", sender(item)], ["identity", item.senderId || item.fromId], ["sent", date ? date.toLocaleString(language()) : "—"], ["room", selected], ["kind", kind(item)], ["target", item.targetId]].forEach(function (pair) {
         if (!pair[1]) return; fields.append(el("dt", "", t(pair[0])), el("dd", "", pair[1]));
       });
       detailBody.appendChild(fields);
@@ -278,11 +278,12 @@
       var name = sender(item), initial = Array.from(name.trim())[0] || "?";
       var avatar = button("mc-avatar", initial.toLocaleUpperCase(), function (event) { showDetails(item, event.currentTarget); });
       avatar.title = name; attr(avatar, "aria-label", t("author") + ": " + name);
-      var hash = Array.from(String(item.fromId || name)).reduce(function (value, ch) { return (value * 31 + ch.charCodeAt(0)) >>> 0; }, 0);
+      var hash = Array.from(String(item.senderId || item.fromId || name)).reduce(function (value, ch) { return (value * 31 + ch.charCodeAt(0)) >>> 0; }, 0);
       avatar.style.setProperty("--mc-avatar-hue", hash % 360);
       var column = el("div", "mc-message-column");
       var meta = el("div", "mc-message-meta");
-      var author = button("mc-author", name, function (event) { showDetails(item, event.currentTarget); }); author.title = String(item.fromId || name);
+      var author = button("mc-author", name, function (event) { showDetails(item, event.currentTarget); });
+      author.title = item.delegated && item.root ? t("delegated") + ": " + item.root : String(item.senderId || item.fromId || name);
       var date = validDate(item.timestamp), time = el("time", "mc-time", date ? date.toLocaleTimeString(language(), { hour: "2-digit", minute: "2-digit" }) : "—");
       if (date) { time.dateTime = date.toISOString(); time.title = date.toLocaleString(language()); }
       meta.append(author, time);

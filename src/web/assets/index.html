@@ -1852,6 +1852,7 @@
 <link rel="stylesheet" href="/assets/features/tunnel-graph.css">
 <link rel="stylesheet" href="/assets/features/peers.css">
 <link rel="stylesheet" href="/assets/features/messenger.css">
+<link rel="stylesheet" href="/assets/features/identity.css">
 <script>
   /* Seed the theme before first paint (no flash). Light is the default; an
      explicit choice the user made with the toggle (stored in localStorage)
@@ -2817,6 +2818,7 @@
       </summary>
       <div class="settings-drawer-body" id="settings-drawer-body-identity"></div>
     </details>
+    <div id="identity-app"></div>
   </section>
 
   <section class="panel" id="panel-update">
@@ -2842,6 +2844,11 @@
         <h3 data-i18n="update.autostartTitle">Start at login</h3>
         <p data-i18n="update.autostartDesc">Launch the mistl daemon automatically when you sign in.</p>
         <label class="switch-control"><span data-i18n="update.autostartLabel">Start mistl at login</span> <span class="toggle-switch"><input type="checkbox" role="switch" id="chk-autostart"><span class="slider" aria-hidden="true"></span></span></label>
+      </div>
+      <div class="flow-card">
+        <h3 data-i18n="update.pathTitle">Command line</h3>
+        <p data-i18n="update.pathDesc">Add mistl to your PATH so the mistl command works in any new terminal.</p>
+        <label class="switch-control"><span data-i18n="update.pathLabel">Use mistl from any terminal</span> <span class="toggle-switch"><input type="checkbox" role="switch" id="chk-cli-path"><span class="slider" aria-hidden="true"></span></span></label>
       </div>
     </div>
     <details class="settings-drawer" id="settings-drawer-update">
@@ -3145,6 +3152,12 @@
       "update.autostartTitle": "Start at login",
       "update.autostartDesc": "Launch the mistl daemon automatically when you sign in.",
       "update.autostartLabel": "Start mistl at login",
+      "update.path": "PATH",
+      "update.pathTitle": "Command line",
+      "update.pathDesc": "Add mistl to your PATH so the mistl command works in any new terminal.",
+      "update.pathLabel": "Use mistl from any terminal",
+      "update.pathOn": "mistl is on your PATH. Open a new terminal to use it.",
+      "update.pathOff": "Removed mistl from your PATH.",
       "update.availMsg": "v{version} is available.",
       "update.availNoAsset": "v{version} is available, but has no binary for this platform — download it from the releases page.",
       "update.upToDate": "You’re on the latest version.",
@@ -4092,6 +4105,12 @@
       "update.autostartTitle": "ログイン時に起動",
       "update.autostartDesc": "サインイン時に mistl デーモンを自動的に起動します。",
       "update.autostartLabel": "ログイン時に mistl を起動",
+      "update.path": "PATH",
+      "update.pathTitle": "コマンドライン",
+      "update.pathDesc": "mistl を PATH に追加し、新しく開いたターミナルのどこからでも mistl コマンドを使えるようにします。",
+      "update.pathLabel": "どのターミナルからでも mistl を使う",
+      "update.pathOn": "mistl を PATH に追加しました。新しいターミナルを開くと使えます。",
+      "update.pathOff": "mistl を PATH から外しました。",
       "update.availMsg": "v{version} が利用可能です。",
       "update.availNoAsset": "v{version} が利用可能ですが、このプラットフォーム向けのバイナリがありません。リリースページからダウンロードしてください。",
       "update.upToDate": "最新バージョンです。",
@@ -5034,6 +5053,12 @@
       "update.autostartTitle": "登录时启动",
       "update.autostartDesc": "登录时自动启动 mistl 守护进程。",
       "update.autostartLabel": "登录时启动 mistl",
+      "update.path": "PATH",
+      "update.pathTitle": "命令行",
+      "update.pathDesc": "将 mistl 添加到 PATH，以便在任何新终端中使用 mistl 命令。",
+      "update.pathLabel": "在任意终端中使用 mistl",
+      "update.pathOn": "已将 mistl 添加到 PATH。打开新终端即可使用。",
+      "update.pathOff": "已从 PATH 中移除 mistl。",
       "update.availMsg": "有可用版本 v{version}。",
       "update.availNoAsset": "有可用版本 v{version}，但没有适用于此平台的二进制文件——请从发布页面下载。",
       "update.upToDate": "已是最新版本。",
@@ -12494,6 +12519,7 @@
   var btnUpdateApply = document.getElementById("btn-update-apply");
   var btnInstall = document.getElementById("btn-install");
   var chkAutostart = document.getElementById("chk-autostart");
+  var chkCliPath = document.getElementById("chk-cli-path");
 
   function mergeUpdate(data) {
     var u = state.update || {};
@@ -12519,6 +12545,7 @@
     addKv(updateKv, t("update.autoUpdate"), onOff(u.auto_apply));
     addKv(updateKv, t("update.installed"), u.installed ? t("update.yes") : t("update.no"));
     addKv(updateKv, t("update.autostart"), onOff(u.autostart_enabled));
+    if (typeof u.cli_path_enabled === "boolean") addKv(updateKv, t("update.path"), onOff(u.cli_path_enabled));
 
     var avail = u.update_available === true;
     if (updateAvailHint) {
@@ -12531,6 +12558,7 @@
     }
     if (btnUpdateApply) btnUpdateApply.hidden = !(avail && u.asset_available !== false);
     if (chkAutostart) chkAutostart.checked = !!u.autostart_enabled;
+    if (chkCliPath) chkCliPath.checked = !!u.cli_path_enabled;
     if (btnInstall) btnInstall.textContent = u.installed ? t("update.reinstallBtn") : t("update.installBtn");
   }
 
@@ -12571,7 +12599,8 @@
   if (btnInstall) {
     btnInstall.addEventListener("click", function (e) {
       var autostart = chkAutostart ? chkAutostart.checked : true;
-      runAction(e.currentTarget, "install.install", { autostart: autostart }, function () {
+      var path = chkCliPath ? chkCliPath.checked : true;
+      runAction(e.currentTarget, "install.install", { autostart: autostart, path: path }, function () {
         showToast(t("update.installedToast"), "success");
         pollUpdate();
       });
@@ -12582,6 +12611,19 @@
     chkAutostart.addEventListener("change", function () {
       var cmd = chkAutostart.checked ? "autostart.enable" : "autostart.disable";
       runAction(null, cmd, {}, function () { pollUpdate(); });
+    });
+  }
+
+  if (chkCliPath) {
+    chkCliPath.addEventListener("change", function () {
+      var on = chkCliPath.checked;
+      api(on ? "cli_path.enable" : "cli_path.disable", {}).then(function () {
+        showToast(t(on ? "update.pathOn" : "update.pathOff"), "success");
+        pollUpdate();
+      }, function (err) {
+        showToast(err.message || String(err), "error");
+        pollUpdate(); // snap the switch back to the real state
+      });
     });
   }
 
@@ -13058,6 +13100,23 @@
   pollTunnelRoomList();
   initDevMode();
 })();
+</script>
+<script src="/assets/features/identity.js"></script>
+<script>
+window.MistlIdentity.mount(document.getElementById("identity-app"), {
+  lang: function () { return document.documentElement.lang; },
+  call: function (cmd, args) {
+    var build = window.mistlRuntime || {};
+    return fetch("/api/call", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-mistl-ui": "1", "x-mistl-instance": [build.instance_id, build.build_id].join("/") },
+      body: JSON.stringify({ cmd: cmd, args: args || {} })
+    }).then(function (response) { return response.json(); }).then(function (json) {
+      if (!json || json.ok !== true) throw new Error("identity request failed");
+      return json.data;
+    });
+  }
+});
 </script>
 </body>
 </html>

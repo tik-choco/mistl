@@ -122,14 +122,8 @@ pub fn issue(
 /// rule 8 (the delegation must belong to a specific leaf, e.g. the wire's
 /// `fromId`).
 ///
-/// Not yet called from mistl's own runtime: this crate currently only
-/// *issues* delegations (as root custodian); *verifying* one attached to a
-/// wire is the receiving peer's job (a browser app, per the spec's "受信側"
-/// section -- mistai's TypeScript port of this same function). Kept public
-/// and fully tested here so a future mistl-side consumer (e.g. the chat
-/// relay resolving senders to their root identity) has a byte-compatible
-/// implementation ready to call without redesigning the API.
-#[allow(dead_code)]
+/// Byte-compatible with mistai's TypeScript `verifyDelegation`; wire
+/// receivers reach it through [`resolve_wire_sender`].
 pub fn verify(d: &DelegationV1, now: DateTime<Utc>, expect_leaf: Option<&str>) -> bool {
     // Rule 1: v must be exactly 1. (root/leaf/iat/exp/sig are already typed
     // as String by DelegationV1, so the "must be strings" half of rule 1 is
@@ -181,6 +175,59 @@ pub fn verify(d: &DelegationV1, now: DateTime<Utc>, expect_leaf: Option<&str>) -
         return false;
     }
     true
+}
+
+/// Who sent a signed wire, per the spec's "受信側" section. Mirrors mistai's
+/// TypeScript `ResolvedSender`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedSender {
+    /// Identity for same-person comparisons: `root` when delegated, else `leaf`.
+    pub id: String,
+    /// Always the wire's `fromId` -- the key that actually signed it.
+    pub leaf: String,
+    /// Present only when the attached delegation verified for `leaf`.
+    pub root: Option<String>,
+}
+
+impl ResolvedSender {
+    pub fn delegated(&self) -> bool {
+        self.root.is_some()
+    }
+}
+
+/// Full receive-side resolution (spec "受信側" steps 1-5): verify the wire's
+/// own signature, then attribute the sender to the attached delegation's
+/// `root` when that delegation verifies with `fromId` as its leaf. A
+/// missing, malformed, expired or mismatched delegation degrades to the
+/// leaf -- it never invalidates the wire. Returns `None` only when the
+/// wire's own signature fails. Untrusted input: never panics.
+///
+/// mistl's receive paths already run `verify_wire` before any app-level
+/// checks and call [`resolve_verified_sender`]; this one-shot form mirrors
+/// mistai's `resolveWireSender` for callers that have not.
+#[allow(dead_code)]
+pub fn resolve_wire_sender(wire: &Value, now: DateTime<Utc>) -> Option<ResolvedSender> {
+    if !crate::wiresign::verify_wire(wire).unwrap_or(false) {
+        return None;
+    }
+    let leaf = wire.get("fromId")?.as_str()?.to_string();
+    Some(resolve_verified_sender(wire, &leaf, now))
+}
+
+/// Steps 2-5 of [`resolve_wire_sender`] for a wire whose signature the
+/// caller has already verified with `leaf` as its `fromId` (lets hot paths
+/// that already called `verify_wire` skip a second signature check).
+pub fn resolve_verified_sender(wire: &Value, leaf: &str, now: DateTime<Utc>) -> ResolvedSender {
+    let root = wire
+        .get("delegation")
+        .and_then(|d| serde_json::from_value::<DelegationV1>(d.clone()).ok())
+        .filter(|d| verify(d, now, Some(leaf)))
+        .map(|d| d.root);
+    ResolvedSender {
+        id: root.clone().unwrap_or_else(|| leaf.to_string()),
+        leaf: leaf.to_string(),
+        root,
+    }
 }
 
 /// Parse a ttl/duration string like `"60d"`, `"90m"`, `"12h"`, `"30s"`
@@ -548,5 +595,76 @@ mod tests {
         assert_eq!(parse_short_duration("30s").unwrap(), Duration::seconds(30));
         assert_eq!(parse_short_duration("2h").unwrap(), Duration::hours(2));
         assert!(parse_short_duration("0m").is_err());
+    }
+
+    fn signed_wire(signer: &crate::identity::Identity, delegation: Option<&DelegationV1>) -> Value {
+        let mut wire = serde_json::json!({
+            "type": "tc-chat:post",
+            "fromId": signer.did(),
+            "text": "hi",
+        });
+        if let Some(d) = delegation {
+            wire["delegation"] = serde_json::to_value(d).unwrap();
+        }
+        crate::wiresign::sign_wire(&mut wire, signer).unwrap();
+        wire
+    }
+
+    #[test]
+    fn resolve_wire_sender_attributes_a_valid_delegation_to_root() {
+        let root = crate::identity::for_test();
+        let leaf = crate::identity::for_test();
+        let d = issue(&root, leaf.did(), Duration::days(60), fixed_now()).unwrap();
+        let wire = signed_wire(&leaf, Some(&d));
+        let sender = resolve_wire_sender(&wire, fixed_now()).unwrap();
+        assert_eq!(sender.id, root.did());
+        assert_eq!(sender.leaf, leaf.did());
+        assert_eq!(sender.root.as_deref(), Some(root.did()));
+        assert!(sender.delegated());
+    }
+
+    #[test]
+    fn resolve_wire_sender_without_delegation_is_the_leaf() {
+        let leaf = crate::identity::for_test();
+        let sender = resolve_wire_sender(&signed_wire(&leaf, None), fixed_now()).unwrap();
+        assert_eq!(sender.id, leaf.did());
+        assert!(!sender.delegated());
+    }
+
+    #[test]
+    fn resolve_wire_sender_degrades_bad_delegations_to_the_leaf() {
+        let root = crate::identity::for_test();
+        let leaf = crate::identity::for_test();
+        let other = crate::identity::for_test();
+        // Delegation for a different leaf (rule 8).
+        let foreign = issue(&root, other.did(), Duration::days(60), fixed_now()).unwrap();
+        let sender = resolve_wire_sender(&signed_wire(&leaf, Some(&foreign)), fixed_now()).unwrap();
+        assert_eq!(sender.id, leaf.did());
+        assert!(!sender.delegated());
+        // Expired delegation: the wire stays valid under the leaf.
+        let d = issue(&root, leaf.did(), Duration::days(1), fixed_now()).unwrap();
+        let later = fixed_now() + Duration::days(3);
+        let sender = resolve_wire_sender(&signed_wire(&leaf, Some(&d)), later).unwrap();
+        assert_eq!(sender.id, leaf.did());
+        // Malformed delegation value.
+        let mut wire = serde_json::json!({"fromId": leaf.did(), "delegation": "nope"});
+        crate::wiresign::sign_wire(&mut wire, &leaf).unwrap();
+        assert_eq!(
+            resolve_wire_sender(&wire, fixed_now()).unwrap().id,
+            leaf.did()
+        );
+    }
+
+    #[test]
+    fn resolve_wire_sender_rejects_a_forged_wire_or_stripped_delegation() {
+        let root = crate::identity::for_test();
+        let leaf = crate::identity::for_test();
+        let d = issue(&root, leaf.did(), Duration::days(60), fixed_now()).unwrap();
+        let mut wire = signed_wire(&leaf, Some(&d));
+        wire.as_object_mut().unwrap().remove("delegation");
+        assert!(resolve_wire_sender(&wire, fixed_now()).is_none());
+        let mut tampered = signed_wire(&leaf, None);
+        tampered["text"] = serde_json::json!("changed");
+        assert!(resolve_wire_sender(&tampered, fixed_now()).is_none());
     }
 }

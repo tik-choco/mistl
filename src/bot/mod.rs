@@ -549,7 +549,8 @@ fn check_transforms_resolve(config: &Config, transforms: &[TransformConfig]) -> 
 /// stops anything -- it's purely diagnostic, matching the brief's warning
 /// examples (`preset "worker" not found in ai.presets`, an unset sink
 /// target, ...), each paired with the config path and a fix command.
-/// A `trusted_authors` entry must be a `did:key:` DID or a 16-hex node id.
+/// A `trusted_authors` entry must be a leaf or delegation root `did:key:` DID,
+/// or the corresponding 16-hex node id.
 fn is_valid_trusted_author(entry: &str) -> bool {
     let entry = entry.trim();
     entry.starts_with("did:key:")
