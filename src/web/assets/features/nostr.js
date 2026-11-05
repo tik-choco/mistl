@@ -8,6 +8,8 @@
     var copy = root.querySelector("[data-nostr-copy]");
     var error = root.querySelector("[data-nostr-error]");
     var rooms = root.querySelector("[data-nostr-rooms]"), rows = new Map();
+    var upstreams = root.querySelector("[data-nostr-upstreams]");
+    var upstreamRows = root.querySelector("[data-nostr-upstream-rows]");
     function updateError() {
       error.textContent = actionError || statusError;
       error.hidden = !error.textContent;
@@ -32,24 +34,71 @@
       ["events", "connections", "subscriptions"].forEach(function (key) {
         text("[data-nostr-" + key + "]", running ? count(data[key]) : "0");
       });
-      var meshRooms = running && data.mesh && Array.isArray(data.mesh.rooms) ? data.mesh.rooms : [];
-      var configured = running && Array.isArray(data.rooms) ? data.rooms : [];
+      var meshRooms = running && data.mesh && Array.isArray(data.mesh.rooms) ? data.mesh.rooms.filter(function (item) {
+        return item && typeof item.room === "string";
+      }) : [];
+      var configured = running && Array.isArray(data.rooms) ? data.rooms.filter(function (room) {
+        return typeof room === "string";
+      }) : [];
       var list = meshRooms.length ? meshRooms : configured.map(function (room) { return { room: room }; });
       var kept = new Set();
       list.forEach(function (item) {
         var key = String(item.room), row = rows.get(key);
         if (!row) {
           row = document.createElement("li");
-          var name = document.createElement("span"), peers = document.createElement("span");
+          var name = document.createElement("span"), details = document.createElement("span");
+          var peers = document.createElement("span"), role = document.createElement("span");
+          var leader = document.createElement("span");
           name.className = "mono"; peers.className = "nostr-peers";
-          row.append(name, peers); rows.set(key, row); rooms.appendChild(row);
+          details.className = "nostr-room-details"; role.className = "nostr-role";
+          leader.className = "nostr-leader";
+          details.append(peers, role, leader); row.append(name, details);
+          rows.set(key, row); rooms.appendChild(row);
         }
         kept.add(key); row.firstChild.textContent = key;
-        row.lastChild.textContent = Number.isFinite(item.peers) ? t("nostr.peers", { count: count(item.peers) }) : t("nostr.meshWaiting");
+        row.querySelector(".nostr-peers").textContent = Number.isFinite(item.peers) ? t("nostr.peers", { count: count(item.peers) }) : t("nostr.meshWaiting");
+        var roleBadge = row.querySelector(".nostr-role");
+        roleBadge.hidden = typeof item.role !== "string";
+        var roleKey = item.role === "leader" || item.role === "follower" ? item.role : "electing";
+        roleBadge.dataset.role = roleKey;
+        roleBadge.textContent = t("nostr.role." + roleKey);
+        var leaderLabel = row.querySelector(".nostr-leader");
+        leaderLabel.hidden = typeof item.leader !== "string" || !item.leader;
+        leaderLabel.textContent = leaderLabel.hidden ? "" : t("nostr.leader", { id: item.leader.slice(0, 8) });
       });
       rows.forEach(function (row, key) { if (!kept.has(key)) { row.remove(); rows.delete(key); } });
       rooms.hidden = !list.length;
       root.querySelector("[data-nostr-rooms-hint]").hidden = !!list.length;
+      var upstreamData = data && data.upstreams && typeof data.upstreams === "object" && !Array.isArray(data.upstreams) ? data.upstreams : null;
+      upstreams.hidden = !upstreamData;
+      upstreamRows.replaceChildren();
+      if (upstreamData) {
+        text("[data-nostr-gateway-hint]", t(upstreamData.gateway === true ? "nostr.gateway" :
+          upstreamData.gateway === false ? "nostr.viaLeader" : "nostr.gatewayUnknown"));
+        var interest = root.querySelector("[data-nostr-interest]");
+        interest.hidden = !Number.isSafeInteger(upstreamData.interest) || upstreamData.interest < 0;
+        interest.textContent = interest.hidden ? "" : t("nostr.interest", { count: count(upstreamData.interest) });
+        var relays = Array.isArray(upstreamData.relays) ? upstreamData.relays : [];
+        root.querySelector("[data-nostr-upstream-empty]").hidden = !!relays.length;
+        relays.forEach(function (relay) {
+          relay = relay && typeof relay === "object" ? relay : {};
+          var row = document.createElement("li"), url = document.createElement("span");
+          var details = document.createElement("span"), state = document.createElement("span");
+          var role = document.createElement("span"), counts = document.createElement("span");
+          var relayError = document.createElement("span");
+          url.className = "mono"; details.className = "nostr-upstream-details";
+          role.className = "nostr-role nostr-upstream-role";
+          relayError.className = "nostr-error";
+          url.textContent = typeof relay.url === "string" ? relay.url : "—";
+          role.hidden = relay.role !== "bridge" && relay.role !== "upstream";
+          role.textContent = role.hidden ? "" : t("nostr.upstreamRole." + relay.role);
+          var stateKey = ["idle", "connecting", "connected", "backoff"].includes(relay.state) ? relay.state : "unknown";
+          state.textContent = t("nostr.upstreamState." + stateKey);
+          counts.textContent = t("nostr.upstreamCounts", { received: count(relay.received), published: count(relay.published) });
+          relayError.textContent = typeof relay.error === "string" && relay.error ? t("nostr.upstreamError", { error: relay.error }) : "";
+          details.append(role, state, counts, relayError); row.append(url, details); upstreamRows.appendChild(row);
+        });
+      }
       updateError();
     }
     toggle.addEventListener("click", function () {

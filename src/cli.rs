@@ -3659,26 +3659,53 @@ fn render_nostr_status(response: &Value, json_only: bool) -> Result<String> {
         number("rejected")
     ));
     let mesh = response.get("mesh").filter(|value| !value.is_null());
-    let peers = |room: &str| {
-        mesh.and_then(|mesh| mesh.get("rooms"))
-            .and_then(Value::as_array)
-            .and_then(|rooms| {
-                rooms
-                    .iter()
-                    .find(|entry| entry.get("room").and_then(Value::as_str) == Some(room))
-            })
-            .and_then(|entry| entry.get("peers"))
-            .and_then(Value::as_u64)
-    };
-    if let Some(rooms) = response.get("rooms").and_then(Value::as_array) {
-        if rooms.is_empty() {
+    let rooms = response.get("rooms").and_then(Value::as_array);
+    let mesh_rooms = mesh
+        .and_then(|mesh| mesh.get("rooms"))
+        .and_then(Value::as_array);
+    let mut room_names: Vec<&str> = rooms
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    for entry in mesh_rooms.into_iter().flatten() {
+        if let Some(room) = entry.get("room").and_then(Value::as_str)
+            && !room_names.contains(&room)
+        {
+            room_names.push(room);
+        }
+    }
+    if rooms.is_some() || mesh_rooms.is_some() {
+        if room_names.is_empty() {
             lines.push("mesh rooms: (none)".to_string());
         } else {
             lines.push("mesh rooms:".to_string());
-            for room in rooms.iter().filter_map(Value::as_str) {
-                match peers(room) {
-                    Some(n) => lines.push(format!("  {room}  {n} peer(s)")),
-                    None => lines.push(format!("  {room}  (not joined)")),
+            for room in room_names {
+                let entry = mesh_rooms
+                    .into_iter()
+                    .flatten()
+                    .find(|entry| entry.get("room").and_then(Value::as_str) == Some(room));
+                if let Some(entry) = entry {
+                    let number = |key: &str| {
+                        entry
+                            .get(key)
+                            .and_then(Value::as_u64)
+                            .map_or_else(|| "?".to_string(), |n| n.to_string())
+                    };
+                    let role = entry
+                        .get("role")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown");
+                    let leader = entry.get("leader").and_then(Value::as_str).unwrap_or("-");
+                    let epoch = entry.get("epoch").and_then(Value::as_str).unwrap_or("-");
+                    lines.push(format!(
+                        "  {room}  {} peer(s)  role: {role}  leader: {leader}  members: {}  epoch:seq {epoch}:{}",
+                        number("peers"),
+                        number("members"),
+                        number("seq")
+                    ));
+                } else {
+                    lines.push(format!("  {room}  (not joined)"));
                 }
             }
         }
@@ -3692,6 +3719,63 @@ fn render_nostr_status(response: &Value, json_only: bool) -> Result<String> {
             count("sync_requests"),
             count("sync_served")
         ));
+        if let Some(peers) = mesh.get("interest_peers").and_then(Value::as_u64) {
+            lines.push(format!("interest peers: {peers}"));
+        }
+    }
+    let upstreams = response.get("upstreams").filter(|value| value.is_object());
+    if mesh.is_some() || upstreams.is_some() {
+        let gateway = mesh
+            .and_then(|value| value.get("gateway"))
+            .and_then(Value::as_bool)
+            .or_else(|| {
+                upstreams
+                    .and_then(|value| value.get("gateway"))
+                    .and_then(Value::as_bool)
+            });
+        lines.push(format!(
+            "gateway: {}",
+            match gateway {
+                Some(true) => "yes",
+                Some(false) => "no",
+                None => "unknown",
+            }
+        ));
+    }
+    if let Some(interest) = upstreams
+        .and_then(|value| value.get("interest"))
+        .and_then(Value::as_u64)
+    {
+        lines.push(format!("interest: {interest} filter(s)"));
+    }
+    if let Some(relays) = upstreams
+        .and_then(|value| value.get("relays"))
+        .and_then(Value::as_array)
+    {
+        lines.push("upstream relays:".to_string());
+        for relay in relays {
+            let url = relay.get("url").and_then(Value::as_str).unwrap_or("?");
+            let role = relay
+                .get("role")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let state = relay
+                .get("state")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let number = |key: &str| {
+                relay
+                    .get(key)
+                    .and_then(Value::as_u64)
+                    .map_or_else(|| "?".to_string(), |n| n.to_string())
+            };
+            let error = relay.get("error").and_then(Value::as_str).unwrap_or("-");
+            lines.push(format!(
+                "  {url}  role: {role}  {state}  received/published {}/{}  error: {error}",
+                number("received"),
+                number("published")
+            ));
+        }
     }
     Ok(lines.join("\n"))
 }
@@ -3815,6 +3899,8 @@ mod nostr_cli_tests {
         ] {
             assert!(rendered.contains(part), "missing {part}: {rendered}");
         }
+        assert!(rendered.contains("role: unknown  leader: -  members: ?  epoch:seq -:?"));
+        assert!(rendered.contains("gateway: unknown"));
         assert_eq!(
             serde_json::from_str::<Value>(&render_nostr_status(&status, true).unwrap()).unwrap(),
             status
@@ -3824,6 +3910,58 @@ mod nostr_cli_tests {
                 .unwrap()
                 .contains("stopped")
         );
+    }
+
+    #[test]
+    fn renders_cluster_and_upstream_status() {
+        let status = json!({
+            "running": true,
+            "tls": null,
+            "mesh": {
+                "gateway": false,
+                "interest_peers": 2,
+                "rooms": [
+                    {"room":"one", "peers":2, "role":"follower", "leader":"0123456789abcdef", "members":3, "epoch":"abc", "seq":42},
+                    {"room":"two", "peers":0, "role":"candidate", "leader":null, "members":1, "epoch":null, "seq":0}
+                ]
+            },
+            "upstreams": {
+                "gateway": false,
+                "interest": 3,
+                "relays": [
+                    {"url":"wss://relay.example.com", "role":"upstream", "state":"backoff", "received":12, "published":7, "error":"connection failed"},
+                    {"url":"ws://relay.example.net", "role":"bridge", "state":"idle", "received":0, "published":0, "error":null}
+                ]
+            }
+        });
+        let rendered = render_nostr_status(&status, false).unwrap();
+        for part in [
+            "tls: disabled",
+            "one  2 peer(s)  role: follower  leader: 0123456789abcdef  members: 3  epoch:seq abc:42",
+            "two  0 peer(s)  role: candidate  leader: -  members: 1  epoch:seq -:0",
+            "gateway: no",
+            "interest peers: 2",
+            "interest: 3 filter(s)",
+            "wss://relay.example.com  role: upstream  backoff  received/published 12/7  error: connection failed",
+            "ws://relay.example.net  role: bridge  idle  received/published 0/0  error: -",
+        ] {
+            assert!(rendered.contains(part), "missing {part}: {rendered}");
+        }
+    }
+
+    #[test]
+    fn renders_standalone_gateway_and_missing_upstream_fields() {
+        let status = json!({"running":true, "upstreams":{"gateway":true, "relays":[{}]}});
+        let rendered = render_nostr_status(&status, false).unwrap();
+        assert!(rendered.contains("gateway: yes"));
+        assert!(rendered.contains("?  role: unknown  unknown  received/published ?/?  error: -"));
+        assert!(!rendered.contains("interest:"));
+        assert!(!rendered.contains("interest peers:"));
+
+        let zero = json!({"running":true, "mesh":{"interest_peers":0}, "upstreams":{"interest":0}});
+        let rendered = render_nostr_status(&zero, false).unwrap();
+        assert!(rendered.contains("interest peers: 0"));
+        assert!(rendered.contains("interest: 0 filter(s)"));
     }
 
     #[test]

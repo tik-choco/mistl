@@ -59,7 +59,7 @@ $ mistl chat log <room> --limit 50
 
 # Nostr relay
 $ mistl nostr start           # start the relay; persists the enabled setting
-$ mistl nostr status          # URL, TLS certificate, counters, rooms and mesh
+$ mistl nostr status          # URL, counters, cluster rooms and upstream relays
 $ mistl nostr status --json   # full machine-readable status
 $ mistl nostr query --kind 1 --author <hex-pubkey> --limit 20
 $ mistl nostr query --filter '{"kinds":[1],"since":1700000000}' --json
@@ -236,9 +236,14 @@ authors. Filters are alternatives; fields within one filter are combined.
 `--limit` caps the total returned events, up to the relay's configured
 `max_limit`. With no filters, the query returns recent stored events.
 
-The default listener uses a self-signed `wss://` certificate that clients must
-trust or pin. See [Nostr relay configuration](configuration.md#nostr-relay) for
-trusted certificates, reverse proxies, replication rooms and write policy.
+The default listener is plain `ws://` on loopback. Set `tls = true` for
+`wss://`; clients must trust or pin a generated self-signed certificate.
+Status shows each cluster room's role, leader, membership and sequence, plus
+gateway and relay state, distinguishing bridge relays from configured upstreams.
+It also reports the number of mirrored signaling filters and peers whose
+subscription interest is held. See [Nostr relay configuration](configuration.md#nostr-relay)
+for certificates, cluster replication, the signaling bridge, upstreams and write
+policy.
 
 ### Standing tc-chat relay
 

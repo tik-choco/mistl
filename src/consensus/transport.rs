@@ -45,6 +45,39 @@ pub const HELLO_TAG: &str = "mistl-relay-hello-v2";
 pub const LEGACY_RAFT_TAG: &str = "mistl-raft-v1";
 pub const LEGACY_HELLO_TAG: &str = "mistl-relay-hello-v1";
 
+/// Tags of the nostr relay cluster's own control plane (see [`Plane`]).
+pub const NOSTR_RAFT_TAG: &str = "mistl-nostr-raft-v1";
+pub const NOSTR_HELLO_TAG: &str = "mistl-nostr-hello-v1";
+
+/// Which control plane a Raft instance belongs to. Each plane has its own
+/// wire tags (both covered by the signature), so the stream-relay cascade
+/// and the nostr relay cluster can run independent elections in the same
+/// room without seeing each other's votes or hellos.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Plane {
+    /// `stream relay` cascade (the original, `mistl-raft-v2` tags).
+    StreamRelay,
+    /// The nostr relay cluster of one `[nostr] rooms` room.
+    Nostr,
+}
+
+impl Plane {
+    pub fn raft_tag(self) -> &'static str {
+        match self {
+            Plane::StreamRelay => RAFT_TAG,
+            Plane::Nostr => NOSTR_RAFT_TAG,
+        }
+    }
+
+    pub fn hello_tag(self) -> &'static str {
+        match self {
+            Plane::StreamRelay => HELLO_TAG,
+            Plane::Nostr => NOSTR_HELLO_TAG,
+        }
+    }
+}
+
 /// Largest Raft envelope worth parsing. v1 never replicates log entries, so
 /// real envelopes are a few hundred bytes.
 pub const MAX_RAFT_BYTES: usize = 16 * 1024;
@@ -85,6 +118,7 @@ pub fn embedded_sender(msg: &RaftMessage) -> &NodeId {
 /// Serializes `msg` with bincode and wraps it in a signed JSON envelope
 /// other `crate::net` handlers can silently ignore.
 pub fn encode_raft_message(
+    plane: Plane,
     room: &str,
     identity: &Identity,
     boot: u64,
@@ -94,7 +128,7 @@ pub fn encode_raft_message(
 ) -> Result<Vec<u8>> {
     let payload = bincode::serialize(msg).context("consensus: encoding RaftMessage")?;
     let mut envelope = json!({
-        "t": RAFT_TAG,
+        "t": plane.raft_tag(),
         "room": room,
         "node": identity.node_id(),
         "fromId": identity.did(),
@@ -110,9 +144,9 @@ pub fn encode_raft_message(
 }
 
 /// Builds the periodic signed relay-hello announcement.
-pub fn encode_hello(room: &str, identity: &Identity) -> Vec<u8> {
+pub fn encode_hello(plane: Plane, room: &str, identity: &Identity) -> Vec<u8> {
     peer_auth::build_proof(
-        HELLO_TAG,
+        plane.hello_tag(),
         room,
         identity,
         peer_auth::now_ms(),
@@ -126,18 +160,26 @@ pub fn encode_hello(room: &str, identity: &Identity) -> Vec<u8> {
 /// our two envelope shapes, names a different room, or fails verification
 /// (signature, DID/node binding, freshness, embedded sender). Replay and
 /// membership are checked by the caller.
-pub fn decode(data: &[u8], room: &str, from: &str, now_ms: u64) -> Option<WireMessage> {
+pub fn decode(
+    plane: Plane,
+    data: &[u8],
+    room: &str,
+    from: &str,
+    now_ms: u64,
+) -> Option<WireMessage> {
     if data.len() > MAX_RAFT_BYTES {
         return None;
     }
     let value: Value = serde_json::from_slice(data).ok()?;
     let tag = value.get("t")?.as_str()?;
-    match tag {
-        RAFT_TAG => decode_raft(&value, room, from, now_ms).map(WireMessage::Raft),
-        HELLO_TAG => peer_auth::check_proof_value(&value, HELLO_TAG, room, from, now_ms)
+    if tag == plane.raft_tag() {
+        decode_raft(&value, room, from, now_ms).map(WireMessage::Raft)
+    } else if tag == plane.hello_tag() {
+        peer_auth::check_proof_value(&value, tag, room, from, now_ms)
             .ok()
-            .map(WireMessage::Hello),
-        _ => None,
+            .map(WireMessage::Hello)
+    } else {
+        None
     }
 }
 
@@ -181,6 +223,7 @@ fn decode_raft(value: &Value, room: &str, from: &str, now_ms: u64) -> Option<Sig
 /// exactly, so no extra fan-out logic is needed here. Every message is
 /// signed with this node's DID and numbered under a per-process boot id.
 pub struct MistlRaftTransport {
+    plane: Plane,
     room: String,
     identity: Arc<Identity>,
     boot: u64,
@@ -188,8 +231,9 @@ pub struct MistlRaftTransport {
 }
 
 impl MistlRaftTransport {
-    pub fn new(room: String, identity: Arc<Identity>) -> Self {
+    pub fn new(plane: Plane, room: String, identity: Arc<Identity>) -> Self {
         Self {
+            plane,
             room,
             identity,
             boot: rand::random(),
@@ -203,6 +247,7 @@ impl RaftTransport for MistlRaftTransport {
     async fn send(&self, to: &NodeId, msg: RaftMessage) -> RaftResult<()> {
         let seq = self.seq.fetch_add(1, Ordering::Relaxed) + 1;
         let bytes = encode_raft_message(
+            self.plane,
             &self.room,
             &self.identity,
             self.boot,
@@ -234,8 +279,17 @@ mod tests {
     fn signed_raft_envelope_roundtrips() {
         let id = crate::identity::for_test();
         let now = peer_auth::now_ms();
-        let bytes = encode_raft_message("room-a", &id, 9, 1, now, &vote_from(&id)).unwrap();
-        match decode(&bytes, "room-a", &id.node_id(), now) {
+        let bytes = encode_raft_message(
+            Plane::StreamRelay,
+            "room-a",
+            &id,
+            9,
+            1,
+            now,
+            &vote_from(&id),
+        )
+        .unwrap();
+        match decode(Plane::StreamRelay, &bytes, "room-a", &id.node_id(), now) {
             Some(WireMessage::Raft(signed)) => {
                 assert_eq!(signed.did, id.did());
                 assert_eq!((signed.boot, signed.seq), (9, 1));
@@ -252,8 +306,17 @@ mod tests {
     fn raft_envelope_ignored_for_a_different_room() {
         let id = crate::identity::for_test();
         let now = peer_auth::now_ms();
-        let bytes = encode_raft_message("room-a", &id, 1, 1, now, &vote_from(&id)).unwrap();
-        assert!(decode(&bytes, "room-b", &id.node_id(), now).is_none());
+        let bytes = encode_raft_message(
+            Plane::StreamRelay,
+            "room-a",
+            &id,
+            1,
+            1,
+            now,
+            &vote_from(&id),
+        )
+        .unwrap();
+        assert!(decode(Plane::StreamRelay, &bytes, "room-b", &id.node_id(), now).is_none());
     }
 
     #[test]
@@ -261,9 +324,18 @@ mod tests {
         let id = crate::identity::for_test();
         let victim = crate::identity::for_test();
         let now = peer_auth::now_ms();
-        let bytes = encode_raft_message("room-a", &id, 1, 1, now, &vote_from(&id)).unwrap();
+        let bytes = encode_raft_message(
+            Plane::StreamRelay,
+            "room-a",
+            &id,
+            1,
+            1,
+            now,
+            &vote_from(&id),
+        )
+        .unwrap();
         // Delivered under the victim's (forged) transport id.
-        assert!(decode(&bytes, "room-a", &victim.node_id(), now).is_none());
+        assert!(decode(Plane::StreamRelay, &bytes, "room-a", &victim.node_id(), now).is_none());
     }
 
     #[test]
@@ -276,21 +348,32 @@ mod tests {
             vote_granted: true,
             voter_id: NodeId(victim.node_id()),
         };
-        let bytes = encode_raft_message("room-a", &id, 1, 1, now, &forged_vote).unwrap();
-        assert!(decode(&bytes, "room-a", &id.node_id(), now).is_none());
+        let bytes = encode_raft_message(Plane::StreamRelay, "room-a", &id, 1, 1, now, &forged_vote)
+            .unwrap();
+        assert!(decode(Plane::StreamRelay, &bytes, "room-a", &id.node_id(), now).is_none());
     }
 
     #[test]
     fn tampered_or_stale_raft_envelope_is_rejected() {
         let id = crate::identity::for_test();
         let now = peer_auth::now_ms();
-        let bytes = encode_raft_message("room-a", &id, 1, 1, now, &vote_from(&id)).unwrap();
+        let bytes = encode_raft_message(
+            Plane::StreamRelay,
+            "room-a",
+            &id,
+            1,
+            1,
+            now,
+            &vote_from(&id),
+        )
+        .unwrap();
         let mut value: Value = serde_json::from_slice(&bytes).unwrap();
         value["seq"] = json!("2");
         let tampered = serde_json::to_vec(&value).unwrap();
-        assert!(decode(&tampered, "room-a", &id.node_id(), now).is_none());
+        assert!(decode(Plane::StreamRelay, &tampered, "room-a", &id.node_id(), now).is_none());
 
         let old = encode_raft_message(
+            Plane::StreamRelay,
             "room-a",
             &id,
             1,
@@ -299,21 +382,21 @@ mod tests {
             &vote_from(&id),
         )
         .unwrap();
-        assert!(decode(&old, "room-a", &id.node_id(), now).is_none());
+        assert!(decode(Plane::StreamRelay, &old, "room-a", &id.node_id(), now).is_none());
     }
 
     #[test]
     fn signed_hello_roundtrips_and_is_room_bound() {
         let id = crate::identity::for_test();
-        let bytes = encode_hello("room-a", &id);
+        let bytes = encode_hello(Plane::StreamRelay, "room-a", &id);
         let now = peer_auth::now_ms();
-        match decode(&bytes, "room-a", &id.node_id(), now) {
+        match decode(Plane::StreamRelay, &bytes, "room-a", &id.node_id(), now) {
             Some(WireMessage::Hello(proof)) => assert_eq!(proof.did, id.did()),
             other => panic!("expected a decoded Hello, got {other:?}"),
         }
-        assert!(decode(&bytes, "room-b", &id.node_id(), now).is_none());
+        assert!(decode(Plane::StreamRelay, &bytes, "room-b", &id.node_id(), now).is_none());
         let other = crate::identity::for_test();
-        assert!(decode(&bytes, "room-a", &other.node_id(), now).is_none());
+        assert!(decode(Plane::StreamRelay, &bytes, "room-a", &other.node_id(), now).is_none());
     }
 
     #[test]
@@ -324,14 +407,32 @@ mod tests {
             "t": LEGACY_HELLO_TAG, "room": "room-a", "node": id.node_id(),
         }))
         .unwrap();
-        assert!(decode(&legacy_hello, "room-a", &id.node_id(), now).is_none());
+        assert!(
+            decode(
+                Plane::StreamRelay,
+                &legacy_hello,
+                "room-a",
+                &id.node_id(),
+                now
+            )
+            .is_none()
+        );
 
         let payload = bincode::serialize(&vote_from(&id)).unwrap();
         let legacy_raft = serde_json::to_vec(&json!({
             "t": LEGACY_RAFT_TAG, "room": "room-a", "payload": BASE64.encode(payload),
         }))
         .unwrap();
-        assert!(decode(&legacy_raft, "room-a", &id.node_id(), now).is_none());
+        assert!(
+            decode(
+                Plane::StreamRelay,
+                &legacy_raft,
+                "room-a",
+                &id.node_id(),
+                now
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -343,17 +444,45 @@ mod tests {
             "body": {},
         }))
         .unwrap();
-        assert!(decode(&foreign_tagged, "room-a", "n", now).is_none());
+        assert!(decode(Plane::StreamRelay, &foreign_tagged, "room-a", "n", now).is_none());
 
         // The network-wide DID hello is a different tag.
         let id = crate::identity::for_test();
         let did_hello =
             peer_auth::build_proof(peer_auth::HELLO_TAG, "room-a", &id, now, "nonce", false);
-        assert!(decode(&did_hello, "room-a", &id.node_id(), now).is_none());
+        assert!(decode(Plane::StreamRelay, &did_hello, "room-a", &id.node_id(), now).is_none());
 
         let ai_like = serde_json::to_vec(&json!({ "v": 1, "type": "consumer_hello" })).unwrap();
-        assert!(decode(&ai_like, "room-a", "n", now).is_none());
-        assert!(decode(b"\x00\x01\x02not json", "room-a", "n", now).is_none());
-        assert!(decode(b"[1,2,3]", "room-a", "n", now).is_none());
+        assert!(decode(Plane::StreamRelay, &ai_like, "room-a", "n", now).is_none());
+        assert!(
+            decode(
+                Plane::StreamRelay,
+                b"\x00\x01\x02not json",
+                "room-a",
+                "n",
+                now
+            )
+            .is_none()
+        );
+        assert!(decode(Plane::StreamRelay, b"[1,2,3]", "room-a", "n", now).is_none());
+    }
+
+    #[test]
+    fn planes_do_not_see_each_others_messages() {
+        let id = crate::identity::for_test();
+        let now = peer_auth::now_ms();
+        let hello = encode_hello(Plane::Nostr, "room-a", &id);
+        assert!(decode(Plane::StreamRelay, &hello, "room-a", &id.node_id(), now).is_none());
+        assert!(matches!(
+            decode(Plane::Nostr, &hello, "room-a", &id.node_id(), now),
+            Some(WireMessage::Hello(_))
+        ));
+        let rpc =
+            encode_raft_message(Plane::Nostr, "room-a", &id, 1, 1, now, &vote_from(&id)).unwrap();
+        assert!(decode(Plane::StreamRelay, &rpc, "room-a", &id.node_id(), now).is_none());
+        assert!(matches!(
+            decode(Plane::Nostr, &rpc, "room-a", &id.node_id(), now),
+            Some(WireMessage::Raft(_))
+        ));
     }
 }

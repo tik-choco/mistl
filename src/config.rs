@@ -1065,8 +1065,8 @@ impl Default for TunnelConfig {
     }
 }
 
-/// Nostr relay (NIP-01 over WebSocket, `wss://` by default) hosted by the
-/// daemon, optionally replicating events with other mistl nodes in `rooms`
+/// Nostr relay (NIP-01 over WebSocket, plain `ws://` by default) hosted by the
+/// daemon, optionally clustered with other mistl nodes in `rooms`
 /// (see `crate::nostr`). Everything is read when the relay starts, so
 /// changes apply on the next `nostr.start`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1078,8 +1078,9 @@ pub struct NostrConfig {
     /// `host:port` the relay listens on. Loopback by default; use
     /// `0.0.0.0:<port>` to accept clients from other machines.
     pub listen: String,
-    /// Serve `wss://` (TLS). `false` serves plain `ws://`, e.g. behind a
-    /// reverse proxy that terminates TLS.
+    /// Serve `wss://` (TLS). Off by default: the relay listens on loopback,
+    /// where plain `ws://` is what local clients expect; turn it on (or put
+    /// a TLS-terminating reverse proxy in front) when listening publicly.
     pub tls: bool,
     /// PEM certificate chain / private key. Both empty means a self-signed
     /// certificate generated under `<data_dir>/nostr/tls/` (fine for local
@@ -1089,9 +1090,33 @@ pub struct NostrConfig {
     /// Extra DNS names / IPs for the self-signed certificate's SANs
     /// (`localhost`, `127.0.0.1` and `::1` are always included).
     pub tls_hosts: Vec<String>,
-    /// mistl rooms whose nostr relays replicate events with this one.
+    /// mistl rooms whose nostr relays form a cluster with this one. Each
+    /// room elects a Raft leader; events reach the leader and the leader
+    /// re-distributes them to every relay in the room, so all converge.
     /// Empty means a standalone relay.
     pub rooms: Vec<String>,
+    /// External (non-mistl) relays, `ws://` or `wss://` URLs. Only the
+    /// cluster leader connects to them (a standalone relay always does);
+    /// the other nodes get those events through the cluster.
+    pub upstreams: Vec<String>,
+    /// NIP-01 filters (JSON objects as text) the gateway subscribes with on
+    /// every upstream. Empty means publish-only: nothing is pulled in.
+    pub upstream_filters: Vec<String>,
+    /// Publish events accepted by this cluster to the upstreams.
+    pub upstream_publish: bool,
+    /// Bridge mistlib signaling for the cluster: the gateway connects to
+    /// `bridge_relays`, subscribes with exactly what the cluster's clients
+    /// subscribe to in `mirror_kinds`, and publishes only those kinds.
+    /// mistlib's `nostr_auto` signaling prefers a loopback relay, so without
+    /// the bridge, nodes behind a local relay would not find peers on other
+    /// machines. Connections open only while there is such interest.
+    pub signaling_bridge: bool,
+    /// Relays the signaling bridge uses. Empty means mistlib's default relay
+    /// list (fetched, loopback relays excluded).
+    pub bridge_relays: Vec<String>,
+    /// Event kinds mirrored through the bridge (mistlib's signaling
+    /// discovery and message kinds by default).
+    pub mirror_kinds: Vec<u32>,
     /// Hex pubkeys allowed to publish (from clients and from the mesh).
     /// Empty means anyone may publish.
     pub write_pubkeys: Vec<String>,
@@ -1119,11 +1144,17 @@ impl Default for NostrConfig {
         Self {
             enabled: false,
             listen: "127.0.0.1:7447".to_string(),
-            tls: true,
+            tls: false,
             cert_path: String::new(),
             key_path: String::new(),
             tls_hosts: Vec::new(),
             rooms: Vec::new(),
+            upstreams: Vec::new(),
+            upstream_filters: Vec::new(),
+            upstream_publish: true,
+            signaling_bridge: true,
+            bridge_relays: Vec::new(),
+            mirror_kinds: vec![25049, 25050],
             write_pubkeys: Vec::new(),
             name: "mistl relay".to_string(),
             description: "Nostr relay hosted by a mistl node".to_string(),

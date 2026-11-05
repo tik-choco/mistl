@@ -547,6 +547,13 @@ fn remote_config_denied(path: &str) -> bool {
         "escrow.replication",
         // Who may publish to the hosted nostr relay.
         "nostr.write_pubkeys",
+        // Outbound connections / what gets published to external relays.
+        "nostr.upstreams",
+        "nostr.upstream_filters",
+        "nostr.upstream_publish",
+        "nostr.signaling_bridge",
+        "nostr.bridge_relays",
+        "nostr.mirror_kinds",
         // Local paths.
         "storage.blocks_dir",
         "storage.export_dir",

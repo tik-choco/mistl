@@ -32,7 +32,7 @@ tools.
 | **Storage** | Content-addressed store (CIDv1, 1 MiB chunks), compatible with [tc-storage](https://github.com/tik-choco/tc-storage) |
 | **Screen share** | Serve your screen, or a [tc-chat](https://github.com/tik-choco/tc-chat) share, as RTSP for the VRChat video player |
 | **Chat relay** | Stays in tc-chat rooms and replays signed history to late joiners |
-| **Nostr relay** | `wss://` Nostr relay with event replication across shared mistl rooms ([setup](docs/configuration.md#nostr-relay)) |
+| **Nostr relay** | Local `ws://` Nostr relay with clustered replication and optional TLS and upstream relays ([setup](docs/configuration.md#nostr-relay)) |
 | **Tunnel** | TCP/UDP port forwarding through NAT, with per-connection approval |
 | **AI network** | Share LLMs with peers ([mistai](https://github.com/tik-choco-lab/mistai) protocol), and a local OpenAI-compatible API |
 | **Agent** | `mistl agent`: a terminal AI assistant that can operate mistl and your workspace |

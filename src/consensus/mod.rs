@@ -65,7 +65,7 @@
 mod membership;
 mod transport;
 
-use std::sync::{Arc, Mutex as StdMutex, RwLock};
+use std::sync::{Arc, Mutex as StdMutex, Once, RwLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -81,6 +81,8 @@ use crate::net::peer_auth::{self, DidProof};
 
 use membership::{HELLO_INTERVAL, Membership, PEER_TIMEOUT};
 use transport::{MistlRaftTransport, WireMessage};
+
+pub use transport::Plane;
 
 /// Minimum/maximum randomized election timeout. Conservative for a
 /// jittery p2p mesh -- see the module doc's "Timing" section.
@@ -129,6 +131,7 @@ pub struct ConsensusView {
 
 /// A running control-plane participant for one room.
 pub struct RelayConsensus {
+    plane: Plane,
     room: String,
     node_id: String,
     identity: Arc<Identity>,
@@ -146,6 +149,12 @@ pub struct RelayConsensus {
 /// the previous entry rather than be rejected by it.
 static CURRENT: RwLock<Option<Arc<RelayConsensus>>> = RwLock::new(None);
 
+/// Every running instance, of any plane; the single permanent `crate::net`
+/// handler dispatches to these (handlers cannot be unregistered, so one per
+/// `start` would leak across restarts).
+static INSTANCES: RwLock<Vec<Arc<RelayConsensus>>> = RwLock::new(Vec::new());
+static REGISTER: Once = Once::new();
+
 impl RelayConsensus {
     /// Joins the consensus control plane for `room`, which must already
     /// be a mist room this process has joined (e.g. via
@@ -158,13 +167,27 @@ impl RelayConsensus {
     /// A lone node in the room becomes leader by itself once its first
     /// election timeout fires (a few seconds, per [`ELECTION_TIMEOUT_MIN_MS`]).
     pub async fn start(state: &Arc<AppState>, room: String) -> Result<Arc<RelayConsensus>> {
+        Self::start_plane(state, room, Plane::StreamRelay).await
+    }
+
+    /// Like [`Self::start`] for any control plane. Only the stream-relay
+    /// plane backs `consensus.status`'s top-level fields; every running
+    /// instance is listed under its `instances`.
+    pub async fn start_plane(
+        state: &Arc<AppState>,
+        room: String,
+        plane: Plane,
+    ) -> Result<Arc<RelayConsensus>> {
         let identity = crate::identity::current(state)
             .await
             .context("consensus: loading identity")?;
         let node_id = identity.node_id();
 
-        let raft_transport: Arc<dyn RaftTransport> =
-            Arc::new(MistlRaftTransport::new(room.clone(), identity.clone()));
+        let raft_transport: Arc<dyn RaftTransport> = Arc::new(MistlRaftTransport::new(
+            plane,
+            room.clone(),
+            identity.clone(),
+        ));
         let config = RaftConfig {
             election_timeout_min_ms: ELECTION_TIMEOUT_MIN_MS,
             election_timeout_max_ms: ELECTION_TIMEOUT_MAX_MS,
@@ -193,6 +216,7 @@ impl RelayConsensus {
         });
 
         let consensus = Arc::new(RelayConsensus {
+            plane,
             room: room.clone(),
             node_id,
             identity,
@@ -202,7 +226,11 @@ impl RelayConsensus {
             tasks: StdMutex::new(Vec::new()),
         });
 
-        register_net_handler(consensus.clone());
+        register_net_handler();
+        INSTANCES
+            .write()
+            .expect("consensus instances lock poisoned")
+            .push(consensus.clone());
 
         let hello_task = tokio::spawn(hello_loop(consensus.clone()));
         let view_task = tokio::spawn(view_poll_loop(consensus.clone()));
@@ -212,9 +240,19 @@ impl RelayConsensus {
             .expect("consensus tasks lock poisoned")
             .extend([hello_task, view_task]);
 
-        *CURRENT.write().expect("consensus current lock poisoned") = Some(consensus.clone());
+        if plane == Plane::StreamRelay {
+            *CURRENT.write().expect("consensus current lock poisoned") = Some(consensus.clone());
+        }
 
         Ok(consensus)
+    }
+
+    pub fn plane(&self) -> Plane {
+        self.plane
+    }
+
+    pub fn room(&self) -> &str {
+        &self.room
     }
 
     /// This node's current believed role.
@@ -266,6 +304,10 @@ impl RelayConsensus {
     /// (a `start()` that ran after this one, replacing `CURRENT`, is left
     /// alone).
     pub async fn shutdown(&self) {
+        INSTANCES
+            .write()
+            .expect("consensus instances lock poisoned")
+            .retain(|instance| !std::ptr::eq(instance.as_ref(), self));
         self.raft.shutdown();
         for task in self
             .tasks
@@ -333,65 +375,83 @@ fn gate_inbound(
     }
 }
 
-/// Wires a room-aware `crate::net` handler for this instance: verifies and
-/// demuxes Raft RPCs (fed into the driver) and relay hellos (tracked in
-/// `membership`, promoted to `RaftNode::add_peer` on first sight), and clears
-/// departed peers on `EVENT_PEER_DISCONNECTED` -- all only for events that actually
-/// arrived in this instance's room. Entirely synchronous -- no tokio runtime
-/// is available on `crate::net`'s dispatch thread, and nothing here needs
-/// one (channel sends and `std::sync::Mutex`/`watch::Sender` don't require
-/// an executor).
-fn register_net_handler(consensus: Arc<RelayConsensus>) {
-    crate::net::register_room_handler(move |event_type, room, from_id, data| {
-        if room != consensus.room {
-            return; // another joined room's traffic, whatever its JSON claims
-        }
-        match event_type {
-            crate::net::EVENT_RAW => {
-                let Some(msg) = transport::decode(data, room, from_id, peer_auth::now_ms()) else {
-                    return; // not ours, or failed verification
-                };
-                let inbound = {
-                    let mut membership = consensus
-                        .membership
-                        .lock()
-                        .expect("consensus membership lock poisoned");
-                    gate_inbound(
-                        &mut membership,
-                        msg,
-                        from_id,
-                        Instant::now(),
-                        peer_auth::admitted,
-                        |proof| peer_auth::accept_proof(room, proof).is_ok(),
-                    )
-                };
-                match inbound {
-                    Inbound::Deliver(msg) => {
-                        consensus.raft.deliver(NodeId(from_id.to_string()), msg);
-                    }
-                    Inbound::NewPeer => {
-                        consensus.raft.add_peer(NodeId(from_id.to_string()));
-                        publish_view(&consensus);
-                    }
-                    Inbound::Nothing => {
-                        tracing::trace!(from = %from_id, "consensus: message not admitted");
-                    }
-                }
+/// Installs the one room-aware `crate::net` handler shared by every
+/// instance: for each running instance of the room the event actually
+/// arrived in (whatever its JSON claims), it verifies and demuxes Raft RPCs
+/// (fed into the driver) and relay hellos (tracked in `membership`,
+/// promoted to `RaftNode::add_peer` on first sight), and clears departed
+/// peers on `EVENT_PEER_DISCONNECTED`. Entirely synchronous -- no tokio
+/// runtime is available on `crate::net`'s dispatch thread, and nothing here
+/// needs one (channel sends and `std::sync::Mutex`/`watch::Sender` don't
+/// require an executor).
+fn register_net_handler() {
+    REGISTER.call_once(|| {
+        crate::net::register_room_handler(|event_type, room, from_id, data| {
+            let instances: Vec<Arc<RelayConsensus>> = match INSTANCES.read() {
+                Ok(list) => list.iter().filter(|c| c.room == room).cloned().collect(),
+                Err(_) => return,
+            };
+            for consensus in instances {
+                on_net_event(&consensus, event_type, room, from_id, data);
             }
-            crate::net::EVENT_PEER_DISCONNECTED => {
-                let was_known = consensus
+        })
+    });
+}
+
+fn on_net_event(
+    consensus: &Arc<RelayConsensus>,
+    event_type: u32,
+    room: &str,
+    from_id: &str,
+    data: &[u8],
+) {
+    match event_type {
+        crate::net::EVENT_RAW => {
+            let Some(msg) =
+                transport::decode(consensus.plane, data, room, from_id, peer_auth::now_ms())
+            else {
+                return; // not ours, or failed verification
+            };
+            let inbound = {
+                let mut membership = consensus
                     .membership
                     .lock()
-                    .expect("consensus membership lock poisoned")
-                    .remove(from_id);
-                if was_known {
-                    consensus.raft.remove_peer(NodeId(from_id.to_string()));
-                    publish_view(&consensus);
+                    .expect("consensus membership lock poisoned");
+                gate_inbound(
+                    &mut membership,
+                    msg,
+                    from_id,
+                    Instant::now(),
+                    peer_auth::admitted,
+                    |proof| peer_auth::accept_proof(room, proof).is_ok(),
+                )
+            };
+            match inbound {
+                Inbound::Deliver(msg) => {
+                    consensus.raft.deliver(NodeId(from_id.to_string()), msg);
+                }
+                Inbound::NewPeer => {
+                    consensus.raft.add_peer(NodeId(from_id.to_string()));
+                    publish_view(consensus);
+                }
+                Inbound::Nothing => {
+                    tracing::trace!(from = %from_id, "consensus: message not admitted");
                 }
             }
-            _ => {}
         }
-    });
+        crate::net::EVENT_PEER_DISCONNECTED => {
+            let was_known = consensus
+                .membership
+                .lock()
+                .expect("consensus membership lock poisoned")
+                .remove(from_id);
+            if was_known {
+                consensus.raft.remove_peer(NodeId(from_id.to_string()));
+                publish_view(consensus);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Broadcasts this node's hello every [`HELLO_INTERVAL`] and expires
@@ -412,7 +472,7 @@ async fn hello_loop(consensus: Arc<RelayConsensus>) {
 /// to `room` regardless, so it simply fails silently for anyone not
 /// actually reachable there).
 async fn broadcast_hello(consensus: &RelayConsensus) {
-    let bytes = transport::encode_hello(&consensus.room, &consensus.identity);
+    let bytes = transport::encode_hello(consensus.plane, &consensus.room, &consensus.identity);
     for node in crate::net::connected_nodes().await {
         let _ = crate::net::send_direct(&consensus.room, &node, bytes.clone()).await;
     }
@@ -477,6 +537,20 @@ pub async fn handle(cmd: &str, _args: Value, _state: &Arc<AppState>) -> Result<V
 }
 
 fn status() -> Value {
+    let instances: Vec<Value> = INSTANCES
+        .read()
+        .expect("consensus instances lock poisoned")
+        .iter()
+        .map(|c| {
+            json!({
+                "plane": c.plane,
+                "room": c.room,
+                "role": c.role(),
+                "leader": c.leader(),
+                "peers": c.relay_peers(),
+            })
+        })
+        .collect();
     match current() {
         Some(consensus) => json!({
             "active": true,
@@ -484,8 +558,9 @@ fn status() -> Value {
             "role": consensus.role(),
             "leader": consensus.leader(),
             "peers": consensus.relay_peers(),
+            "instances": instances,
         }),
-        None => json!({ "active": false }),
+        None => json!({ "active": false, "instances": instances }),
     }
 }
 
@@ -514,8 +589,14 @@ mod hello_auth_tests {
     }
 
     fn decode_from(bytes: &[u8], id: &Identity) -> WireMessage {
-        transport::decode(bytes, "room-a", &id.node_id(), peer_auth::now_ms())
-            .expect("a well-formed signed message decodes")
+        transport::decode(
+            Plane::StreamRelay,
+            bytes,
+            "room-a",
+            &id.node_id(),
+            peer_auth::now_ms(),
+        )
+        .expect("a well-formed signed message decodes")
     }
 
     fn gate(m: &mut Membership, msg: WireMessage, id: &Identity) -> Inbound {
@@ -529,23 +610,37 @@ mod hello_auth_tests {
         let now = peer_auth::now_ms();
 
         // Correctly signed, but the sender never proved membership.
-        let rpc =
-            transport::encode_raft_message("room-a", &peer, 1, 1, now, &heartbeat_from(&peer))
-                .unwrap();
+        let rpc = transport::encode_raft_message(
+            Plane::StreamRelay,
+            "room-a",
+            &peer,
+            1,
+            1,
+            now,
+            &heartbeat_from(&peer),
+        )
+        .unwrap();
         assert!(matches!(
             gate(&mut m, decode_from(&rpc, &peer), &peer),
             Inbound::Nothing
         ));
 
-        let hello = transport::encode_hello("room-a", &peer);
+        let hello = transport::encode_hello(Plane::StreamRelay, "room-a", &peer);
         assert!(matches!(
             gate(&mut m, decode_from(&hello, &peer), &peer),
             Inbound::NewPeer
         ));
 
-        let rpc2 =
-            transport::encode_raft_message("room-a", &peer, 1, 2, now, &heartbeat_from(&peer))
-                .unwrap();
+        let rpc2 = transport::encode_raft_message(
+            Plane::StreamRelay,
+            "room-a",
+            &peer,
+            1,
+            2,
+            now,
+            &heartbeat_from(&peer),
+        )
+        .unwrap();
         assert!(matches!(
             gate(&mut m, decode_from(&rpc2, &peer), &peer),
             Inbound::Deliver(_)
@@ -573,7 +668,14 @@ mod hello_auth_tests {
         }))
         .unwrap();
         assert!(
-            transport::decode(&legacy, "room-a", &peer.node_id(), peer_auth::now_ms()).is_none()
+            transport::decode(
+                Plane::StreamRelay,
+                &legacy,
+                "room-a",
+                &peer.node_id(),
+                peer_auth::now_ms()
+            )
+            .is_none()
         );
     }
 
@@ -581,7 +683,7 @@ mod hello_auth_tests {
     fn hello_outside_the_allowlist_does_not_join() {
         let peer = crate::identity::for_test();
         let mut m = Membership::new("self".into());
-        let hello = transport::encode_hello("room-a", &peer);
+        let hello = transport::encode_hello(Plane::StreamRelay, "room-a", &peer);
         let allow = vec!["did:key:zSomeoneElse".to_string()];
         let inbound = gate_inbound(
             &mut m,
@@ -599,7 +701,7 @@ mod hello_auth_tests {
     fn replayed_hello_rejected_by_the_registry_does_not_join() {
         let peer = crate::identity::for_test();
         let mut m = Membership::new("self".into());
-        let hello = transport::encode_hello("room-a", &peer);
+        let hello = transport::encode_hello(Plane::StreamRelay, "room-a", &peer);
         let inbound = gate_inbound(
             &mut m,
             decode_from(&hello, &peer),
@@ -618,7 +720,7 @@ mod hello_auth_tests {
         let b = crate::identity::for_test();
         let mut m = Membership::new("self".into());
         for id in [&a, &b] {
-            let hello = transport::encode_hello("room-a", id);
+            let hello = transport::encode_hello(Plane::StreamRelay, "room-a", id);
             assert!(matches!(
                 gate(&mut m, decode_from(&hello, id), id),
                 Inbound::NewPeer
@@ -635,8 +737,14 @@ mod hello_auth_tests {
             leader_commit: 0,
         };
         let now = peer_auth::now_ms();
-        let bytes = transport::encode_raft_message("room-a", &a, 1, 1, now, &forged).unwrap();
-        assert!(transport::decode(&bytes, "room-a", &a.node_id(), now).is_none());
-        assert!(transport::decode(&bytes, "room-a", &b.node_id(), now).is_none());
+        let bytes =
+            transport::encode_raft_message(Plane::StreamRelay, "room-a", &a, 1, 1, now, &forged)
+                .unwrap();
+        assert!(
+            transport::decode(Plane::StreamRelay, &bytes, "room-a", &a.node_id(), now).is_none()
+        );
+        assert!(
+            transport::decode(Plane::StreamRelay, &bytes, "room-a", &b.node_id(), now).is_none()
+        );
     }
 }

@@ -428,15 +428,17 @@ async fn start_engine(state: &Arc<AppState>) -> Result<Arc<Engine>> {
         .context("net: loading identity")?;
     let node_id = identity.node_id();
 
-    // Same shape tc-storage's mistStorage.ts uses: explicit Nostr signaling
-    // with no relay override, which falls back to mistlib's default public
-    // relay list (NostrSignalingConfig::effective_relay_list_url). inviteSalt
+    // Same shape tc-storage's mistStorage.ts uses: Nostr signaling with no
+    // relay override, which falls back to mistlib's default public relay
+    // list (NostrSignalingConfig::effective_relay_list_url). `nostr_auto`
+    // (mistlib >= 0.7.3-beta.4) tries loopback relays in `relays` first and
+    // only then the rest; with no inline relays it behaves like `nostr`. inviteSalt
     // / inviteCode are set explicitly to this family's shared namespace --
     // see MIST_INVITE_SALT's doc comment for why the engine default can't be
     // trusted here.
     let config_json = json!({
         "signaling": {
-            "mode": "nostr",
+            "mode": "nostr_auto",
             "nostr": {
                 "relays": [],
                 "inviteSalt": MIST_INVITE_SALT,

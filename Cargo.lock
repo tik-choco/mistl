@@ -819,7 +819,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1706,6 +1706,7 @@ dependencies = [
  "tracing-subscriber",
  "unicode-width 0.2.0",
  "uuid",
+ "webpki-roots",
  "windows-capture",
  "windows-sys 0.61.2",
  "winreg",
@@ -1744,7 +1745,7 @@ dependencies = [
 
 [[package]]
 name = "mistlib-core"
-version = "0.7.3-beta.3"
+version = "0.7.3-beta.5"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -1768,7 +1769,7 @@ dependencies = [
 
 [[package]]
 name = "mistlib-native"
-version = "0.7.3-beta.3"
+version = "0.7.3-beta.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2507,7 +2508,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2994,7 +2995,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3631,6 +3632,15 @@ checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "1.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
+dependencies = [
+ "rustls-pki-types",
 ]
 
 [[package]]

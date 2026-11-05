@@ -26,7 +26,7 @@ use tracing::debug;
 
 use super::event::Event;
 use super::filter::Filter;
-use super::{Origin, Relay, now_secs};
+use super::{InterestSource, Origin, Relay, now_secs};
 
 const MAX_HEAD: usize = 8 * 1024;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -442,6 +442,8 @@ impl Bucket {
 
 struct Session {
     relay: Arc<Relay>,
+    /// Interest key of this connection (see `Relay::set_interest`).
+    conn: u64,
     subscriptions: HashMap<String, Vec<Filter>>,
     events: Bucket,
     queries: Bucket,
@@ -452,10 +454,20 @@ impl Drop for Session {
         self.relay
             .subscriptions
             .fetch_sub(self.subscriptions.len(), Ordering::Relaxed);
+        self.relay
+            .set_interest(InterestSource::Conn(self.conn), &[], None);
     }
 }
 
 impl Session {
+    /// Publishes this connection's subscriptions as interest (the relay
+    /// keeps only the mirrored kinds).
+    fn report_interest(&self) {
+        let filters: Vec<Filter> = self.subscriptions.values().flatten().cloned().collect();
+        self.relay
+            .set_interest(InterestSource::Conn(self.conn), &filters, None);
+    }
+
     async fn text<S: AsyncRead + AsyncWrite + Unpin>(
         &mut self,
         ws: &mut WebSocketStream<S>,
@@ -547,6 +559,7 @@ impl Session {
                 if self.subscriptions.insert(id.to_string(), filters).is_none() {
                     self.relay.subscriptions.fetch_add(1, Ordering::Relaxed);
                 }
+                self.report_interest();
                 for event in stored {
                     send_json(ws, json!(["EVENT", id, event]), shutdown).await?;
                 }
@@ -555,6 +568,7 @@ impl Session {
             "CLOSE" if parts.len() == 2 && parts.get(1).is_some_and(Value::is_string) => {
                 if self.subscriptions.remove(id).is_some() {
                     self.relay.subscriptions.fetch_sub(1, Ordering::Relaxed);
+                    self.report_interest();
                 }
             }
             "AUTH" => send_json(ws, json!(["NOTICE", "unsupported: AUTH"]), shutdown).await?,
@@ -577,8 +591,10 @@ async fn websocket<S: AsyncRead + AsyncWrite + Unpin + Send>(
     mut live: broadcast::Receiver<Arc<Event>>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
+    let conn = relay.next_conn_id();
     let mut session = Session {
         relay,
+        conn,
         subscriptions: HashMap::new(),
         events: Bucket::new(EVENT_RATE, EVENT_BURST),
         queries: Bucket::new(QUERY_RATE, QUERY_BURST),
@@ -649,6 +665,7 @@ mod tests {
             let relay = Arc::new(Relay::new(
                 cfg,
                 Store::open(None, StoreLimits { max_events: 1000 }, 0).unwrap(),
+                None,
                 None,
                 None,
             ));
@@ -1065,6 +1082,7 @@ mod tests {
             Store::open(None, StoreLimits { max_events: 1000 }, 0).unwrap(),
             None,
             None,
+            None,
         ));
         let ips = Arc::new(Mutex::new(HashMap::new()));
         let remote: IpAddr = "192.0.2.1".parse().unwrap();
@@ -1113,6 +1131,7 @@ mod tests {
         let (_shutdown_tx, mut shutdown) = watch::channel(false);
         let mut session = Session {
             relay: server.relay.clone(),
+            conn: 0,
             subscriptions: HashMap::new(),
             events: Bucket::new(0.0, 0.0),
             queries: Bucket::new(0.0, 0.0),

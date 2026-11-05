@@ -1,11 +1,14 @@
 //! Nostr relay hosted by the daemon.
 //!
 //! A NIP-01 relay (plus NIP-09 deletion, NIP-11 info document, NIP-40
-//! expiration and NIP-45 COUNT) listening on `[nostr] listen`, over `wss://`
-//! by default (see [`tls`]) or plain `ws://`. Optionally, every relay in the
-//! same mistl rooms (`[nostr] rooms`) replicates accepted events with the
-//! others over p2p ([`mesh`]), so a client connected to any node sees the
-//! events published through all of them.
+//! expiration and NIP-45 COUNT) listening on `[nostr] listen`, over plain
+//! `ws://` by default (loopback) or `wss://` (see [`tls`]). Optionally, the
+//! relays in the same mistl rooms (`[nostr] rooms`) form a cluster per room
+//! ([`mesh`]): a Raft leader is elected, every node hands the events it
+//! accepts to the leader, and the leader re-distributes them to the whole
+//! room in one sequence, so a client connected to any node sees the events
+//! published through all of them. Only a leader (or a standalone relay)
+//! connects to external relays (`[nostr] upstreams`, [`upstream`]).
 //!
 //! Layout:
 //! - [`event`] / [`filter`]: NIP-01 event model, id + signature checks,
@@ -13,7 +16,8 @@
 //! - [`store`]: bounded event store with replaceable / addressable /
 //!   ephemeral / deletion semantics, persisted to `<data_dir>/nostr/`.
 //! - [`server`]: TCP listener, TLS, HTTP upgrade, per-connection protocol.
-//! - [`mesh`]: p2p replication between mistl nodes.
+//! - [`mesh`]: the leader-sequenced cluster between mistl nodes.
+//! - [`upstream`]: WebSocket client to external relays, gateway-only.
 //! - this file: the shared [`Relay`] core every event goes through
 //!   ([`Relay::submit`]), the service lifecycle and the `nostr.*` IPC.
 //!
@@ -28,16 +32,18 @@
 
 pub mod event;
 pub mod filter;
+pub mod interest;
 pub mod mesh;
 pub mod server;
 pub mod store;
 pub mod tls;
+pub mod upstream;
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
@@ -71,6 +77,34 @@ pub enum Origin {
     Client,
     /// A mistl peer, identified by the transport sender in `room`.
     Mesh { room: String, peer: String },
+    /// An external relay this node is connected to as the gateway.
+    Upstream { url: String },
+}
+
+/// A freshly accepted event and where it came from, for the cluster
+/// ([`mesh`]) to route.
+#[derive(Debug, Clone)]
+pub struct Fresh {
+    pub event: Arc<Event>,
+    pub origin: Origin,
+}
+
+/// Who holds a set of mirrored subscriptions (see [`interest`]).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum InterestSource {
+    /// A WebSocket client connection of this relay.
+    Conn(u64),
+    /// A cluster peer's clients, reported over the mesh (transport sender).
+    Peer { room: String, peer: String },
+}
+
+/// Interest sources kept at most (connections are already capped by
+/// `max_connections`; this bounds peers).
+const MAX_INTEREST_SOURCES: usize = 2048;
+
+struct InterestEntry {
+    filters: Vec<Filter>,
+    expires: Option<Instant>,
 }
 
 /// Result of [`Relay::submit`], mapped 1:1 onto a NIP-01 `OK` message.
@@ -136,22 +170,34 @@ pub struct Relay {
     store: Mutex<Store>,
     seen: Mutex<Seen>,
     live: broadcast::Sender<Arc<Event>>,
-    mesh_tx: Option<mpsc::Sender<Arc<Event>>>,
+    mesh_tx: Option<mpsc::Sender<Fresh>>,
+    /// Fresh events not from an upstream, for publishing to the upstreams.
+    upstream_tx: Option<mpsc::Sender<Arc<Event>>>,
     /// `<data_dir>/nostr`; `None` keeps everything in memory (tests).
     dir: Option<PathBuf>,
     pub connections: AtomicUsize,
     pub subscriptions: AtomicUsize,
     pub accepted: AtomicU64,
     pub rejected: AtomicU64,
+    interest: Mutex<HashMap<InterestSource, InterestEntry>>,
+    /// Merged interest of every source (what the gateway mirrors).
+    interest_all: watch::Sender<Arc<Vec<Filter>>>,
+    /// Merged interest of local connections only (what this node reports
+    /// to its cluster leader).
+    interest_local: watch::Sender<Arc<Vec<Filter>>>,
+    next_conn: AtomicU64,
 }
 
 impl Relay {
-    /// `mesh_tx` receives every fresh event for replication (`None`: no mesh).
+    /// `mesh_tx` receives every fresh event for the cluster (`None`: no
+    /// mesh); `upstream_tx` every fresh event that did not come from an
+    /// upstream (`None`: no upstreams).
     pub fn new(
         cfg: NostrConfig,
         store: Store,
         dir: Option<PathBuf>,
-        mesh_tx: Option<mpsc::Sender<Arc<Event>>>,
+        mesh_tx: Option<mpsc::Sender<Fresh>>,
+        upstream_tx: Option<mpsc::Sender<Arc<Event>>>,
     ) -> Self {
         let (live, _) = broadcast::channel(LIVE_BUFFER);
         Self {
@@ -160,12 +206,93 @@ impl Relay {
             seen: Mutex::new(Seen::default()),
             live,
             mesh_tx,
+            upstream_tx,
             dir,
             connections: AtomicUsize::new(0),
             subscriptions: AtomicUsize::new(0),
             accepted: AtomicU64::new(0),
             rejected: AtomicU64::new(0),
+            interest: Mutex::new(HashMap::new()),
+            interest_all: watch::channel(Arc::new(Vec::new())).0,
+            interest_local: watch::channel(Arc::new(Vec::new())).0,
+            next_conn: AtomicU64::new(0),
         }
+    }
+
+    /// A fresh interest key for a client connection.
+    pub fn next_conn_id(&self) -> u64 {
+        self.next_conn.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Replaces `source`'s mirrored subscriptions (filters outside
+    /// `[nostr] mirror_kinds` are ignored; none left removes the source).
+    /// Peer sources should pass a `ttl` and refresh before it runs out.
+    pub fn set_interest(&self, source: InterestSource, filters: &[Filter], ttl: Option<Duration>) {
+        let kept: Vec<Filter> = filters
+            .iter()
+            .filter(|f| interest::mirrored(f, &self.cfg.mirror_kinds))
+            .cloned()
+            .collect();
+        let mut map = self.interest.lock().expect("nostr interest poisoned");
+        let changed = if kept.is_empty() {
+            map.remove(&source).is_some()
+        } else if !map.contains_key(&source) && map.len() >= MAX_INTEREST_SOURCES {
+            false
+        } else {
+            let expires = ttl.map(|ttl| Instant::now() + ttl);
+            let same = map.get(&source).is_some_and(|e| e.filters == kept);
+            map.insert(
+                source,
+                InterestEntry {
+                    filters: kept,
+                    expires,
+                },
+            );
+            !same
+        };
+        if changed {
+            self.publish_interest(&map);
+        }
+    }
+
+    /// Drops peer interest whose TTL ran out.
+    pub fn prune_interest(&self, now: Instant) {
+        let mut map = self.interest.lock().expect("nostr interest poisoned");
+        let before = map.len();
+        map.retain(|_, e| e.expires.is_none_or(|at| now < at));
+        if map.len() != before {
+            self.publish_interest(&map);
+        }
+    }
+
+    fn publish_interest(&self, map: &HashMap<InterestSource, InterestEntry>) {
+        let all = interest::merge(map.values().flat_map(|e| e.filters.iter()));
+        let local = interest::merge(
+            map.iter()
+                .filter(|(k, _)| matches!(k, InterestSource::Conn(_)))
+                .flat_map(|(_, e)| e.filters.iter()),
+        );
+        for (tx, merged) in [(&self.interest_all, all), (&self.interest_local, local)] {
+            tx.send_if_modified(|current| {
+                if **current == merged {
+                    false
+                } else {
+                    *current = Arc::new(merged);
+                    true
+                }
+            });
+        }
+    }
+
+    /// Merged interest of the whole cluster as seen here (local clients
+    /// plus peers that reported to this node).
+    pub fn interest(&self) -> watch::Receiver<Arc<Vec<Filter>>> {
+        self.interest_all.subscribe()
+    }
+
+    /// Merged interest of this node's own clients.
+    pub fn local_interest(&self) -> watch::Receiver<Arc<Vec<Filter>>> {
+        self.interest_local.subscribe()
     }
 
     pub fn cfg(&self) -> &NostrConfig {
@@ -239,8 +366,17 @@ impl Relay {
                     .insert(&ev.id);
                 let _ = self.live.send(ev.clone());
                 if let Some(tx) = &self.mesh_tx {
-                    // Re-forwarding mesh input too lets events cross rooms
-                    // and partial meshes; `seen` + the store stop the echo.
+                    // Mesh input goes back to the cluster too: the leader
+                    // re-distributes what followers hand it, and events
+                    // cross rooms; `seen` + the store stop the echo.
+                    let _ = tx.try_send(Fresh {
+                        event: ev.clone(),
+                        origin: origin.clone(),
+                    });
+                }
+                if let Some(tx) = &self.upstream_tx
+                    && !matches!(origin, Origin::Upstream { .. })
+                {
                     let _ = tx.try_send(ev.clone());
                 }
                 Submitted::ok(true, "")
@@ -335,6 +471,7 @@ struct Running {
     shutdown: watch::Sender<bool>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
     mesh: Option<Arc<mesh::Mesh>>,
+    upstreams: Option<Arc<upstream::Upstreams>>,
 }
 
 static RUNNING: tokio::sync::Mutex<Option<Running>> = tokio::sync::Mutex::const_new(None);
@@ -357,7 +494,26 @@ fn validate(cfg: &NostrConfig) -> Result<()> {
     if cfg.cert_path.trim().is_empty() != cfg.key_path.trim().is_empty() {
         bail!("[nostr] cert_path and key_path must be set together");
     }
+    for url in &cfg.upstreams {
+        upstream::parse_url(url).with_context(|| format!("[nostr] upstreams: {url:?}"))?;
+    }
+    upstream_filters(cfg)?;
+    for url in &cfg.bridge_relays {
+        upstream::parse_url(url).with_context(|| format!("[nostr] bridge_relays: {url:?}"))?;
+    }
     Ok(())
+}
+
+/// Parses `[nostr] upstream_filters` (JSON objects as text).
+fn upstream_filters(cfg: &NostrConfig) -> Result<Vec<Filter>> {
+    cfg.upstream_filters
+        .iter()
+        .map(|text| {
+            let value: Value = serde_json::from_str(text)
+                .with_context(|| format!("[nostr] upstream_filters: {text:?} is not JSON"))?;
+            Filter::parse(&value).map_err(|e| anyhow!("[nostr] upstream_filters: {text:?}: {e}"))
+        })
+        .collect()
 }
 
 async fn start(state: &Arc<AppState>) -> Result<Value> {
@@ -409,7 +565,19 @@ async fn launch(state: &Arc<AppState>) -> Result<Running> {
         let (tx, rx) = mpsc::channel(MESH_BUFFER);
         (Some(tx), Some(rx))
     };
-    let relay = Arc::new(Relay::new(cfg.clone(), store, Some(dir), mesh_tx));
+    let (upstream_tx, upstream_rx) = if cfg.upstreams.is_empty() && !cfg.signaling_bridge {
+        (None, None)
+    } else {
+        let (tx, rx) = mpsc::channel(MESH_BUFFER);
+        (Some(tx), Some(rx))
+    };
+    let relay = Arc::new(Relay::new(
+        cfg.clone(),
+        store,
+        Some(dir),
+        mesh_tx,
+        upstream_tx,
+    ));
     let (shutdown, shutdown_rx) = watch::channel(false);
 
     let mut tasks = Vec::new();
@@ -451,6 +619,25 @@ async fn launch(state: &Arc<AppState>) -> Result<Running> {
         },
         None => None,
     };
+    let upstreams = upstream_rx.map(|rx| {
+        // Without a running cluster this relay is its own gateway.
+        let gateway = match &mesh {
+            Some(mesh) => mesh.gateway(),
+            None => watch::channel(true).1,
+        };
+        upstream::Upstreams::start(
+            relay.clone(),
+            upstream::Plan {
+                upstreams: cfg.upstreams.clone(),
+                filters: upstream_filters(&cfg).unwrap_or_default(),
+                publish: cfg.upstream_publish,
+                bridge: cfg.signaling_bridge.then(|| cfg.bridge_relays.clone()),
+                mirror_kinds: cfg.mirror_kinds.clone(),
+            },
+            gateway,
+            rx,
+        )
+    });
     info!(%url, events = relay.event_count(), "nostr: relay listening");
     Ok(Running {
         relay,
@@ -459,6 +646,7 @@ async fn launch(state: &Arc<AppState>) -> Result<Running> {
         shutdown,
         tasks,
         mesh,
+        upstreams,
     })
 }
 
@@ -467,6 +655,9 @@ async fn stop(state: &Arc<AppState>) -> Result<Value> {
     let mut guard = RUNNING.lock().await;
     if let Some(running) = guard.take() {
         let _ = running.shutdown.send(true);
+        if let Some(upstreams) = &running.upstreams {
+            upstreams.stop().await;
+        }
         if let Some(mesh) = &running.mesh {
             mesh.stop().await;
         }
@@ -522,6 +713,7 @@ fn status_of(running: Option<&Running>) -> Value {
         "rejected": relay.rejected.load(Ordering::Relaxed),
         "rooms": relay.cfg.rooms,
         "mesh": running.mesh.as_ref().map(|m| m.status()),
+        "upstreams": running.upstreams.as_ref().map(|u| u.status()),
     })
 }
 
@@ -584,7 +776,7 @@ mod tests {
 
     fn relay(cfg: NostrConfig) -> Relay {
         let store = Store::open(None, StoreLimits { max_events: 100 }, 0).unwrap();
-        Relay::new(cfg, store, None, None)
+        Relay::new(cfg, store, None, None, None)
     }
 
     #[test]

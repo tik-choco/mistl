@@ -14,7 +14,9 @@
 #panel-nostr .nostr-counters div { flex: 1; min-width: 100px; }
 #panel-nostr .nostr-counters dt { font-size: 12px; color: var(--text-dim); }
 #panel-nostr .nostr-counters dd { margin: 5px 0 0; font-size: 22px; }
-#panel-nostr .nostr-rooms { list-style: none; padding: 0; margin: 10px 0; }
-#panel-nostr .nostr-rooms li { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 12px; padding: 8px 0; border-bottom: 1px solid var(--panel-border); overflow-wrap: anywhere; }
-#panel-nostr .nostr-peers { color: var(--text-dim); font-size: 12px; }
+#panel-nostr .nostr-rooms, #panel-nostr .nostr-upstream-list { list-style: none; padding: 0; margin: 10px 0; }
+#panel-nostr .nostr-rooms li, #panel-nostr .nostr-upstream-list li { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 12px; padding: 8px 0; border-bottom: 1px solid var(--panel-border); overflow-wrap: anywhere; }
+#panel-nostr .nostr-room-details, #panel-nostr .nostr-upstream-details { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; color: var(--text-dim); font-size: 12px; }
+#panel-nostr .nostr-role { border: 1px solid var(--panel-border); border-radius: 999px; padding: 1px 7px; }
+#panel-nostr .nostr-role[data-role="leader"] { color: var(--ok); }
 #panel-nostr .settings-drawer { margin-top: 18px; }
