@@ -22,6 +22,75 @@ const MAX_TOTAL_CHARS: usize = 48 * 1024 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_SEQ: u64 = (MAX_BASE64_CHARS / CHUNK_SIZE) as u64;
 
+/// Rewrites top-level members of a JSON object body without re-serializing
+/// the rest: `set` replaces a member in place (or appends it), `remove`
+/// drops it. Nested values are copied verbatim, so key order survives --
+/// decision upstreams (`/systemone`) present `choice` criteria in the order
+/// the client wrote them, while a `Value` round-trip would sort the keys.
+pub(super) fn rewrite_object(
+    bytes: &[u8],
+    set: &[(&str, Value)],
+    remove: &[&str],
+) -> Result<Vec<u8>> {
+    use serde::de::{Deserializer, MapAccess, Visitor};
+    use serde_json::value::RawValue;
+
+    struct Members(Vec<(String, Box<RawValue>)>);
+    impl<'de> serde::Deserialize<'de> for Members {
+        fn deserialize<D: Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+            struct V;
+            impl<'de> Visitor<'de> for V {
+                type Value = Members;
+                fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    f.write_str("a JSON object")
+                }
+                fn visit_map<A: MapAccess<'de>>(
+                    self,
+                    mut map: A,
+                ) -> std::result::Result<Members, A::Error> {
+                    let mut out = Vec::new();
+                    while let Some(entry) = map.next_entry::<String, Box<RawValue>>()? {
+                        out.push(entry);
+                    }
+                    Ok(Members(out))
+                }
+            }
+            d.deserialize_map(V)
+        }
+    }
+
+    let Members(members) = serde_json::from_slice(bytes).context("request_rejected")?;
+    let mut out = String::from("{");
+    let mut written: Vec<&str> = Vec::new();
+    let push = |out: &mut String, key: &str, raw: &str| {
+        if out.len() > 1 {
+            out.push(',');
+        }
+        out.push_str(&Value::String(key.to_string()).to_string());
+        out.push(':');
+        out.push_str(raw);
+    };
+    for (key, raw) in &members {
+        if remove.contains(&key.as_str()) || written.contains(&key.as_str()) {
+            continue;
+        }
+        match set.iter().find(|(k, _)| k == key) {
+            Some((k, value)) => {
+                push(&mut out, key, &value.to_string());
+                written.push(k);
+            }
+            None => push(&mut out, key, raw.get()),
+        }
+    }
+    for (key, value) in set {
+        if !written.contains(key) {
+            push(&mut out, key, &value.to_string());
+        }
+    }
+    out.push('}');
+    Ok(out.into_bytes())
+}
+
 pub(super) fn chunks(bytes: &[u8]) -> Vec<String> {
     let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
     if encoded.is_empty() {
@@ -242,7 +311,7 @@ impl TunnelProvider {
         let method = assembly.method.clone();
         if !matches!(
             path.as_str(),
-            "/chat/completions" | "/models" | "/embeddings"
+            "/chat/completions" | "/models" | "/embeddings" | "/systemone"
         ) {
             bail!("unsupported_path");
         }
@@ -251,7 +320,7 @@ impl TunnelProvider {
         }
         let content_type = assembly.content_type.clone();
         let bytes = assembly.decode()?;
-        let mut body: Value = if bytes.is_empty() {
+        let body: Value = if bytes.is_empty() {
             Value::Null
         } else {
             if !content_type.to_ascii_lowercase().contains("json") {
@@ -260,14 +329,15 @@ impl TunnelProvider {
             serde_json::from_slice(&bytes).map_err(|_| anyhow::anyhow!("request_rejected"))?
         };
         let target = (self.resolve)(&path, &body)?.context("unsupported_path")?;
-        if method == "POST" {
-            let object = body.as_object_mut().context("request_rejected")?;
-            object.remove("temperature");
-            object.insert("model".into(), Value::String(target.model));
+        let payload = if method == "POST" {
+            let mut set = vec![("model", Value::String(target.model.clone()))];
             if path == "/chat/completions" {
-                object.insert("stream".into(), Value::Bool(false));
+                set.push(("stream", Value::Bool(false)));
             }
-        }
+            Some(rewrite_object(&bytes, &set, &["temperature"])?)
+        } else {
+            None
+        };
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(TIMEOUT)
@@ -277,8 +347,10 @@ impl TunnelProvider {
         if !target.api_key.trim().is_empty() {
             request = request.bearer_auth(target.api_key);
         }
-        if method != "GET" {
-            request = request.json(&body);
+        if let Some(payload) = payload {
+            request = request
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(payload);
         }
         let mut response = request.send().await?;
         let status = response.status().as_u16();
@@ -747,6 +819,31 @@ mod tests {
         assert!(consumer.pending.lock().unwrap().is_empty());
     }
 
+    #[test]
+    fn rewrite_object_keeps_nested_key_order_and_rewrites_top_level() {
+        let input = br#"{"temperature":1,"model":"asked","questions":{"q":{"type":"choice","criteria":{"zebra":"z","apple":null}}},"state":"s"}"#;
+        let out = rewrite_object(
+            input,
+            &[("model", json!("served")), ("stream", json!(false))],
+            &["temperature"],
+        )
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(
+            text,
+            r#"{"model":"served","questions":{"q":{"type":"choice","criteria":{"zebra":"z","apple":null}}},"state":"s","stream":false}"#
+        );
+        let dup = rewrite_object(
+            br#"{"model":"a","model":"b"}"#,
+            &[("model", json!("c"))],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(dup, br#"{"model":"c"}"#);
+        assert!(rewrite_object(b"[1]", &[], &[]).is_err());
+        assert!(rewrite_object(b"", &[], &[]).is_err());
+    }
+
     #[tokio::test]
     async fn models_get_and_embeddings_post_are_forwarded_to_the_selected_upstream() {
         for (path, method, request_body, response_body) in [
@@ -761,6 +858,12 @@ mod tests {
                 "POST",
                 json!({"model":"raw","input":"hello"}),
                 json!({"data":[{"embedding":[0.5]}]}),
+            ),
+            (
+                "/systemone",
+                "POST",
+                json!({"model":"raw","state":"hi","questions":{"q":{"type":"noul","instructions":"?"}}}),
+                json!({"model":"raw","answers":{"q":{"type":"noul","noul":0.9}}}),
             ),
         ] {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -44,6 +44,11 @@
 //!   Multipart rather than a raw body because the point of this server is
 //!   that an unmodified OpenAI client can be pointed at it, and every such
 //!   client sends this endpoint that way.
+//! - `POST /v1/rooms/<room>/systemone` -> a System One decision request
+//!   (`{model?, state, questions, images?, keep_alive?}`, as Ollama's
+//!   `/v1/systemone`), relayed unchanged over the room's oai tunnel; the
+//!   provider's upstream status and JSON body come back as-is. Room-scoped
+//!   only: the unscoped `/v1/systemone` answers `404`.
 //! - Unresolvable explicit models -> `404` with OpenAI `model_not_found`.
 //! - Upstream/backend errors: before any deltas were streamed -> `502` with
 //!   `{"error":{"message":...}}` carrying a generic message (the detail is
@@ -100,12 +105,25 @@ pub(super) type OaiFn = Arc<
         + Sync,
 >;
 
+/// Room decision relay. Takes the client's raw JSON body so nested key order
+/// (meaningful for `choice` criteria) reaches the upstream unchanged.
+pub(super) type DecisionFn = Arc<
+    dyn Fn(
+            Vec<u8>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<super::oai_tunnel::TunnelResponse>> + Send>,
+        > + Send
+        + Sync,
+>;
+
 pub(super) struct RoomRoutes {
     pub call: LlmCallFn,
     pub models: ModelsFn,
     pub tts: TtsFn,
     pub stt: SttFn,
     pub oai: OaiFn,
+    /// `POST /systemone` over the room's oai tunnel.
+    pub decision: DecisionFn,
 }
 
 /// Extra browser origins allowed to call the API (`ai.api_allowed_origins`).
@@ -899,7 +917,7 @@ async fn route_request(
     let is_post = head.method.eq_ignore_ascii_case("POST");
     let is_get = head.method.eq_ignore_ascii_case("GET");
     let mut path = head.path.split('?').next().unwrap_or("").to_string();
-    let (call, models, tts_call, stt_call, oai) = if path.starts_with("/v1/rooms/") {
+    let (call, models, tts_call, stt_call, oai, decision) = if path.starts_with("/v1/rooms/") {
         let Some((room, endpoint)) = room_route(&path) else {
             write_error(&mut stream, 404, "Not Found", "invalid room route").await?;
             return Ok(());
@@ -938,9 +956,10 @@ async fn route_request(
             routes.tts,
             routes.stt,
             Some(routes.oai),
+            Some(routes.decision),
         )
     } else {
-        (call, models, tts_call, stt_call, None)
+        (call, models, tts_call, stt_call, None, None)
     };
 
     let body: Vec<u8> = if is_post {
@@ -1012,6 +1031,8 @@ async fn route_request(
     } else if is_post && path == "/v1/audio/transcriptions" {
         let content_type = head.header("content-type").unwrap_or_default().to_string();
         handle_audio_transcriptions(&mut stream, &content_type, &body, &stt_call).await?;
+    } else if is_post && path == "/v1/systemone" {
+        handle_decision(&mut stream, &body, decision.as_ref()).await?;
     } else {
         let _ = write_error(&mut stream, 404, "Not Found", "not found").await;
     }
@@ -1025,7 +1046,7 @@ fn room_route(path: &str) -> Option<(String, String)> {
     let (encoded, endpoint) = rest.split_once('/')?;
     if !matches!(
         endpoint,
-        "models" | "chat/completions" | "audio/speech" | "audio/transcriptions"
+        "models" | "chat/completions" | "audio/speech" | "audio/transcriptions" | "systemone"
     ) {
         return None;
     }
@@ -1309,6 +1330,90 @@ fn split_on<'a>(haystack: &'a [u8], needle: &[u8]) -> Vec<&'a [u8]> {
     out
 }
 
+/// Writes a buffered oai-tunnel response as-is (status, content type, body).
+async fn write_tunnel_response(
+    stream: &mut TcpStream,
+    response: &super::oai_tunnel::TunnelResponse,
+) -> Result<()> {
+    let content_type = if response.content_type.contains(['\r', '\n']) {
+        "application/json"
+    } else {
+        &response.content_type
+    };
+    let reason = if (200..300).contains(&response.status) {
+        "OK"
+    } else {
+        "Upstream Error"
+    };
+    let head = format!(
+        "HTTP/1.1 {} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{}Connection: close\r\n\r\n",
+        response.status,
+        response.body.len(),
+        cors_headers()
+    );
+    stream.write_all(head.as_bytes()).await?;
+    stream.write_all(&response.body).await?;
+    Ok(())
+}
+
+/// `POST /v1/rooms/<room>/systemone`: checks the envelope (an object with a
+/// `state` and a non-empty `questions` object), then relays it over the
+/// room's oai tunnel. Question semantics are left to the upstream server.
+async fn handle_decision(
+    stream: &mut TcpStream,
+    body: &[u8],
+    decision: Option<&DecisionFn>,
+) -> Result<()> {
+    let Some(decision) = decision else {
+        write_error(
+            stream,
+            404,
+            "Not Found",
+            "decision requests need a room-scoped route: /v1/rooms/<room>/systemone",
+        )
+        .await?;
+        return Ok(());
+    };
+    let req: Value = match serde_json::from_slice(body) {
+        Ok(value @ Value::Object(_)) => value,
+        _ => {
+            write_error(
+                stream,
+                400,
+                "Bad Request",
+                "request body must be a JSON object",
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+    if req.get("state").is_none_or(Value::is_null) {
+        write_error(stream, 400, "Bad Request", "'state' is required").await?;
+        return Ok(());
+    }
+    if req
+        .get("questions")
+        .and_then(Value::as_object)
+        .is_none_or(|q| q.is_empty())
+    {
+        write_error(
+            stream,
+            400,
+            "Bad Request",
+            "'questions' must be a non-empty object",
+        )
+        .await?;
+        return Ok(());
+    }
+    match decision(body.to_vec()).await {
+        Ok(response) => write_tunnel_response(stream, &response).await,
+        Err(err) => {
+            write_backend_failure(stream, &err).await;
+            Ok(())
+        }
+    }
+}
+
 async fn handle_chat_completions_with_oai(
     stream: &mut TcpStream,
     body: &[u8],
@@ -1356,25 +1461,7 @@ async fn handle_chat_completions_with_oai(
             }
         };
         if !req.stream || !(200..300).contains(&response.status) {
-            let content_type = if response.content_type.contains(['\r', '\n']) {
-                "application/json"
-            } else {
-                &response.content_type
-            };
-            let reason = if (200..300).contains(&response.status) {
-                "OK"
-            } else {
-                "Upstream Error"
-            };
-            let head = format!(
-                "HTTP/1.1 {} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{}Connection: close\r\n\r\n",
-                response.status,
-                response.body.len(),
-                cors_headers()
-            );
-            stream.write_all(head.as_bytes()).await?;
-            stream.write_all(&response.body).await?;
-            return Ok(());
+            return write_tunnel_response(stream, &response).await;
         }
         let value: Value = match serde_json::from_slice(&response.body) {
             Ok(value) => value,
@@ -1651,6 +1738,23 @@ mod tests {
                         Ok("room".to_string().into())
                     })
                 });
+                let decision_records = records.clone();
+                let decision: DecisionFn = Arc::new(move |body: Vec<u8>| {
+                    decision_records
+                        .lock()
+                        .unwrap()
+                        .push(json!({"route":"decision","raw":String::from_utf8(body).unwrap()}));
+                    Box::pin(async {
+                        Ok(super::super::oai_tunnel::TunnelResponse {
+                            status: 200,
+                            content_type: "application/json".into(),
+                            body: serde_json::to_vec(
+                                &json!({"model":"nimble","answers":{"q":{"type":"noul","noul":0.75}}}),
+                            )
+                            .unwrap(),
+                        })
+                    })
+                });
                 let oai: OaiFn = Arc::new(move |body| {
                     records
                         .lock()
@@ -1682,6 +1786,7 @@ mod tests {
                     tts,
                     stt,
                     oai,
+                    decision,
                 }))
             })
         });
@@ -1723,6 +1828,39 @@ mod tests {
         ] {
             assert!(room_route(path).is_none(), "{path}");
         }
+        assert_eq!(
+            room_route("/v1/rooms/team/systemone"),
+            Some(("team".into(), "systemone".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn room_decision_requests_are_relayed_over_the_tunnel() {
+        let (server, seen) = room_test_server().await;
+        let request = json!({"model":"nimble","state":{"text":"hi"},"questions":{"q":{"type":"noul","instructions":"?"}}});
+        let ordered = r#"{"model":"nimble","state":"s","questions":{"q":{"type":"choice","instructions":"?","criteria":{"zebra":null,"apple":null}}}}"#;
+        let raw = send_request(server.addr(), &format!("POST /v1/rooms/team%2Fone/systemone HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{ordered}", ordered.len())).await;
+        let (head, body) = split_response(&raw);
+        assert_eq!(status_code(&head), 200);
+        let answer: Value = serde_json::from_slice(body).unwrap();
+        assert_eq!(answer["answers"]["q"]["noul"], 0.75);
+        {
+            let records = seen.lock().unwrap();
+            let sent = records.last().unwrap();
+            assert_eq!(sent["route"], "decision");
+            assert_eq!(sent["raw"], ordered, "body is relayed byte-for-byte");
+        }
+        for bad in [
+            json!([1]),
+            json!({"questions":{"q":{"type":"noul","instructions":"?"}}}),
+            json!({"state":"x","questions":{}}),
+        ] {
+            let raw = post_json(&server, "/v1/rooms/team%2Fone/systemone", bad.clone()).await;
+            assert_eq!(status_code(&split_response(&raw).0), 400, "{bad}");
+        }
+        let raw = post_json(&server, "/v1/systemone", request).await;
+        assert_eq!(status_code(&split_response(&raw).0), 404);
+        server.stop();
     }
 
     #[tokio::test]

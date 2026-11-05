@@ -201,6 +201,7 @@ directly, independently of `ai.default_ref`, `ai.tts` and `ai.stt`:
 | POST | `/rooms/{room}/chat/completions` | `llm_request` with the body's `reasoning_effort`; supports JSON and SSE responses |
 | POST | `/rooms/{room}/audio/speech` | That room's advertised TTS service, forwarding body `speed` and `response_format` |
 | POST | `/rooms/{room}/audio/transcriptions` | Multipart upload to that room's advertised STT service |
+| POST | `/rooms/{room}/systemone` | System One decision request (`{model?, state, questions, ...}`, as Ollama's `/v1/systemone`) relayed over the room's `oai` tunnel; upstream status and body are returned as-is |
 
 URL-encode the whole room id as one path segment (for example `team/one` becomes
 `team%2Fone`). It must exactly match an enabled `mist-network://<room>` entry in
@@ -217,7 +218,8 @@ $ curl http://127.0.0.1:6478/v1/rooms/team-room/chat/completions \
 
 Room providers also advertise `oai` when a usable HTTP target exists. The
 mistai-compatible `oai_request` / `oai_response` / `oai_error` tunnel allows only
-`POST /chat/completions`, `GET /models` and `POST /embeddings`. It resolves the
+`POST /chat/completions`, `GET /models`, `POST /embeddings` and `POST /systemone`
+(decision models, e.g. an Ollama upstream). It resolves the
 model against that room's shared refs with the same rules as LLM requests,
 including `model_not_shared`, first-match ordering and empty-model defaults.
 Only the resolved provider's API key is used. Temperature is removed and chat
@@ -236,7 +238,8 @@ Image `content` parts on a room-scoped chat route select a peer advertising
 `oai`. The upstream response is buffered; `stream:true` clients receive a local
 SSE adaptation once that response completes. Text-only chat still uses
 `llm_request`. Local `/rooms/{room}/embeddings` and tunnel consumers for arbitrary
-paths are not exposed; mistai consumers can call all three provider tunnel paths.
+paths are not exposed; mistai consumers can call all four provider tunnel paths.
+The unscoped `/v1/systemone` returns 404: decisions are room-scoped only.
 
 ### API errors
 

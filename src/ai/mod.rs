@@ -397,6 +397,44 @@ impl AiService {
                 })
             })
         };
+        let decision: api_server::DecisionFn = {
+            let session = session.clone();
+            Arc::new(move |raw: Vec<u8>| {
+                let session = session.clone();
+                Box::pin(async move {
+                    let requested: Value =
+                        serde_json::from_slice(&raw).context("invalid decision body")?;
+                    let model = network_model(
+                        requested
+                            .get("model")
+                            .and_then(Value::as_str)
+                            .map(String::from),
+                    );
+                    session
+                        .consumer
+                        .validate_api_model(protocol::SERVICE_OAI, model.as_deref())?;
+                    // Only `model` is rewritten; the rest is relayed verbatim.
+                    let body = oai_tunnel::rewrite_object(
+                        &raw,
+                        &[("model", json!(model.clone().unwrap_or_default()))],
+                        &[],
+                    )?;
+                    session.broadcast(ProtocolMessage::ConsumerHello).await;
+                    let info = session
+                        .consumer
+                        .wait_for_service_model(
+                            protocol::SERVICE_OAI,
+                            model.as_deref(),
+                            DISCOVERY_TIMEOUT,
+                        )
+                        .await?;
+                    session
+                        .oai
+                        .request(&info.node_id, "/systemone", &body, timeout)
+                        .await
+                })
+            })
+        };
         let state = self.state.clone();
         let oai: api_server::OaiFn = Arc::new(move |mut body| {
             let session = session.clone();
@@ -450,6 +488,7 @@ impl AiService {
             tts,
             stt,
             oai,
+            decision,
         }))
     }
 
