@@ -1853,6 +1853,7 @@
 <link rel="stylesheet" href="/assets/features/peers.css">
 <link rel="stylesheet" href="/assets/features/messenger.css">
 <link rel="stylesheet" href="/assets/features/identity.css">
+<link rel="stylesheet" href="/assets/features/authz.css">
 <script>
   /* Seed the theme before first paint (no flash). Light is the default; an
      explicit choice the user made with the toggle (stored in localStorage)
@@ -1900,6 +1901,7 @@
     <a href="#panel-profile"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/></svg><span data-i18n="nav.profile">Profile</span></a>
     <a href="#panel-update"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m8 11 4 4 4-4"/><path d="M4 17v2a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-2"/></svg><span data-i18n="nav.update">Updates</span></a>
     <a href="#panel-settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg><span data-i18n="nav.settings">Settings</span></a>
+    <a href="#panel-access"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v6c0 5 8 9 8 9s8-4 8-9V6Z"/><path d="m8 12 3 3 5-6"/></svg><span data-authz-title>Access</span></a>
   </nav>
 
 <main id="main">
@@ -2783,6 +2785,10 @@
         <div class="empty-note" id="tunnel-events-empty" data-i18n="tunnel.activity.eventsEmpty">No events yet.</div>
       </div>
     </details>
+  </section>
+
+  <section class="panel" id="panel-access">
+    <div id="authz-app"></div>
   </section>
 
   <section class="panel" id="panel-profile">
@@ -12867,7 +12873,7 @@
 
   var PANEL_IDS = [
     "panel-overview", "panel-chat", "panel-ai",
-    "panel-store", "panel-scheduler", "panel-bot", "panel-tunnel", "panel-profile", "panel-update", "panel-settings"
+    "panel-store", "panel-scheduler", "panel-bot", "panel-tunnel", "panel-profile", "panel-access", "panel-update", "panel-settings"
   ];
   var sideLinks = Array.prototype.slice.call(document.querySelectorAll("#sidenav a"));
 
@@ -13102,6 +13108,7 @@
 })();
 </script>
 <script src="/assets/features/identity.js"></script>
+<script src="/assets/features/authz.js"></script>
 <script>
 window.MistlIdentity.mount(document.getElementById("identity-app"), {
   lang: function () { return document.documentElement.lang; },
@@ -13114,6 +13121,25 @@ window.MistlIdentity.mount(document.getElementById("identity-app"), {
     }).then(function (response) { return response.json(); }).then(function (json) {
       if (!json || json.ok !== true) throw new Error("identity request failed");
       return json.data;
+    });
+  }
+});
+window.MistlAuthz.mount(document.getElementById("authz-app"), {
+  lang: function () { return document.documentElement.lang; },
+  call: function (cmd, args) {
+    var build = window.mistlRuntime || {};
+    return fetch("/api/call", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-mistl-ui": "1", "x-mistl-instance": [build.instance_id, build.build_id].join("/") },
+      body: JSON.stringify({ cmd: cmd, args: args || {} })
+    }).then(function (response) { return response.json(); }).then(function (json) {
+      if (!json || json.ok !== true) throw new Error("access request failed");
+      return json.data;
+    });
+  },
+  models: function () {
+    return this.call("config.show", {}).then(function (config) {
+      return Array.from(new Set(((config.ai || {}).providers || []).filter(function (p) { return p.enabled !== false; }).flatMap(function (p) { return p.models || []; }))).sort();
     });
   }
 });

@@ -44,8 +44,8 @@
 //! Keeps a ring buffer of request logs (default cap 50, oldest dropped;
 //! re-logging an id replaces the previous entry): status progresses
 //! `started` -> `streaming` (with cumulative char count) -> `done` /
-//! `error` (with detail). Voice requests are not logged (the `RequestLog`
-//! shape is chat-specific -- `model` there means the *chat* model).
+//! `error` (with detail). Authorization denials are logged for every
+//! request kind; other voice requests are not logged.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -56,6 +56,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use tracing::warn;
 
+use crate::authz::{Action, Authorized, Denied, Service};
 use crate::config::ResolvedModel;
 
 use super::openai::ToolOptions;
@@ -245,6 +246,7 @@ impl JobLimiter {
 /// `(from, id)`. `mime`/`model`/`file_name` are captured from the first
 /// chunk only (peers are not required to repeat them on every chunk).
 struct SttBuffer {
+    authorized: Option<Authorized>,
     mime: String,
     model: Option<String>,
     file_name: Option<String>,
@@ -354,6 +356,7 @@ impl SttBuffers {
             return SttPush::Rejected(SttReject::Busy);
         }
         let buf = self.map.entry(key).or_insert_with(|| SttBuffer {
+            authorized: None,
             mime,
             model,
             file_name,
@@ -591,13 +594,38 @@ impl Provider {
     /// / `tts_request` / `stt_request`; everything else ignored). Runs the
     /// upstream call inline (callers spawn this future per message, so
     /// concurrent requests don't block each other).
+    #[cfg(test)]
     pub async fn handle_message(self: Arc<Self>, from: String, msg: ProtocolMessage) {
+        self.handle_message_in_room(None, from, msg).await;
+    }
+
+    pub async fn handle_message_in_room(
+        self: Arc<Self>,
+        room: Option<String>,
+        from: String,
+        msg: ProtocolMessage,
+    ) {
         match msg {
             msg @ ProtocolMessage::OaiRequest { .. } => {
                 let tunnel = self.oai.read().expect("ai oai lock").clone();
                 if let Some(tunnel) = tunnel {
-                    tunnel.handle_message(&from, msg).await;
+                    let id = match &msg {
+                        ProtocolMessage::OaiRequest { id, .. } => id.clone(),
+                        _ => unreachable!(),
+                    };
+                    if let Err(denied) = tunnel
+                        .handle_message_in_room(room.as_deref(), &from, msg)
+                        .await
+                    {
+                        self.log_denied(&from, &id, None, &denied);
+                    }
                 } else if let ProtocolMessage::OaiRequest { id, .. } = msg {
+                    if self
+                        .authorize_request(room.as_deref(), &from, &id, None, "oai")
+                        .is_none()
+                    {
+                        return;
+                    }
                     (self.send)(
                         &from,
                         ProtocolMessage::OaiError {
@@ -609,7 +637,9 @@ impl Provider {
                 }
             }
             ProtocolMessage::ConsumerHello => {
-                if self.hello_reply_allowed(&from) {
+                if crate::authz::access_allowed(Service::Ai, room.as_deref(), &from)
+                    && self.hello_reply_allowed(&from)
+                {
                     (self.send)(&from, self.hello());
                 }
             }
@@ -631,7 +661,12 @@ impl Provider {
                             .clone()
                     }),
                 };
-                self.handle_llm_request(from, id, messages, tools, model)
+                let Some(authorized) =
+                    self.authorize_request(room.as_deref(), &from, &id, model.clone(), "llm")
+                else {
+                    return;
+                };
+                self.handle_llm_request(from, id, messages, tools, model, authorized)
                     .await;
             }
             ProtocolMessage::TtsRequest {
@@ -643,6 +678,11 @@ impl Provider {
                 speed,
                 response_format,
             } => {
+                let Some(authorized) =
+                    self.authorize_request(room.as_deref(), &from, &id, model.clone(), "voice")
+                else {
+                    return;
+                };
                 self.handle_tts_request(
                     from,
                     id,
@@ -654,6 +694,7 @@ impl Provider {
                         speed,
                         response_format,
                     },
+                    authorized,
                 )
                 .await;
             }
@@ -666,10 +707,58 @@ impl Provider {
                 model,
                 file_name,
             } => {
-                self.handle_stt_request(from, id, seq, data, last, mime, model, file_name)
-                    .await;
+                self.handle_stt_request(
+                    room.as_deref(),
+                    from,
+                    id,
+                    seq,
+                    data,
+                    last,
+                    mime,
+                    model,
+                    file_name,
+                )
+                .await;
             }
             _ => {}
+        }
+    }
+
+    fn log_denied(&self, from: &str, id: &str, model: Option<String>, denied: &Denied) {
+        self.push_log(RequestLog {
+            id: id.into(),
+            from: from.into(),
+            model,
+            status: "error".into(),
+            started_at: chrono::Utc::now().to_rfc3339(),
+            char_count: 0,
+            detail: Some(denied.message.clone()),
+        });
+    }
+
+    fn authorize_request(
+        &self,
+        room: Option<&str>,
+        from: &str,
+        id: &str,
+        model: Option<String>,
+        kind: &str,
+    ) -> Option<Authorized> {
+        match crate::authz::authorize_p2p(Service::Ai, Action::Infer, room, from, None) {
+            Ok(authorized) => Some(authorized),
+            Err(denied) => {
+                self.log_denied(from, id, model, &denied);
+                let id = id.to_string();
+                let code = Some(denied.code.to_string());
+                let message = denied.message;
+                let reply = match kind {
+                    "llm" => ProtocolMessage::LlmError { id, message, code },
+                    "oai" => ProtocolMessage::OaiError { id, message, code },
+                    _ => ProtocolMessage::VoiceError { id, message, code },
+                };
+                (self.send)(from, reply);
+                None
+            }
         }
     }
 
@@ -704,6 +793,7 @@ impl Provider {
         voice: Option<String>,
         lang: Option<String>,
         options: TtsOptions,
+        authorized: Authorized,
     ) {
         let Some(tts) = &self.tts else {
             self.reject_voice_request(&from, id);
@@ -720,7 +810,9 @@ impl Provider {
             );
             return;
         };
-        match tts(text, model, voice, lang, options).await {
+        let result = tts(text, model, voice, lang, options).await;
+        authorized.record(1, 0);
+        match result {
             Ok(audio) => self.send_tts_response(&from, id, audio),
             Err(err) => {
                 (self.send)(
@@ -781,6 +873,7 @@ impl Provider {
     #[allow(clippy::too_many_arguments)]
     async fn handle_stt_request(
         &self,
+        room: Option<&str>,
         from: String,
         id: String,
         seq: u64,
@@ -790,42 +883,63 @@ impl Provider {
         model: Option<String>,
         file_name: Option<String>,
     ) {
-        let Some(stt) = self.stt.clone() else {
-            self.reject_voice_request(&from, id);
-            return;
-        };
-
-        use base64::Engine as _;
-        let decoded = match base64::engine::general_purpose::STANDARD.decode(&data) {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                self.stt_buffers
-                    .lock()
-                    .expect("ai stt buffer lock")
-                    .remove(&from, &id);
-                (self.send)(
-                    &from,
-                    ProtocolMessage::VoiceError {
-                        id,
-                        message: format!("ai: invalid stt_request chunk encoding: {err}"),
-                        code: None,
-                    },
-                );
+        let outcome = {
+            let mut buffers = self.stt_buffers.lock().expect("ai stt buffer lock");
+            buffers.sweep(Instant::now());
+            let authorized = buffers
+                .map
+                .get(&(from.clone(), id.clone()))
+                .and_then(|b| b.authorized.clone())
+                .or_else(|| self.authorize_request(room, &from, &id, model.clone(), "voice"));
+            let Some(authorized) = authorized else {
+                return;
+            };
+            if self.stt.is_none() {
+                self.reject_voice_request(&from, id);
                 return;
             }
-        };
 
-        let outcome = self.stt_buffers.lock().expect("ai stt buffer lock").push(
-            Instant::now(),
-            &from,
-            &id,
-            seq,
-            &decoded,
-            last,
-            mime,
-            model,
-            file_name,
-        );
+            use base64::Engine as _;
+            let decoded = match base64::engine::general_purpose::STANDARD.decode(&data) {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    buffers.remove(&from, &id);
+                    (self.send)(
+                        &from,
+                        ProtocolMessage::VoiceError {
+                            id,
+                            message: format!("ai: invalid stt_request chunk encoding: {err}"),
+                            code: None,
+                        },
+                    );
+                    return;
+                }
+            };
+
+            let mut outcome = buffers.push(
+                Instant::now(),
+                &from,
+                &id,
+                seq,
+                &decoded,
+                last,
+                mime,
+                model,
+                file_name,
+            );
+            match &mut outcome {
+                SttPush::Waiting => {
+                    buffers
+                        .map
+                        .get_mut(&(from.clone(), id.clone()))
+                        .expect("buffered STT request")
+                        .authorized = Some(authorized);
+                }
+                SttPush::Ready(buffer) => buffer.authorized = Some(authorized),
+                SttPush::Rejected(_) => {}
+            }
+            outcome
+        };
 
         let buffer = match outcome {
             SttPush::Waiting => return,
@@ -859,7 +973,11 @@ impl Provider {
             );
             return;
         };
-        match stt(buffer.bytes, buffer.mime, buffer.model, buffer.file_name).await {
+        let authorized = buffer.authorized.expect("authorized STT buffer");
+        let stt = self.stt.as_ref().expect("configured STT upstream");
+        let result = stt(buffer.bytes, buffer.mime, buffer.model, buffer.file_name).await;
+        authorized.record(1, 0);
+        match result {
             Ok(text) => (self.send)(&from, ProtocolMessage::SttResponse { id, text }),
             Err(err) => {
                 (self.send)(
@@ -920,6 +1038,7 @@ impl Provider {
         messages: Vec<super::protocol::ChatMessage>,
         tools: ToolOptions,
         model: Option<String>,
+        authorized: Authorized,
     ) {
         let started_at = chrono::Utc::now().to_rfc3339();
         self.push_log(RequestLog {
@@ -1066,6 +1185,11 @@ impl Provider {
             }
         }
 
+        let output_chars = match &result {
+            Ok(output) => output.content.chars().count(),
+            Err(_) => char_count,
+        };
+        authorized.record(1, output_chars as u64);
         match result {
             Ok(super::openai::ChatOutput {
                 content,
@@ -1213,9 +1337,449 @@ impl Provider {
 mod tests {
     use super::*;
     use crate::ai::protocol::ChatMessage;
+    use serde_json::json;
+
+    struct AuthzReset;
+
+    impl AuthzReset {
+        fn new() -> Self {
+            crate::authz::test_reset();
+            Self
+        }
+    }
+
+    impl Drop for AuthzReset {
+        fn drop(&mut self) {
+            crate::authz::test_reset();
+        }
+    }
+
+    fn llm_request(id: &str) -> ProtocolMessage {
+        ProtocolMessage::LlmRequest {
+            id: id.into(),
+            messages: messages(),
+            model: None,
+            reasoning_effort: None,
+            tools: None,
+            tool_choice: None,
+        }
+    }
+
+    fn ai_usage(node: &str) -> serde_json::Value {
+        let usage = crate::authz::test_command("authz.usage", json!({"service":"ai"})).unwrap();
+        usage["ai"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["account"] == format!("node:{node}"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null)
+    }
+
+    #[tokio::test]
+    async fn authorization_denies_all_request_kinds_before_upstream_and_logs_errors() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
+        let _reset = AuthzReset::new();
+        let peer = "0123456789abcdef";
+        crate::authz::test_command("authz.deny.add", json!({"service":"ai", "subject":peer}))
+            .unwrap();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = calls.clone();
+        let call: LlmCallFn = Arc::new(move |_, _, _, _| {
+            count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Box::pin(async { Ok("unexpected".to_string().into()) })
+        });
+        let (send, sent) = fake_send();
+        let provider = Provider::new_with_voice(send.clone(), call, vec![], None, None, vec![]);
+        let count = calls.clone();
+        provider.set_oai(super::super::oai_tunnel::TunnelProvider::new(
+            send,
+            Arc::new(move |_, _| {
+                count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(None)
+            }),
+        ));
+        // Authorization wins over concurrency and unsupported-service errors.
+        let _job1 = provider
+            .limiter
+            .try_acquire(peer, MAX_JOBS_PER_PEER)
+            .unwrap();
+        let _job2 = provider
+            .limiter
+            .try_acquire(peer, MAX_JOBS_PER_PEER)
+            .unwrap();
+        let requests = [
+            llm_request("llm"),
+            ProtocolMessage::TtsRequest {
+                id: "tts".into(),
+                text: "hello".into(),
+                model: None,
+                voice: None,
+                lang: None,
+                speed: None,
+                response_format: None,
+            },
+            ProtocolMessage::SttRequest {
+                id: "stt".into(),
+                seq: 0,
+                data: String::new(),
+                last: true,
+                mime: "audio/wav".into(),
+                model: None,
+                file_name: None,
+            },
+            ProtocolMessage::OaiRequest {
+                id: "oai".into(),
+                seq: 0,
+                data: String::new(),
+                last: true,
+                path: Some("/models".into()),
+                method: Some("GET".into()),
+                content_type: None,
+            },
+        ];
+        for request in requests {
+            provider
+                .clone()
+                .handle_message_in_room(Some("w3-denied".into()), peer.into(), request)
+                .await;
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.len(), 4);
+        for (to, msg) in sent.iter() {
+            assert_eq!(to, peer);
+            let (code, message) = match msg {
+                ProtocolMessage::LlmError { code, message, .. }
+                | ProtocolMessage::VoiceError { code, message, .. }
+                | ProtocolMessage::OaiError { code, message, .. } => (code, message),
+                _ => panic!("unexpected reply: {msg:?}"),
+            };
+            assert_eq!(
+                code.as_deref(),
+                Some(super::super::protocol::CODE_FORBIDDEN)
+            );
+            assert_eq!(message, "Access denied");
+        }
+        assert_eq!(provider.logs().len(), 4);
+        assert!(provider.logs().iter().all(|log| log.status == "error"));
+        assert!(ai_usage(peer).is_null());
+    }
+
+    #[tokio::test]
+    async fn verified_allowlisted_peer_gets_normal_reply_and_usage() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
+        let _reset = AuthzReset::new();
+        let room = format!("w3-allow-{}", uuid::Uuid::new_v4());
+        let identity = crate::identity::for_test();
+        let peer = identity.node_id();
+        let now = crate::net::peer_auth::now_ms();
+        let proof = crate::net::peer_auth::build_proof(
+            crate::net::peer_auth::HELLO_TAG,
+            &room,
+            &identity,
+            now,
+            &crate::net::peer_auth::fresh_nonce(),
+            false,
+        );
+        let proof = crate::net::peer_auth::check_proof(
+            &proof,
+            crate::net::peer_auth::HELLO_TAG,
+            &room,
+            &peer,
+            now,
+        )
+        .unwrap();
+        crate::net::peer_auth::accept_proof(&room, &proof).unwrap();
+        crate::authz::test_command(
+            "authz.mode.set",
+            json!({"service":"ai", "mode":"allowlist"}),
+        )
+        .unwrap();
+        crate::authz::test_command(
+            "authz.allow.add",
+            json!({"service":"ai", "subject":identity.did()}),
+        )
+        .unwrap();
+        let (send, sent) = fake_send();
+        let provider = Provider::new_with_voice(
+            send,
+            fake_call_success(vec!["Hi", "世界"], "Hi世界"),
+            vec![],
+            None,
+            None,
+            vec![],
+        );
+        provider
+            .clone()
+            .handle_message_in_room(Some(room.clone()), peer.clone(), llm_request("allowed"))
+            .await;
+        assert!(matches!(&sent.lock().unwrap().last().unwrap().1,
+            ProtocolMessage::LlmResponseDone { content: Some(content), .. } if content == "Hi世界"));
+        assert_eq!(ai_usage(&peer)["requests"], 1);
+        assert_eq!(ai_usage(&peer)["output_chars"], 4);
+        crate::net::peer_auth::forget_room(&room);
+    }
+
+    #[tokio::test]
+    async fn usage_limit_returns_code_without_another_upstream_call() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
+        let _reset = AuthzReset::new();
+        let peer = "0123456789abcdef";
+        crate::authz::test_command(
+            "authz.limits.set",
+            json!({"service":"ai", "subject":peer,
+            "limits":{"max_output_chars":2}}),
+        )
+        .unwrap();
+        let (send, sent) = fake_send();
+        let provider = Provider::new_with_voice(
+            send,
+            fake_call_success(vec!["世界"], "世界"),
+            vec![],
+            None,
+            None,
+            vec![],
+        );
+        provider
+            .clone()
+            .handle_message(peer.into(), llm_request("first"))
+            .await;
+        provider
+            .clone()
+            .handle_message(peer.into(), llm_request("limited"))
+            .await;
+        assert!(matches!(&sent.lock().unwrap().last().unwrap().1,
+            ProtocolMessage::LlmError { code: Some(code), message, .. }
+                if code == super::super::protocol::CODE_USAGE_LIMIT && message == "Usage limit exceeded"));
+        assert_eq!(ai_usage(peer)["requests"], 1);
+        assert_eq!(ai_usage(peer)["output_chars"], 2);
+        assert_eq!(provider.logs()[0].status, "error");
+    }
+
+    #[tokio::test]
+    async fn upstream_error_charges_partial_generated_chars_once() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
+        let _reset = AuthzReset::new();
+        let peer = "0123456789abcdef";
+        let (send, _) = fake_send();
+        let call: LlmCallFn = Arc::new(|_, _, _, delta_tx| {
+            Box::pin(async move {
+                delta_tx.unwrap().send("a界".into()).unwrap();
+                anyhow::bail!("upstream failed")
+            })
+        });
+        let provider = Provider::new_with_voice(send, call, vec![], None, None, vec![]);
+        provider
+            .clone()
+            .handle_message(peer.into(), llm_request("partial"))
+            .await;
+        assert_eq!(ai_usage(peer)["requests"], 1);
+        assert_eq!(ai_usage(peer)["output_chars"], 2);
+    }
+
+    #[tokio::test]
+    async fn consumer_hello_suppresses_denied_peers_but_ignores_usage_limits() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
+        let _reset = AuthzReset::new();
+        let peer = "0123456789abcdef";
+        let (send, sent) = fake_send();
+        let provider = Provider::new_with_voice(
+            send,
+            fake_call_success(vec![], ""),
+            vec![],
+            None,
+            None,
+            vec![],
+        );
+        crate::authz::test_command("authz.deny.add", json!({"service":"ai", "subject":peer}))
+            .unwrap();
+        provider
+            .clone()
+            .handle_message(peer.into(), ProtocolMessage::ConsumerHello)
+            .await;
+        assert!(sent.lock().unwrap().is_empty());
+        crate::authz::test_command("authz.deny.remove", json!({"service":"ai", "subject":peer}))
+            .unwrap();
+        crate::authz::test_command(
+            "authz.limits.set",
+            json!({"service":"ai", "subject":peer,
+            "limits":{"max_requests":0}}),
+        )
+        .unwrap();
+        provider
+            .clone()
+            .handle_message(peer.into(), ProtocolMessage::ConsumerHello)
+            .await;
+        assert!(matches!(
+            &sent.lock().unwrap()[0].1,
+            ProtocolMessage::ProviderHello { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn stt_authorizes_first_chunk_and_charges_one_request() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
+        let _reset = AuthzReset::new();
+        let peer = "0123456789abcdef";
+        let (send, sent) = fake_send();
+        let captured = Arc::new(Mutex::new(None));
+        let provider = Provider::new_with_voice(
+            send,
+            fake_call_success(vec![], ""),
+            vec![],
+            None,
+            Some(fake_stt_success("ok", captured.clone())),
+            vec![],
+        );
+        for seq in 0..2 {
+            if seq == 1 {
+                crate::authz::test_command(
+                    "authz.deny.add",
+                    json!({"service":"ai", "subject":peer}),
+                )
+                .unwrap();
+            }
+            provider
+                .clone()
+                .handle_message(
+                    peer.into(),
+                    ProtocolMessage::SttRequest {
+                        id: "stt".into(),
+                        seq,
+                        data: "eA==".into(),
+                        last: seq == 1,
+                        mime: "audio/wav".into(),
+                        model: None,
+                        file_name: None,
+                    },
+                )
+                .await;
+        }
+        assert!(
+            matches!(&sent.lock().unwrap()[0].1, ProtocolMessage::SttResponse { text, .. } if text == "ok")
+        );
+        assert_eq!(captured.lock().unwrap().as_ref().unwrap().0, b"xx");
+        assert_eq!(ai_usage(peer)["requests"], 1);
+        assert_eq!(ai_usage(peer)["output_chars"], 0);
+    }
+
+    #[tokio::test]
+    async fn tts_success_and_failure_each_charge_one_request() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
+        let _reset = AuthzReset::new();
+        let peer = "0123456789abcdef";
+        for tts in [
+            fake_tts_success(vec![0; TTS_CHUNK_RAW_BYTES + 1], "audio/wav"),
+            fake_tts_error("failed"),
+        ] {
+            let (send, _) = fake_send();
+            let provider = Provider::new_with_voice(
+                send,
+                fake_call_success(vec![], ""),
+                vec![],
+                Some(tts),
+                None,
+                vec![],
+            );
+            provider
+                .clone()
+                .handle_message(
+                    peer.into(),
+                    ProtocolMessage::TtsRequest {
+                        id: "tts".into(),
+                        text: "hello".into(),
+                        model: None,
+                        voice: None,
+                        lang: None,
+                        speed: None,
+                        response_format: None,
+                    },
+                )
+                .await;
+        }
+        assert_eq!(ai_usage(peer)["requests"], 2);
+        assert_eq!(ai_usage(peer)["output_chars"], 0);
+    }
+
+    #[tokio::test]
+    async fn oai_authorizes_first_chunk_and_charges_one_request() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
+        let _reset = AuthzReset::new();
+        let peer = "0123456789abcdef";
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                let mut buf = [0; 1024];
+                let n = socket.read(&mut buf).await.unwrap();
+                assert!(n > 0);
+                request.extend_from_slice(&buf[..n]);
+            }
+            assert!(request.starts_with(b"GET /v1/models "));
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"data\":[]}").await.unwrap();
+        });
+        let (send, sent) = fake_send();
+        let provider = Provider::new_with_voice(
+            send.clone(),
+            fake_call_success(vec![], ""),
+            vec![],
+            None,
+            None,
+            vec![],
+        );
+        provider.set_oai(super::super::oai_tunnel::TunnelProvider::new(
+            send,
+            Arc::new(move |_, _| {
+                Ok(Some(ResolvedModel {
+                    base_url: format!("http://{addr}/v1"),
+                    api_key: String::new(),
+                    model: "test".into(),
+                    reasoning_effort: None,
+                    voice: None,
+                    lang_voices: HashMap::new(),
+                }))
+            }),
+        ));
+        for seq in 0..2 {
+            if seq == 1 {
+                crate::authz::test_command(
+                    "authz.deny.add",
+                    json!({"service":"ai", "subject":peer}),
+                )
+                .unwrap();
+            }
+            provider
+                .clone()
+                .handle_message(
+                    peer.into(),
+                    ProtocolMessage::OaiRequest {
+                        id: "oai".into(),
+                        seq,
+                        data: String::new(),
+                        last: seq == 1,
+                        path: (seq == 0).then(|| "/models".into()),
+                        method: Some("GET".into()),
+                        content_type: None,
+                    },
+                )
+                .await;
+        }
+        server.await.unwrap();
+        assert!(matches!(
+            &sent.lock().unwrap()[0].1,
+            ProtocolMessage::OaiResponse { last: true, .. }
+        ));
+        assert_eq!(ai_usage(peer)["requests"], 1);
+        assert_eq!(ai_usage(peer)["output_chars"], 0);
+    }
 
     #[tokio::test]
     async fn inbound_effort_reaches_default_call_verbatim_and_absence_stays_absent() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         let seen = Arc::new(Mutex::new(Vec::new()));
         let copy = seen.clone();
         let call: LlmCallFn = Arc::new(move |_, options, _, _| {
@@ -1318,6 +1882,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_path_emits_chunks_then_done() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         let (send, sent) = fake_send();
         let call = fake_call_success(vec!["Hel", "lo"], "Hello");
         let provider = Provider::new_with_voice(send, call, vec![], None, None, vec![]);
@@ -1374,6 +1939,7 @@ mod tests {
 
     #[tokio::test]
     async fn error_path_emits_llm_error() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         let (send, sent) = fake_send();
         let call = fake_call_error("upstream boom");
         let provider = Provider::new_with_voice(send, call, vec![], None, None, vec![]);
@@ -1469,6 +2035,7 @@ mod tests {
 
     #[tokio::test]
     async fn consumer_hello_gets_hello_reply() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         let (send, sent) = fake_send();
         let call = fake_call_success(vec![], "");
         let provider = Provider::new_with_voice(send, call, vec!["m1".into()], None, None, vec![]);
@@ -1486,6 +2053,7 @@ mod tests {
 
     #[tokio::test]
     async fn consumer_hello_replies_are_throttled_per_peer() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         let (send, sent) = fake_send();
         let call = fake_call_success(vec![], "");
         let provider = Provider::new_with_voice(send, call, vec![], None, None, vec![]);
@@ -1506,6 +2074,7 @@ mod tests {
 
     #[tokio::test]
     async fn log_status_transitions() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         let (send, _sent) = fake_send();
         let call = fake_call_success(vec!["a", "b"], "ab");
         let provider = Provider::new_with_voice(send, call, vec![], None, None, vec![]);
@@ -1540,6 +2109,7 @@ mod tests {
 
     #[tokio::test]
     async fn log_ring_buffer_caps_and_orders_newest_first() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         let (send, _sent) = fake_send();
         let call = fake_call_success(vec![], "ok");
         let provider = Provider::new_with_voice(send, call, vec![], None, None, vec![]);
@@ -1572,6 +2142,7 @@ mod tests {
 
     #[tokio::test]
     async fn re_logging_same_id_replaces_in_place() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         let (send, _sent) = fake_send();
         // Multiple deltas trigger multiple push_log calls (started ->
         // streaming x N -> done) for the *same* request id; the log length
@@ -1600,6 +2171,7 @@ mod tests {
 
     #[tokio::test]
     async fn tts_request_gets_voice_error_reply() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         let (send, sent) = fake_send();
         let call = fake_call_success(vec![], "");
         let provider = Provider::new_with_voice(send, call, vec![], None, None, vec![]);
@@ -1635,6 +2207,7 @@ mod tests {
 
     #[tokio::test]
     async fn stt_request_gets_voice_error_reply() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         let (send, sent) = fake_send();
         let call = fake_call_success(vec![], "");
         let provider = Provider::new_with_voice(send, call, vec![], None, None, vec![]);
@@ -1670,6 +2243,7 @@ mod tests {
 
     #[tokio::test]
     async fn voice_requests_do_not_affect_unrelated_llm_requests() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         // Guards against a shared-state regression: handling a tts_request
         // must not touch the provider's llm_request logging/response path.
         let (send, sent) = fake_send();
@@ -1728,6 +2302,7 @@ mod tests {
 
     #[tokio::test]
     async fn call_upstream_bypasses_network() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         let (send, sent) = fake_send();
         let call = fake_call_success(vec!["x"], "x");
         let provider = Provider::new_with_voice(send, call, vec![], None, None, vec![]);
@@ -1759,6 +2334,7 @@ mod tests {
 
     #[tokio::test]
     async fn call_upstream_resolves_an_advertised_name_rather_than_using_the_default_call() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         // The local API server advertises the same names as
         // `provider_hello`, so one of those names must reach *that
         // model reference's* upstream. Before this was wired up the name went to
@@ -1799,6 +2375,7 @@ mod tests {
 
     #[tokio::test]
     async fn call_upstream_rejects_a_name_that_is_not_advertised() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         let (send, _sent) = fake_send();
         let call = fake_call_success(vec!["x"], "x");
         let mut advertised = HashMap::new();
@@ -1908,6 +2485,7 @@ mod tests {
 
     #[tokio::test]
     async fn llm_request_named_but_unshared_model_is_rejected_without_calling_upstream() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         let (send, sent) = fake_send();
         // This closure must never run: a rejected request must short-circuit
         // before reaching either the default closure or any upstream call.
@@ -1968,6 +2546,7 @@ mod tests {
     /// label) is what actually reaches the upstream request body.
     #[tokio::test]
     async fn llm_request_with_a_matching_raw_id_calls_that_models_own_upstream() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 
@@ -2266,6 +2845,7 @@ mod tests {
 
     #[tokio::test]
     async fn tts_request_with_configured_tts_synthesizes_and_replies_in_chunks() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         use base64::Engine as _;
         let engine = base64::engine::general_purpose::STANDARD;
 
@@ -2327,6 +2907,7 @@ mod tests {
 
     #[tokio::test]
     async fn tts_request_lang_hint_is_forwarded_to_the_tts_closure() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         let captured: Arc<Mutex<Option<TtsCallArgs>>> = Arc::new(Mutex::new(None));
         let (send, _sent) = fake_send();
         let call = fake_call_success(vec![], "");
@@ -2368,6 +2949,7 @@ mod tests {
 
     #[tokio::test]
     async fn tts_request_upstream_failure_sends_voice_error_without_code() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         let (send, sent) = fake_send();
         let call = fake_call_success(vec![], "");
         let provider = Provider::new_with_voice(
@@ -2410,6 +2992,7 @@ mod tests {
 
     #[tokio::test]
     async fn stt_request_reassembles_chunks_and_replies_with_text() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         use base64::Engine as _;
         let engine = base64::engine::general_purpose::STANDARD;
 
@@ -2482,6 +3065,7 @@ mod tests {
 
     #[tokio::test]
     async fn stt_request_upstream_failure_sends_voice_error_without_code() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         use base64::Engine as _;
         let engine = base64::engine::general_purpose::STANDARD;
 
@@ -2527,6 +3111,7 @@ mod tests {
 
     #[tokio::test]
     async fn stt_request_buffer_overflow_sends_voice_error_and_skips_upstream_call() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         let captured: Arc<Mutex<Option<SttCallArgs>>> = Arc::new(Mutex::new(None));
         let (send, sent) = fake_send();
         let call = fake_call_success(vec![], "");
@@ -2577,6 +3162,7 @@ mod tests {
 
     #[tokio::test]
     async fn legacy_mode_ignores_the_peer_supplied_model() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         let seen: Arc<Mutex<Option<Option<String>>>> = Arc::new(Mutex::new(None));
         let seen2 = seen.clone();
         let call: LlmCallFn = Arc::new(move |_m, _tools, model, _tx| {
@@ -2844,6 +3430,7 @@ mod tests {
 
     #[tokio::test]
     async fn tool_request_reaches_the_call_and_tool_calls_come_back_in_done() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         let seen: Arc<Mutex<Option<(Vec<ChatMessage>, ToolOptions)>>> = Arc::new(Mutex::new(None));
         let seen2 = seen.clone();
         let calls = serde_json::json!([{"id":"c1","type":"function",
@@ -2907,6 +3494,7 @@ mod tests {
 
     #[tokio::test]
     async fn oversized_tools_get_an_llm_error_and_no_upstream_call() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         let called = Arc::new(Mutex::new(false));
         let called2 = called.clone();
         let call: LlmCallFn = Arc::new(move |_m, _t, _model, _tx| {

@@ -84,6 +84,7 @@ options and approval behavior.
 | [Configuration](docs/configuration.md) | `config.toml` keys and where data lives |
 | [AI configuration](docs/ai-config.md) | Providers, rooms and the local API |
 | [Identity](docs/identity.md) | Profile document and DID delegation |
+| [Authorization](docs/authorization.md) | Allow/deny peers, API tokens, usage limits, capabilities |
 | [Architecture](docs/architecture.md) | Modules, interop, bot delivery, known limitations |
 | [Runtime](docs/runtime.md) | Dev and stable instances, connection controls |
 | [Building from source](docs/building.md) | Requirements, build, releases |

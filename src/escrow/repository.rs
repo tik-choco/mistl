@@ -19,6 +19,8 @@ pub const MAX_MANIFEST: usize = 128 * 1024;
 #[derive(Clone, Serialize, Deserialize)]
 struct Record {
     room: String,
+    #[serde(default)]
+    owner: Option<String>,
     current: Head,
     previous: Option<Head>,
     #[serde(default = "default_held")]
@@ -60,9 +62,16 @@ struct Index {
     blocks: HashMap<(String, String), Block>,
     bytes: u64,
     reserved: u64,
-    pending_slots: HashMap<String, String>,
+    owner_bytes: HashMap<String, u64>,
+    owner_reserved: HashMap<String, u64>,
+    pending_slots: HashMap<String, PendingSlot>,
     manifests: HashMap<(String, String), (FileManifest, usize)>,
     write_failed: bool,
+}
+
+struct PendingSlot {
+    room: String,
+    owner: Option<String>,
 }
 
 pub struct Repository {
@@ -441,6 +450,10 @@ impl Repository {
         self.index.lock().unwrap().bytes
     }
 
+    pub fn owner_bytes(&self) -> HashMap<String, u64> {
+        self.index.lock().unwrap().owner_bytes.clone()
+    }
+
     pub fn rooms(&self) -> Vec<String> {
         let index = self.index.lock().unwrap();
         let mut rooms: Vec<_> = index.records.values().map(|r| r.room.clone()).collect();
@@ -455,6 +468,8 @@ impl Repository {
         &'a self,
         room: &str,
         head: &Head,
+        owner: Option<&str>,
+        owner_limit: Option<u64>,
     ) -> Result<Option<Reservation<'a>>, Error> {
         head.validate(self.cfg.max_blob_bytes)?;
         head.verify()?;
@@ -483,7 +498,7 @@ impl Repository {
             + index
                 .pending_slots
                 .values()
-                .filter(|r| r.as_str() == room)
+                .filter(|r| r.room == room)
                 .count();
         if !index.records.contains_key(&k)
             && (slots >= self.cfg.max_slots_per_room
@@ -492,6 +507,22 @@ impl Repository {
             return Err(Error::new("quota"));
         }
         let amount = head.size + manifest_limit(head.size) as u64;
+        // A new owner also inherits whichever previous head the commit retains.
+        let inherited = record
+            .filter(|r| owner.is_some() && r.owner.as_deref() != owner && r.deleted.is_none())
+            .and_then(|r| {
+                let retained = if r.current == *head {
+                    r.previous.as_ref().filter(|_| r.previous_held)
+                } else {
+                    Some(&r.current).filter(|_| r.held)
+                }?;
+                index
+                    .manifests
+                    .get(&(k.clone(), retained.hash()))
+                    .map(|(_, len)| retained.size + *len as u64)
+            })
+            .unwrap_or(0);
+        let owner_amount = amount.saturating_add(inherited);
         if index
             .bytes
             .saturating_add(index.reserved)
@@ -500,12 +531,35 @@ impl Repository {
         {
             return Err(Error::new("quota"));
         }
+        if let (Some(owner), Some(limit)) = (owner, owner_limit)
+            && index
+                .owner_bytes
+                .get(owner)
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(index.owner_reserved.get(owner).copied().unwrap_or(0))
+                .saturating_add(owner_amount)
+                > limit
+        {
+            return Err(Error::new("quota"));
+        }
         index.reserved += amount;
-        index.pending_slots.insert(k.clone(), room.into());
+        if let Some(owner) = owner {
+            *index.owner_reserved.entry(owner.into()).or_default() += owner_amount;
+        }
+        index.pending_slots.insert(
+            k.clone(),
+            PendingSlot {
+                room: room.into(),
+                owner: owner.map(str::to_owned),
+            },
+        );
         Ok(Some(Reservation {
             repo: self,
             key: k,
             amount,
+            owner: owner.map(str::to_owned),
+            owner_amount,
         }))
     }
 
@@ -538,12 +592,17 @@ impl Repository {
             }
             _ => (None, false),
         };
+        let owner = index
+            .pending_slots
+            .get(&key(room, &head.slot))
+            .and_then(|pending| pending.owner.clone());
         self.commit_inner(
             &mut index,
             room,
             head,
             previous,
             previous_held,
+            owner,
             blob,
             manifest_bytes,
             &manifest,
@@ -618,7 +677,7 @@ impl Repository {
                 + index
                     .pending_slots
                     .values()
-                    .filter(|r| r.as_str() == room)
+                    .filter(|r| r.room == room)
                     .count();
             if slots >= self.cfg.max_slots_per_room
                 || index.records.len() + index.pending_slots.len() >= 65536
@@ -641,6 +700,7 @@ impl Repository {
             head,
             previous,
             previous_held,
+            None,
             blob,
             manifest_bytes,
             &manifest,
@@ -660,6 +720,7 @@ impl Repository {
         head: &Head,
         previous: Option<Head>,
         previous_held: bool,
+        owner: Option<String>,
         blob: &[u8],
         bytes: &[u8],
         manifest: &FileManifest,
@@ -673,6 +734,7 @@ impl Repository {
         sync_dir(&self.root.join("blobs"))?;
         let record = Record {
             room: room.into(),
+            owner,
             current: head.clone(),
             previous,
             previous_held,
@@ -705,6 +767,7 @@ impl Repository {
     fn rebuild_index(&self, index: &mut Index) {
         index.blocks.clear();
         index.bytes = 0;
+        index.owner_bytes.clear();
         let records: Vec<_> = index
             .records
             .iter()
@@ -719,6 +782,9 @@ impl Repository {
                     continue;
                 };
                 self.index_generation(index, &record.room, &k, h, &manifest, len);
+                if let Some(owner) = &record.owner {
+                    *index.owner_bytes.entry(owner.clone()).or_default() += h.size + len as u64;
+                }
             }
         }
         index.manifests.retain(|key, _| retained.contains(key));
@@ -873,11 +939,21 @@ pub struct Reservation<'a> {
     repo: &'a Repository,
     key: String,
     amount: u64,
+    owner: Option<String>,
+    owner_amount: u64,
 }
 impl Drop for Reservation<'_> {
     fn drop(&mut self) {
         let mut index = self.repo.index.lock().unwrap();
         index.reserved -= self.amount;
+        if let Some(owner) = &self.owner
+            && let Some(reserved) = index.owner_reserved.get_mut(owner)
+        {
+            *reserved -= self.owner_amount;
+            if *reserved == 0 {
+                index.owner_reserved.remove(owner);
+            }
+        }
         index.pending_slots.remove(&self.key);
     }
 }

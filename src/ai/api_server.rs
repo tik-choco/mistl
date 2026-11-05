@@ -3,8 +3,11 @@
 //! requests are answered by the p2p network (or the local provider).
 //!
 //! Hand-rolled minimal HTTP/1.1 over tokio TCP -- same spirit as the
-//! project's RTSP and IPC servers; no hyper/axum. Loopback-oriented, no
-//! auth (any `Authorization` header is accepted and ignored).
+//! project's RTSP and IPC servers; no hyper/axum. Token auth is optional
+//! by default: `mst_` bearer tokens enforce per-token models and usage limits;
+//! `authz.api.require_token` requires a live token for every API request.
+//! Invalid tokens, disallowed models, and exhausted limits return 401, 403,
+//! and 429 respectively. CORS preflights do not require a token.
 //!
 //! ## Endpoints
 //!
@@ -210,6 +213,11 @@ impl ApiServer {
         let addr = listener
             .local_addr()
             .context("reading bound api server address")?;
+        if !addr.ip().to_canonical().is_loopback() && !crate::authz::api_token_required() {
+            warn!(
+                "local API is reachable from the network without token auth; set authz api require_token"
+            );
+        }
 
         let conns: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
         let conns_for_loop = conns.clone();
@@ -568,9 +576,19 @@ async fn write_json_response(
     reason: &str,
     body: &Value,
 ) -> io::Result<()> {
+    write_json_response_with_headers(stream, status, reason, body, "").await
+}
+
+async fn write_json_response_with_headers(
+    stream: &mut TcpStream,
+    status: u16,
+    reason: &str,
+    body: &Value,
+    headers: &str,
+) -> io::Result<()> {
     let body_bytes = serde_json::to_vec(body).unwrap_or_else(|_| b"{}".to_vec());
     let head = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{}Connection: close\r\n\r\n",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{}{headers}Connection: close\r\n\r\n",
         body_bytes.len(),
         cors_headers()
     );
@@ -599,6 +617,53 @@ async fn write_error(
     .await
 }
 
+async fn write_denied(stream: &mut TcpStream, denied: crate::authz::Denied) -> io::Result<()> {
+    let status = denied.http_status();
+    let (reason, headers) = match status {
+        401 => ("Unauthorized", "WWW-Authenticate: Bearer\r\n"),
+        429 => ("Too Many Requests", ""),
+        _ => ("Forbidden", ""),
+    };
+    write_json_response_with_headers(
+        stream,
+        status,
+        reason,
+        &json!({"error": {
+            "message": denied.message,
+            "type": "invalid_request_error",
+            "code": denied.code,
+        }}),
+        headers,
+    )
+    .await
+}
+
+/// Charge each backend attempt once, including partial output on stream or
+/// socket failure. Parsing and authorization failures never start an attempt.
+struct ApiUsage {
+    authorized: crate::authz::Authorized,
+    started: bool,
+    output_chars: u64,
+}
+
+impl ApiUsage {
+    fn new(authorized: crate::authz::Authorized) -> Self {
+        Self {
+            authorized,
+            started: false,
+            output_chars: 0,
+        }
+    }
+}
+
+impl Drop for ApiUsage {
+    fn drop(&mut self) {
+        if self.started {
+            self.authorized.record(1, self.output_chars);
+        }
+    }
+}
+
 /// Write one HTTP chunked-transfer frame (`payload` may be empty, which
 /// produces the terminating `0\r\n\r\n` frame) and flush.
 async fn write_http_chunk(stream: &mut TcpStream, payload: &[u8]) -> io::Result<()> {
@@ -625,10 +690,11 @@ fn gen_id(prefix: &str) -> String {
     format!("{prefix}-{hex}")
 }
 
-fn models_response(models: &ModelsFn) -> Value {
+fn models_response(models: &ModelsFn, allowed: Option<&[String]>) -> Value {
     let list = models();
     let data: Vec<Value> = list
         .into_iter()
+        .filter(|id| allowed.is_none_or(|allowed| allowed.contains(id)))
         .map(|id| json!({"id": id, "object": "model", "owned_by": "mistl"}))
         .collect();
     json!({"object": "list", "data": data})
@@ -1022,15 +1088,36 @@ async fn route_request(
     };
 
     if is_get && path == "/v1/models" {
-        let body = models_response(&models);
+        let allowed = match crate::authz::api_model_filter(head.header("authorization")) {
+            Ok(allowed) => allowed,
+            Err(denied) => {
+                write_denied(&mut stream, denied).await?;
+                return Ok(());
+            }
+        };
+        let body = models_response(&models, allowed.as_deref());
         let _ = write_json_response(&mut stream, 200, "OK", &body).await;
     } else if is_post && path == "/v1/chat/completions" {
-        handle_chat_completions_with_oai(&mut stream, &body, &call, oai.as_ref()).await?;
+        handle_chat_completions_with_oai(
+            &mut stream,
+            &body,
+            &call,
+            oai.as_ref(),
+            head.header("authorization"),
+        )
+        .await?;
     } else if is_post && path == "/v1/audio/speech" {
-        handle_audio_speech(&mut stream, &body, &tts_call).await?;
+        handle_audio_speech(&mut stream, &body, &tts_call, head.header("authorization")).await?;
     } else if is_post && path == "/v1/audio/transcriptions" {
         let content_type = head.header("content-type").unwrap_or_default().to_string();
-        handle_audio_transcriptions(&mut stream, &content_type, &body, &stt_call).await?;
+        handle_audio_transcriptions(
+            &mut stream,
+            &content_type,
+            &body,
+            &stt_call,
+            head.header("authorization"),
+        )
+        .await?;
     } else if is_post && path == "/v1/systemone" {
         handle_decision(&mut stream, &body, decision.as_ref()).await?;
     } else {
@@ -1071,7 +1158,12 @@ fn room_route(path: &str) -> Option<(String, String)> {
 /// `POST /v1/audio/speech`: OpenAI's shape -- `{model, input, voice,
 /// response_format?, speed?}` in, raw audio out (not JSON; the upstream
 /// returns bytes and so do we, with the format's own MIME type).
-async fn handle_audio_speech(stream: &mut TcpStream, body: &[u8], call: &TtsFn) -> Result<()> {
+async fn handle_audio_speech(
+    stream: &mut TcpStream,
+    body: &[u8],
+    call: &TtsFn,
+    authorization: Option<&str>,
+) -> Result<()> {
     let req: Value = match serde_json::from_slice(body) {
         Ok(v) => v,
         Err(err) => {
@@ -1123,6 +1215,16 @@ async fn handle_audio_speech(stream: &mut TcpStream, body: &[u8], call: &TtsFn) 
     // OpenAI client that never sends it simply gets the configuration's own voice.
     let lang = req.get("lang").and_then(Value::as_str).map(str::to_string);
 
+    let authorized = match crate::authz::authorize_api(authorization, Some(&params.model)) {
+        Ok(authorized) => authorized,
+        Err(denied) => {
+            write_denied(stream, denied).await?;
+            return Ok(());
+        }
+    };
+    let mut usage = ApiUsage::new(authorized);
+    usage.started = true;
+
     match (call)(params, lang).await {
         Ok(audio) => {
             let head = format!(
@@ -1153,6 +1255,7 @@ async fn handle_audio_transcriptions(
     content_type: &str,
     body: &[u8],
     call: &SttFn,
+    authorization: Option<&str>,
 ) -> Result<()> {
     let Some(boundary) = multipart_boundary(content_type) else {
         let _ = write_error(
@@ -1191,6 +1294,16 @@ async fn handle_audio_transcriptions(
         },
         file_name: file.file_name.clone(),
     };
+
+    let authorized = match crate::authz::authorize_api(authorization, Some(&params.model)) {
+        Ok(authorized) => authorized,
+        Err(denied) => {
+            write_denied(stream, denied).await?;
+            return Ok(());
+        }
+    };
+    let mut usage = ApiUsage::new(authorized);
+    usage.started = true;
 
     match (call)(params).await {
         Ok(text) => {
@@ -1419,6 +1532,7 @@ async fn handle_chat_completions_with_oai(
     body: &[u8],
     call: &LlmCallFn,
     oai: Option<&OaiFn>,
+    authorization: Option<&str>,
 ) -> Result<()> {
     // Validate the ordinary fields using the text parser; only image content
     // parts take the non-streaming tunnel, and SSE is adapted locally below.
@@ -1429,16 +1543,24 @@ async fn handle_chat_completions_with_oai(
             return Ok(());
         }
     };
+    let parsed_body = vision.as_ref().map_or(body, |(_, text)| text.as_slice());
+    let req = match parse_chat_request(parsed_body) {
+        Ok(req) => req,
+        Err(message) => {
+            write_error(stream, 400, "Bad Request", &message).await?;
+            return Ok(());
+        }
+    };
+    let authorized = match crate::authz::authorize_api(authorization, req.model.as_deref()) {
+        Ok(authorized) => authorized,
+        Err(denied) => {
+            write_denied(stream, denied).await?;
+            return Ok(());
+        }
+    };
+    let mut usage = ApiUsage::new(authorized);
     let mut vision_call: Option<LlmCallFn> = None;
-    let normalized;
-    let body = if let Some((mut raw, text_body)) = vision {
-        let req = match parse_chat_request(&text_body) {
-            Ok(req) => req,
-            Err(message) => {
-                write_error(stream, 400, "Bad Request", &message).await?;
-                return Ok(());
-            }
-        };
+    if let Some((mut raw, _)) = vision {
         let Some(oai) = oai else {
             write_error(
                 stream,
@@ -1453,6 +1575,7 @@ async fn handle_chat_completions_with_oai(
         raw.as_object_mut()
             .expect("validated chat body")
             .remove("temperature");
+        usage.started = true;
         let response = match oai(raw).await {
             Ok(response) => response,
             Err(err) => {
@@ -1461,6 +1584,12 @@ async fn handle_chat_completions_with_oai(
             }
         };
         if !req.stream || !(200..300).contains(&response.status) {
+            if let Ok(value) = serde_json::from_slice::<Value>(&response.body) {
+                usage.output_chars = value
+                    .pointer("/choices/0/message/content")
+                    .and_then(Value::as_str)
+                    .map_or(0, |text| text.chars().count() as u64);
+            }
             return write_tunnel_response(stream, &response).await;
         }
         let value: Value = match serde_json::from_slice(&response.body) {
@@ -1491,28 +1620,19 @@ async fn handle_chat_completions_with_oai(
                 Ok(output)
             })
         }));
-        normalized = text_body;
-        normalized.as_slice()
-    } else {
-        body
-    };
+    }
     let call = vision_call.as_ref().unwrap_or(call);
-    let req = match parse_chat_request(body) {
-        Ok(req) => req,
-        Err(message) => {
-            let _ = write_error(stream, 400, "Bad Request", &message).await;
-            return Ok(());
-        }
-    };
 
     let resp_model = req.model.clone().unwrap_or_else(|| "mistl".to_string());
     let id = gen_id("chatcmpl");
     let created = unix_now();
+    usage.started = true;
 
     if !req.stream {
         let fut = (call)(req.messages, req.tools, req.model, None);
         return match fut.await {
             Ok(output) => {
+                usage.output_chars = output.content.chars().count() as u64;
                 let resp = json!({
                     "id": id,
                     "object": "chat.completion",
@@ -1557,6 +1677,7 @@ async fn handle_chat_completions_with_oai(
             maybe_delta = rx.recv(), if !rx_closed => {
                 match maybe_delta {
                     Some(delta) => {
+                        usage.output_chars = usage.output_chars.saturating_add(delta.chars().count() as u64);
                         if !stream_started {
                             stream.write_all(sse_response_header().as_bytes()).await?;
                             stream.flush().await?;
@@ -1587,6 +1708,9 @@ async fn handle_chat_completions_with_oai(
 
     match done.expect("loop only exits once the call future has resolved") {
         Ok(output) => {
+            usage.output_chars = usage
+                .output_chars
+                .max(output.content.chars().count() as u64);
             // A successful backend is allowed to produce no content. It is
             // still a valid empty SSE completion, so commit the response now.
             if !stream_started {
@@ -1709,6 +1833,321 @@ fn vision_request(body: &[u8]) -> std::result::Result<Option<(Value, Vec<u8>)>, 
 
 #[cfg(test)]
 mod tests {
+    struct AuthzTestGuard {
+        _lock: tokio::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Drop for AuthzTestGuard {
+        fn drop(&mut self) {
+            crate::authz::test_reset();
+        }
+    }
+
+    async fn authz_test() -> AuthzTestGuard {
+        let lock = crate::authz::TEST_LOCK.lock().await;
+        crate::authz::test_reset();
+        AuthzTestGuard { _lock: lock }
+    }
+
+    fn create_token(extra: Value) -> String {
+        let mut args = json!({"name": "API test"});
+        args.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        crate::authz::test_command("authz.token.create", args).unwrap()["token"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    fn require_token(required: bool) {
+        crate::authz::test_command("authz.api.set", json!({"require_token": required})).unwrap();
+    }
+
+    async fn token_request(
+        server: &ApiServer,
+        path: &str,
+        token: Option<&str>,
+        body: Option<(&str, &str)>,
+    ) -> Vec<u8> {
+        let authorization =
+            token.map_or_else(String::new, |t| format!("Authorization: Bearer {t}\r\n"));
+        let request = if let Some((content_type, body)) = body {
+            format!(
+                "POST {path} HTTP/1.1\r\nHost: localhost\r\n{authorization}Content-Type: {content_type}\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+        } else {
+            format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n{authorization}\r\n")
+        };
+        send_request(server.addr(), &request).await
+    }
+
+    fn assert_denied(raw: &[u8], status: u16, code: &str) {
+        let (head, body) = split_response(raw);
+        assert_eq!(status_code(&head), status, "{head}");
+        let value: Value = serde_json::from_slice(body).unwrap();
+        assert_eq!(value["error"]["type"], "invalid_request_error");
+        assert_eq!(value["error"]["code"], code);
+        assert!(
+            value["error"]["message"]
+                .as_str()
+                .is_some_and(|m| !m.is_empty())
+        );
+        if status == 401 {
+            assert!(head_has(&head, "WWW-Authenticate: Bearer"));
+        }
+    }
+
+    fn token_usage() -> Value {
+        let usage = crate::authz::test_command("authz.usage", json!({"service": "ai"})).unwrap();
+        let rows = usage["ai"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        rows[0].clone()
+    }
+
+    const CHAT_BODY: &str = r#"{"model":"m1","messages":[{"role":"user","content":"hi"}]}"#;
+    const AUDIO_BODY: &str = "--b\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nm1\r\n--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.wav\"\r\nContent-Type: audio/wav\r\n\r\naudio\r\n--b--\r\n";
+
+    #[tokio::test]
+    async fn api_tokens_authenticate_default_and_room_endpoints() {
+        let _authz = authz_test().await;
+        let token = create_token(json!({}));
+        let unknown_token = format!("mst_{}", "x".repeat(43));
+        require_token(true);
+        let (server, seen) = room_test_server().await;
+        for prefix in ["/v1", "/v1/rooms/team%2Fone"] {
+            for (endpoint, body) in [
+                ("models", None),
+                ("chat/completions", Some(("application/json", CHAT_BODY))),
+                (
+                    "audio/speech",
+                    Some(("application/json", r#"{"model":"m1","input":"hi"}"#)),
+                ),
+                (
+                    "audio/transcriptions",
+                    Some(("multipart/form-data; boundary=b", AUDIO_BODY)),
+                ),
+            ] {
+                let path = format!("{prefix}/{endpoint}");
+                for credential in [None, Some(unknown_token.as_str())] {
+                    let raw = token_request(&server, &path, credential, body).await;
+                    assert_denied(&raw, 401, "unauthorized");
+                }
+                let raw = token_request(&server, &path, Some(&token), body).await;
+                assert_eq!(status_code(&split_response(&raw).0), 200, "{path}");
+            }
+        }
+        assert_eq!(seen.lock().unwrap().len(), 2);
+        assert_eq!(token_usage()["requests"], 6);
+    }
+
+    #[tokio::test]
+    async fn api_tokens_filter_models_and_refuse_disallowed_inference() {
+        let _authz = authz_test().await;
+        let token = create_token(json!({"models": ["m1"]}));
+        require_token(true);
+        let (server, seen) = room_test_server().await;
+        for (path, expected) in [
+            (
+                "/v1/models",
+                json!([{"id":"m1","object":"model","owned_by":"mistl"}]),
+            ),
+            ("/v1/rooms/team%2Fone/models", json!([])),
+        ] {
+            let raw = token_request(&server, path, Some(&token), None).await;
+            let (head, body) = split_response(&raw);
+            assert_eq!(status_code(&head), 200);
+            assert_eq!(
+                serde_json::from_slice::<Value>(body).unwrap()["data"],
+                expected
+            );
+        }
+        for prefix in ["/v1", "/v1/rooms/team%2Fone"] {
+            for body in [
+                json!({"model":"b", "messages":[{"role":"user","content":"hi"}]}),
+                json!({"messages":[{"role":"user","content":"hi"}]}),
+                json!({"model":"b", "messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}]}]}),
+            ] {
+                let body = body.to_string();
+                let raw = token_request(
+                    &server,
+                    &format!("{prefix}/chat/completions"),
+                    Some(&token),
+                    Some(("application/json", &body)),
+                )
+                .await;
+                assert_denied(&raw, 403, "model_not_allowed");
+            }
+            let raw = token_request(
+                &server,
+                &format!("{prefix}/audio/speech"),
+                Some(&token),
+                Some(("application/json", r#"{"model":"b","input":"hi"}"#)),
+            )
+            .await;
+            assert_denied(&raw, 403, "model_not_allowed");
+            let body = AUDIO_BODY.replace("\r\nm1\r\n", "\r\nb\r\n");
+            let raw = token_request(
+                &server,
+                &format!("{prefix}/audio/transcriptions"),
+                Some(&token),
+                Some(("multipart/form-data; boundary=b", &body)),
+            )
+            .await;
+            assert_denied(&raw, 403, "model_not_allowed");
+        }
+        assert!(seen.lock().unwrap().is_empty());
+        let info = crate::authz::test_command("authz.token.list", json!({})).unwrap();
+        crate::authz::test_command(
+            "authz.token.update",
+            json!({"id":info[0]["id"], "models":["room-raw"]}),
+        )
+        .unwrap();
+        let raw = token_request(&server, "/v1/rooms/team%2Fone/models", Some(&token), None).await;
+        let value: Value = serde_json::from_slice(split_response(&raw).1).unwrap();
+        assert_eq!(value["data"][0]["id"], "room-raw");
+    }
+
+    #[tokio::test]
+    async fn api_tokens_meter_each_response_and_enforce_request_limits() {
+        let _authz = authz_test().await;
+        let stream_body =
+            json!({"model":"m1","messages":[{"role":"user","content":"hi"}],"stream":true})
+                .to_string();
+        let image_body = |stream| {
+            json!({"model":"m1", "stream":stream,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}]}]}).to_string()
+        };
+        let image = image_body(false);
+        let image_stream = image_body(true);
+        let (room_server, _) = room_test_server().await;
+        let default_server = start_test_server(fake_call_ok(), fake_models()).await;
+        for (server, path, content_type, body, chars) in [
+            (
+                &default_server,
+                "/v1/chat/completions",
+                "application/json",
+                CHAT_BODY,
+                5,
+            ),
+            (
+                &default_server,
+                "/v1/chat/completions",
+                "application/json",
+                stream_body.as_str(),
+                5,
+            ),
+            (
+                &default_server,
+                "/v1/audio/speech",
+                "application/json",
+                r#"{"input":"hi"}"#,
+                0,
+            ),
+            (
+                &default_server,
+                "/v1/audio/transcriptions",
+                "multipart/form-data; boundary=b",
+                AUDIO_BODY,
+                0,
+            ),
+            (
+                &room_server,
+                "/v1/rooms/team%2Fone/chat/completions",
+                "application/json",
+                image.as_str(),
+                12,
+            ),
+            (
+                &room_server,
+                "/v1/rooms/team%2Fone/chat/completions",
+                "application/json",
+                image_stream.as_str(),
+                12,
+            ),
+        ] {
+            crate::authz::test_reset();
+            let token = create_token(json!({"limits":{"max_requests":1}}));
+            require_token(true);
+            let raw = token_request(server, path, Some(&token), Some((content_type, body))).await;
+            assert_eq!(status_code(&split_response(&raw).0), 200, "{path}");
+            let usage = token_usage();
+            assert_eq!(usage["requests"], 1);
+            assert_eq!(usage["output_chars"], chars, "{path}");
+            let raw = token_request(server, path, Some(&token), Some((content_type, body))).await;
+            assert_denied(&raw, 429, "usage_limit_exceeded");
+        }
+    }
+
+    #[tokio::test]
+    async fn api_tokens_meter_partial_stream_output_and_unicode_characters() {
+        let _authz = authz_test().await;
+        let body = json!({"messages":[{"role":"user","content":"hi"}],"stream":true}).to_string();
+        let unicode_call: LlmCallFn = Arc::new(|_, _, _, tx| {
+            Box::pin(async move {
+                let text = "\u{65e5}\u{672c}\u{1f30d}";
+                if let Some(tx) = tx {
+                    let _ = tx.send(text.into());
+                }
+                Ok(ChatOutput::from(text.to_string()))
+            })
+        });
+        for (call, chars) in [(fake_call_midstream_err(), 7), (unicode_call, 3)] {
+            crate::authz::test_reset();
+            let token = create_token(json!({"limits":{"max_output_chars":chars}}));
+            let server = start_test_server(call, fake_models()).await;
+            let raw = token_request(
+                &server,
+                "/v1/chat/completions",
+                Some(&token),
+                Some(("application/json", &body)),
+            )
+            .await;
+            assert_eq!(status_code(&split_response(&raw).0), 200);
+            let usage = token_usage();
+            assert_eq!(usage["requests"], 1);
+            assert_eq!(usage["output_chars"], chars);
+            let raw = token_request(
+                &server,
+                "/v1/chat/completions",
+                Some(&token),
+                Some(("application/json", &body)),
+            )
+            .await;
+            assert_denied(&raw, 429, "usage_limit_exceeded");
+        }
+    }
+
+    #[tokio::test]
+    async fn api_tokens_keep_optional_legacy_auth_and_preflight_cors() {
+        let _authz = authz_test().await;
+        let server = start_cors_server(&["https://app.example.com"]).await;
+        require_token(false);
+        let raw = token_request(
+            &server,
+            "/v1/chat/completions",
+            Some("sk-dummy"),
+            Some(("application/json", CHAT_BODY)),
+        )
+        .await;
+        assert_eq!(status_code(&split_response(&raw).0), 200);
+        let raw = token_request(&server, "/v1/models", Some("mst_invalid"), None).await;
+        assert_denied(&raw, 401, "unauthorized");
+        require_token(true);
+        let raw = send_request(server.addr(), "OPTIONS /v1/models HTTP/1.1\r\nHost: localhost\r\nOrigin: https://app.example.com\r\nAccess-Control-Request-Method: GET\r\n\r\n").await;
+        assert_eq!(status_code(&split_response(&raw).0), 204);
+        let raw = send_request(
+            server.addr(),
+            "GET /v1/models HTTP/1.1\r\nHost: localhost\r\nOrigin: https://app.example.com\r\n\r\n",
+        )
+        .await;
+        assert_denied(&raw, 401, "unauthorized");
+        assert!(head_has(
+            &split_response(&raw).0,
+            "Access-Control-Allow-Origin: https://app.example.com"
+        ));
+    }
+
     async fn room_test_server() -> (Arc<ApiServer>, Arc<Mutex<Vec<Value>>>) {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let default_seen = seen.clone();
@@ -1865,6 +2304,7 @@ mod tests {
 
     #[tokio::test]
     async fn default_and_room_chat_pass_effort_with_both_response_modes() {
+        let _authz = authz_test().await;
         let (server, seen) = room_test_server().await;
         for path in [
             "/v1/chat/completions",
@@ -1897,6 +2337,7 @@ mod tests {
 
     #[tokio::test]
     async fn room_models_voice_routes_and_missing_rooms_are_isolated() {
+        let _authz = authz_test().await;
         let (server, _) = room_test_server().await;
         let raw = send_request(
             server.addr(),
@@ -1939,6 +2380,7 @@ mod tests {
 
     #[tokio::test]
     async fn room_image_requests_use_oai_and_adapt_buffered_responses_to_sse() {
+        let _authz = authz_test().await;
         let (server, seen) = room_test_server().await;
         for stream in [false, true] {
             let raw = post_json(&server, "/v1/rooms/team%2Fone/chat/completions", json!({"model":"raw","reasoning_effort":"high","temperature":0.4,"stream":stream,
@@ -2129,6 +2571,7 @@ mod tests {
 
     #[tokio::test]
     async fn audio_speech_returns_the_synthesized_bytes() {
+        let _authz = authz_test().await;
         let server = start_test_server(fake_call_ok(), fake_models()).await;
         let payload = json!({"model": "tts-1", "voice": "alloy", "input": "hi"}).to_string();
         let raw = send_request(
@@ -2153,6 +2596,7 @@ mod tests {
 
     #[tokio::test]
     async fn audio_speech_rejects_a_request_with_no_input() {
+        let _authz = authz_test().await;
         let server = start_test_server(fake_call_ok(), fake_models()).await;
         let payload = json!({"model": "tts-1", "input": "   "}).to_string();
         let raw = send_request(
@@ -2172,6 +2616,7 @@ mod tests {
 
     #[tokio::test]
     async fn audio_transcriptions_reads_a_multipart_upload() {
+        let _authz = authz_test().await;
         let server = start_test_server(fake_call_ok(), fake_models()).await;
         let body = concat!(
             "--B\r\n",
@@ -2204,6 +2649,7 @@ mod tests {
 
     #[tokio::test]
     async fn audio_transcriptions_requires_multipart() {
+        let _authz = authz_test().await;
         let server = start_test_server(fake_call_ok(), fake_models()).await;
         let raw = send_request(
             server.addr(),
@@ -2265,6 +2711,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_models_returns_expected_shape() {
+        let _authz = authz_test().await;
         let server = start_test_server(fake_call_ok(), fake_models()).await;
         let raw = send_request(
             server.addr(),
@@ -2288,6 +2735,7 @@ mod tests {
 
     #[tokio::test]
     async fn post_chat_completions_non_stream_happy_path() {
+        let _authz = authz_test().await;
         let server = start_test_server(fake_call_ok(), fake_models()).await;
         let payload =
             json!({"messages": [{"role": "user", "content": "hi"}], "stream": false}).to_string();
@@ -2309,6 +2757,7 @@ mod tests {
 
     #[tokio::test]
     async fn post_chat_completions_stream_emits_sse_events() {
+        let _authz = authz_test().await;
         let server = start_test_server(fake_call_ok(), fake_models()).await;
         let payload = json!({"model": "gpt-x", "messages": [{"role": "user", "content": "hi"}], "stream": true}).to_string();
         let request = format!(
@@ -2362,6 +2811,7 @@ mod tests {
 
     #[tokio::test]
     async fn remote_model_not_shared_is_not_reclassified_as_model_not_found() {
+        let _authz = authz_test().await;
         let call: LlmCallFn = Arc::new(|_, _, _, _| {
             Box::pin(async {
                 Err(anyhow::anyhow!(
@@ -2388,6 +2838,7 @@ mod tests {
 
     #[tokio::test]
     async fn post_chat_completions_stream_error_before_first_delta_is_502() {
+        let _authz = authz_test().await;
         let server = start_test_server(fake_call_err(), fake_models()).await;
         let payload = json!({
             "messages": [{"role": "user", "content": "hi"}],
@@ -2416,6 +2867,7 @@ mod tests {
 
     #[tokio::test]
     async fn post_chat_completions_midstream_error_emits_sse_error_and_terminates_chunking() {
+        let _authz = authz_test().await;
         let server = start_test_server(fake_call_midstream_err(), fake_models()).await;
         let payload = json!({
             "messages": [{"role": "user", "content": "hi"}],
@@ -2465,6 +2917,7 @@ mod tests {
 
     #[tokio::test]
     async fn post_malformed_json_is_400() {
+        let _authz = authz_test().await;
         let server = start_test_server(fake_call_ok(), fake_models()).await;
         let payload = "not json";
         let request = format!(
@@ -2481,6 +2934,7 @@ mod tests {
 
     #[tokio::test]
     async fn post_bad_messages_shape_is_400() {
+        let _authz = authz_test().await;
         let server = start_test_server(fake_call_ok(), fake_models()).await;
         let payload = json!({"messages": [{"role": "user", "content": 42}]}).to_string();
         let request = format!(
@@ -2495,6 +2949,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_path_is_404() {
+        let _authz = authz_test().await;
         let server = start_test_server(fake_call_ok(), fake_models()).await;
         let raw = send_request(
             server.addr(),
@@ -2507,6 +2962,7 @@ mod tests {
 
     #[tokio::test]
     async fn post_backend_error_non_stream_is_502() {
+        let _authz = authz_test().await;
         let server = start_test_server(fake_call_err(), fake_models()).await;
         let payload = json!({"messages": [{"role": "user", "content": "hi"}]}).to_string();
         let request = format!(
@@ -2524,6 +2980,7 @@ mod tests {
 
     #[tokio::test]
     async fn post_without_content_length_is_411() {
+        let _authz = authz_test().await;
         let server = start_test_server(fake_call_ok(), fake_models()).await;
         let raw = send_request(
             server.addr(),
@@ -2536,6 +2993,7 @@ mod tests {
 
     #[tokio::test]
     async fn stop_closes_listener_so_new_connections_fail() {
+        let _authz = authz_test().await;
         let server = start_test_server(fake_call_ok(), fake_models()).await;
         let addr = server.addr();
 
@@ -2597,6 +3055,7 @@ mod tests {
 
     #[tokio::test]
     async fn cross_site_and_malformed_requests_are_refused() {
+        let _authz = authz_test().await;
         let server = start_test_server(fake_call_ok(), fake_models()).await;
         let addr = server.addr();
         let body = "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}";
@@ -2664,6 +3123,7 @@ mod tests {
 
     #[tokio::test]
     async fn allowed_origin_gets_preflight_and_cors_headers() {
+        let _authz = authz_test().await;
         let server = start_cors_server(&["HTTPS://App.Example.com/"]).await;
         let addr = server.addr();
 
@@ -2745,6 +3205,7 @@ mod tests {
 
     #[tokio::test]
     async fn unlisted_origins_stay_refused_and_get_no_grant() {
+        let _authz = authz_test().await;
         let server = start_cors_server(&["https://app.example.com"]).await;
         let addr = server.addr();
         for origin in [
@@ -2928,6 +3389,7 @@ mod tests {
 
     #[tokio::test]
     async fn non_stream_tool_calls_response() {
+        let _authz = authz_test().await;
         let server = start_test_server(fake_call_tools(), fake_models()).await;
         let raw = send_request(server.addr(), &post_chat(&tool_request_body(false))).await;
         let (head, body) = split_response(&raw);
@@ -2942,6 +3404,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_tool_calls_come_after_text_in_one_chunk() {
+        let _authz = authz_test().await;
         let server = start_test_server(fake_call_tools(), fake_models()).await;
         let raw = send_request(server.addr(), &post_chat(&tool_request_body(true))).await;
         let (head, body) = split_response(&raw);
@@ -2982,6 +3445,7 @@ mod tests {
 
     #[tokio::test]
     async fn tools_unsupported_is_a_400_before_streaming() {
+        let _authz = authz_test().await;
         let server = start_test_server(fake_call_tools_unsupported(), fake_models()).await;
         for stream in [false, true] {
             let raw = send_request(server.addr(), &post_chat(&tool_request_body(stream))).await;
@@ -3006,6 +3470,7 @@ mod tests {
 
     #[tokio::test]
     async fn other_backend_errors_stay_generic_502() {
+        let _authz = authz_test().await;
         let server = start_test_server(fake_call_err(), fake_models()).await;
         let raw = send_request(server.addr(), &post_chat(&tool_request_body(false))).await;
         let (head, _) = split_response(&raw);

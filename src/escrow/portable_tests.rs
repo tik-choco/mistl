@@ -233,7 +233,10 @@ fn escrow_import_quotas_include_pending_reservations() {
     };
     let repo = Repository::open(dir.clone(), cfg).unwrap();
     let (first, manifest) = fixture(b"first", 1, None);
-    let pending = repo.reserve("test-room", &first).unwrap().unwrap();
+    let pending = repo
+        .reserve("test-room", &first, None, None)
+        .unwrap()
+        .unwrap();
     let (mut other, bytes) = fixture(b"other", 1, None);
     other.slot = "cd".repeat(16);
     sign(&mut other, [7; 32]);
@@ -270,7 +273,10 @@ fn escrow_import_quotas_include_pending_reservations() {
         ..Default::default()
     };
     let repo = Repository::open(dir.clone(), cfg).unwrap();
-    let pending = repo.reserve("test-room", &first).unwrap().unwrap();
+    let pending = repo
+        .reserve("test-room", &first, None, None)
+        .unwrap()
+        .unwrap();
     assert_eq!(
         repo.import("test-room", &other, b"other", &bytes).unwrap(),
         Skipped("quota")

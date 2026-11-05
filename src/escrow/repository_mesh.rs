@@ -218,7 +218,11 @@ impl Repository {
             }
         } else if index.records.len() + index.pending_slots.len() >= 65536
             || index.records.values().filter(|r| r.room == room).count()
-                + index.pending_slots.values().filter(|r| *r == room).count()
+                + index
+                    .pending_slots
+                    .values()
+                    .filter(|r| r.room == room)
+                    .count()
                 >= self.cfg.max_slots_per_room
         {
             return Err(Error::new("quota"));
@@ -231,6 +235,7 @@ impl Repository {
         });
         let record = Record {
             room: room.into(),
+            owner: None,
             current: head.clone(),
             previous: previous.map(|r| r.current.clone()),
             previous_held: previous.is_some_and(|r| r.held),

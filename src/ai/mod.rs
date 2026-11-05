@@ -294,14 +294,18 @@ impl AiService {
                         service.cache_room_models(&session);
                     }
                     if let Some(provider) = session.local_provider() {
-                        provider.handle_message(from, msg).await;
+                        provider
+                            .handle_message_in_room(Some(session.room.clone()), from, msg)
+                            .await;
                     }
                 });
             }
             crate::net::EVENT_PEER_CONNECTED => {
                 (session.send)(from, ProtocolMessage::ConsumerHello);
                 if let Some(provider) = session.local_provider() {
-                    (session.send)(from, provider.hello());
+                    if crate::authz::access_allowed(crate::authz::Service::Ai, Some(room), from) {
+                        (session.send)(from, provider.hello());
+                    }
                 }
             }
             crate::net::EVENT_PEER_DISCONNECTED => {
@@ -1903,6 +1907,7 @@ mod tests {
 
     #[tokio::test]
     async fn provider_default_effort_reaches_both_default_and_shared_upstreams() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         for model in [None, Some("raw")] {
             for (default, request, expected) in [
                 (None, None, None),
@@ -2093,6 +2098,7 @@ mod tests {
 
     #[tokio::test]
     async fn provider_and_http_speech_pass_speed_and_format_to_upstream() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         for provider_route in [false, true] {
             for reject_format in [false, true] {
                 for (default, requested, expected) in [
@@ -2181,6 +2187,7 @@ mod tests {
 
     #[tokio::test]
     async fn local_chat_routes_apply_effort_only_to_default_model() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         let (state, session, mut rx, server) = network_api_fixture().await;
         let client = reqwest::Client::builder()
             .no_proxy()
@@ -2254,6 +2261,7 @@ mod tests {
 
     #[tokio::test]
     async fn local_speech_routes_forward_options_and_use_response_mime() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         use base64::Engine as _;
         let (state, session, mut rx, server) = network_api_fixture().await;
         let client = reqwest::Client::builder()
@@ -2363,6 +2371,7 @@ mod tests {
 
     #[tokio::test]
     async fn built_room_provider_advertises_oai_even_when_targets_are_unavailable() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         let ai = sample_config();
         let provider = build_provider(&test_session("test"), &ai, &ai.providers[1])
             .await
@@ -2550,6 +2559,7 @@ mod tests {
 
     #[tokio::test]
     async fn local_api_unknown_models_return_404_before_http_or_room_calls() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         let state = AppState::for_test();
         let mut config = state.config();
         config.ai = sample_config();
@@ -2804,6 +2814,7 @@ mod tests {
 
     #[tokio::test]
     async fn reconcile_starts_from_flags_reloads_and_stops_without_global_state() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         let state = AppState::for_test();
         let mut config = state.config();
         config.ai = sample_config();
@@ -2873,6 +2884,7 @@ mod tests {
 
     #[tokio::test]
     async fn external_rooms_reconcile_live_and_are_available_to_room_api_and_status() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         let state = AppState::for_test();
         let before = serde_json::to_value(state.config()).unwrap();
         let payload = json!({"owner":"app","providers":[{"id":"http","label":"Local","base_url":"http://127.0.0.1:1/v1","api_key":"secret","enabled":true}],
@@ -2950,6 +2962,7 @@ mod tests {
 
     #[tokio::test]
     async fn status_rooms_contract_includes_disabled_rooms_without_joining() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         let state = AppState::for_test();
         let mut config = crate::config::Config::default();
         config.ai.providers.push(AiProviderConfig {
@@ -2988,7 +3001,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn connected_peer_only_gets_provider_hello_when_access_is_allowed() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
+        crate::authz::test_reset();
+        let peer = "0123456789abcdef";
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let session = test_session_with_send(
+            "test",
+            Arc::new(move |_, msg| {
+                tx.send(msg).unwrap();
+            }),
+        );
+        let call: LlmCallFn =
+            Arc::new(|_, _, _, _| Box::pin(async { Ok("ok".to_string().into()) }));
+        *session.provider.write().unwrap() = Some(Provider::new_with_voice(
+            session.send.clone(),
+            call,
+            vec![],
+            None,
+            None,
+            vec![],
+        ));
+        let service = Arc::new(AiService {
+            state: AppState::for_test(),
+            rooms: RwLock::new(HashMap::from([("test".into(), session)])),
+            on_demand: RwLock::new(HashSet::new()),
+            sync: Mutex::new(()),
+            api_server: Mutex::new(None),
+        });
+        crate::authz::test_command("authz.deny.add", json!({"service":"ai", "subject":peer}))
+            .unwrap();
+        service.handle_room_event(
+            crate::net::EVENT_PEER_CONNECTED,
+            "test",
+            peer,
+            &[],
+            &tokio::runtime::Handle::current(),
+        );
+        assert_eq!(rx.try_recv().unwrap(), ProtocolMessage::ConsumerHello);
+        assert!(rx.try_recv().is_err());
+        crate::authz::test_command("authz.deny.remove", json!({"service":"ai", "subject":peer}))
+            .unwrap();
+        crate::authz::test_command(
+            "authz.limits.set",
+            json!({"service":"ai", "subject":peer,
+            "limits":{"max_requests":0}}),
+        )
+        .unwrap();
+        service.handle_room_event(
+            crate::net::EVENT_PEER_CONNECTED,
+            "test",
+            peer,
+            &[],
+            &tokio::runtime::Handle::current(),
+        );
+        assert_eq!(rx.try_recv().unwrap(), ProtocolMessage::ConsumerHello);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            ProtocolMessage::ProviderHello { .. }
+        ));
+        crate::authz::test_reset();
+    }
+
+    #[tokio::test]
     async fn external_and_config_room_events_reply_with_scoped_models_and_services() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         for restart in [false, true] {
             let state = AppState::for_test();
             let mut config = state.config();
@@ -3131,6 +3208,7 @@ mod tests {
 
     #[tokio::test]
     async fn received_hellos_replace_room_cache_and_withdrawals_clear_it() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         let state = AppState::for_test();
         let mut config = state.config();
         config.ai = sample_config();
@@ -3195,6 +3273,7 @@ mod tests {
 
     #[tokio::test]
     async fn provider_hello_is_scoped_to_each_rooms_shared_refs() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         let mut ai = sample_config();
         let second = AiProviderConfig {
             id: "room2".into(),
@@ -3230,6 +3309,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_inbound_model_prefers_enabled_http_default_over_first_shared() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         let (base_url, requested_model) = mock_chat_server("default").await;
         let mut ai = sample_config();
         ai.providers[0].base_url = base_url;
@@ -3258,6 +3338,7 @@ mod tests {
 
     #[tokio::test]
     async fn room_default_uses_first_http_shared_ref_for_inbound_requests() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         let (base_url, requested_model) = mock_chat_server("shared").await;
         let mut ai = sample_config();
         ai.providers[0].base_url = base_url;
@@ -3655,11 +3736,13 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_advertised_voices_empty_when_no_tts_config_configured() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         assert_eq!(resolve_advertised_voices(None).await, Vec::<String>::new());
     }
 
     #[tokio::test]
     async fn resolve_advertised_voices_prefers_the_fetched_upstream_catalog() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         // Fetch succeeds *and* the configuration has its own `voice` set -- the
         // fetched catalog wins (fallback order step 1 beats step 2).
         let base_url = mock_voices_server(&ok_json(r#"{"voices":["nova","shimmer"]}"#)).await;
@@ -3677,6 +3760,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_advertised_voices_falls_back_to_config_voice_when_fetch_is_empty() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         // Both /audio/voices and /voices need to be tried and fail for
         // fetch_voices to return []; a single 404 response closes the
         // connection after the first candidate, so the second candidate
@@ -3697,6 +3781,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_advertised_voices_empty_when_fetch_fails_and_preset_has_no_voice() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         let base_url = mock_voices_server(&not_found()).await;
         let resolved = resolved_voice_config(base_url.clone(), None);
         let provider = crate::config::AiProviderConfig {

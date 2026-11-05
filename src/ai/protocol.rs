@@ -261,6 +261,13 @@ pub const CODE_UNSUPPORTED_SERVICE: &str = "unsupported_service";
 /// just not under the name the request asked for.
 pub const CODE_MODEL_NOT_SHARED: &str = "model_not_shared";
 
+/// The peer is denied by the provider's access policy.
+#[allow(dead_code)] // Also available to protocol consumers.
+pub const CODE_FORBIDDEN: &str = "forbidden";
+/// The peer has exhausted its cumulative usage allowance.
+#[allow(dead_code)] // Also available to protocol consumers.
+pub const CODE_USAGE_LIMIT: &str = "usage_limit_exceeded";
+
 /// Whether a `provider_hello.services` value (already decoded, `None` if
 /// the field was absent/invalid) advertises `service`. Applies the wire
 /// spec's default: a missing `services` field is treated as `["chat"]`.

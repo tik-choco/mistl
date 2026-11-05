@@ -295,6 +295,7 @@ async fn daemon_main(host_override: Option<String>) -> Result<()> {
         web.close().await;
     }
     server.close().await;
+    crate::authz::flush();
 
     // Persist whether the dashboard was open at shutdown so the next start
     // (in particular, the relaunch below after a `daemon.restart`) knows
@@ -614,6 +615,22 @@ fn authorize(caller: Caller, cmd: &str, args: &Value) -> Result<()> {
         // Directory listing of the daemon host's filesystem.
         "store.browse-dirs" if has("path") => Some("lists an arbitrary local directory"),
         "store.folder-sync" if has("dir") => Some("writes to an arbitrary local directory"),
+        // Who may use this node's services, API credentials and delegated
+        // grants -- the same class as `ai.trusted_providers` /
+        // `tunnel.allow_peers` below. Read-only views stay available.
+        c if c.starts_with("authz.")
+            && !matches!(
+                c,
+                "authz.show"
+                    | "authz.usage"
+                    | "authz.peers"
+                    | "authz.token.list"
+                    | "authz.cap.list"
+                    | "authz.cap.verify"
+            ) =>
+        {
+            Some("changes who is trusted or issues credentials")
+        }
         "config.set"
             if args
                 .get("path")
@@ -659,8 +676,11 @@ pub async fn dispatch_as(
             );
         }
     }
+    // Local policy edits work offline; cap delivery / revocation broadcasts
+    // simply report that nothing was sent.
     if !state.network.permitted()
         && !crate::network::offline_command_allowed(cmd)
+        && !cmd.starts_with("authz.")
         && !matches!(
             cmd,
             "escrow.status"
@@ -803,6 +823,7 @@ pub async fn dispatch_as(
             Some("stream") => crate::stream::handle(cmd, args, state).await,
             Some("chat") => crate::chat_relay::handle(cmd, args, state).await,
             Some("escrow") => crate::escrow::handle(cmd, args, state).await,
+            Some("authz") => crate::authz::handle(cmd, args, state).await,
             Some("dm") => crate::dm::handle(cmd, args, state).await,
             Some("peers") => crate::net::peer_profile::handle(cmd, args, state).await,
             Some("sched") => crate::scheduler::handle(cmd, args, state).await,
@@ -946,6 +967,36 @@ mod tests {
         ] {
             authorize(REMOTE, "config.set", &json!({"path": path, "value": 1}))
                 .unwrap_or_else(|e| panic!("{path}: {e}"));
+        }
+    }
+
+    #[test]
+    fn remote_http_denies_authz_mutations_but_allows_views() {
+        for cmd in [
+            "authz.mode.set",
+            "authz.allow.add",
+            "authz.deny.remove",
+            "authz.limits.set",
+            "authz.api.set",
+            "authz.token.create",
+            "authz.token.revoke",
+            "authz.cap.issue",
+            "authz.cap.import",
+            "authz.issuer.add",
+        ] {
+            let err = authorize(REMOTE, cmd, &json!({})).unwrap_err().to_string();
+            assert!(err.contains(MSG), "{cmd}: {err}");
+            authorize(LOCAL, cmd, &json!({})).unwrap_or_else(|e| panic!("{cmd}: {e}"));
+        }
+        for cmd in [
+            "authz.show",
+            "authz.usage",
+            "authz.peers",
+            "authz.token.list",
+            "authz.cap.list",
+            "authz.cap.verify",
+        ] {
+            authorize(REMOTE, cmd, &json!({})).unwrap_or_else(|e| panic!("{cmd}: {e}"));
         }
     }
 

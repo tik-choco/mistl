@@ -82,7 +82,7 @@ fn delete(head: &Head) -> Delete {
     d
 }
 fn accept(repo: &Repository, head: &Head, blob: &[u8], manifest: &[u8]) {
-    let _reservation = repo.reserve(ROOM, head).unwrap().unwrap();
+    let _reservation = repo.reserve(ROOM, head, None, None).unwrap().unwrap();
     repo.commit(ROOM, head, blob, manifest).unwrap();
 }
 
@@ -125,7 +125,10 @@ fn metadata_acceptance_and_durable_delete_continue() {
         repo.learn(ROOM, &h, None, None).unwrap_err().code,
         "deleted"
     );
-    assert_eq!(repo.reserve(ROOM, &h).err().unwrap().code, "deleted");
+    assert_eq!(
+        repo.reserve(ROOM, &h, None, None).err().unwrap().code,
+        "deleted"
+    );
     let mut another = h.clone();
     another.slot = "bb".repeat(16);
     sign(&mut another, 7);
@@ -136,7 +139,7 @@ fn metadata_acceptance_and_durable_delete_continue() {
     let (mut next, manifest) = fixture(8, Some(h.hash()), b"successor");
     sign(&mut next, 8);
     assert_eq!(
-        repo.reserve(ROOM, &next).err().unwrap().code,
+        repo.reserve(ROOM, &next, None, None).err().unwrap().code,
         "writer_mismatch"
     );
     sign(&mut next, 7);
@@ -187,7 +190,10 @@ fn unheld_restart_capacity_and_scrub_recovery() {
     cfg.max_total_bytes = 1;
     let repo = Repository::open(dir.clone(), cfg).unwrap();
     repo.learn(ROOM, &h, Some(me.did()), None).unwrap();
-    assert_eq!(repo.reserve(ROOM, &h).err().unwrap().code, "quota");
+    assert_eq!(
+        repo.reserve(ROOM, &h, None, None).err().unwrap().code,
+        "quota"
+    );
     assert_eq!(repo.mesh_records(ROOM).len(), 1);
     drop(repo);
     std::fs::remove_dir_all(dir).unwrap();
@@ -499,7 +505,7 @@ fn previous_corruption_preserves_current_at_restart_and_scrub() {
         assert!(repo.generation_bytes(ROOM, &first).unwrap().is_none());
         assert_eq!(repo.total_bytes(), second.size + m2.len() as u64);
         assert_eq!(std::fs::read_dir(dir.join("blobs")).unwrap().count(), 1);
-        assert!(repo.reserve(ROOM, &second).unwrap().is_none());
+        assert!(repo.reserve(ROOM, &second, None, None).unwrap().is_none());
         drop(repo);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -605,18 +611,21 @@ fn gossiped_successor_keeps_parent_retry_and_held_blob() {
         }
         repo.learn(ROOM, &second, Some(me.did()), None).unwrap();
         for _ in 0..2 {
-            assert!(repo.reserve(ROOM, &first).unwrap().is_none());
+            assert!(repo.reserve(ROOM, &first, None, None).unwrap().is_none());
             assert_eq!(repo.head(ROOM, &first.slot), Some(second.clone()));
             assert_eq!(repo.generation_bytes(ROOM, &first).unwrap().is_some(), held);
             drop(repo);
             repo = Repository::open(dir.clone(), config()).unwrap();
         }
         accept(&repo, &second, b"second", &m2);
-        assert!(repo.reserve(ROOM, &first).unwrap().is_none());
+        assert!(repo.reserve(ROOM, &first, None, None).unwrap().is_none());
         assert_eq!(repo.generation_bytes(ROOM, &first).unwrap().is_some(), held);
         let (third, _) = fixture(3, Some(second.hash()), b"third");
         repo.learn(ROOM, &third, None, None).unwrap();
-        assert_eq!(repo.reserve(ROOM, &first).err().unwrap().code, "conflict");
+        assert_eq!(
+            repo.reserve(ROOM, &first, None, None).err().unwrap().code,
+            "conflict"
+        );
         assert!(repo.generation_bytes(ROOM, &first).unwrap().is_none());
         drop(repo);
         std::fs::remove_dir_all(dir).unwrap();

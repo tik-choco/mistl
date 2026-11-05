@@ -35,6 +35,15 @@ type ReplySender = Arc<dyn Fn(String, String, Vec<u8>) -> ReplyFuture + Send + S
 
 static SERVICE: OnceCell<Arc<Service>> = OnceCell::const_new();
 
+pub fn owner_usage() -> Vec<(String, u64)> {
+    let mut usage: Vec<_> = SERVICE
+        .get()
+        .map(|service| service.repo.owner_bytes().into_iter().collect())
+        .unwrap_or_default();
+    usage.sort_by(|a, b| a.0.cmp(&b.0));
+    usage
+}
+
 pub fn valid_room(room: &str) -> bool {
     !room.is_empty()
         && room.len() <= 96
@@ -257,7 +266,9 @@ impl Service {
         let _slot = tokio::time::timeout(SLOT_WAIT, self.slots[stripe].lock())
             .await
             .map_err(|_| Error::new("busy"))?;
-        let Some(_reservation) = self.repo.reserve(room, &head)? else {
+        let limit =
+            crate::authz::escrow_byte_limit(&crate::authz::Principal::resolve(Some(room), from));
+        let Some(_reservation) = self.repo.reserve(room, &head, Some(from), limit)? else {
             if let Some(mesh) = self.mesh(room) {
                 if self
                     .repo
@@ -318,6 +329,36 @@ impl Service {
         let kind = msg["type"].as_str()?;
         if !matches!(kind, "escrow_get" | "escrow_put" | "escrow_delete") {
             return None;
+        }
+        // Client-facing requests only; provider<->provider mesh and Raft
+        // traffic never reaches this point.
+        let action = if kind == "escrow_get" {
+            crate::authz::Action::Read
+        } else {
+            crate::authz::Action::Write
+        };
+        let slot = msg["slot"]
+            .as_str()
+            .or_else(|| msg["head"]["slot"].as_str())
+            .filter(|s| hex_string(s, 32));
+        let resource = slot.map(|slot| format!("{room}/{slot}"));
+        let current_head = slot.and_then(|slot| self.repo.head(room, slot));
+        let resource_owner = current_head
+            .as_ref()
+            .and_then(|head| crate::authz::escrow_writer_did(&head.writer));
+        let authorization = crate::authz::authorize_p2p_owned(
+            crate::authz::Service::Escrow,
+            action,
+            Some(room),
+            from,
+            resource.as_deref(),
+            resource_owner.as_deref(),
+        );
+        if let Ok(authorized) = authorization {
+            authorized.record(1, 0);
+        } else {
+            let id = msg["id"].as_str().filter(|s| s.len() <= 64).unwrap_or("");
+            return Some(Error::new("forbidden").reply(id));
         }
         if let Some(cluster) = self.cluster(room) {
             return cluster.request(from, &msg).await;

@@ -46,9 +46,254 @@ fn scratch() -> std::path::PathBuf {
     dir
 }
 fn accept(repo: &Repository, head: &Head, blob: &[u8], bytes: &[u8]) {
-    let reservation = repo.reserve("test-room", head).unwrap().unwrap();
+    let reservation = repo
+        .reserve("test-room", head, None, None)
+        .unwrap()
+        .unwrap();
     repo.commit("test-room", head, blob, bytes).unwrap();
     drop(reservation);
+}
+
+fn accept_owned(repo: &Repository, head: &Head, blob: &[u8], bytes: &[u8], owner: &str) {
+    let reservation = repo
+        .reserve("test-room", head, Some(owner), None)
+        .unwrap()
+        .unwrap();
+    repo.commit("test-room", head, blob, bytes).unwrap();
+    drop(reservation);
+}
+
+#[test]
+fn escrow_owner_quota_counts_pending_reservations_and_releases_on_drop() {
+    const ALICE: &str = "0123456789abcdef";
+    const BOB: &str = "fedcba9876543210";
+    let dir = scratch();
+    let repo = Repository::open(dir.clone(), EscrowConfig::default()).unwrap();
+    let (first, manifest) = fixture(b"blob", 1, None);
+    let amount = first.size + repository::manifest_limit(first.size) as u64;
+    let mut second = first.clone();
+    second.slot = "b".repeat(32);
+    sign(&mut second, [7; 32]);
+    let pending = repo
+        .reserve("test-room", &first, Some(ALICE), Some(amount))
+        .unwrap()
+        .unwrap();
+    assert!(repo.owner_bytes().is_empty());
+    assert_eq!(
+        repo.reserve("test-room", &second, Some(ALICE), Some(amount))
+            .err()
+            .unwrap()
+            .code,
+        "quota"
+    );
+    let other = repo
+        .reserve("test-room", &second, Some(BOB), Some(amount))
+        .unwrap()
+        .unwrap();
+    drop(other);
+    drop(pending);
+    assert_eq!(
+        repo.reserve("test-room", &first, Some(ALICE), Some(amount - 1))
+            .err()
+            .unwrap()
+            .code,
+        "quota"
+    );
+    let pending = repo
+        .reserve("test-room", &first, Some(ALICE), Some(amount))
+        .unwrap()
+        .unwrap();
+    repo.commit("test-room", &first, b"blob", &manifest)
+        .unwrap();
+    drop(pending);
+    let stored = first.size + manifest.len() as u64;
+    assert_eq!(repo.owner_bytes(), HashMap::from([(ALICE.into(), stored)]));
+    assert_eq!(
+        repo.reserve("test-room", &second, Some(ALICE), Some(stored + amount - 1))
+            .err()
+            .unwrap()
+            .code,
+        "quota"
+    );
+    // A committed reservation no longer consumes capacity once its guard drops.
+    let pending = repo
+        .reserve("test-room", &second, Some(ALICE), Some(stored + amount))
+        .unwrap()
+        .unwrap();
+    drop(pending);
+    let pending = repo
+        .reserve("test-room", &second, Some(BOB), Some(amount))
+        .unwrap()
+        .unwrap();
+    repo.commit("test-room", &second, b"blob", &manifest)
+        .unwrap();
+    drop(pending);
+    assert_eq!(
+        repo.owner_bytes(),
+        HashMap::from([(ALICE.into(), stored), (BOB.into(), stored)])
+    );
+    drop(repo);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn escrow_owner_replacement_moves_retained_bytes_prunes_and_reloads() {
+    const ALICE: &str = "0123456789abcdef";
+    const BOB: &str = "fedcba9876543210";
+    let dir = scratch();
+    let cfg = EscrowConfig::default();
+    let repo = Repository::open(dir.clone(), cfg.clone()).unwrap();
+    let (first, first_manifest) = fixture(b"first", 1, None);
+    accept_owned(&repo, &first, b"first", &first_manifest, ALICE);
+    let first_bytes = first.size + first_manifest.len() as u64;
+    let (second, second_manifest) = fixture(b"second", 2, Some(first.hash()));
+    let second_bytes = second.size + second_manifest.len() as u64;
+    let amount = second.size + repository::manifest_limit(second.size) as u64;
+    assert_eq!(
+        repo.reserve("test-room", &second, Some(BOB), Some(amount))
+            .err()
+            .unwrap()
+            .code,
+        "quota"
+    );
+    let pending = repo
+        .reserve("test-room", &second, Some(BOB), Some(amount + first_bytes))
+        .unwrap()
+        .unwrap();
+    repo.commit("test-room", &second, b"second", &second_manifest)
+        .unwrap();
+    drop(pending);
+    assert_eq!(
+        repo.owner_bytes(),
+        HashMap::from([(BOB.into(), first_bytes + second_bytes)])
+    );
+    assert_eq!(repo.total_bytes(), first_bytes + second_bytes);
+    let (third, third_manifest) = fixture(b"third", 3, Some(second.hash()));
+    accept_owned(&repo, &third, b"third", &third_manifest, BOB);
+    let held_bytes = second_bytes + third.size + third_manifest.len() as u64;
+    assert_eq!(
+        repo.owner_bytes(),
+        HashMap::from([(BOB.into(), held_bytes)])
+    );
+    assert_eq!(repo.total_bytes(), held_bytes);
+    assert!(repo.block("test-room", &first.cid).is_none());
+    drop(repo);
+    let repo = Repository::open(dir.clone(), cfg).unwrap();
+    assert_eq!(
+        repo.owner_bytes(),
+        HashMap::from([(BOB.into(), held_bytes)])
+    );
+    assert_eq!(repo.total_bytes(), held_bytes);
+    repo.delete("test-room", &delete_request(&third, [7; 32]))
+        .unwrap();
+    assert!(repo.owner_bytes().is_empty());
+    assert_eq!(repo.total_bytes(), 0);
+    let pending = repo
+        .reserve(
+            "test-room",
+            &first,
+            Some(BOB),
+            Some(first.size + repository::manifest_limit(first.size) as u64),
+        )
+        .unwrap()
+        .unwrap();
+    drop(pending);
+    drop(repo);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn escrow_owner_mesh_deletion_and_holding_release_free_bytes() {
+    const OWNER: &str = "0123456789abcdef";
+    let dir = scratch();
+    let repo = Repository::open(dir.clone(), EscrowConfig::default()).unwrap();
+    let (head, manifest) = fixture(b"blob", 1, None);
+    accept_owned(&repo, &head, b"blob", &manifest, OWNER);
+    repo.drop_holding("test-room", &head).unwrap();
+    assert!(repo.owner_bytes().is_empty());
+    assert_eq!(repo.total_bytes(), 0);
+    accept_owned(&repo, &head, b"blob", &manifest, OWNER);
+    assert_eq!(repo.owner_bytes()[OWNER], repo.total_bytes());
+    repo.mesh_delete("test-room", &delete_request(&head, [7; 32]))
+        .unwrap();
+    assert!(repo.owner_bytes().is_empty());
+    assert_eq!(repo.total_bytes(), 0);
+    drop(repo);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn escrow_owner_legacy_record_loads_without_owner_and_counts_globally() {
+    const OWNER: &str = "0123456789abcdef";
+    let dir = scratch();
+    let cfg = EscrowConfig::default();
+    let repo = Repository::open(dir.clone(), cfg.clone()).unwrap();
+    let (head, manifest) = fixture(b"blob", 1, None);
+    accept_owned(&repo, &head, b"blob", &manifest, OWNER);
+    let total = repo.total_bytes();
+    drop(repo);
+    let path = std::fs::read_dir(dir.join("heads"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let mut record: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(record["owner"], OWNER);
+    record.as_object_mut().unwrap().remove("owner");
+    crate::statefile::write_private(&path, &serde_json::to_vec(&record).unwrap()).unwrap();
+    let repo = Repository::open(dir.clone(), cfg).unwrap();
+    assert_eq!(repo.total_bytes(), total);
+    assert!(repo.owner_bytes().is_empty());
+    assert_eq!(repo.head("test-room", &head.slot), Some(head));
+    drop(repo);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn escrow_owner_import_and_mesh_successor_are_unattributed() {
+    const OWNER: &str = "0123456789abcdef";
+    let dir = scratch();
+    let repo = Repository::open(dir.clone(), EscrowConfig::default()).unwrap();
+    let (first, first_manifest) = fixture(b"first", 1, None);
+    accept_owned(&repo, &first, b"first", &first_manifest, OWNER);
+    let (second, second_manifest) = fixture(b"second", 2, Some(first.hash()));
+    repo.import("test-room", &second, b"second", &second_manifest)
+        .unwrap();
+    assert!(repo.owner_bytes().is_empty());
+    assert_eq!(
+        repo.total_bytes(),
+        first.size + first_manifest.len() as u64 + second.size + second_manifest.len() as u64
+    );
+    let (third, third_manifest) = fixture(b"third", 3, Some(second.hash()));
+    accept_owned(&repo, &third, b"third", &third_manifest, OWNER);
+    let (fourth, fourth_manifest) = fixture(b"fourth", 4, Some(third.hash()));
+    repo.learn("test-room", &fourth, None, None).unwrap();
+    assert!(repo.owner_bytes().is_empty());
+    assert_eq!(repo.total_bytes(), third.size + third_manifest.len() as u64);
+    let amount = fourth.size + repository::manifest_limit(fourth.size) as u64;
+    assert_eq!(
+        repo.reserve("test-room", &fourth, Some(OWNER), Some(amount))
+            .err()
+            .unwrap()
+            .code,
+        "quota"
+    );
+    let pending = repo
+        .reserve(
+            "test-room",
+            &fourth,
+            Some(OWNER),
+            Some(amount + repo.total_bytes()),
+        )
+        .unwrap()
+        .unwrap();
+    repo.commit("test-room", &fourth, b"fourth", &fourth_manifest)
+        .unwrap();
+    drop(pending);
+    assert_eq!(repo.owner_bytes()[OWNER], repo.total_bytes());
+    drop(repo);
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -139,7 +384,7 @@ async fn escrow_cas_tofu_idempotence_and_restart_serve_both_generations() {
     assert_eq!(
         service
             .repo
-            .reserve("test-room", &other)
+            .reserve("test-room", &other, None, None)
             .err()
             .unwrap()
             .code,
@@ -148,14 +393,23 @@ async fn escrow_cas_tofu_idempotence_and_restart_serve_both_generations() {
     let (mut next, next_manifest) = fixture(b"second", 10, Some(first.hash()));
     next.parent = None;
     sign(&mut next, [7; 32]);
-    let error = service.repo.reserve("test-room", &next).err().unwrap();
+    let error = service
+        .repo
+        .reserve("test-room", &next, None, None)
+        .err()
+        .unwrap();
     assert_eq!(error.code, "conflict");
     assert_eq!(*error.head.unwrap(), first);
     next.parent = Some(first.hash());
     next.seq = 11;
     sign(&mut next, [7; 32]);
     assert_eq!(
-        service.repo.reserve("test-room", &next).err().unwrap().code,
+        service
+            .repo
+            .reserve("test-room", &next, None, None)
+            .err()
+            .unwrap()
+            .code,
         "conflict"
     );
     next.seq = 10;
@@ -225,7 +479,10 @@ fn escrow_rejects_bad_signatures_size_hash_manifest_and_quota() {
     let mut bad = head.clone();
     bad.at += 1;
     assert_eq!(
-        repo.reserve("test-room", &bad).err().unwrap().code,
+        repo.reserve("test-room", &bad, None, None)
+            .err()
+            .unwrap()
+            .code,
         "bad_sig"
     );
     bad.sig = "!".repeat(86);
@@ -248,14 +505,20 @@ fn escrow_rejects_bad_signatures_size_hash_manifest_and_quota() {
     bad.size = 32 * 1024 * 1024 + 1;
     sign(&mut bad, [7; 32]);
     assert_eq!(
-        repo.reserve("test-room", &bad).err().unwrap().code,
+        repo.reserve("test-room", &bad, None, None)
+            .err()
+            .unwrap()
+            .code,
         "too_large"
     );
     bad = head.clone();
     bad.parent = Some("a".repeat(64));
     sign(&mut bad, [7; 32]);
     assert_eq!(check_cas(&bad, None).unwrap_err().code, "conflict");
-    let reservation = repo.reserve("test-room", &head).unwrap().unwrap();
+    let reservation = repo
+        .reserve("test-room", &head, None, None)
+        .unwrap()
+        .unwrap();
     assert_eq!(
         repo.commit("test-room", &head, b"xxxx", &bytes)
             .unwrap_err()
@@ -272,7 +535,13 @@ fn escrow_rejects_bad_signatures_size_hash_manifest_and_quota() {
         },
     )
     .unwrap();
-    assert_eq!(low.reserve("test-room", &head).err().unwrap().code, "quota");
+    assert_eq!(
+        low.reserve("test-room", &head, None, None)
+            .err()
+            .unwrap()
+            .code,
+        "quota"
+    );
     let one = Repository::open(
         dir.clone(),
         EscrowConfig {
@@ -281,12 +550,18 @@ fn escrow_rejects_bad_signatures_size_hash_manifest_and_quota() {
         },
     )
     .unwrap();
-    let reservation = one.reserve("test-room", &head).unwrap().unwrap();
+    let reservation = one
+        .reserve("test-room", &head, None, None)
+        .unwrap()
+        .unwrap();
     let mut second = head.clone();
     second.slot = "b".repeat(32);
     sign(&mut second, [7; 32]);
     assert_eq!(
-        one.reserve("test-room", &second).err().unwrap().code,
+        one.reserve("test-room", &second, None, None)
+            .err()
+            .unwrap()
+            .code,
         "quota"
     );
     drop(reservation);
@@ -415,7 +690,10 @@ fn escrow_failed_publication_preserves_state_and_restart_cleans_orphans() {
     let dir = scratch();
     let (head, manifest) = fixture(b"checkpoint", 1, None);
     let repo = Repository::open(dir.clone(), EscrowConfig::default()).unwrap();
-    let reservation = repo.reserve("test-room", &head).unwrap().unwrap();
+    let reservation = repo
+        .reserve("test-room", &head, None, None)
+        .unwrap()
+        .unwrap();
     let key = digest(format!("test-room\n{}", head.slot).as_bytes());
     let blocker = dir.join("heads").join(format!("{key}.json"));
     std::fs::create_dir(&blocker).unwrap();
@@ -427,7 +705,10 @@ fn escrow_failed_publication_preserves_state_and_restart_cleans_orphans() {
     );
     assert!(repo.head("test-room", &head.slot).is_none());
     assert_eq!(
-        repo.reserve("test-room", &head).err().unwrap().code,
+        repo.reserve("test-room", &head, None, None)
+            .err()
+            .unwrap()
+            .code,
         "quota"
     );
     drop(reservation);
@@ -519,7 +800,11 @@ async fn escrow_cheap_put_rejections_precede_pull_admission() {
             .code,
         "busy"
     );
-    let reservation = service.repo.reserve("test-room", &next).unwrap().unwrap();
+    let reservation = service
+        .repo
+        .reserve("test-room", &next, None, None)
+        .unwrap()
+        .unwrap();
     drop(reservation);
     drop(service);
     std::fs::remove_dir_all(dir).unwrap();
@@ -537,7 +822,7 @@ async fn escrow_provider_enforces_configuration_and_room_cid_membership() {
     accept(&service.repo, &head, b"checkpoint", &manifest);
     let reservation = service
         .repo
-        .reserve("unconfigured", &head)
+        .reserve("unconfigured", &head, None, None)
         .unwrap()
         .unwrap();
     service
@@ -664,6 +949,10 @@ async fn escrow_put_fetches_only_sender_in_room_with_manifest_and_chunk_caps() {
         head.ack("put")
     );
     let chunks: FileManifest = serde_cbor::from_slice(&manifest).unwrap();
+    assert_eq!(
+        service.repo.owner_bytes(),
+        HashMap::from([("put-sender".into(), head.size + manifest.len() as u64)])
+    );
     assert_eq!(
         *calls.lock().unwrap(),
         vec![
@@ -962,8 +1251,8 @@ fn inflight_commit_must_stop_after_durable_write_failure() {
     let (mut b, bm) = fixture(b"b", 1, None);
     b.slot = "b".repeat(32);
     sign(&mut b, [7; 32]);
-    let ra = repo.reserve("test-room", &a).unwrap().unwrap();
-    let rb = repo.reserve("test-room", &b).unwrap().unwrap();
+    let ra = repo.reserve("test-room", &a, None, None).unwrap().unwrap();
+    let rb = repo.reserve("test-room", &b, None, None).unwrap().unwrap();
     let k = digest(format!("test-room\n{}", a.slot).as_bytes());
     let blocker = dir.join("heads").join(format!("{k}.json"));
     std::fs::create_dir(&blocker).unwrap();
@@ -990,8 +1279,14 @@ fn escrow_failed_sync_after_publish_preserves_disk_generations_until_restart() {
     let (mut other, om) = fixture(b"other", 1, None);
     other.slot = "b".repeat(32);
     sign(&mut other, [7; 32]);
-    let rn = repo.reserve("test-room", &next).unwrap().unwrap();
-    let ro = repo.reserve("test-room", &other).unwrap().unwrap();
+    let rn = repo
+        .reserve("test-room", &next, None, None)
+        .unwrap()
+        .unwrap();
+    let ro = repo
+        .reserve("test-room", &other, None, None)
+        .unwrap()
+        .unwrap();
     repo.inject_post_publish_failure();
     assert_eq!(
         repo.commit("test-room", &next, b"next", &nm)
@@ -1265,7 +1560,10 @@ fn escrow_cid_matching_malformed_manifest_is_fetch_failure_without_disabling_wri
     let malformed = [0xff]; // CBOR break outside an indefinite container.
     bad.cid = compute_cid(&malformed, MULTICODEC_DAG_CBOR);
     sign(&mut bad, [7; 32]);
-    let reservation = repo.reserve("test-room", &bad).unwrap().unwrap();
+    let reservation = repo
+        .reserve("test-room", &bad, None, None)
+        .unwrap()
+        .unwrap();
     assert_eq!(
         validate_manifest(&bad, &malformed).unwrap_err().code,
         "fetch_failed"
@@ -1277,7 +1575,11 @@ fn escrow_cid_matching_malformed_manifest_is_fetch_failure_without_disabling_wri
         "fetch_failed"
     );
     drop(reservation);
-    assert!(repo.reserve("test-room", &head).unwrap().is_some());
+    assert!(
+        repo.reserve("test-room", &head, None, None)
+            .unwrap()
+            .is_some()
+    );
     drop(repo);
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -1363,7 +1665,7 @@ async fn escrow_delete_checks_writer_cas_idempotence_and_releases_quota() {
     assert_eq!(
         service
             .repo
-            .reserve("test-room", &replacement)
+            .reserve("test-room", &replacement, None, None)
             .err()
             .unwrap()
             .code,
@@ -1421,7 +1723,10 @@ fn escrow_delete_crash_after_head_removal_reconciles_orphans() {
     );
     let (next, _) = fixture(b"next", 2, Some(head.hash()));
     assert_eq!(
-        repo.reserve("test-room", &next).err().unwrap().code,
+        repo.reserve("test-room", &next, None, None)
+            .err()
+            .unwrap()
+            .code,
         "quota"
     );
     drop(repo);
@@ -1446,7 +1751,10 @@ fn escrow_delete_preserves_shared_cid_blocks_and_other_rooms() {
     second.slot = "b".repeat(32);
     sign(&mut second, [7; 32]);
     accept(&repo, &second, b"same blob", &bytes);
-    let reserve = repo.reserve("other-room", &first).unwrap().unwrap();
+    let reserve = repo
+        .reserve("other-room", &first, None, None)
+        .unwrap()
+        .unwrap();
     repo.commit("other-room", &first, b"same blob", &bytes)
         .unwrap();
     drop(reserve);
@@ -1699,7 +2007,10 @@ fn migration_export_and_retirement_are_room_scoped_and_preserve_other_data() {
     accept(&repo, &first, b"first encrypted", &first_manifest);
     accept(&repo, &latest, b"latest encrypted", &latest_manifest);
     let (other, other_manifest) = fixture(b"other room", 1, None);
-    let reservation = repo.reserve("other-room", &other).unwrap().unwrap();
+    let reservation = repo
+        .reserve("other-room", &other, None, None)
+        .unwrap()
+        .unwrap();
     repo.commit("other-room", &other, b"other room", &other_manifest)
         .unwrap();
     drop(reservation);

@@ -773,7 +773,7 @@ impl Mesh {
                 if service.repo.held(&room, &head) {
                     return Ok(());
                 }
-                let Some(_reservation) = service.repo.reserve(&room, &head)? else {
+                let Some(_reservation) = service.repo.reserve(&room, &head, None, None)? else {
                     return Ok(());
                 };
                 let (blob, manifest) = service.transfers.pull(&room, &source, &head).await?;

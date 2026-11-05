@@ -11,6 +11,7 @@ use tokio::sync::mpsc;
 
 use super::protocol::{self, ProtocolMessage};
 use super::{SendFn, provider::JobLimiter};
+use crate::authz::{Action, Authorized, Denied, Service};
 use crate::config::ResolvedModel;
 
 pub(super) const CHUNK_SIZE: usize = 12 * 1024;
@@ -105,6 +106,7 @@ pub(super) fn chunks(bytes: &[u8]) -> Vec<String> {
 
 #[derive(Default)]
 struct Assembly {
+    authorized: Option<Authorized>,
     parts: BTreeMap<u64, String>,
     last: Option<u64>,
     chars: usize,
@@ -186,7 +188,17 @@ impl TunnelProvider {
         );
     }
 
+    #[cfg(test)]
     pub async fn handle_message(&self, from: &str, msg: ProtocolMessage) {
+        let _ = self.handle_message_in_room(None, from, msg).await;
+    }
+
+    pub async fn handle_message_in_room(
+        &self,
+        room: Option<&str>,
+        from: &str,
+        msg: ProtocolMessage,
+    ) -> std::result::Result<(), Denied> {
         let ProtocolMessage::OaiRequest {
             id,
             seq,
@@ -197,7 +209,7 @@ impl TunnelProvider {
             content_type,
         } = msg
         else {
-            return;
+            return Ok(());
         };
         if id.len() > 256
             || path.as_ref().is_some_and(|p| p.len() > 256)
@@ -210,13 +222,24 @@ impl TunnelProvider {
                 "Request exceeded the maximum allowed size.",
                 Some("request_too_large"),
             );
-            return;
+            return Ok(());
         }
         let ready = {
             let mut pending = self.pending.lock().expect("oai pending lock");
             let now = Instant::now();
             pending.retain(|_, (at, _)| now.duration_since(*at) < TIMEOUT);
             let key = (from.to_string(), id.clone());
+            let authorized = if pending.contains_key(&key) {
+                None
+            } else {
+                match crate::authz::authorize_p2p(Service::Ai, Action::Infer, room, from, None) {
+                    Ok(authorized) => Some(authorized),
+                    Err(denied) => {
+                        self.error(from, id, &denied.message, Some(denied.code));
+                        return Err(denied);
+                    }
+                }
+            };
             let total: usize = pending.values().map(|(_, a)| a.chars).sum();
             if (!pending.contains_key(&key)
                 && (pending.len() >= MAX_BUFFERS
@@ -230,11 +253,17 @@ impl TunnelProvider {
                     "Too many pending OAI requests.",
                     Some("request_rejected"),
                 );
-                return;
+                return Ok(());
             }
-            let (at, assembly) = pending
-                .entry(key.clone())
-                .or_insert_with(|| (now, Assembly::default()));
+            let (at, assembly) = pending.entry(key.clone()).or_insert_with(|| {
+                (
+                    now,
+                    Assembly {
+                        authorized,
+                        ..Assembly::default()
+                    },
+                )
+            });
             *at = now;
             // Later chunks never override seq 0 metadata, including duplicates.
             if seq == 0 && !assembly.parts.contains_key(&0) {
@@ -243,13 +272,13 @@ impl TunnelProvider {
                 assembly.content_type = content_type.unwrap_or_else(|| "application/json".into());
             }
             match assembly.push(seq, last, data) {
-                Ok(false) => return,
+                Ok(false) => return Ok(()),
                 Ok(true) => pending.remove(&key).expect("complete assembly").1,
                 Err(err) => {
                     pending.remove(&key);
                     let code = err.to_string();
                     self.error(from, id, "Invalid or oversized OAI request.", Some(&code));
-                    return;
+                    return Ok(());
                 }
             }
         };
@@ -260,9 +289,12 @@ impl TunnelProvider {
                 "Too many concurrent OAI requests.",
                 Some("request_rejected"),
             );
-            return;
+            return Ok(());
         };
-        match tokio::time::timeout(TIMEOUT, self.dispatch(ready)).await {
+        let authorized = ready.authorized.clone().expect("authorized OAI assembly");
+        let result = tokio::time::timeout(TIMEOUT, self.dispatch(ready)).await;
+        authorized.record(1, 0);
+        match result {
             Ok(Ok(response)) => {
                 let parts = chunks(&response.body);
                 let count = parts.len();
@@ -304,6 +336,7 @@ impl TunnelProvider {
             }
             Err(_) => self.error(from, id, "OAI upstream request timed out.", None),
         }
+        Ok(())
     }
 
     async fn dispatch(&self, assembly: Assembly) -> Result<TunnelResponse> {
@@ -626,6 +659,7 @@ mod tests {
 
     #[tokio::test]
     async fn request_buffers_are_peer_bound_capped_expired_and_removed_on_disconnect() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         let (send, sent) = capture();
         let provider = TunnelProvider::new(send, Arc::new(|_, _| Ok(None)));
         for peer in ["a", "b"] {
@@ -662,6 +696,7 @@ mod tests {
 
     #[tokio::test]
     async fn unsupported_path_and_unshared_model_keep_mistai_error_codes() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         let (send, sent) = capture();
         let provider = TunnelProvider::new(send, Arc::new(|_, _| bail!("model_not_shared")));
         provider
@@ -690,6 +725,7 @@ mod tests {
 
     #[tokio::test]
     async fn tunnel_forwards_resolved_key_image_effort_and_http_status_without_temperature() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
@@ -774,6 +810,7 @@ mod tests {
 
     #[tokio::test]
     async fn consumer_ignores_other_senders_and_reassembles_response() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         let (send, sent) = capture();
         let consumer = TunnelConsumer::new(send);
         let c = consumer.clone();
@@ -846,6 +883,7 @@ mod tests {
 
     #[tokio::test]
     async fn models_get_and_embeddings_post_are_forwarded_to_the_selected_upstream() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         for (path, method, request_body, response_body) in [
             (
                 "/models",

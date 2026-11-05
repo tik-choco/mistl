@@ -1,5 +1,6 @@
 mod agent;
 mod ai;
+mod authz;
 mod bot;
 mod chat_relay;
 mod child_process;

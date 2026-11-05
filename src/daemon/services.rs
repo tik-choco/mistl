@@ -3,6 +3,22 @@ use super::AppState;
 use std::sync::Arc;
 
 pub(super) fn spawn(state: Arc<AppState>) {
+    if let Err(error) = crate::config::data_dir().and_then(|data_dir| crate::authz::init(&data_dir))
+    {
+        tracing::warn!(%error, "failed to initialize authorization state");
+        return;
+    }
+    if state.network.permitted() {
+        let authz_state = state.clone();
+        tokio::spawn(async move {
+            match crate::identity::current(&authz_state).await {
+                Ok(identity) => crate::authz::start(identity, tokio::runtime::Handle::current()),
+                Err(error) => {
+                    tracing::warn!(%error, "failed to start authorization background task")
+                }
+            }
+        });
+    }
     crate::ai::migrate_provide_state();
     if !state.network.permitted() {
         return;

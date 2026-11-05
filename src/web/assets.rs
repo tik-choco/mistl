@@ -4,6 +4,14 @@
 
 pub(super) fn feature_asset(path: &str) -> Option<(&'static str, &'static [u8])> {
     let (content_type, body): (&str, &[u8]) = match path {
+        "/assets/features/authz.js" => (
+            "text/javascript; charset=utf-8",
+            include_bytes!("assets/features/authz.js"),
+        ),
+        "/assets/features/authz.css" => (
+            "text/css; charset=utf-8",
+            include_bytes!("assets/features/authz.css"),
+        ),
         "/assets/features/identity.js" => (
             "text/javascript; charset=utf-8",
             include_bytes!("assets/features/identity.js"),
@@ -88,6 +96,7 @@ mod tests {
     #[test]
     fn only_embedded_features_are_public() {
         for feature in [
+            "authz",
             "identity",
             "topology",
             "storage",

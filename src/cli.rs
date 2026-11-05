@@ -78,6 +78,14 @@ pub enum Command {
         #[command(subcommand)]
         action: EscrowAction,
     },
+    /// Manage peer access, API tokens, capabilities, and usage limits
+    Authz {
+        /// Print JSON (token and capability creation print their values alone)
+        #[arg(long, global = true)]
+        json: bool,
+        #[command(subcommand)]
+        action: AuthzAction,
+    },
     /// P2P AI network: consume or provide LLM inference (mistai compatible)
     Ai {
         #[command(subcommand)]
@@ -586,6 +594,296 @@ pub enum EscrowRoomsAction {
     Add { room: String },
     Remove { room: String },
     List,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum AuthzService {
+    Ai,
+    Escrow,
+}
+
+impl AuthzService {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ai => "ai",
+            Self::Escrow => "escrow",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum AuthzMode {
+    Open,
+    Allowlist,
+}
+
+impl AuthzMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Allowlist => "allowlist",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum AuthzPeriod {
+    Day,
+    Month,
+    Total,
+}
+
+impl AuthzPeriod {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Day => "day",
+            Self::Month => "month",
+            Self::Total => "total",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub enum AuthzSwitch {
+    On,
+    Off,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum AuthzCapabilityAction {
+    Infer,
+    Read,
+    Write,
+}
+
+impl AuthzCapabilityAction {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Infer => "infer",
+            Self::Read => "read",
+            Self::Write => "write",
+        }
+    }
+}
+
+#[derive(clap::Args)]
+pub struct AuthzLimitArgs {
+    /// Counter period (UTC day, UTC month, or total)
+    #[arg(long)]
+    period: Option<AuthzPeriod>,
+    /// Maximum requests per period
+    #[arg(long)]
+    max_requests: Option<u64>,
+    /// Maximum generated characters per period
+    #[arg(long)]
+    max_output_chars: Option<u64>,
+}
+
+#[derive(Subcommand)]
+pub enum AuthzAction {
+    /// Show policies and token metadata
+    Show,
+    /// Change a service's access mode
+    Mode {
+        service: AuthzService,
+        mode: AuthzMode,
+    },
+    /// Manage allowed peers
+    Allow {
+        #[command(subcommand)]
+        action: AuthzRuleAction,
+    },
+    /// Manage denied peers
+    Deny {
+        #[command(subcommand)]
+        action: AuthzRuleAction,
+    },
+    /// Set default limits or a per-subject override
+    Limits {
+        service: AuthzService,
+        #[arg(long)]
+        subject: Option<String>,
+        #[command(flatten)]
+        limits: AuthzLimitArgs,
+        /// Maximum stored bytes (e.g. 1GiB)
+        #[arg(long, value_parser = parse_authz_size)]
+        max_stored: Option<u64>,
+        /// Reset defaults or remove a subject's override
+        #[arg(long, conflicts_with_all = ["period", "max_requests", "max_output_chars", "max_stored"])]
+        clear: bool,
+    },
+    /// Show or reset cumulative usage
+    #[command(args_conflicts_with_subcommands = true)]
+    Usage {
+        service: Option<AuthzService>,
+        #[command(subcommand)]
+        action: Option<AuthzUsageAction>,
+    },
+    /// Manage local API authorization
+    Api {
+        #[command(subcommand)]
+        action: AuthzApiAction,
+    },
+    /// Manage API tokens
+    Token {
+        #[command(subcommand)]
+        action: AuthzTokenAction,
+    },
+    /// Manage signed capabilities
+    Cap {
+        #[command(subcommand)]
+        action: AuthzCapAction,
+    },
+    /// Manage trusted capability issuers
+    Issuer {
+        #[command(subcommand)]
+        action: AuthzIssuerAction,
+    },
+    /// List verified peers
+    Peers,
+}
+
+#[derive(Subcommand)]
+pub enum AuthzRuleAction {
+    /// Add or replace a rule
+    Add {
+        service: AuthzService,
+        subject: String,
+        /// Lifetime, e.g. 10m, 12h, or 7d (daemon minimum: 60s)
+        #[arg(long, value_parser = parse_authz_ttl, conflicts_with = "expires")]
+        ttl: Option<u64>,
+        /// Expiry as an RFC3339 timestamp
+        #[arg(long, value_parser = parse_authz_expiry)]
+        expires: Option<String>,
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Remove a rule
+    Rm {
+        service: AuthzService,
+        subject: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AuthzUsageAction {
+    /// Reset usage counters for a service or account
+    Reset {
+        service: AuthzService,
+        #[arg(long)]
+        account: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AuthzApiAction {
+    /// Require an API token for local API requests
+    RequireToken { value: AuthzSwitch },
+}
+
+#[derive(Subcommand)]
+pub enum AuthzTokenAction {
+    /// Create a token; its secret is printed only once
+    Create {
+        name: String,
+        #[arg(long = "model")]
+        models: Vec<String>,
+        #[command(flatten)]
+        limits: AuthzLimitArgs,
+        /// Lifetime, e.g. 10m, 12h, or 7d (daemon minimum: 60s)
+        #[arg(long, value_parser = parse_authz_ttl, conflicts_with = "expires")]
+        ttl: Option<u64>,
+        /// Expiry as an RFC3339 timestamp
+        #[arg(long, value_parser = parse_authz_expiry)]
+        expires: Option<String>,
+    },
+    /// List token metadata
+    List,
+    /// Update token metadata and limits
+    Update {
+        id: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long = "model")]
+        models: Vec<String>,
+        /// Remove all model restrictions
+        #[arg(long, conflicts_with = "models")]
+        clear_models: bool,
+        #[command(flatten)]
+        limits: AuthzLimitArgs,
+        /// Set an RFC3339 expiry
+        #[arg(long, value_parser = parse_authz_expiry, conflicts_with = "clear_expiry")]
+        expires: Option<String>,
+        /// Remove the token's expiry
+        #[arg(long)]
+        clear_expiry: bool,
+    },
+    /// Revoke a token
+    Revoke { id: String },
+    /// Delete a token
+    Delete { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum AuthzCapAction {
+    /// Issue a capability; its JSON is printed on stdout
+    Issue {
+        aud_did: String,
+        service: AuthzService,
+        /// Permitted action; may be repeated (default: infer for AI, read for escrow)
+        #[arg(long = "action")]
+        actions: Vec<AuthzCapabilityAction>,
+        /// Resource: *, ROOM/*, or ROOM/SLOT (required for escrow)
+        #[arg(long, required_if_eq("service", "escrow"))]
+        resource: Option<String>,
+        /// Lifetime, e.g. 10m, 12h, or 7d (default: 7d)
+        #[arg(long, value_parser = parse_authz_ttl, conflicts_with = "expires")]
+        ttl: Option<u64>,
+        /// Expiry as an RFC3339 timestamp
+        #[arg(long, value_parser = parse_authz_expiry)]
+        expires: Option<String>,
+        /// DID of an allowed verifier; may be repeated
+        #[arg(long)]
+        to: Vec<String>,
+        #[command(flatten)]
+        limits: AuthzLimitArgs,
+        /// Held capability to delegate
+        #[arg(long)]
+        parent: Option<String>,
+        /// Try to deliver the capability to its holder
+        #[arg(long)]
+        deliver: bool,
+    },
+    /// Import a capability from a file, stdin (-), or JSON
+    Import { source: String },
+    /// List issued, held, presented, and revoked capabilities
+    List,
+    /// Revoke an issued capability, or revoke any capability locally
+    Revoke {
+        id: String,
+        #[arg(long)]
+        local: bool,
+    },
+    /// Remove a held capability
+    Remove { id: String },
+    /// Verify a capability from a file, stdin (-), or JSON
+    Verify {
+        source: String,
+        #[arg(long)]
+        service: Option<AuthzService>,
+        #[arg(long)]
+        action: Option<AuthzCapabilityAction>,
+        #[arg(long)]
+        resource: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AuthzIssuerAction {
+    /// Trust an issuer for a service
+    Add { service: AuthzService, did: String },
+    /// Stop trusting an issuer for a service
+    Rm { service: AuthzService, did: String },
 }
 
 #[derive(Subcommand)]
@@ -1332,6 +1630,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
                 EscrowRoomsAction::List => client_call("escrow.rooms.list", json!({})),
             },
         },
+        Command::Authz { json, action } => authz_call(action, json),
         Command::Chat { action } => match action {
             ChatAction::Rooms => client_call("chat.rooms", json!({})),
             ChatAction::Log { room, limit } => {
@@ -2064,6 +2363,1253 @@ fn client_call(cmd: &str, args: Value) -> Result<()> {
     let response = request(cmd, args)?;
     println!("{}", serde_json::to_string_pretty(&response)?);
     Ok(())
+}
+
+fn parse_authz_ttl(value: &str) -> std::result::Result<u64, String> {
+    let (number, multiplier) = match value.as_bytes().last() {
+        Some(b's') => (&value[..value.len() - 1], 1),
+        Some(b'm') => (&value[..value.len() - 1], 60),
+        Some(b'h') => (&value[..value.len() - 1], 60 * 60),
+        Some(b'd') => (&value[..value.len() - 1], 24 * 60 * 60),
+        _ => return Err("expected a duration such as 30s, 10m, 12h, or 7d".into()),
+    };
+    if number.is_empty() || !number.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("duration must be a whole number followed by s, m, h, or d".into());
+    }
+    number
+        .parse::<u64>()
+        .ok()
+        .and_then(|n| n.checked_mul(multiplier))
+        .filter(|n| *n <= i64::MAX as u64)
+        .ok_or_else(|| "duration is too large".into())
+}
+
+fn parse_authz_size(value: &str) -> std::result::Result<u64, String> {
+    let (number, multiplier) = if let Some(n) = value.strip_suffix("KiB") {
+        (n, 1024_u64)
+    } else if let Some(n) = value.strip_suffix("MiB") {
+        (n, 1024_u64.pow(2))
+    } else if let Some(n) = value.strip_suffix("GiB") {
+        (n, 1024_u64.pow(3))
+    } else {
+        (value, 1)
+    };
+    if number.is_empty() || !number.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("expected whole bytes or a KiB, MiB, or GiB suffix".into());
+    }
+    number
+        .parse::<u64>()
+        .ok()
+        .and_then(|n| n.checked_mul(multiplier))
+        .ok_or_else(|| "size is too large".into())
+}
+
+fn parse_authz_expiry(value: &str) -> std::result::Result<String, String> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|_| value.to_owned())
+        .map_err(|_| "expected an RFC3339 timestamp".into())
+}
+
+impl AuthzLimitArgs {
+    fn any(&self) -> bool {
+        self.period.is_some() || self.max_requests.is_some() || self.max_output_chars.is_some()
+    }
+
+    fn apply(&self, limits: &mut Value) -> Result<()> {
+        let fields = limits
+            .as_object_mut()
+            .context("invalid limits in daemon response")?;
+        if let Some(period) = self.period {
+            fields.insert("period".into(), json!(period.as_str()));
+        }
+        if let Some(max) = self.max_requests {
+            fields.insert("max_requests".into(), json!(max));
+        }
+        if let Some(max) = self.max_output_chars {
+            fields.insert("max_output_chars".into(), json!(max));
+        }
+        Ok(())
+    }
+}
+
+enum AuthzOutput {
+    Show,
+    Policy,
+    Usage(Option<AuthzService>),
+    Reset,
+    Tokens,
+    Token,
+    Deleted,
+    Secret,
+    Peers,
+    CapIssued,
+    CapImported,
+    Caps,
+    CapRevoked,
+    CapRemoved,
+    CapVerified,
+}
+
+fn read_authz_cap(source: &str, stdin: &mut impl std::io::Read) -> Result<Value> {
+    let text = if source == "-" {
+        std::io::read_to_string(stdin).context("reading capability from stdin")?
+    } else if source.trim_start().starts_with('{') {
+        source.to_owned()
+    } else {
+        std::fs::read_to_string(source).with_context(|| format!("reading {source}"))?
+    };
+    serde_json::from_str(&text).context("invalid capability JSON")
+}
+
+fn authz_rule_request(allow: bool, action: AuthzRuleAction) -> (&'static str, Value, AuthzOutput) {
+    match action {
+        AuthzRuleAction::Add {
+            service,
+            subject,
+            ttl,
+            expires,
+            note,
+        } => (
+            if allow {
+                "authz.allow.add"
+            } else {
+                "authz.deny.add"
+            },
+            json!({"service": service.as_str(), "subject": subject, "ttl_secs": ttl,
+                   "expires_at": expires, "note": note}),
+            AuthzOutput::Policy,
+        ),
+        AuthzRuleAction::Rm { service, subject } => (
+            if allow {
+                "authz.allow.remove"
+            } else {
+                "authz.deny.remove"
+            },
+            json!({"service": service.as_str(), "subject": subject}),
+            AuthzOutput::Policy,
+        ),
+    }
+}
+
+fn authz_request(
+    action: AuthzAction,
+    get: impl FnMut(&str, Value) -> Result<Value>,
+) -> Result<(&'static str, Value, AuthzOutput)> {
+    authz_request_with_input(action, get, std::io::stdin().lock())
+}
+
+fn authz_request_with_input(
+    action: AuthzAction,
+    mut get: impl FnMut(&str, Value) -> Result<Value>,
+    mut stdin: impl std::io::Read,
+) -> Result<(&'static str, Value, AuthzOutput)> {
+    Ok(match action {
+        AuthzAction::Show => ("authz.show", json!({}), AuthzOutput::Show),
+        AuthzAction::Mode { service, mode } => (
+            "authz.mode.set",
+            json!({"service": service.as_str(), "mode": mode.as_str()}),
+            AuthzOutput::Policy,
+        ),
+        AuthzAction::Allow { action } => authz_rule_request(true, action),
+        AuthzAction::Deny { action } => authz_rule_request(false, action),
+        AuthzAction::Limits {
+            service,
+            subject,
+            limits,
+            max_stored,
+            clear,
+        } => {
+            let value = if clear {
+                if subject.is_some() {
+                    Value::Null
+                } else {
+                    json!({})
+                }
+            } else {
+                let current = get("authz.show", json!({}))?;
+                let policy = current
+                    .get("policy")
+                    .and_then(|p| p.get(service.as_str()))
+                    .context("missing service policy in daemon response")?;
+                let default = policy
+                    .get("limits")
+                    .context("missing default limits in daemon response")?;
+                let mut value = subject
+                    .as_ref()
+                    .and_then(|subject| {
+                        policy
+                            .get("overrides")
+                            .and_then(Value::as_array)
+                            .and_then(|entries| {
+                                entries.iter().find(|entry| {
+                                    entry.get("subject").and_then(Value::as_str)
+                                        == Some(subject.as_str())
+                                })
+                            })
+                            .and_then(|entry| entry.get("limits"))
+                    })
+                    .unwrap_or(default)
+                    .clone();
+                limits.apply(&mut value)?;
+                if let Some(max) = max_stored {
+                    value["max_stored_bytes"] = json!(max);
+                }
+                value
+            };
+            (
+                "authz.limits.set",
+                json!({"service": service.as_str(), "subject": subject, "limits": value}),
+                AuthzOutput::Policy,
+            )
+        }
+        AuthzAction::Usage {
+            service,
+            action: None,
+        } => (
+            "authz.usage",
+            json!({"service": service.map(AuthzService::as_str)}),
+            AuthzOutput::Usage(service),
+        ),
+        AuthzAction::Usage {
+            action: Some(AuthzUsageAction::Reset { service, account }),
+            ..
+        } => (
+            "authz.usage.reset",
+            json!({"service": service.as_str(), "account": account}),
+            AuthzOutput::Reset,
+        ),
+        AuthzAction::Api {
+            action: AuthzApiAction::RequireToken { value },
+        } => (
+            "authz.api.set",
+            json!({"require_token": matches!(value, AuthzSwitch::On)}),
+            AuthzOutput::Policy,
+        ),
+        AuthzAction::Token { action } => match action {
+            AuthzTokenAction::Create {
+                name,
+                models,
+                limits,
+                ttl,
+                expires,
+            } => {
+                let mut value = json!({});
+                limits.apply(&mut value)?;
+                (
+                    "authz.token.create",
+                    json!({"name": name, "models": models, "limits": value,
+                    "ttl_secs": ttl, "expires_at": expires}),
+                    AuthzOutput::Secret,
+                )
+            }
+            AuthzTokenAction::List => ("authz.token.list", json!({}), AuthzOutput::Tokens),
+            AuthzTokenAction::Update {
+                id,
+                name,
+                models,
+                clear_models,
+                limits,
+                expires,
+                clear_expiry,
+            } => {
+                let mut args = json!({"id": id});
+                if let Some(name) = name {
+                    args["name"] = json!(name);
+                }
+                if !models.is_empty() || clear_models {
+                    args["models"] = json!(models);
+                }
+                if limits.any() {
+                    let tokens = get("authz.token.list", json!({}))?;
+                    let token = tokens
+                        .as_array()
+                        .context("invalid token list in daemon response")?
+                        .iter()
+                        .find(|token| token.get("id").and_then(Value::as_str) == Some(id.as_str()))
+                        .context("unknown API token id")?;
+                    let mut value = token
+                        .get("limits")
+                        .context("missing token limits in daemon response")?
+                        .clone();
+                    limits.apply(&mut value)?;
+                    args["limits"] = value;
+                }
+                if let Some(expires) = expires {
+                    args["expires_at"] = json!(expires);
+                }
+                if clear_expiry {
+                    args["expires_at"] = Value::Null;
+                }
+                ("authz.token.update", args, AuthzOutput::Token)
+            }
+            AuthzTokenAction::Revoke { id } => {
+                ("authz.token.revoke", json!({"id": id}), AuthzOutput::Token)
+            }
+            AuthzTokenAction::Delete { id } => (
+                "authz.token.delete",
+                json!({"id": id}),
+                AuthzOutput::Deleted,
+            ),
+        },
+        AuthzAction::Cap { action } => match action {
+            AuthzCapAction::Issue {
+                aud_did,
+                service,
+                mut actions,
+                resource,
+                ttl,
+                expires,
+                to,
+                limits,
+                parent,
+                deliver,
+            } => {
+                if actions.is_empty() {
+                    actions.push(match service {
+                        AuthzService::Ai => AuthzCapabilityAction::Infer,
+                        AuthzService::Escrow => AuthzCapabilityAction::Read,
+                    });
+                }
+                let resource = match (service, resource) {
+                    (_, Some(resource)) => resource,
+                    (AuthzService::Ai, None) => "*".into(),
+                    (AuthzService::Escrow, None) => bail!("escrow requires --resource"),
+                };
+                let mut args = json!({
+                    "aud": aud_did,
+                    "service": service.as_str(),
+                    "actions": actions.iter().map(|action| action.as_str()).collect::<Vec<_>>(),
+                    "resource": resource,
+                    "deliver": deliver,
+                });
+                if let Some(ttl) = ttl {
+                    args["ttl_secs"] = json!(ttl);
+                }
+                if let Some(expires) = expires {
+                    args["expires_at"] = json!(expires);
+                }
+                if !to.is_empty() {
+                    args["to"] = json!(to);
+                }
+                if limits.any() {
+                    let mut value = json!({});
+                    limits.apply(&mut value)?;
+                    args["limits"] = value;
+                }
+                if let Some(parent) = parent {
+                    args["parent"] = json!(parent);
+                }
+                ("authz.cap.issue", args, AuthzOutput::CapIssued)
+            }
+            AuthzCapAction::Import { source } => (
+                "authz.cap.import",
+                json!({"cap": read_authz_cap(&source, &mut stdin)?}),
+                AuthzOutput::CapImported,
+            ),
+            AuthzCapAction::List => ("authz.cap.list", json!({}), AuthzOutput::Caps),
+            AuthzCapAction::Revoke { id, local } => (
+                "authz.cap.revoke",
+                json!({"id": id, "local": local}),
+                AuthzOutput::CapRevoked,
+            ),
+            AuthzCapAction::Remove { id } => (
+                "authz.cap.remove",
+                json!({"id": id}),
+                AuthzOutput::CapRemoved,
+            ),
+            AuthzCapAction::Verify {
+                source,
+                service,
+                action,
+                resource,
+            } => (
+                "authz.cap.verify",
+                json!({"cap": read_authz_cap(&source, &mut stdin)?,
+                       "service": service.map(AuthzService::as_str),
+                       "action": action.map(AuthzCapabilityAction::as_str),
+                       "resource": resource}),
+                AuthzOutput::CapVerified,
+            ),
+        },
+        AuthzAction::Issuer { action } => match action {
+            AuthzIssuerAction::Add { service, did } => (
+                "authz.issuer.add",
+                json!({"service": service.as_str(), "did": did}),
+                AuthzOutput::Policy,
+            ),
+            AuthzIssuerAction::Rm { service, did } => (
+                "authz.issuer.remove",
+                json!({"service": service.as_str(), "did": did}),
+                AuthzOutput::Policy,
+            ),
+        },
+        AuthzAction::Peers => ("authz.peers", json!({}), AuthzOutput::Peers),
+    })
+}
+
+fn authz_call(action: AuthzAction, json_output: bool) -> Result<()> {
+    let (cmd, args, output) = authz_request(action, request)?;
+    let response = request(cmd, args)?;
+    if matches!(output, AuthzOutput::Secret) {
+        let token = response
+            .get("token")
+            .and_then(Value::as_str)
+            .filter(|token| !token.is_empty())
+            .context("token missing from daemon response")?;
+        eprintln!("Store this token now; it will not be shown again.");
+        println!("{token}");
+    } else if matches!(output, AuthzOutput::CapIssued) {
+        let cap = response
+            .get("cap")
+            .filter(|cap| cap.is_object())
+            .context("capability missing from daemon response")?;
+        let delivered = response["delivered"]
+            .as_bool()
+            .context("delivery status missing from daemon response")?;
+        eprintln!("Issued: {}", authz_cap_summary(cap));
+        eprintln!("delivered: {}", if delivered { "yes" } else { "no" });
+        println!("{}", serde_json::to_string(cap)?);
+    } else if json_output {
+        println!("{}", serde_json::to_string_pretty(&response)?);
+    } else {
+        let rendered = match output {
+            AuthzOutput::Show => render_authz_show(&response),
+            AuthzOutput::Policy => render_authz_policy(&response),
+            AuthzOutput::Usage(service) => render_authz_usage(&response, service),
+            AuthzOutput::Reset => format!(
+                "Reset {} usage account(s).",
+                response["reset"].as_u64().unwrap_or(0)
+            ),
+            AuthzOutput::Tokens => render_authz_tokens(&response),
+            AuthzOutput::Token => render_authz_tokens(&json!([response])),
+            AuthzOutput::Deleted => "Token deleted.".to_string(),
+            AuthzOutput::Peers => render_authz_peers(&response),
+            AuthzOutput::CapImported => format!("Imported: {}", authz_cap_summary(&response)),
+            AuthzOutput::Caps => render_authz_caps(&response),
+            AuthzOutput::CapRevoked => format!(
+                "Revoked: {}\nBroadcast: {}",
+                authz_yes_no(&response["revoked"]),
+                authz_yes_no(&response["broadcast"])
+            ),
+            AuthzOutput::CapRemoved => {
+                format!("Removed: {}", authz_yes_no(&response["removed"]))
+            }
+            AuthzOutput::CapVerified => render_authz_cap_verification(&response),
+            AuthzOutput::Secret | AuthzOutput::CapIssued => unreachable!(),
+        };
+        println!("{rendered}");
+    }
+    Ok(())
+}
+
+fn authz_text(value: &Value, key: &str) -> String {
+    let mut result = String::new();
+    for c in value
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or("-")
+        .chars()
+    {
+        if c.is_control() {
+            result.extend(c.escape_debug());
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+fn authz_subject(value: &str) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    if value.starts_with("did:key:") && chars.len() > 20 {
+        format!(
+            "{}…{}",
+            chars[..12].iter().collect::<String>(),
+            chars[chars.len() - 4..].iter().collect::<String>()
+        )
+    } else {
+        value.to_string()
+    }
+}
+
+fn authz_number(value: Option<&Value>) -> String {
+    value
+        .and_then(Value::as_u64)
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "unlimited".into())
+}
+
+fn authz_size(bytes: u64) -> String {
+    for (unit, scale) in [
+        ("GiB", 1024_u64.pow(3)),
+        ("MiB", 1024_u64.pow(2)),
+        ("KiB", 1024_u64),
+    ] {
+        if bytes >= scale {
+            return if bytes.is_multiple_of(scale) {
+                format!("{} {unit}", bytes / scale)
+            } else {
+                format!("{:.1} {unit}", bytes as f64 / scale as f64)
+            };
+        }
+    }
+    format!("{bytes} B")
+}
+
+fn authz_size_limit(value: Option<&Value>) -> String {
+    value
+        .and_then(Value::as_u64)
+        .map(authz_size)
+        .unwrap_or_else(|| "unlimited".into())
+}
+
+fn authz_limits_text(limits: &Value) -> String {
+    format!(
+        "period={} requests={} chars={} stored={}",
+        authz_text(limits, "period"),
+        authz_number(limits.get("max_requests")),
+        authz_number(limits.get("max_output_chars")),
+        authz_size_limit(limits.get("max_stored_bytes"))
+    )
+}
+
+fn render_authz_policy(policy: &Value) -> String {
+    let mut lines = vec![format!(
+        "API token required: {}",
+        if policy["api"]["require_token"].as_bool().unwrap_or(false) {
+            "on"
+        } else {
+            "off"
+        }
+    )];
+    for service in ["ai", "escrow"] {
+        let section = &policy[service];
+        lines.push(format!(
+            "\n{} mode: {}",
+            service.to_ascii_uppercase(),
+            authz_text(section, "mode")
+        ));
+        lines.push(format!(
+            "  default: {}",
+            authz_limits_text(&section["limits"])
+        ));
+        lines.push(format!(
+            "  {:<23}  {:<6}  {:<25}  {}",
+            "SUBJECT", "RULE", "EXPIRES", "NOTE"
+        ));
+        let mut count = 0;
+        for kind in ["allow", "deny"] {
+            if let Some(rules) = section[kind].as_array() {
+                for rule in rules {
+                    lines.push(format!(
+                        "  {:<23}  {:<6}  {:<25}  {}",
+                        authz_subject(&authz_text(rule, "subject")),
+                        kind,
+                        authz_text(rule, "expires_at"),
+                        authz_text(rule, "note")
+                    ));
+                    count += 1;
+                }
+            }
+        }
+        if count == 0 {
+            lines.push("  (no rules)".into());
+        }
+        if let Some(overrides) = section["overrides"]
+            .as_array()
+            .filter(|items| !items.is_empty())
+        {
+            lines.push("  limit overrides:".into());
+            for entry in overrides {
+                lines.push(format!(
+                    "    {:<23}  {}",
+                    authz_subject(&authz_text(entry, "subject")),
+                    authz_limits_text(&entry["limits"])
+                ));
+            }
+        }
+        if let Some(issuers) = section["issuers"]
+            .as_array()
+            .filter(|items| !items.is_empty())
+        {
+            lines.push("  trusted issuers:".into());
+            for issuer in issuers {
+                if let Some(did) = issuer.as_str() {
+                    lines.push(format!("    {}", did.escape_debug()));
+                }
+            }
+        }
+    }
+    lines.join("\n")
+}
+
+fn render_authz_show(response: &Value) -> String {
+    let mut lines = Vec::new();
+    if let Some(local) = response.get("local") {
+        lines.push(format!(
+            "Local: {}  {}",
+            authz_text(local, "node"),
+            authz_subject(&authz_text(local, "did"))
+        ));
+    }
+    lines.push(render_authz_policy(&response["policy"]));
+    lines.push(format!("\n{}", render_authz_tokens(&response["tokens"])));
+    lines.join("\n")
+}
+
+fn render_authz_usage(response: &Value, service: Option<AuthzService>) -> String {
+    let mut lines = Vec::new();
+    if service != Some(AuthzService::Escrow) {
+        lines.push(format!(
+            "AI usage\n{:<23}  {:<23}  {:<6}  {:<21}  {}",
+            "ACCOUNT", "DID", "PERIOD", "REQUESTS/LIMIT", "CHARS/LIMIT"
+        ));
+        if let Some(rows) = response["ai"].as_array() {
+            for row in rows {
+                let limits = &row["limits"];
+                let requests = format!(
+                    "{}/{}",
+                    row["requests"].as_u64().unwrap_or(0),
+                    authz_number(limits.get("max_requests"))
+                );
+                let chars = format!(
+                    "{}/{}",
+                    row["output_chars"].as_u64().unwrap_or(0),
+                    authz_number(limits.get("max_output_chars"))
+                );
+                lines.push(format!(
+                    "{:<23}  {:<23}  {:<6}  {:<21}  {}",
+                    authz_text(row, "account"),
+                    authz_subject(&authz_text(row, "did")),
+                    authz_text(row, "period"),
+                    requests,
+                    chars
+                ));
+            }
+        }
+    }
+    if service != Some(AuthzService::Ai) {
+        if !lines.is_empty() {
+            lines.push(String::new());
+        }
+        lines.push(format!(
+            "Escrow usage\n{:<16}  {:<23}  {}",
+            "NODE", "DID", "STORED/LIMIT"
+        ));
+        if let Some(rows) = response["escrow"].as_array() {
+            for row in rows {
+                lines.push(format!(
+                    "{:<16}  {:<23}  {}/{}",
+                    authz_text(row, "node"),
+                    authz_subject(&authz_text(row, "did")),
+                    authz_size(row["stored_bytes"].as_u64().unwrap_or(0)),
+                    authz_size_limit(row.get("limit"))
+                ));
+            }
+        }
+    }
+    lines.join("\n")
+}
+
+fn render_authz_tokens(response: &Value) -> String {
+    let mut lines = vec![format!(
+        "Tokens\n{:<12}  {:<16}  {:<10}  {:<25}  {}",
+        "ID", "NAME", "STATUS", "EXPIRES", "MODELS"
+    )];
+    if let Some(tokens) = response.as_array() {
+        for token in tokens {
+            let status = if !token["revoked_at"].is_null() {
+                "revoked"
+            } else if token["expires_at"]
+                .as_str()
+                .and_then(|date| chrono::DateTime::parse_from_rfc3339(date).ok())
+                .is_some_and(|date| date <= chrono::Utc::now())
+            {
+                "expired"
+            } else {
+                "active"
+            };
+            let models = token["models"]
+                .as_array()
+                .map(|models| {
+                    models
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(|model| {
+                            model
+                                .chars()
+                                .flat_map(char::escape_debug)
+                                .collect::<String>()
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .filter(|models| !models.is_empty())
+                .unwrap_or_else(|| "all".into());
+            lines.push(format!(
+                "{:<12}  {:<16}  {:<10}  {:<25}  {}",
+                authz_text(token, "id"),
+                authz_text(token, "name"),
+                status,
+                authz_text(token, "expires_at"),
+                models
+            ));
+            lines.push(format!(
+                "  {}  {}",
+                authz_text(token, "hint"),
+                authz_limits_text(&token["limits"])
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
+fn render_authz_peers(response: &Value) -> String {
+    let mut lines = vec![format!("{:<16}  {:<23}  {}", "NODE", "DID", "ROOM")];
+    if let Some(peers) = response.as_array() {
+        for peer in peers {
+            lines.push(format!(
+                "{:<16}  {:<23}  {}",
+                authz_text(peer, "node"),
+                authz_subject(&authz_text(peer, "did")),
+                authz_text(peer, "room")
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
+fn authz_yes_no(value: &Value) -> &'static str {
+    match value.as_bool() {
+        Some(true) => "yes",
+        Some(false) => "no",
+        None => "unknown",
+    }
+}
+
+fn authz_cap_time(value: &Value, key: &str) -> String {
+    value[key]
+        .as_i64()
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .map(|date| date.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .unwrap_or_else(|| "-".into())
+}
+
+fn authz_cap_actions(cap: &Value) -> String {
+    cap["act"]
+        .as_array()
+        .map(|actions| {
+            actions
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|action| action.escape_debug().to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .filter(|actions| !actions.is_empty())
+        .unwrap_or_else(|| "-".into())
+}
+
+fn authz_cap_summary(cap: &Value) -> String {
+    format!(
+        "id={} audience={} service={} action={} resource={} expires={}",
+        authz_text(cap, "id"),
+        authz_text(cap, "aud"),
+        authz_text(cap, "svc"),
+        authz_cap_actions(cap),
+        authz_text(cap, "res"),
+        authz_cap_time(cap, "exp")
+    )
+}
+
+fn render_authz_caps(response: &Value) -> String {
+    let mut lines = Vec::new();
+    for (key, title) in [
+        ("issued", "Issued"),
+        ("held", "Held"),
+        ("presented", "Presented"),
+    ] {
+        if !lines.is_empty() {
+            lines.push(String::new());
+        }
+        lines.push(title.into());
+        lines.push(format!(
+            "{:<32}  {:<6}  {:<10}  {:<16}  {:<23}  {:<23}  {:<20}  {}",
+            "ID", "SERVICE", "ACTIONS", "RESOURCE", "HOLDER", "ISSUER", "EXPIRES", "STATUS/NODE"
+        ));
+        let rows = response[key].as_array();
+        if rows.is_none_or(|rows| rows.is_empty()) {
+            lines.push("(none)".into());
+        }
+        for row in rows.into_iter().flatten() {
+            let cap = if key == "held" { row } else { &row["cap"] };
+            let status = match key {
+                "issued" if row["revoked"] == true => "revoked".to_string(),
+                "issued" => "active".to_string(),
+                "presented" => authz_text(row, "node"),
+                _ => "-".to_string(),
+            };
+            lines.push(format!(
+                "{:<32}  {:<6}  {:<10}  {:<16}  {:<23}  {:<23}  {:<20}  {}",
+                authz_text(cap, "id"),
+                authz_text(cap, "svc"),
+                authz_cap_actions(cap),
+                authz_text(cap, "res"),
+                authz_subject(&authz_text(cap, "aud")),
+                authz_subject(&authz_text(cap, "fromId")),
+                authz_cap_time(cap, "exp"),
+                status
+            ));
+        }
+    }
+    lines.push(String::new());
+    lines.push("Revoked".into());
+    lines.push(format!("{:<32}  {:<20}  {}", "ID", "REVOKED AT", "EXPIRES"));
+    let revoked = response["revoked"].as_array();
+    if revoked.is_none_or(|rows| rows.is_empty()) {
+        lines.push("(none)".into());
+    }
+    for row in revoked.into_iter().flatten() {
+        lines.push(format!(
+            "{:<32}  {:<20}  {}",
+            authz_text(row, "id"),
+            authz_cap_time(row, "at"),
+            authz_cap_time(row, "exp")
+        ));
+    }
+    lines.join("\n")
+}
+
+fn render_authz_cap_verification(response: &Value) -> String {
+    let mut lines = vec![format!("Valid: {}", authz_yes_no(&response["ok"]))];
+    if !response["reason"].is_null() {
+        lines.push(format!("Reason: {}", authz_text(response, "reason")));
+    }
+    lines.push(format!("Root: {}", authz_text(response, "root")));
+    let chain = response["chain"]
+        .as_array()
+        .map(|chain| {
+            chain
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|id| id.escape_debug().to_string())
+                .collect::<Vec<_>>()
+                .join(" -> ")
+        })
+        .filter(|chain| !chain.is_empty())
+        .unwrap_or_else(|| "-".into());
+    lines.push(format!("Chain: {chain}"));
+    lines.join("\n")
+}
+
+#[cfg(test)]
+mod authz_cli_tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> (bool, AuthzAction) {
+        let mut argv = vec!["mistl", "authz"];
+        argv.extend_from_slice(args);
+        match Cli::try_parse_from(argv).unwrap().command.unwrap() {
+            Command::Authz { json, action } => (json, action),
+            _ => panic!("expected authz command"),
+        }
+    }
+
+    fn request_without_read(action: AuthzAction) -> (&'static str, Value, AuthzOutput) {
+        authz_request(action, |_, _| panic!("unexpected read")).unwrap()
+    }
+
+    #[test]
+    fn parses_cap_issue_with_limits_verifiers_and_delivery() {
+        let (_, action) = parse(&[
+            "cap",
+            "issue",
+            "did:key:holder",
+            "escrow",
+            "--action",
+            "read",
+            "--action",
+            "write",
+            "--resource",
+            "room/*",
+            "--ttl",
+            "7d",
+            "--to",
+            "did:key:first",
+            "--to",
+            "did:key:second",
+            "--period",
+            "month",
+            "--max-requests",
+            "100",
+            "--max-output-chars",
+            "20000",
+            "--parent",
+            "parent-id",
+            "--deliver",
+        ]);
+        let (cmd, args, output) = request_without_read(action);
+        assert_eq!(cmd, "authz.cap.issue");
+        assert!(matches!(output, AuthzOutput::CapIssued));
+        assert_eq!(
+            args,
+            json!({"aud":"did:key:holder", "service":"escrow", "actions":["read","write"],
+                "resource":"room/*", "ttl_secs":604800, "to":["did:key:first","did:key:second"],
+                "limits":{"period":"month","max_requests":100,"max_output_chars":20000},
+                "parent":"parent-id", "deliver":true})
+        );
+
+        let (_, action) = parse(&["cap", "issue", "did:key:holder", "ai"]);
+        assert_eq!(
+            request_without_read(action).1,
+            json!({"aud":"did:key:holder", "service":"ai", "actions":["infer"],
+                "resource":"*", "deliver":false})
+        );
+        let (_, action) = parse(&[
+            "cap",
+            "issue",
+            "did:key:holder",
+            "escrow",
+            "--resource",
+            "*",
+        ]);
+        assert_eq!(request_without_read(action).1["actions"], json!(["read"]));
+        assert!(
+            Cli::try_parse_from(["mistl", "authz", "cap", "issue", "did:key:holder", "escrow"])
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "mistl",
+                "authz",
+                "cap",
+                "issue",
+                "did:key:holder",
+                "ai",
+                "--ttl",
+                "7d",
+                "--expires",
+                "2030-01-01T00:00:00Z"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn parses_cap_import_from_stdin_and_verify_json() {
+        let (_, action) = parse(&["cap", "import", "-"]);
+        let (cmd, args, output) = authz_request_with_input(
+            action,
+            |_, _| panic!("unexpected daemon read"),
+            std::io::Cursor::new(b"{\"id\":\"from-stdin\"}"),
+        )
+        .unwrap();
+        assert_eq!(cmd, "authz.cap.import");
+        assert!(matches!(output, AuthzOutput::CapImported));
+        assert_eq!(args, json!({"cap":{"id":"from-stdin"}}));
+
+        let (_, action) = parse(&[
+            "cap",
+            "verify",
+            " {\"id\":\"inline\"}",
+            "--service",
+            "escrow",
+            "--action",
+            "read",
+            "--resource",
+            "room/slot",
+        ]);
+        let (cmd, args, output) = request_without_read(action);
+        assert_eq!(cmd, "authz.cap.verify");
+        assert!(matches!(output, AuthzOutput::CapVerified));
+        assert_eq!(
+            args,
+            json!({"cap":{"id":"inline"}, "service":"escrow", "action":"read", "resource":"room/slot"})
+        );
+    }
+
+    #[test]
+    fn parses_cap_management_and_issuer_commands() {
+        for (argv, expected, args) in [
+            (vec!["cap", "list"], "authz.cap.list", json!({})),
+            (
+                vec!["cap", "remove", "id"],
+                "authz.cap.remove",
+                json!({"id":"id"}),
+            ),
+            (
+                vec!["cap", "revoke", "id", "--local"],
+                "authz.cap.revoke",
+                json!({"id":"id", "local":true}),
+            ),
+            (
+                vec!["issuer", "add", "ai", "did:key:issuer"],
+                "authz.issuer.add",
+                json!({"service":"ai", "did":"did:key:issuer"}),
+            ),
+            (
+                vec!["issuer", "rm", "escrow", "did:key:issuer"],
+                "authz.issuer.remove",
+                json!({"service":"escrow", "did":"did:key:issuer"}),
+            ),
+        ] {
+            let (_, action) = parse(&argv);
+            let (cmd, actual, _) = request_without_read(action);
+            assert_eq!(cmd, expected);
+            assert_eq!(actual, args);
+        }
+    }
+
+    #[test]
+    fn renders_capability_lists_and_verification() {
+        let cap = json!({"id":"0123456789abcdef0123456789abcdef", "aud":"did:key:holder",
+            "fromId":"did:key:issuer", "svc":"ai", "act":["infer"], "res":"*", "exp":1893456000000_i64});
+        let output = render_authz_caps(&json!({"issued":[{"cap":cap, "revoked":true}],
+            "held":[cap], "presented":[{"node":"1234567890abcdef", "cap":cap}],
+            "revoked":[{"id":cap["id"], "at":1893450000000_i64, "exp":1893456000000_i64}]}));
+        for text in [
+            "Issued",
+            "Held",
+            "Presented",
+            "Revoked",
+            "1234567890abcdef",
+            "revoked",
+            "2030-01-01T00:00:00Z",
+        ] {
+            assert!(output.contains(text), "missing {text} in {output}");
+        }
+        let output = render_authz_cap_verification(
+            &json!({"ok":false, "reason":"untrusted capability root", "root":"did:key:issuer", "chain":["child", "root"]}),
+        );
+        assert!(output.contains("Valid: no"));
+        assert!(output.contains("untrusted capability root"));
+        assert!(output.contains("child -> root"));
+    }
+
+    #[test]
+    fn parses_allow_add_ttl_and_rule_commands() {
+        let (_, action) = parse(&[
+            "allow",
+            "add",
+            "ai",
+            "0123456789abcdef",
+            "--ttl",
+            "7d",
+            "--note",
+            "friend",
+        ]);
+        let (cmd, args, _) = request_without_read(action);
+        assert_eq!(cmd, "authz.allow.add");
+        assert_eq!(args["ttl_secs"], 604800);
+        assert_eq!(args["service"], "ai");
+        assert_eq!(args["subject"], "0123456789abcdef");
+        assert_eq!(args["note"], "friend");
+        let (_, action) = parse(&["deny", "rm", "escrow", "0123456789abcdef"]);
+        assert_eq!(request_without_read(action).0, "authz.deny.remove");
+        assert!(
+            Cli::try_parse_from([
+                "mistl",
+                "authz",
+                "allow",
+                "add",
+                "ai",
+                "a",
+                "--ttl",
+                "7d",
+                "--expires",
+                "2030-01-01T00:00:00Z"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "mistl",
+                "authz",
+                "allow",
+                "add",
+                "ai",
+                "a",
+                "--expires",
+                "tomorrow"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn parses_sizes_and_merges_limits_without_dropping_other_fields() {
+        let (_, action) = parse(&[
+            "limits",
+            "escrow",
+            "--subject",
+            "0123456789abcdef",
+            "--period",
+            "month",
+            "--max-stored",
+            "1GiB",
+        ]);
+        let (cmd, args, _) = authz_request(action, |cmd, _| {
+            assert_eq!(cmd, "authz.show");
+            Ok(json!({"policy":{"escrow":{"limits":{"period":"day", "max_requests":12, "max_output_chars":42, "max_stored_bytes":null},"overrides":[]}}}))
+        }).unwrap();
+        assert_eq!(cmd, "authz.limits.set");
+        assert_eq!(
+            args["limits"],
+            json!({"period":"month", "max_requests":12, "max_output_chars":42, "max_stored_bytes":1073741824_u64})
+        );
+        let (_, action) = parse(&["limits", "ai", "--subject", "0123456789abcdef", "--clear"]);
+        let (_, args, _) = request_without_read(action);
+        assert!(args["limits"].is_null());
+        let (_, action) = parse(&["limits", "ai", "--clear"]);
+        assert_eq!(request_without_read(action).1["limits"], json!({}));
+        assert!(
+            Cli::try_parse_from([
+                "mistl",
+                "authz",
+                "limits",
+                "ai",
+                "--clear",
+                "--max-requests",
+                "1"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "mistl",
+                "authz",
+                "limits",
+                "escrow",
+                "--max-stored",
+                "18446744073709551615GiB"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn parses_token_create_models_and_update_preserves_limits() {
+        let (json, action) = parse(&[
+            "token",
+            "create",
+            "app",
+            "--model",
+            "first",
+            "--model",
+            "second",
+            "--period",
+            "day",
+            "--max-requests",
+            "100",
+            "--ttl",
+            "30d",
+            "--json",
+        ]);
+        assert!(json);
+        let (cmd, args, output) = request_without_read(action);
+        assert_eq!(cmd, "authz.token.create");
+        assert!(matches!(output, AuthzOutput::Secret));
+        assert_eq!(args["models"], json!(["first", "second"]));
+        assert_eq!(args["limits"], json!({"period":"day", "max_requests":100}));
+        assert_eq!(args["ttl_secs"], 2_592_000);
+        let (_, action) = parse(&[
+            "token",
+            "update",
+            "abc",
+            "--max-requests",
+            "9",
+            "--clear-models",
+            "--clear-expiry",
+        ]);
+        let (cmd, args, _) = authz_request(action, |cmd, _| {
+            assert_eq!(cmd, "authz.token.list");
+            Ok(json!([{"id":"abc", "limits":{"period":"month", "max_requests":3, "max_output_chars":45, "max_stored_bytes":null}}]))
+        }).unwrap();
+        assert_eq!(cmd, "authz.token.update");
+        assert_eq!(args["models"], json!([]));
+        assert_eq!(args["expires_at"], Value::Null);
+        assert_eq!(
+            args["limits"],
+            json!({"period":"month", "max_requests":9, "max_output_chars":45, "max_stored_bytes":null})
+        );
+        let (_, action) = parse(&["token", "update", "abc", "--name", "new"]);
+        let (_, args, _) = request_without_read(action);
+        assert_eq!(args, json!({"id":"abc", "name":"new"}));
+        assert!(
+            Cli::try_parse_from([
+                "mistl",
+                "authz",
+                "token",
+                "update",
+                "abc",
+                "--model",
+                "m",
+                "--clear-models"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn parses_usage_reset_modes_tokens_and_peers() {
+        for (argv, expected) in [
+            (vec!["show"], "authz.show"),
+            (vec!["mode", "ai", "allowlist"], "authz.mode.set"),
+            (vec!["usage"], "authz.usage"),
+            (vec!["usage", "ai"], "authz.usage"),
+            (
+                vec!["usage", "reset", "ai", "--account", "node:123"],
+                "authz.usage.reset",
+            ),
+            (vec!["api", "require-token", "on"], "authz.api.set"),
+            (vec!["token", "list"], "authz.token.list"),
+            (vec!["token", "revoke", "id"], "authz.token.revoke"),
+            (vec!["token", "delete", "id"], "authz.token.delete"),
+            (vec!["peers"], "authz.peers"),
+        ] {
+            let (_, action) = parse(&argv);
+            assert_eq!(request_without_read(action).0, expected);
+        }
+        let (_, action) = parse(&["usage", "reset", "escrow", "--account", "node:123"]);
+        assert_eq!(
+            request_without_read(action).1,
+            json!({"service":"escrow", "account":"node:123"})
+        );
+        let (json, action) = parse(&["usage", "reset", "ai", "--json"]);
+        assert!(json);
+        assert_eq!(request_without_read(action).0, "authz.usage.reset");
+        let (_, action) = parse(&["api", "require-token", "off"]);
+        assert_eq!(
+            request_without_read(action).1,
+            json!({"require_token":false})
+        );
+        assert!(Cli::try_parse_from(["mistl", "authz", "usage", "ai", "reset", "escrow"]).is_err());
+    }
+
+    #[test]
+    fn durations_and_sizes_are_checked_and_usage_is_readable() {
+        assert_eq!(parse_authz_ttl("30s").unwrap(), 30);
+        assert_eq!(parse_authz_ttl("10m").unwrap(), 600);
+        assert_eq!(parse_authz_ttl("12h").unwrap(), 43200);
+        assert!(parse_authz_ttl("2w").is_err());
+        assert!(parse_authz_ttl("18446744073709551615d").is_err());
+        assert_eq!(parse_authz_size("42").unwrap(), 42);
+        assert_eq!(parse_authz_size("2KiB").unwrap(), 2048);
+        assert_eq!(parse_authz_size("3MiB").unwrap(), 3 * 1024 * 1024);
+        assert!(parse_authz_size("-1").is_err());
+        let did = "did:key:z6Mkxxxxxxxxxxxxxxxxxxxxabcd";
+        let output = render_authz_usage(
+            &json!({"ai":[{"account":"node:123", "did":did, "period":"day", "requests":2, "output_chars":50, "limits":{"max_requests":10,"max_output_chars":100}}], "escrow":[{"node":"123", "did":did, "stored_bytes":1024, "limit":2147483648_u64}]}),
+            None,
+        );
+        assert!(output.contains("did:key:z6Mk…abcd"));
+        assert!(output.contains("2/10") && output.contains("50/100"));
+        assert!(output.contains("1 KiB/2 GiB"));
+        let policy = json!({"api":{"require_token":true},"ai":{"mode":"allowlist", "limits":{"period":"day"},"allow":[{"subject":did,"expires_at":"2030-01-01T00:00:00Z"}],"deny":[],"overrides":[]},"escrow":{"mode":"open", "limits":{"period":"day"},"allow":[],"deny":[],"overrides":[]}});
+        let output = render_authz_policy(&policy);
+        assert!(output.contains("did:key:z6Mk…abcd") && output.contains("2030-01-01T00:00:00Z"));
+        assert!(output.contains("API token required: on") && output.contains("allowlist"));
+    }
 }
 
 fn render_nostr_status(response: &Value, json_only: bool) -> Result<String> {
