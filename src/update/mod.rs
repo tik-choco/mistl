@@ -6,10 +6,11 @@
 //! `SHA256SUMS.txt`, and swaps the on-disk executable in place via
 //! `self_replace` -- which handles the Windows rename-then-write dance, so
 //! even the currently running daemon can replace its own exe. The staged
-//! version takes effect on the next daemon start; background auto-update
-//! never force-restarts. An explicit `update.apply {"restart": true}` asks
-//! the daemon to restart itself (`AppState::request_restart`) after a
-//! successful swap.
+//! version takes effect on the next daemon start. With
+//! `[update] auto_restart`, a background auto-stage waits for an idle daemon
+//! (no stream pipeline or active tunnel connections) before restarting. An
+//! explicit `update.apply {"restart": true}` requests an immediate restart
+//! after a successful swap or when that version is already staged.
 //!
 //! Release layout (produced by the release workflow): raw binaries named
 //! `mistl-v{version}-{target-triple}` (`.exe` on Windows) plus a
@@ -19,6 +20,7 @@
 //! staged; users are pointed at the release page instead. A binary whose
 //! checksum can't be verified is never written over the exe.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -62,6 +64,12 @@ const FIRST_CHECK_DELAY: Duration = Duration::from_secs(30);
 /// Config re-poll cadence while `[update] auto_check` is off, so enabling
 /// it via `config.set` applies without a daemon restart.
 const DISABLED_RECHECK: Duration = Duration::from_secs(15 * 60);
+/// Allow the daemon and its users time to settle after an automatic stage.
+const RESTART_GRACE: Duration = Duration::from_secs(60);
+/// How often to re-check idleness and the restart settings.
+const IDLE_POLL: Duration = Duration::from_secs(60);
+
+static RESTART_WAITER_RUNNING: AtomicBool = AtomicBool::new(false);
 
 /// Handle `update.*` IPC commands:
 /// - `update.status` `{}` -> version/target/config plus install state and
@@ -99,6 +107,8 @@ fn cmd_status(state: &Arc<AppState>) -> Result<Value> {
         "repo": effective_repo(&update.repo),
         "auto_check": update.auto_check,
         "auto_apply": update.auto_apply,
+        "auto_restart": update.auto_restart,
+        "staged": staged_version(),
         "check_interval_hours": update.check_interval_hours,
         "installed": crate::install::is_installed(),
         "exe_path": exe_path,
@@ -151,6 +161,8 @@ async fn cmd_apply(args: Value, state: &Arc<AppState>) -> Result<Value> {
     let client = build_client()?;
     let release = fetch_latest_release_recorded(&client, &repo, update.prerelease).await?;
 
+    // Serialize both the staged-version check and the replace with auto-apply.
+    let _guard = apply_lock().lock().await;
     if !is_update_available(CURRENT_VERSION, &release.version) {
         record_check("up to date".to_string());
         return Ok(json!({
@@ -160,32 +172,36 @@ async fn cmd_apply(args: Value, state: &Arc<AppState>) -> Result<Value> {
         }));
     }
 
-    let name = asset_name(&release.version, TARGET);
-    let Some(asset) = release.asset(&name) else {
-        record_check(format!(
-            "v{} available, but no {TARGET} binary on the release",
-            release.version
-        ));
-        bail!(
-            "release v{} has no prebuilt binary for {TARGET} (expected asset {name}); \
-             download it manually from {}",
-            release.version,
-            release.notes_url
+    if !is_staged_version(&release.version, staged_version().as_deref()) {
+        let name = asset_name(&release.version, TARGET);
+        let Some(asset) = release.asset(&name) else {
+            record_check(format!(
+                "v{} available, but no {TARGET} binary on the release",
+                release.version
+            ));
+            bail!(
+                "release v{} has no prebuilt binary for {TARGET} (expected asset {name}); \
+                 download it manually from {}",
+                release.version,
+                release.notes_url
+            );
+        };
+
+        if let Err(error) = stage(&client, &release, asset).await {
+            record_check(format!("apply failed: {error:#}"));
+            return Err(error);
+        }
+        record_check(format!("updated to v{}", release.version));
+        info!(
+            from = CURRENT_VERSION,
+            to = %release.version,
+            "update: staged; takes effect on next daemon start"
         );
-    };
-
-    if let Err(error) = stage(&client, &release, asset).await {
-        record_check(format!("apply failed: {error:#}"));
-        return Err(error);
+    } else {
+        record_check(format!("v{} staged; restart pending", release.version));
     }
-    record_check(format!("updated to v{}", release.version));
-    info!(
-        from = CURRENT_VERSION,
-        to = %release.version,
-        "update: staged; takes effect on next daemon start"
-    );
 
-    // Only after a verified successful replace may the daemon restart.
+    // Only a verified staged version may trigger an explicitly requested restart.
     let restart_mode = if restart {
         state.request_restart();
         "scheduled"
@@ -202,9 +218,9 @@ async fn cmd_apply(args: Value, state: &Arc<AppState>) -> Result<Value> {
 
 /// Spawn the periodic background auto-check (and, with `[update]
 /// auto_apply`, auto-stage) task. Called once from the daemon after
-/// startup. Errors are logged and the loop continues -- this task never
-/// takes the daemon down, and it never restarts it either: staged updates
-/// apply on the next daemon start.
+/// startup. Errors are logged and the loop continues. With auto_restart,
+/// an automatically staged update restarts the daemon once it is idle;
+/// otherwise it takes effect at the next daemon start.
 pub fn spawn_auto_update(state: Arc<AppState>) {
     if crate::runtime::CHANNEL != "stable" || !state.network.permitted() {
         return;
@@ -218,7 +234,7 @@ pub fn spawn_auto_update(state: Arc<AppState>) {
                 tokio::time::sleep(DISABLED_RECHECK).await;
                 continue;
             }
-            if let Err(error) = auto_check_once(&update).await {
+            if let Err(error) = auto_check_once(&update, &state).await {
                 warn!(%error, "update: background check failed");
                 record_check(format!("auto-check failed: {error:#}"));
             }
@@ -231,14 +247,24 @@ pub fn spawn_auto_update(state: Arc<AppState>) {
 
 /// One background round: check, and stage when allowed. Missing assets and
 /// disabled auto-apply are normal outcomes (recorded, not errors).
-async fn auto_check_once(update: &UpdateConfig) -> Result<()> {
+async fn auto_check_once(update: &UpdateConfig, state: &Arc<AppState>) -> Result<()> {
     let repo = effective_repo(&update.repo);
     let client = build_client()?;
     let release = fetch_latest_release(&client, &repo, update.prerelease).await?;
 
+    // Keep the check and stage atomic with respect to manual apply.
+    let _guard = apply_lock().lock().await;
     if !is_update_available(CURRENT_VERSION, &release.version) {
         record_check("up to date".to_string());
         debug!(latest = %release.version, "update: up to date");
+        return Ok(());
+    }
+
+    if is_staged_version(&release.version, staged_version().as_deref()) {
+        record_check(format!("v{} staged; restart pending", release.version));
+        if state.config().update.auto_restart {
+            spawn_restart_waiter(Arc::clone(state));
+        }
         return Ok(());
     }
 
@@ -280,13 +306,51 @@ async fn auto_check_once(update: &UpdateConfig) -> Result<()> {
     }
 
     stage(&client, &release, asset).await?;
-    record_check(format!("staged v{}", release.version));
+    record_check(format!("v{} staged; restart pending", release.version));
     info!(
         from = CURRENT_VERSION,
         to = %release.version,
-        "update: auto-staged; takes effect on next daemon start"
+        "update: auto-staged; restart pending"
     );
+    if state.config().update.auto_restart {
+        spawn_restart_waiter(Arc::clone(state));
+    }
     Ok(())
+}
+
+/// Wait for an idle daemon before restarting into an automatically staged release.
+fn spawn_restart_waiter(state: Arc<AppState>) {
+    if RESTART_WAITER_RUNNING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    tokio::spawn(async move {
+        struct WaiterGuard;
+        impl Drop for WaiterGuard {
+            fn drop(&mut self) {
+                RESTART_WAITER_RUNNING.store(false, Ordering::Release);
+            }
+        }
+        let _waiter_guard = WaiterGuard;
+        tokio::time::sleep(RESTART_GRACE).await;
+        loop {
+            // Avoid restarting during another in-progress replacement.
+            let guard = apply_lock().lock().await;
+            let update = state.config().update;
+            if !update.auto_restart || !update.auto_apply {
+                break;
+            }
+            if !crate::stream::is_running().await && crate::tunnel::active_conns().await == 0 {
+                if let Some(version) = staged_version() {
+                    info!(from = CURRENT_VERSION, to = %version, "update: restarting into staged version");
+                    record_check(format!("restarting into v{version}"));
+                    state.request_restart();
+                }
+                break;
+            }
+            drop(guard);
+            tokio::time::sleep(IDLE_POLL).await;
+        }
+    });
 }
 
 /// One release as returned by the GitHub API (only what we consume).
@@ -524,15 +588,12 @@ fn verify_sums_signature(pubkey: Option<&str>, sums: &[u8], sig: Option<&[u8]>) 
 
 /// Download + verify + self-replace. The SHA-256 is checked against the
 /// release's `SHA256SUMS.txt` BEFORE anything touches the on-disk exe; an
-/// unverifiable binary is never installed.
+/// unverifiable binary is never installed. The caller holds `apply_lock`.
 async fn stage(
     client: &reqwest::Client,
     release: &ReleaseInfo,
     asset: &ReleaseAsset,
 ) -> Result<()> {
-    // One replace at a time (an explicit apply racing background auto-apply).
-    let _guard = apply_lock().lock().await;
-
     let sums_asset = release
         .assets
         .iter()
@@ -579,6 +640,9 @@ async fn stage(
     tokio::task::spawn_blocking(move || replace_current_exe(&binary))
         .await
         .context("update: replace task panicked")??;
+    *staged_version_cell()
+        .lock()
+        .expect("update: staged-version lock poisoned") = Some(release.version.clone());
     Ok(())
 }
 
@@ -705,6 +769,23 @@ fn apply_lock() -> &'static tokio::sync::Mutex<()> {
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
+/// The last successfully staged version, reset when the daemon restarts.
+fn staged_version_cell() -> &'static Mutex<Option<String>> {
+    static CELL: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(None))
+}
+
+fn staged_version() -> Option<String> {
+    staged_version_cell()
+        .lock()
+        .expect("update: staged-version lock poisoned")
+        .clone()
+}
+
+fn is_staged_version(latest: &str, staged: Option<&str>) -> bool {
+    staged == Some(latest)
+}
+
 /// `(when_rfc3339, short_result)` of the most recent check or apply
 /// attempt, reported by `update.status`. In-memory only; resets on daemon
 /// restart.
@@ -734,6 +815,14 @@ fn last_check() -> (Option<String>, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn staged_version_matches_only_the_same_release() {
+        assert!(!is_staged_version("1.2.3", None));
+        assert!(!is_staged_version("1.2.3", Some("1.2.2")));
+        assert!(!is_staged_version("1.2.3", Some("1.2.3-rc.1")));
+        assert!(is_staged_version("1.2.3", Some("1.2.3")));
+    }
 
     // Vector from minisign-verify's own tests: prehashed ("ED") signature over
     // the bytes `test`.

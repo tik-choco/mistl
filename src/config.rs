@@ -86,9 +86,10 @@ pub struct UpdateConfig {
     /// Periodically check GitHub Releases for a newer version.
     pub auto_check: bool,
     /// When a newer version is found, download + verify it and swap the
-    /// on-disk binary in place (takes effect on the next daemon start). This
-    /// never force-restarts a running daemon -- the update is staged.
+    /// on-disk binary in place. Restart behaviour is controlled by auto_restart.
     pub auto_apply: bool,
+    /// After an automatic update is staged, restart the daemon into it once idle.
+    pub auto_restart: bool,
     /// Hours between background update checks.
     pub check_interval_hours: u64,
     /// GitHub repository (owner/name) releases are published to.
@@ -102,6 +103,7 @@ impl Default for UpdateConfig {
         Self {
             auto_check: true,
             auto_apply: true,
+            auto_restart: true,
             check_interval_hours: 6,
             repo: "tik-choco/mistl".into(),
             prerelease: false,
@@ -1564,6 +1566,7 @@ impl Config {
                 });
                 config.update.auto_check = false;
                 config.update.auto_apply = false;
+                config.update.auto_restart = false;
             }
             config.save()?;
             return Ok(config);
@@ -2073,6 +2076,15 @@ mod tests {
         assert!(set_by_path(&config, "ai.upstream_api_key", json!("***")).is_err());
     }
 
+    #[test]
+    fn update_auto_restart_defaults_on_and_round_trips() {
+        let config: Config = toml::from_str("[update]\nauto_apply = true\n").unwrap();
+        assert!(config.update.auto_restart);
+        let updated = set_by_path(&config, "update.auto_restart", json!(false)).unwrap();
+        let reloaded: Config = toml::from_str(&toml::to_string(&updated).unwrap()).unwrap();
+        assert!(!reloaded.update.auto_restart);
+    }
+
     /// The real risk the six deleted per-field `set_by_path` tests only
     /// half-covered: a struct field rename silently breaking a path string
     /// the dashboard or CLI still sends, since `set_by_path` is generic
@@ -2115,6 +2127,7 @@ mod tests {
             ("bot.pipelines", json!([])),
             ("update.auto_check", json!(true)),
             ("update.auto_apply", json!(true)),
+            ("update.auto_restart", json!(false)),
             ("update.check_interval_hours", json!(12)),
             ("update.prerelease", json!(true)),
             ("update.repo", json!("tik-choco/mistl")),

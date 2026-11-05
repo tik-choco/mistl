@@ -154,6 +154,11 @@ fn pipeline() -> &'static Mutex<Option<Pipeline>> {
     PIPELINE.get_or_init(|| Mutex::new(None))
 }
 
+/// Whether a stream pipeline is running.
+pub async fn is_running() -> bool {
+    pipeline().lock().await.is_some()
+}
+
 /// Handle `stream.*` IPC commands:
 /// - `stream.start` `{room?}` -> `{rtsp_url, room?}` (local screen capture,
 ///   idempotent: returns the existing URL if already running. Deliberately

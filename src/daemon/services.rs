@@ -3,6 +3,8 @@ use super::AppState;
 use std::sync::Arc;
 
 pub(super) fn spawn(state: Arc<AppState>) {
+    // Login autostart defaults to on (stable only; an opt-out is kept).
+    crate::install::apply_default_autostart();
     if let Err(error) = crate::config::data_dir().and_then(|data_dir| crate::authz::init(&data_dir))
     {
         tracing::warn!(%error, "failed to initialize authorization state");

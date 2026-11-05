@@ -140,7 +140,7 @@ pub enum Command {
     },
     /// Install mistl into a fixed per-user location (%LOCALAPPDATA%\Programs\mistl)
     Install {
-        /// Do not enable start-on-login
+        /// Turn start-on-login off (it is on by default; the choice is remembered)
         #[arg(long)]
         no_autostart: bool,
         /// Do not add the install dir to the user's PATH
@@ -2052,7 +2052,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
 }
 
 /// `mistl install`: copy this exe into the fixed per-user location, add a
-/// Start Menu shortcut, and (unless opted out) enable login autostart. Runs
+/// Start Menu shortcut, and enable login autostart (`--no-autostart` turns it off). Runs
 /// in the client process directly -- it must work from a freshly-downloaded
 /// exe with no daemon running yet.
 fn install_cli(enable_autostart: bool, add_to_path: bool) -> Result<()> {

@@ -9,8 +9,9 @@
 //! - Linux: `~/.local/bin/mistl` (or `$XDG_BIN_HOME`); macOS falls back to
 //!   `~/.local/bin` too. No shortcut on Unix.
 //!
-//! Autostart is opt-in, per-user, and launches the daemon headless
-//! (`"<exe>" daemon run`), NOT the dashboard:
+//! Autostart is on by default for stable builds (see
+//! [`apply_default_autostart`]; opting out is remembered), per-user, and
+//! launches the daemon headless (`"<exe>" daemon run`), NOT the dashboard:
 //!
 //! - Windows: `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value
 //!   name `mistl`.
@@ -129,7 +130,7 @@ pub fn is_installed() -> bool {
 }
 
 /// Copy the running exe into the install dir, (re)create the Start-Menu
-/// shortcut, and optionally enable autostart. Returns the installed exe
+/// shortcut, and enable or disable autostart. Returns the installed exe
 /// path. Safe to re-run: an install from the installed copy itself skips
 /// the self-copy (copying a file over itself would fail) and just
 /// refreshes shortcut/autostart. That includes a daemon whose installed
@@ -190,9 +191,9 @@ pub fn install(enable_autostart: bool, add_to_path: bool) -> Result<PathBuf> {
         }
     }
 
-    if enable_autostart {
-        set_autostart(true)?;
-    }
+    // Both ways count as an explicit choice: `--no-autostart` turns off an
+    // entry the default may already have created, and is remembered.
+    set_autostart(enable_autostart)?;
 
     if add_to_path
         && cfg!(windows)
@@ -260,10 +261,57 @@ pub fn uninstall() -> Result<()> {
     Ok(())
 }
 
+/// Enable or disable launching `"<exe>" daemon run` at login, and record
+/// that the choice was made so [`apply_default_autostart`] never overrides
+/// it. Every explicit toggle (CLI, tray, IPC, `install`, `uninstall`) goes
+/// through here.
+pub fn set_autostart(enabled: bool) -> Result<()> {
+    set_autostart_entry(enabled)?;
+    if let Err(error) = mark_autostart_decided() {
+        warn!(%error, "install: could not record the autostart choice");
+    }
+    Ok(())
+}
+
+/// Marker in the data dir: present once autostart was set explicitly or
+/// by default, so the default applies at most once per instance.
+const AUTOSTART_DECIDED_FILE: &str = "autostart-decided";
+
+fn mark_autostart_decided() -> Result<()> {
+    let dir = crate::config::data_dir()?;
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join(AUTOSTART_DECIDED_FILE), b"")?;
+    Ok(())
+}
+
+/// Login autostart is on by default for stable builds: the first daemon
+/// start of an instance with no recorded choice enables it. A later
+/// disable (tray, `mistl autostart disable`, `install --no-autostart`) is
+/// remembered and never undone. Dev/preview builds never register.
+pub fn apply_default_autostart() {
+    if crate::runtime::CHANNEL != "stable" {
+        return;
+    }
+    let decided = crate::config::data_dir()
+        .map(|dir| dir.join(AUTOSTART_DECIDED_FILE).exists())
+        .unwrap_or(true);
+    if decided {
+        return;
+    }
+    let result = if autostart_enabled() {
+        mark_autostart_decided()
+    } else {
+        set_autostart(true)
+    };
+    if let Err(error) = result {
+        warn!(%error, "install: could not enable default login autostart");
+    }
+}
+
 /// Enable or disable launching `"<exe>" daemon run` at login (Windows:
 /// HKCU Run value `mistl`).
 #[cfg(windows)]
-pub fn set_autostart(enabled: bool) -> Result<()> {
+fn set_autostart_entry(enabled: bool) -> Result<()> {
     use winreg::RegKey;
     use winreg::enums::HKEY_CURRENT_USER;
 
@@ -290,14 +338,14 @@ pub fn set_autostart(enabled: bool) -> Result<()> {
 /// Enable or disable launching `"<exe>" daemon run` at login (Linux: XDG
 /// autostart desktop entry).
 #[cfg(all(unix, not(target_os = "macos")))]
-pub fn set_autostart(enabled: bool) -> Result<()> {
+fn set_autostart_entry(enabled: bool) -> Result<()> {
     write_or_remove_autostart_file(enabled, desktop_entry)
 }
 
 /// Enable or disable launching `"<exe>" daemon run` at login (macOS:
 /// LaunchAgent plist, picked up at the next login).
 #[cfg(target_os = "macos")]
-pub fn set_autostart(enabled: bool) -> Result<()> {
+fn set_autostart_entry(enabled: bool) -> Result<()> {
     write_or_remove_autostart_file(enabled, launch_agent_plist)
 }
 

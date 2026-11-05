@@ -148,6 +148,22 @@ struct RunningSession {
 /// command gives while this is `None`.
 static SESSION: LazyLock<Mutex<Option<RunningSession>>> = LazyLock::new(|| Mutex::new(None));
 
+/// Number of active connections across the running session's forwards.
+pub async fn active_conns() -> usize {
+    let guard = SESSION.lock().await;
+    match guard.as_ref() {
+        Some(session) => session
+            .ctx
+            .controller
+            .list_forwards()
+            .await
+            .iter()
+            .map(|forward| forward.active_conns)
+            .sum(),
+        None => 0,
+    }
+}
+
 // Room ids come from `session::generate_room_id` (4 random bytes, hex-encoded
 // -- byte-for-byte upstream `p2p`'s `app::generate_room_id` scheme, so a
 // generated id looks the same to a human copying it into a `p2p` client on the

@@ -87,7 +87,11 @@ instance, including a custom state root. Dev registrations launch their current
 binary path; keep that path available or disable the entry before moving it.
 Stable/default keeps the existing `mistl` login entry. Dev cannot install over or
 uninstall stable. Self-update is disabled in dev/preview, including manual apply.
-No autostart entry is created just by running the daemon.
+Stable builds enable login startup by default: the first daemon start of an
+instance with no recorded choice registers it. Any explicit choice (tray,
+`mistl autostart enable|disable`, `mistl install [--no-autostart]`, uninstall) is
+remembered in the instance's data dir and is never overridden. Dev/preview builds
+never register automatically.
 
 `just install [mistl install args]` builds the current checkout as a stable binary
 (version `<latest tag>+local`, in `target/install`) and installs it over the
