@@ -3,6 +3,8 @@ use super::AppState;
 use std::sync::Arc;
 
 pub(super) fn spawn(state: Arc<AppState>) {
+    // Config changes also need to apply when external connections are off.
+    super::restart::spawn(state.clone());
     // Login autostart defaults to on (stable only; an opt-out is kept).
     crate::install::apply_default_autostart();
     if let Err(error) = crate::config::data_dir().and_then(|data_dir| crate::authz::init(&data_dir))
@@ -47,13 +49,12 @@ pub(super) fn spawn(state: Arc<AppState>) {
     crate::storage::folder_sync::spawn_background(state.clone());
     crate::storage::folder_owner::spawn_background(state.clone());
 
-    // Cron-like job scheduler: fires due jobs on a 1-second tick. A no-op
-    // (logged) when `[scheduler] enabled = false`.
+    // Cron-like job scheduler: fires due jobs on a 1-second tick, checking
+    // `[scheduler] enabled` each time so the switch applies live.
     crate::scheduler::spawn_background(state.clone());
 
     // Bot pipeline engine: source -> transform(s) -> sink(s) automation
-    // runs, fired on a 1-second tick. A no-op (logged) when
-    // `[bot] enabled = false`.
+    // runs, fired on a 1-second tick while `[bot] enabled = true`.
     crate::bot::spawn_background(state.clone());
 
     // Join referenced rooms and provide according to enabled Room flags.

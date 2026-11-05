@@ -1,9 +1,18 @@
 # Dashboard development
 
 The dashboard is a modular monolith: one Rust daemon and one embedded web
-application, with independently owned feature views. Cargo embeds every asset;
-Node and npm are only needed for UI tests. No sibling checkout is needed to
-build or run the dashboard.
+application, with independently owned feature views. Cargo embeds every asset
+for release builds; Node and npm are only needed for UI tests. No sibling
+checkout is needed to build or run the dashboard.
+
+In debug builds, the daemon serves the dashboard HTML and allowlisted feature
+assets from this checkout when available, falling back to their embedded copies
+if the files cannot be read. An open dashboard checks for asset changes once a
+second and reloads automatically. `just watch` skips rebuilding and restarting
+when only `src/web/assets/` changes; Rust and other watched build inputs still
+rebuild the daemon. Release builds use embedded assets without live reload.
+The favicon remains embedded in debug builds too, so changing it requires a
+manual rebuild and restart.
 
 The reference designs are `../mistlib-dev/tests/misteval/src/webui/assets/topology.html`
 (graph overview, fit control, separate details), `../tc-storage/src/components/`

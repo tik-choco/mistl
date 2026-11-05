@@ -1,4 +1,5 @@
 pub mod ipc;
+pub(crate) mod restart;
 mod services;
 
 use std::process::Stdio;
@@ -27,6 +28,9 @@ pub struct AppState {
     /// Set by [`AppState::request_restart`]: after the daemon shuts down it
     /// relaunches itself from the (freshly self-updated) executable.
     restart: AtomicBool,
+    config_restart: Mutex<Option<restart::PendingRestart>>,
+    /// Serialize saves and their live effects, including the restart decision.
+    pub(crate) config_apply: tokio::sync::Mutex<()>,
     /// When the daemon last saw an HTTP request that indicates an open
     /// dashboard tab (page load or the dashboard's status poll). Used by
     /// [`crate::web::autoreopen`] to tell "a tab is already open" from "the
@@ -83,6 +87,9 @@ impl AppState {
         updated.escrow.validate()?;
         updated.save()?;
         *config = updated;
+        drop(config);
+        // Escrow joins its rooms once per process, like `config.set escrow.*`.
+        self.schedule_config_restart();
         Ok(())
     }
 
@@ -186,6 +193,8 @@ impl AppState {
             started_at: Instant::now(),
             shutdown,
             restart: AtomicBool::new(false),
+            config_restart: Mutex::new(None),
+            config_apply: tokio::sync::Mutex::new(()),
             dashboard_seen: Mutex::new(None),
             dashboard_url: Mutex::new(None),
         })
@@ -227,6 +236,8 @@ async fn daemon_main(host_override: Option<String>) -> Result<()> {
         started_at: Instant::now(),
         shutdown: shutdown_tx,
         restart: AtomicBool::new(false),
+        config_restart: Mutex::new(None),
+        config_apply: tokio::sync::Mutex::new(()),
         dashboard_seen: Mutex::new(None),
         dashboard_url: Mutex::new(None),
     });
@@ -530,10 +541,14 @@ pub fn is_local_peer(ip: std::net::IpAddr) -> bool {
 }
 
 /// `config.set` paths a remote dashboard may not change: they grant code
-/// execution, or redirect where the daemon fetches/pushes/stores data or
+/// execution, schedule a daemon restart, or redirect where it fetches/pushes/stores data or
 /// which peers it trusts. (`set_by_path` only accepts `section.field`, so
 /// there is no whole-section form to worry about.)
 fn remote_config_denied(path: &str) -> bool {
+    // A save must not give remote sessions an indirect daemon.restart.
+    if config::applies_when(path) == "auto restart" {
+        return true;
+    }
     const DENIED_EXACT: &[&str] = &[
         // stdio sessions run `stdio_command` for remote peers.
         "tunnel.stdio_enabled",
@@ -644,7 +659,9 @@ fn authorize(caller: Caller, cmd: &str, args: &Value) -> Result<()> {
                 .and_then(Value::as_str)
                 .is_some_and(remote_config_denied) =>
         {
-            Some("changes a setting that grants code execution or redirects trust or paths")
+            Some(
+                "changes a setting that controls daemon startup, grants code execution, or redirects trust or paths",
+            )
         }
         _ => None,
     };
@@ -740,6 +757,7 @@ pub async fn dispatch_as(
             "version": env!("CARGO_PKG_VERSION"),
             // `null` when the UI is disabled or failed to bind.
             "dashboard": state.dashboard_url(),
+            "restart_pending": state.config_restart_status(),
         })),
         "daemon.stop" => {
             state.request_shutdown();
@@ -790,6 +808,7 @@ pub async fn dispatch_as(
             Ok(value)
         }
         "config.set" => {
+            let _apply = state.config_apply.lock().await;
             let path = args
                 .get("path")
                 .and_then(Value::as_str)
@@ -797,6 +816,33 @@ pub async fn dispatch_as(
             let value = args.get("value").cloned().unwrap_or(Value::Null);
             let previous_ai = state.config().ai;
             state.set_config_path(path, value)?;
+            if config::applies_when(path) == "auto restart" {
+                state.schedule_config_restart();
+            } else {
+                // Further edits in the same batch also postpone a pending restart.
+                state.rearm_config_restart();
+            }
+            if state.network.permitted() {
+                match path {
+                    "tunnel.enabled" => {
+                        let cmd = if state.config().tunnel.enabled {
+                            "tunnel.start"
+                        } else {
+                            "tunnel.stop"
+                        };
+                        crate::tunnel::handle(cmd, json!({}), state).await?;
+                    }
+                    "nostr.enabled" => {
+                        let cmd = if state.config().nostr.enabled {
+                            "nostr.start"
+                        } else {
+                            "nostr.stop"
+                        };
+                        crate::nostr::handle(cmd, json!({}), state).await?;
+                    }
+                    _ => {}
+                }
+            }
             if path == "ai.providers" {
                 crate::ai::spawn_http_refresh(state.clone(), Some(&previous_ai));
             }
@@ -974,6 +1020,27 @@ mod tests {
         ] {
             authorize(REMOTE, "config.set", &json!({"path": path, "value": 1}))
                 .unwrap_or_else(|e| panic!("{path}: {e}"));
+        }
+    }
+
+    #[test]
+    fn auto_restart_config_is_local_only() {
+        for path in [
+            "escrow.enabled",
+            "escrow.rooms",
+            "escrow.replication",
+            "chat_relay.enabled",
+            "chat_relay.rooms",
+            "ai.room_id",
+            "stream.room",
+            "stream.relay_room",
+            "stream.share_room",
+        ] {
+            assert_eq!(config::applies_when(path), "auto restart");
+            let args = json!({"path": path, "value": null});
+            assert!(authorize(REMOTE, "config.set", &args).is_err(), "{path}");
+            authorize(LOCAL, "config.set", &args).unwrap();
+            authorize(Caller::Ipc, "config.set", &args).unwrap();
         }
     }
 

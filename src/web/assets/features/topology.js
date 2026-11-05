@@ -12,12 +12,10 @@
     var selected = null;
     var selectedModel = null;
     var opener = null;
-    var restoreKey = null;
     var hideTimer = null;
     var hovered = null;
     var lastDetailSignature = null;
-    var graphWidth = 0;
-    var fitGraph = false;
+    var layout = null;
 
     function element(tag, className, text) {
       var node = doc.createElement(tag);
@@ -68,45 +66,12 @@
           if (!node.querySelector) return;
           var label = node.querySelector(".topology-node-label");
           if (label) {
-            var hit = node.querySelector(".topology-node-hit");
-            var width = hit && Number(hit.getAttribute("width")) || 180;
-            label.textContent = compactLabel(model.label, Math.max(8, Math.floor((width - 20) / 7.4)));
-          } else if (node.classList.contains("topology-room-peer")) {
-            label = node.querySelector(".mono, .topology-peer-name");
-            if (label) { label.textContent = model.label; label.classList.add("topology-peer-name"); }
+            label.textContent = compactLabel(model.label, 22);
           }
           var title = node.querySelector("title");
           if (title) title.textContent = [model.label, model.id, model.role, model.state].filter(Boolean).join(" · ");
         });
       });
-    }
-
-    var fitButton;
-    var actualButton;
-    function applyGraphScale() {
-      if (!options.graph || !graphWidth) return;
-      var available = options.graph.parentElement.clientWidth - 26;
-      var width = fitGraph && available > 0 ? Math.min(graphWidth, available) : graphWidth;
-      options.graph.style.width = width + "px";
-      options.graph.style.minWidth = width + "px";
-      options.graph.style.maxWidth = "none";
-      if (fitButton) {
-        fitButton.textContent = t("topology.view.fit");
-        actualButton.textContent = t("topology.view.readable");
-        fitButton.setAttribute("aria-pressed", String(fitGraph));
-        actualButton.setAttribute("aria-pressed", String(!fitGraph));
-        options.controls.setAttribute("aria-label", t("topology.view.label"));
-      }
-    }
-    if (options.controls && options.graph) {
-      options.controls.setAttribute("role", "group");
-      fitButton = element("button", "btn");
-      actualButton = element("button", "btn");
-      fitButton.type = actualButton.type = "button";
-      fitButton.addEventListener("click", function () { fitGraph = true; hidePreview(); applyGraphScale(); });
-      actualButton.addEventListener("click", function () { fitGraph = false; hidePreview(); applyGraphScale(); });
-      options.controls.appendChild(fitButton);
-      options.controls.appendChild(actualButton);
     }
 
     var preview = element("div", "topology-preview");
@@ -226,6 +191,7 @@
       triggers.forEach(function (nodes, key) {
         nodes.forEach(function (node) { node.classList.toggle("is-selected", dialog.open && selected === key); });
       });
+      if (layout) layout.highlight(dialog.open ? selected : hovered && hovered.getAttribute("data-topology-key") || doc.activeElement && doc.activeElement.getAttribute("data-topology-key"));
     }
 
     function open(key, trigger) {
@@ -261,20 +227,14 @@
     });
     // A fixed preview must not remain detached from a scrolled/reflowed graph.
     win.addEventListener("scroll", hidePreview, true);
-    win.addEventListener("resize", function () { hidePreview(); applyGraphScale(); });
+    win.addEventListener("resize", hidePreview);
 
     if (root.MistlPeers) root.MistlPeers.subscribe(refreshModels);
 
-    return {
-      setGraphWidth: function (width) { graphWidth = width; applyGraphScale(); },
+    var presentation = {
       setSnapshot: function (nodes) {
         sourceModels = nodes;
         refreshModels();
-      },
-      beginRender: function () {
-        restoreKey = doc.activeElement && doc.activeElement.getAttribute("data-topology-key");
-        hidePreview();
-        triggers.clear();
       },
       bindNode: function (node, key) {
         var model = models.get(key);
@@ -288,24 +248,384 @@
         node.setAttribute("role", "button");
         node.setAttribute("aria-haspopup", "dialog");
         node.setAttribute("aria-label", [model.label, model.state, t("topology.details.open")].filter(Boolean).join(" · "));
-        node.addEventListener("click", function () { open(key, node); });
+        node.addEventListener("click", function () { if (!layout || !layout.suppressClick()) open(key, node); });
         node.addEventListener("keydown", function (event) {
           if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(key, node); }
         });
-        node.addEventListener("mouseenter", function () { showPreview(node, key); });
-        node.addEventListener("mouseleave", scheduleHide);
-        node.addEventListener("focus", function () { showPreview(node, key); });
-        node.addEventListener("blur", scheduleHide);
+        function enter() { showPreview(node, key); if (layout) layout.highlight(key); }
+        function leave() { scheduleHide(); if (layout) layout.highlight(dialog.open ? selected : null); }
+        node.addEventListener("mouseenter", enter);
+        node.addEventListener("mouseleave", leave);
+        node.addEventListener("focus", enter);
+        node.addEventListener("blur", leave);
       },
-      endRender: function () {
+      unbindNode: function (node, key) {
+        triggers.delete(key);
+        if (hovered === node) hidePreview();
+        if (doc.activeElement === node && options.focusFallback) options.focusFallback();
+      },
+      setGraph: function (graph) {
+        presentation.setSnapshot(graph.nodes);
+        layout.update(graph);
         updateLabels();
         markSelected();
-        if (!dialog.open && restoreKey) {
-          var nodes = triggers.get(restoreKey);
-          if (nodes && nodes[0]) nodes[0].focus({ preventScroll: true });
-          else if (options.focusFallback) options.focusFallback();
+      }
+    };
+    if (options.graph) layout = createGraph(options, presentation, hidePreview);
+    presentation.activity = function (path, count, bytes) { layout.activity(path, count, bytes); };
+    presentation.isVisible = function () { return layout.isVisible(); };
+    return presentation;
+  }
+
+  function createGraph(options, inspection, hidePreview) {
+    var doc = options.document, win = options.window, svg = options.graph;
+    var card = svg.closest("#topology-card") || svg;
+    var nodes = new Map(), edges = new Map(), liveNodes = [], liveEdges = [];
+    var particles = [], raf = null, alpha = 0, lastFrame = 0, particleBudget = 48;
+    var width = 640, height = 380, scale = 1, panX = 0, panY = 0;
+    var userView = false, fitting = true, intersecting = true, visible = true;
+    var highlightKey = null, drag = null, pointers = new Map(), pinch = null, suppressUntil = 0;
+    var motion = win.matchMedia("(prefers-reduced-motion: reduce)");
+    var reduced = motion.matches;
+    var SVG_NS = "http://www.w3.org/2000/svg";
+    function el(tag, attrs, parent) {
+      var node = doc.createElementNS(SVG_NS, tag);
+      Object.keys(attrs || {}).forEach(function (key) { node.setAttribute(key, attrs[key]); });
+      if (parent) parent.appendChild(node);
+      return node;
+    }
+    var viewport = el("g", { class: "topology-viewport" }, svg);
+    var edgeLayer = el("g", { "aria-hidden": "true" }, viewport);
+    var particleLayer = el("g", { "aria-hidden": "true", class: "topology-particles" }, viewport);
+    var nodeLayer = el("g", {}, viewport);
+    function now() { return win.performance.now(); }
+    function clamp(n, min, max) { return Math.max(min, Math.min(max, n)); }
+    function camera() {
+      viewport.setAttribute("transform", "translate(" + (width / 2 + panX) + "," + (height / 2 + panY) + ") scale(" + scale + ")");
+      svg.classList.toggle("is-zoomed-out", scale < 0.6);
+    }
+    function fit() {
+      if (!liveNodes.length) return;
+      var minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      liveNodes.forEach(function (n) {
+        minX = Math.min(minX, n.x - 40); maxX = Math.max(maxX, n.x + 40);
+        minY = Math.min(minY, n.y - 28); maxY = Math.max(maxY, n.y + 38);
+      });
+      scale = clamp(Math.min((width - 48) / (maxX - minX), (height - 72) / (maxY - minY)), 0.15, 1.25);
+      panX = -(minX + maxX) / 2 * scale; panY = -(minY + maxY) / 2 * scale;
+      camera();
+    }
+    function resize() {
+      var rect = svg.getBoundingClientRect();
+      width = rect.width || 640; height = rect.height || 380;
+      svg.setAttribute("viewBox", "0 0 " + width + " " + height);
+      if (!userView) fit(); else camera();
+      syncVisibility();
+    }
+    function clearParticles() {
+      particles.forEach(function (p) { p.el.remove(); }); particles = [];
+    }
+    function syncVisibility() {
+      var next = !doc.hidden && intersecting && !card.closest("[hidden]") && win.getComputedStyle(card).display !== "none";
+      if (visible === next) return;
+      visible = next;
+      card.classList.toggle("is-paused", !visible);
+      if (!visible) {
+        if (raf !== null) win.cancelAnimationFrame(raf);
+        raf = null; lastFrame = 0; clearParticles(); hidePreview();
+      } else wake();
+      if (options.onVisibilityChange) options.onVisibilityChange();
+    }
+    function wake(heat) {
+      if (heat) alpha = Math.max(alpha, heat);
+      if (visible && raf === null) raf = win.requestAnimationFrame(frame);
+    }
+    function highlight(key) {
+      highlightKey = key;
+      var neighbours = new Set(key ? [key] : []);
+      if (key) liveEdges.forEach(function (e) {
+        if (e.source.key === key) neighbours.add(e.target.key);
+        if (e.target.key === key) neighbours.add(e.source.key);
+      });
+      nodes.forEach(function (n) {
+        n.el.classList.toggle("is-dimmed", !!key && !neighbours.has(n.key));
+        n.el.classList.toggle("is-highlighted", key === n.key);
+      });
+      edges.forEach(function (e) {
+        var adjacent = e.source.key === key || e.target.key === key;
+        e.el.classList.toggle("is-dimmed", !!key && !adjacent);
+        e.el.classList.toggle("is-highlighted", !!key && adjacent);
+      });
+      particles.forEach(function (p) {
+        p.el.classList.toggle("is-dimmed", !!key && !p.path.some(function (n) { return n.key === key; }));
+      });
+    }
+    function physics() {
+      // Positions survive snapshots. Cooling is independent of traffic animations.
+      for (var i = 0; i < liveNodes.length; i++) {
+        var a = liveNodes[i];
+        for (var j = i + 1; j < liveNodes.length; j++) {
+          var b = liveNodes[j], dx = b.x - a.x, dy = b.y - a.y;
+          var distance = Math.sqrt(dx * dx + dy * dy) || 0.01;
+          if (distance < 0.1) { dx = 0.1; dy = 0.1; distance = 0.14; }
+          var force = Math.min(2.5, 1600 / (distance * distance)) * alpha;
+          var collision = Math.max(0, a.radius + b.radius + 30 - distance) * 0.08;
+          var fx = dx / distance * (force + collision), fy = dy / distance * (force + collision);
+          a.vx -= fx; a.vy -= fy; b.vx += fx; b.vy += fy;
         }
-        restoreKey = null;
+      }
+      liveEdges.forEach(function (e) {
+        var a = e.source, b = e.target, dx = b.x - a.x, dy = b.y - a.y;
+        var distance = Math.sqrt(dx * dx + dy * dy) || 1;
+        var force = (distance - (a.kind === "room" || b.kind === "room" ? 95 : 130)) * 0.025 * alpha;
+        var fx = dx / distance * force, fy = dy / distance * force;
+        a.vx += fx; a.vy += fy; b.vx -= fx; b.vy -= fy;
+      });
+      liveNodes.forEach(function (n) {
+        var center = n.kind === "self" ? 0.035 : 0.0015;
+        n.vx = (n.vx - n.x * center * alpha) * 0.78;
+        n.vy = (n.vy - n.y * center * alpha) * 0.78;
+        if (drag && drag.node === n) { n.vx = n.vy = 0; return; }
+        n.x += n.vx; n.y += n.vy;
+      });
+      alpha *= 0.974;
+    }
+    function addParticle(path, radius, delay, media) {
+      if (reduced || !visible || particles.length >= 160 || path.length < 2 || !media && particleBudget <= 0) return;
+      if (!media) particleBudget--;
+      var dimmed = highlightKey && !path.some(function (n) { return n.key === highlightKey; });
+      particles.push({ path: path, start: now() + delay, duration: 1050 + (path.length - 2) * 500,
+        el: el("circle", { r: radius, class: "topology-particle" + (media ? " is-media" : "") + (dimmed ? " is-dimmed" : ""), opacity: 0 }, particleLayer) });
+      wake();
+    }
+    function frame(time) {
+      raf = null;
+      if (!visible) return;
+      var dt = Math.min(48, lastFrame ? time - lastFrame : 16.7); lastFrame = time;
+      var moving = alpha > 0.002;
+      if (moving) physics();
+      var changing = false;
+      nodes.forEach(function (n, key) {
+        var target = n.removing ? 0 : 1;
+        if (n.life !== target) {
+          n.life = reduced ? target : n.life + Math.sign(target - n.life) * dt / 280;
+          n.life = clamp(n.life, 0, 1); changing = true;
+          n.el.setAttribute("opacity", n.life);
+        }
+        if (n.removing && n.life === 0) {
+          inspection.unbindNode(n.el, key); n.el.remove(); nodes.delete(key); return;
+        }
+        var x = Math.round((n.x - n.cx * n.life) * 100) / 100;
+        var y = Math.round((n.y - n.cy * n.life) * 100) / 100;
+        var transform = "translate(" + x + "," + y + ") scale(" + n.life + ")";
+        if (transform !== n.transform) { n.el.setAttribute("transform", transform); n.transform = transform; }
+        if (n.rippleUntil > time && !reduced) {
+          var progress = 1 - (n.rippleUntil - time) / 850;
+          n.ring.setAttribute("r", n.radius + 4 + progress * 19);
+          n.ring.setAttribute("opacity", (1 - progress) * 0.7); changing = true;
+        } else if (n.rippleUntil) {
+          n.rippleUntil = 0; n.ring.setAttribute("opacity", 0);
+        }
+      });
+      var flowing = false;
+      edges.forEach(function (e, key) {
+        if (e.removing && (!nodes.has(e.source.key) || !nodes.has(e.target.key) || Math.min(e.source.life, e.target.life) === 0)) {
+          e.el.remove(); edges.delete(key); return;
+        }
+        var a = e.source, b = e.target;
+        var geometry = [a.x.toFixed(2), a.y.toFixed(2), b.x.toFixed(2), b.y.toFixed(2)].join(" ");
+        if (geometry !== e.geometry) {
+          e.el.setAttribute("x1", a.x); e.el.setAttribute("y1", a.y);
+          e.el.setAttribute("x2", b.x); e.el.setAttribute("y2", b.y); e.geometry = geometry;
+        }
+        var opacity = Math.min(a.life, b.life);
+        if (e.opacity !== opacity) { e.el.setAttribute("opacity", opacity); e.opacity = opacity; }
+        if (!e.removing && e.flowUntil > time && !reduced) {
+          flowing = true;
+          if (time >= e.nextParticle) { addParticle([a, b], 1.8, 0, true); e.nextParticle = time + 240; }
+        } else if (e.flowUntil && e.flowUntil <= time) {
+          e.flowUntil = 0; e.el.classList.remove("is-flowing");
+        }
+      });
+      particles = particles.filter(function (p) {
+        var progress = (time - p.start) / p.duration;
+        if (progress >= 1 || p.path.some(function (n) { return n.removing; })) { p.el.remove(); return false; }
+        if (progress < 0) return true;
+        var segment = Math.min(p.path.length - 2, Math.floor(progress * (p.path.length - 1)));
+        var fraction = progress * (p.path.length - 1) - segment;
+        var a = p.path[segment], b = p.path[segment + 1];
+        p.el.setAttribute("cx", a.x + (b.x - a.x) * fraction);
+        p.el.setAttribute("cy", a.y + (b.y - a.y) * fraction);
+        p.el.setAttribute("opacity", Math.min(1, progress * 8, (1 - progress) * 8));
+        return true;
+      });
+      if (fitting && !userView) { fit(); if (!moving) fitting = false; }
+      // No timer keeps a settled, inactive graph alive.
+      if (moving || changing || flowing || particles.length) wake(); else lastFrame = 0;
+    }
+    function update(graph) {
+      particleBudget = 48;
+      var nextNodes = new Set(graph.nodes.map(function (n) { return n.key; }));
+      var changed = liveNodes.length !== nextNodes.size;
+      var rippling = false;
+      var degree = new Map();
+      graph.edges.forEach(function (e) {
+        degree.set(e.source, (degree.get(e.source) || 0) + 1);
+        degree.set(e.target, (degree.get(e.target) || 0) + 1);
+      });
+      nodes.forEach(function (n, key) { n.el.classList.remove("has-activity"); if (!nextNodes.has(key) && !n.removing) { n.removing = true; changed = true; } });
+      graph.nodes.forEach(function (model, index) {
+        var n = nodes.get(model.key);
+        var radius = model.kind === "self" ? 10 : model.kind === "room" ? 4.5 : 5.5 + Math.min(3, Math.sqrt(degree.get(model.key) || 0));
+        if (!n) {
+          var link = graph.edges.find(function (e) { return e.source === model.key && nodes.has(e.target) || e.target === model.key && nodes.has(e.source); });
+          var neighbour = link && nodes.get(link.source === model.key ? link.target : link.source);
+          var angle = index * 2.39996, spread = 42 + Math.sqrt(index) * 14;
+          var shape = options.makeNode(nodeLayer, model, radius);
+          n = { key: model.key, x: (neighbour ? neighbour.x : 0) + Math.cos(angle) * spread,
+            y: (neighbour ? neighbour.y : 0) + Math.sin(angle) * spread, vx: 0, vy: 0,
+            el: shape.el, cx: shape.cx, cy: shape.cy, life: reduced ? 1 : 0 };
+          n.dot = n.el.querySelector(".topology-node-dot");
+          n.label = n.el.querySelector(".topology-node-label");
+          n.ring = el("circle", { class: "topology-ripple", cx: n.cx, cy: n.cy, opacity: 0 }, n.el);
+          nodes.set(model.key, n); changed = true;
+        }
+        if (n.removing) { n.removing = false; changed = true; }
+        var connected = model.rawState === "connected";
+        var justConnected = connected && n.rawState !== "connected";
+        if (justConnected && !reduced) { n.rippleUntil = now() + 850; rippling = true; }
+        n.rawState = model.rawState; n.kind = model.kind; n.radius = radius;
+        var className = "topology-node topology-node-clickable kind-" + model.kind + " state-" + (model.rawState || "connected");
+        if (className !== n.className) { n.el.setAttribute("class", className); n.className = className; }
+        if (justConnected && reduced) n.el.classList.add("has-activity");
+        n.dot.setAttribute("r", radius);
+        n.label.setAttribute("y", n.cy + radius + 15);
+        n.el.classList.toggle("is-alone", graph.nodes.length === 1);
+      });
+      var nextEdges = new Set(graph.edges.map(function (e) { return e.key; }));
+      edges.forEach(function (e, key) {
+        if (!nextEdges.has(key)) {
+          e.removing = true;
+          if (!e.source.removing && !e.target.removing) { e.el.remove(); edges.delete(key); }
+        }
+      });
+      graph.edges.forEach(function (model) {
+        var e = edges.get(model.key);
+        if (!e) {
+          e = { el: el("line", { class: "topology-edge" }, edgeLayer), nextParticle: 0 };
+          edges.set(model.key, e); changed = true;
+        }
+        e.source = nodes.get(model.source); e.target = nodes.get(model.target); e.removing = false;
+        e.flowUntil = model.flowMs ? now() + model.flowMs : 0;
+        e.el.classList.toggle("is-flowing", e.flowUntil > now());
+      });
+      liveNodes = graph.nodes.map(function (n) { return nodes.get(n.key); });
+      liveEdges = graph.edges.map(function (e) { return edges.get(e.key); });
+      if (changed && !userView) fitting = true;
+      highlight(highlightKey);
+      syncVisibility();
+      if (changed) wake(0.8);
+      else if (rippling || liveEdges.some(function (e) { return e.flowUntil > now(); })) wake();
+    }
+    function point(event) {
+      var rect = svg.getBoundingClientRect();
+      return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+    }
+    function world(p) { return { x: (p.x - width / 2 - panX) / scale, y: (p.y - height / 2 - panY) / scale }; }
+    function zoom(next, p) {
+      var anchor = world(p); scale = clamp(next, 0.15, 4);
+      panX = p.x - width / 2 - anchor.x * scale; panY = p.y - height / 2 - anchor.y * scale;
+      userView = true; fitting = false; camera(); hidePreview();
+    }
+    svg.addEventListener("wheel", function (event) {
+      event.preventDefault(); zoom(scale * Math.exp(-event.deltaY * (event.deltaMode === 1 ? 0.04 : 0.002)), point(event));
+    }, { passive: false });
+    svg.addEventListener("pointerdown", function (event) {
+      if (event.button !== 0) return;
+      var p = point(event); pointers.set(event.pointerId, p);
+      svg.setPointerCapture(event.pointerId);
+      if (pointers.size === 2) {
+        var pair = Array.from(pointers.values());
+        pinch = { distance: Math.hypot(pair[1].x - pair[0].x, pair[1].y - pair[0].y), scale: scale };
+        drag = null; return;
+      }
+      var target = event.target.closest("[data-topology-key]");
+      var n = target && nodes.get(target.getAttribute("data-topology-key"));
+      drag = { node: n, start: p, last: p, moved: false };
+      if (n) wake(0.5);
+    });
+    svg.addEventListener("pointermove", function (event) {
+      if (!pointers.has(event.pointerId)) return;
+      var p = point(event); pointers.set(event.pointerId, p);
+      if (pinch && pointers.size === 2) {
+        var pair = Array.from(pointers.values());
+        var distance = Math.hypot(pair[1].x - pair[0].x, pair[1].y - pair[0].y);
+        zoom(pinch.scale * distance / Math.max(1, pinch.distance), { x: (pair[0].x + pair[1].x) / 2, y: (pair[0].y + pair[1].y) / 2 });
+        suppressUntil = now() + 400; return;
+      }
+      if (!drag) return;
+      if (Math.hypot(p.x - drag.start.x, p.y - drag.start.y) > 4) drag.moved = true;
+      if (!drag.moved) return;
+      hidePreview();
+      if (drag.node) {
+        var position = world(p); drag.node.x = position.x; drag.node.y = position.y; wake(0.4);
+      } else {
+        userView = true; fitting = false;
+        panX += p.x - drag.last.x; panY += p.y - drag.last.y; camera();
+      }
+      drag.last = p;
+    });
+    function release(event) {
+      pointers.delete(event.pointerId);
+      if (drag && drag.moved) { suppressUntil = now() + 400; if (drag.node) wake(0.5); }
+      drag = null; pinch = null;
+    }
+    svg.addEventListener("pointerup", release);
+    svg.addEventListener("pointercancel", release);
+    svg.addEventListener("lostpointercapture", release);
+    svg.addEventListener("dblclick", function (event) {
+      if (event.target.closest("[data-topology-key]")) return;
+      userView = false; fit(); hidePreview();
+    });
+    svg.addEventListener("keydown", function (event) {
+      var target = event.target.closest("[data-topology-key]");
+      var n = target && nodes.get(target.getAttribute("data-topology-key"));
+      var dx = event.key === "ArrowRight" ? 20 : event.key === "ArrowLeft" ? -20 : 0;
+      var dy = event.key === "ArrowDown" ? 20 : event.key === "ArrowUp" ? -20 : 0;
+      if (dx || dy) {
+        event.preventDefault();
+        if (n) { n.x += dx; n.y += dy; wake(0.5); }
+        else { userView = true; fitting = false; panX += dx; panY += dy; camera(); }
+      } else if (event.key === "+" || event.key === "=" || event.key === "-") {
+        event.preventDefault(); zoom(scale * (event.key === "-" ? 0.8 : 1.25), { x: width / 2, y: height / 2 });
+      } else if (event.key === "0" || event.key === "Home") { event.preventDefault(); userView = false; fit(); }
+    });
+    doc.addEventListener("visibilitychange", syncVisibility);
+    if (win.IntersectionObserver) new win.IntersectionObserver(function (entries) {
+      intersecting = entries[0].isIntersecting; syncVisibility();
+    }).observe(card);
+    if (win.ResizeObserver) new win.ResizeObserver(resize).observe(svg);
+    else win.addEventListener("resize", resize);
+    motion.addEventListener("change", function () {
+      reduced = motion.matches;
+      if (reduced) {
+        clearParticles();
+        nodes.forEach(function (n) { n.rippleUntil = 0; n.ring.setAttribute("opacity", 0); });
+      }
+      wake();
+    });
+    resize(); camera();
+    return {
+      update: update, highlight: highlight,
+      isVisible: function () { syncVisibility(); return visible; },
+      suppressClick: function () { return now() < suppressUntil; },
+      activity: function (keys, count, bytes) {
+        var path = keys.map(function (key) { return nodes.get(key); });
+        if (!visible || path.length < 2 || path.some(function (n) { return !n || n.removing; })) return;
+        if (reduced) { path.forEach(function (n) { n.el.classList.add("has-activity"); }); return; }
+        var amount = Math.min(12, Math.max(1, Math.ceil(Math.log2(1 + count) + Math.log2(1 + bytes / 1024) / 3)));
+        var radius = Math.min(3.2, 1.3 + Math.log2(1 + bytes / Math.max(1, count) / 1024) * 0.22);
+        for (var i = 0; i < amount; i++) addParticle(path, radius, i * 70, false);
       }
     };
   }

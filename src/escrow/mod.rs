@@ -603,7 +603,7 @@ pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Val
                 .context("escrow rooms requires room")?;
             state.set_escrow_room(room, cmd == "escrow.rooms.add")?;
             Ok(
-                json!({"saved":true,"applies":"daemon restart","enabled":state.config().escrow.enabled,"rooms":state.config().escrow.rooms}),
+                json!({"saved":true,"applies":"auto restart","enabled":state.config().escrow.enabled,"rooms":state.config().escrow.rooms}),
             )
         }
         "escrow.replication.membership" => {
@@ -641,7 +641,7 @@ pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Val
                 status
             }).collect();
             Ok(
-                json!({"enabled":cfg.enabled,"running":!joined.is_empty(),"rooms":rooms,"bytes":service.repo.total_bytes() + service.clusters.lock().unwrap().values().map(|cluster| cluster.total_bytes()).sum::<u64>(),"applies":"daemon restart"}),
+                json!({"enabled":cfg.enabled,"running":!joined.is_empty(),"rooms":rooms,"bytes":service.repo.total_bytes() + service.clusters.lock().unwrap().values().map(|cluster| cluster.total_bytes()).sum::<u64>(),"applies":"auto restart"}),
             )
         }
         _ => bail!("unknown escrow command: {cmd}"),

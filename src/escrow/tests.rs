@@ -572,7 +572,7 @@ fn escrow_rejects_bad_signatures_size_hash_manifest_and_quota() {
 }
 
 #[test]
-fn escrow_config_validates_and_requires_restart() {
+fn escrow_config_validates_and_schedules_auto_restart() {
     let cfg = crate::config::Config::default();
     assert!(!cfg.escrow.enabled);
     assert_eq!(cfg.escrow.max_blob_bytes, 32 * 1024 * 1024);
@@ -585,7 +585,7 @@ fn escrow_config_validates_and_requires_restart() {
         "escrow.max_total_bytes",
         "escrow.max_slots_per_room",
     ] {
-        assert_eq!(crate::config::applies_when(path), "daemon restart");
+        assert_eq!(crate::config::applies_when(path), "auto restart");
     }
     for value in [json!([""]), json!(["bad room"]), json!(["a", "a"])] {
         assert!(crate::config::set_by_path(&cfg, "escrow.rooms", value).is_err());

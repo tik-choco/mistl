@@ -120,6 +120,8 @@
   .pill.ok .dot { background: var(--ok); }
   .pill.err { background: var(--err-dim); color: var(--err); }
   .pill.err .dot { background: var(--err); }
+  .pill.warn { background: var(--warn-dim); color: var(--warn); }
+  .pill.warn .dot { background: var(--warn); }
 
   .identity {
     margin-left: auto;
@@ -851,168 +853,7 @@
     min-width: 0;   /* same reason as .panel: never let the 620px graph min-width propagate up */
     transition: border-color var(--dur-fast) var(--ease-out);
   }
-  /* Where the single #topology-card currently lives (Overview or Stream).
-     A flex item of .panel, so it needs the same min-width: 0 escape hatch
-     as .panel itself -- otherwise the SVG's min-width bubbles up and the
-     whole panel overflows a phone viewport (measured: 696px panel on a
-     390px screen before this rule). */
   .topology-slot { min-width: 0; }
-  .cascade-card-head { display: flex; align-items: center; gap: 10px; }
-  .cascade-card-head h3 { margin: 0; font-size: 13.5px; flex: 1; }
-  .cascade-source { font-size: 12.5px; color: var(--text-dim); }
-  .topology-graph-wrap {
-    overflow-x: auto;
-    min-width: 0;
-    max-width: 100%;
-    border: 1px solid var(--panel-border);
-    border-radius: 10px;
-    background: var(--bg-alt);
-    padding: 4px;
-  }
-  .topology-svg { display: block; min-width: 620px; width: 100%; height: auto; }
-  .topology-node-box {
-    fill: var(--panel);
-    stroke: var(--panel-border);
-    stroke-width: 1.4;
-    transition: stroke var(--dur-fast) var(--ease-out);
-  }
-  .topology-node-box.kind-self { stroke: var(--accent); fill: var(--accent-dim); }
-  .topology-node-box.kind-leader { stroke: var(--warn); }
-  .topology-node-box.kind-publisher { stroke: var(--ok); }
-  .topology-node-box.kind-follower { stroke: var(--accent); }
-  .topology-node-box.kind-viewers { stroke-dasharray: 3 2; }
-  /* A clickable node (has a full id to copy) gets a pointer cursor; the
-     inert viewers-count box (no id) keeps the default cursor. */
-  .topology-node-clickable { cursor: pointer; }
-  .topology-node-label { fill: var(--text); font: 600 11.5px var(--sans); }
-  .topology-node-sub { fill: var(--text-faint); font: 700 9.5px var(--mono); }
-  .topology-edge { stroke: var(--text-faint); stroke-width: 1.3; fill: none; transition: opacity var(--dur-fast) var(--ease-out); }
-  .topology-edge.dashed { stroke-dasharray: 4 3; }
-  /* Hovering a node dims every edge that doesn't touch it, so a busy graph's
-     relevant path stands out. Declared with lower specificity than .flowing
-     so a flowing edge stays visibly green even while dimmed. */
-  .topology-edge.dimmed { opacity: 0.25; }
-  /* An edge that is actually carrying media right now (per stream.status's
-     flow ages, not mere connectivity): green "marching ants". The color
-     shift alone keeps flowing distinguishable from idle when the animation
-     is disabled by prefers-reduced-motion. */
-  .topology-edge.flowing {
-    stroke: var(--ok);
-    stroke-width: 1.6;
-    stroke-dasharray: 6 4;
-    animation: topology-flow 0.8s linear infinite;
-  }
-  @keyframes topology-flow { to { stroke-dashoffset: -10; } }
-  /* Transient data-activity pulses (topology.status's `activity` field --
-     distinct from the media `.flowing` state above): a brief directional
-     "marching ants" flash on a peer's edge whenever a new message crosses
-     it, added/removed by JS (updateTopologyActivity/topologyFlash) rather
-     than tied to a persistent render state. TX (this node -> peer) reuses
-     the forward dash-offset direction the edge is already drawn in; RX
-     (peer -> this node) runs the same animation backwards so the two read
-     as opposite flows on the same line. Colors intentionally pair with the
-     tx/rx glyphs in the per-room breakdown below (accent = TX, ok = RX) so
-     the two surfaces read as one language. Stroke/dasharray are static
-     properties on the rule itself (not only inside the keyframe), so
-     disabling `animation` under reduced-motion (further down) still leaves
-     a visibly distinct, just non-moving, edge. */
-  .topology-edge.activity-tx {
-    stroke: var(--accent);
-    stroke-width: 1.8;
-    stroke-dasharray: 5 4;
-    animation: topology-flow 0.6s linear infinite;
-  }
-  .topology-edge.activity-rx {
-    stroke: var(--ok);
-    stroke-width: 1.8;
-    stroke-dasharray: 5 4;
-    animation: topology-flow-rev 0.6s linear infinite;
-  }
-  @keyframes topology-flow-rev { to { stroke-dashoffset: 10; } }
-  .topology-edge-arrowhead { fill: var(--text-faint); }
-  .topology-edge-label {
-    fill: var(--text-dim);
-    font: 600 9.5px var(--sans);
-    paint-order: stroke;
-    stroke: var(--bg-alt);
-    stroke-width: 4px;
-  }
-  .topology-dot { stroke: var(--panel); stroke-width: 1px; }
-  .topology-dot.state-connected { fill: var(--ok); }
-  .topology-dot.state-connecting { fill: var(--warn); }
-  .topology-dot.state-down { fill: var(--err); }
-  .topology-empty { padding: 20px; text-align: center; color: var(--text-faint); font-size: 12.5px; }
-  .topology-legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 11px; color: var(--text-dim); margin: 8px 0 0; }
-  .topology-legend-item { display: inline-flex; align-items: center; gap: 5px; }
-  .topology-legend-dot { width: 9px; height: 9px; border-radius: 3px; display: inline-block; border: 1.4px solid var(--panel-border); flex: none; }
-  .topology-legend-dot.kind-self { border-color: var(--accent); background: var(--accent-dim); }
-  .topology-legend-dot.kind-leader { border-color: var(--warn); background: var(--panel); }
-  .topology-legend-dot.kind-publisher { border-color: var(--ok); background: var(--panel); }
-  .topology-legend-dot.kind-follower { border-color: var(--accent); background: var(--panel); }
-  .topology-legend-dot.kind-sibling { border-color: var(--text-dim); background: var(--panel); border-style: dashed; }
-  .topology-legend-dot.kind-peer { border-color: var(--text-dim); background: var(--panel); }
-  .topology-legend-dot.kind-viewers { border-color: var(--text-faint); background: var(--panel); border-style: dashed; }
-  /* Legend swatches for edge states: a short line sample, dashed+animated
-     for "media flowing", plain for "idle". */
-  .topology-legend-line { width: 20px; height: 0; border-top: 2px solid var(--text-faint); display: inline-block; flex: none; }
-  .topology-legend-line.flowing {
-    border-top: none;
-    height: 2px;
-    background: repeating-linear-gradient(90deg, var(--ok) 0 6px, transparent 6px 10px);
-    animation: topology-flow-legend 0.8s linear infinite;
-  }
-  @keyframes topology-flow-legend { to { background-position: 10px 0; } }
-  @media (prefers-reduced-motion: reduce) {
-    .topology-edge.flowing, .topology-legend-line.flowing,
-    .topology-edge.activity-tx, .topology-edge.activity-rx,
-    .topology-room-chip.activity-flash, .topology-room-peer-dir.active {
-      animation: none;
-    }
-  }
-  .topology-rooms { font-size: 12px; color: var(--text-dim); margin-top: 8px; }
-  .topology-rooms .mono { color: var(--text); }
-  /* Room ids as small click-to-copy chips, styled off the existing .badge. */
-  .topology-room-chip { cursor: pointer; margin: 2px 4px 2px 0; }
-  .topology-room-chip:hover { background: var(--accent-dim); color: var(--accent); }
-
-  /* ---- per-room breakdown (topology.status's optional `room_peers` field)
-     -- one block per joined room, pairing its room id with which modules
-     use it and which peers mistlib reports as connected *in that room
-     specifically* (see renderTopologyRoomBreakdown). This replaces the
-     plain .topology-room-chip list above when the daemon sends
-     `room_peers`; an older daemon that doesn't still gets that flat list. */
-  .topology-rooms-heading { font-weight: 600; color: var(--text-dim); margin-bottom: 2px; }
-  .topology-room-breakdown { display: flex; flex-direction: column; gap: 8px; }
-  .topology-room-item {
-    border: 1px solid var(--panel-border);
-    border-radius: 8px;
-    padding: 7px 10px;
-    background: var(--bg-alt);
-  }
-  .topology-room-item-head { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; }
-  /* Module badges (chat_relay/ai/store/stream/cascade) reuse .badge but get a
-     tinted look so they read as "tags" rather than status pills. */
-  .topology-room-module-badge { background: var(--accent-dim); color: var(--accent); }
-  .topology-room-peers { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin-top: 6px; }
-  .topology-room-peer { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
-  .topology-room-empty { color: var(--text-faint); font-style: italic; }
-  /* Per-peer TX/RX activity glyphs (topology.status's `activity` field):
-     only rendered at all once a peer has ever sent/received something this
-     daemon run (see renderTopologyRoomBreakdown), dim by default, and
-     briefly lit + popped by updateTopologyActivity/topologyFlash whenever a
-     fresh message crosses that direction. Color pairing (accent = TX,
-     ok = RX) matches the SVG edge activity classes above. */
-  .topology-room-peer-dirs { display: inline-flex; gap: 2px; font-size: 9px; line-height: 1; }
-  .topology-room-peer-dir { color: var(--text-faint); transition: color var(--dur-fast) var(--ease-out); }
-  .topology-room-peer-dir.tx.active { color: var(--accent); animation: topology-activity-pop 1.4s ease-out; }
-  .topology-room-peer-dir.rx.active { color: var(--ok); animation: topology-activity-pop 1.4s ease-out; }
-  @keyframes topology-activity-pop { 0% { transform: scale(1.8); } 100% { transform: scale(1); } }
-  /* Broadcast entries (room_peers has no peer row to flash) light the room
-     chip itself instead -- a static ring plus a brief fade, same reasoning
-     as the edge classes: the box-shadow is a plain property on the rule, so
-     reduced-motion (further up) only strips the animation, not the ring. */
-  .topology-room-chip.activity-flash { box-shadow: 0 0 0 2px var(--accent); animation: topology-activity-ring 1.4s ease-out; }
-  @keyframes topology-activity-ring { 0% { box-shadow: 0 0 0 0 var(--accent); } 100% { box-shadow: 0 0 0 4px transparent; } }
 
   /* ---- per-module topology mini-strips (tc-chat relay / AI / Store) ----
      One compact row: the module's room id, connection-state dots for the
@@ -1250,17 +1091,6 @@
   #panel-ai .ai-setup-title { font-size: 15px; font-weight: 700; color: var(--text); }
   #panel-ai .ai-setup-desc { font-size: 12.5px; color: var(--text-dim); max-width: 420px; }
   #panel-ai .ai-setup-cta { margin-top: 4px; }
-
-  /* ---- topology card fold (collapsible body, reuses .drawer-chevron) --- */
-  /* .cascade-card's own flex/gap only had one child once the body moved
-     inside <details>; recreate the same column + 10px gap on the fold
-     itself so the open card looks identical to the pre-fold layout. */
-  .topology-fold { display: flex; flex-direction: column; gap: 10px; }
-  .topology-fold > summary { cursor: pointer; list-style: none; }
-  .topology-fold > summary::-webkit-details-marker { display: none; }
-  .topology-fold[open] > summary .drawer-chevron { transform: rotate(-180deg); }
-  .topology-fold > summary:hover h3 { color: var(--accent); }
-  .topology-context { font-size: 12px; color: var(--text-dim); word-break: break-all; }
 
   .settings-advanced { margin-top: 8px; }
   .settings-advanced > summary {
@@ -1554,15 +1384,8 @@
     .sidenav a.active::before { display: none; }
     main { padding: 16px 14px 40px; }
     .panel { padding: 18px 16px; }
-    /* Topology graph on a phone: the wrap scrolls horizontally (the SVG
-       keeps a readable min-width instead of shrinking its text into
-       illegibility), with a slightly smaller floor so a ~390px screen pans
-       less. Momentum scrolling for touch. */
-    .topology-svg { min-width: 560px; }
-    .topology-graph-wrap { -webkit-overflow-scrolling: touch; }
     .topo-strip { font-size: 11.5px; }
     .topo-strip a { margin-left: 0; }   /* wrap under the peers row instead of forcing width */
-    .topology-room-item { font-size: 11.5px; }
   }
 
   /* ---- respect reduced-motion: keep it calm, kill the movement --------- */
@@ -1577,8 +1400,6 @@
   /* Persistent network workspace and task-focused forms. */
   #topology-dock { min-width: 0; padding: 20px; }
   #topology-dock .cascade-card { margin: 0; background: var(--panel); }
-  #topology-dock .topology-graph-wrap { overflow-x: auto; }
-  #topology-dock .topology-svg { min-width: 560px; }
   #bot-editor { margin-top: 16px; }
   #bot-editor > summary { color: var(--accent); font-weight: 600; }
   #bot-editor .bot-recipe-grid { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
@@ -1596,13 +1417,6 @@
     .shell { flex-wrap: wrap; padding-bottom: 0; }
     #topology-dock { position: static; width: 100%; padding: 16px 14px; background: var(--bg); border-top: 1px solid var(--panel-border); }
   }
-
-  .topology-node-glyph { fill: none; stroke: var(--text-dim); stroke-width: 1.7; stroke-linecap: round; }
-  .topology-node-box.kind-self + .topology-node-glyph { stroke: var(--accent); }
-  .topology-node-clickable:focus-visible { outline: none; }
-  .topology-node-clickable:focus-visible .topology-node-box,
-  .topology-node-clickable:hover .topology-node-box { stroke: var(--accent); stroke-width: 3; }
-  #topology-card .topology-dot { stroke: var(--panel); stroke-width: 2; }
 
   /* Match LlmSettings tokens while keeping the dashboard shell independent. */
   #panel-ai, .ai-model-overlay, .ai-connection-overlay, .ai-status-popover, .ai-reasoning-menu, .ai-choice-menu {
@@ -2003,24 +1817,15 @@
     </div>
     <div class="topology-slot" id="topology-slot-stream">
       <div class="cascade-card" id="topology-card">
-        <details class="topology-fold" id="topology-fold" open>
-          <summary class="cascade-card-head">
-            <h3 data-i18n="topology.title">Topology</h3>
+        <div class="topology-graph-wrap">
+          <svg id="topology-svg" class="topology-svg" role="group" tabindex="0" viewBox="0 0 640 380"></svg>
+          <div class="topology-status">
             <span class="badge cascade-role-badge" id="cascade-role-badge" hidden></span>
-            <span class="drawer-chevron" aria-hidden="true"></span>
-          </summary>
-          <p class="muted" style="font-size: 12.5px; margin: 0;" data-i18n="topology.desc">Explore your connections. Hover for a preview or select a node to see details.</p>
-          <div class="topology-context" id="topology-context" hidden></div>
-          <div class="topology-view-controls" id="topology-view-controls"></div>
-          <div class="topology-graph-wrap">
-            <svg id="topology-svg" class="topology-svg" role="group" tabindex="-1" viewBox="0 0 640 200"></svg>
+            <span class="cascade-source" id="cascade-source" hidden></span>
+            <span id="topology-flow-note" hidden></span>
           </div>
-          <div class="cascade-source" id="cascade-source" hidden></div>
-          <p class="topology-empty-note" id="topology-empty-note" data-i18n="topology.emptyHint" hidden>No peers connected yet.</p>
-          <div class="topology-legend" id="topology-legend"></div>
-          <dl class="kv" id="topology-kv"></dl>
-          <div class="topology-rooms" id="topology-rooms"></div>
-        </details>
+          <p class="topology-empty-note" id="topology-empty-note" hidden></p>
+        </div>
       </div>
     </div>
     <div class="row">
@@ -2231,10 +2036,6 @@
       </div>
       <p class="escrow-help" data-i18n="escrow.help">Use the same room as the app's 'mistl room'. tc-linkai shows an auto room like tce-xxxxxxxx… with a Copy button.</p>
       <dl class="kv" data-escrow-summary aria-live="polite"></dl>
-      <div class="escrow-restart-notice" data-escrow-restart-notice hidden>
-        <p data-i18n="escrow.restartNotice">Changes to rooms, enabled and limits require a daemon restart. Configured rooms may differ from joined rooms until restart.</p>
-        <button type="button" class="badge restart" data-escrow-restart data-i18n="overview.restartDaemon">Restart daemon</button>
-      </div>
       <form class="inline escrow-add-form" data-escrow-add-form novalidate>
         <div class="field">
           <label for="escrow-room" data-i18n="escrow.roomLabel">mistl room</label>
@@ -3025,7 +2826,6 @@
       "escrow.joinedRooms": "Joined rooms",
       "escrow.totalSlots": "Total slots",
       "escrow.totalBytes": "Total stored bytes",
-      "escrow.restartNotice": "Changes to rooms, enabled and limits require a daemon restart. Configured rooms may differ from joined rooms until restart.",
       "escrow.roomLabel": "mistl room",
       "escrow.roomPlaceholder": "tce-xxxxxxxx… or a custom room",
       "escrow.addRoom": "Add room",
@@ -3050,19 +2850,19 @@
       "settings.section.escrow": "Escrow",
       "settings.drawer.escrow": "Escrow settings",
       "settings.field.escrow.rooms.label": "Escrow rooms",
-      "settings.field.escrow.rooms.desc": "Use the app's mistl room. Room changes take effect after daemon restart.",
+      "settings.field.escrow.rooms.desc": "Use the app's mistl room. Room changes apply automatically after a brief restart.",
       "settings.field.escrow.enabled.label": "Enable Escrow",
-      "settings.field.escrow.enabled.desc": "Store encrypted checkpoints in configured rooms. Requires daemon restart.",
+      "settings.field.escrow.enabled.desc": "Store encrypted checkpoints in configured rooms. Applied automatically after a brief restart.",
       "settings.field.escrow.max_blob_bytes.label": "Maximum blob size",
-      "settings.field.escrow.max_blob_bytes.desc": "GiB per encrypted blob (default 0.03125 GiB = 32 MiB; maximum 1 GiB). Requires daemon restart.",
+      "settings.field.escrow.max_blob_bytes.desc": "GiB per encrypted blob (default 0.03125 GiB = 32 MiB; maximum 1 GiB). Applied automatically after a brief restart.",
       "settings.field.escrow.max_total_bytes.label": "Total capacity",
-      "settings.field.escrow.max_total_bytes.desc": "GiB for all retained data (default 1 GiB; maximum 1024 GiB). Requires daemon restart.",
+      "settings.field.escrow.max_total_bytes.desc": "GiB for all retained data (default 1 GiB; maximum 1024 GiB). Applied automatically after a brief restart.",
       "settings.field.escrow.max_slots_per_room.label": "Slots per room",
-      "settings.field.escrow.max_slots_per_room.desc": "Maximum slots per room (default 1024; range 1–65536). Requires daemon restart.",
+      "settings.field.escrow.max_slots_per_room.desc": "Maximum slots per room (default 1024; range 1–65536). Applied automatically after a brief restart.",
       "settings.field.escrow.auto_replicas.label": "Target copies",
-      "settings.field.escrow.auto_replicas.desc": "Target encrypted copies per slot (1–8; default 3). Set to 1 to turn automatic replication off. Requires daemon restart.",
+      "settings.field.escrow.auto_replicas.desc": "Target encrypted copies per slot (1–8; default 3). Set to 1 to turn automatic replication off. Applied automatically after a brief restart.",
       "settings.field.escrow.dead_after_secs.label": "Provider expiry (seconds)",
-      "settings.field.escrow.dead_after_secs.desc": "Replace providers unseen for this many seconds (minimum 60; default 86400). Requires daemon restart.",
+      "settings.field.escrow.dead_after_secs.desc": "Replace providers unseen for this many seconds (minimum 60; default 86400). Applied automatically after a brief restart.",
       "ai.sharing.toggle": "Share {model} with {room}",
       "ai.sharing.noHttp": "Add an enabled HTTP connection in Connections to share its models.",
       "ai.sharing.noRooms": "Add a room to share models.",
@@ -3143,6 +2943,8 @@
       "ai.model.empty": "No matching models",
       "ai.model.voice": "Voice",
       "daemon.connected": "Connected",
+      "daemon.applying": "Applying settings…",
+      "daemon.applyWaiting": "Settings apply when streams and tunnels end",
       "pageTitle": "MISTL dashboard",
       "lang.en": "EN",
       "lang.zh": "中文",
@@ -3278,7 +3080,6 @@
       "stream.cascade.consensusPeers": "raft peers",
       "stream.cascade.offNote": "Cascade off ([stream] cascade = false)",
       "topology.title": "Topology",
-      "topology.desc": "Explore your connections. Hover for a preview or select a node to see details.",
       "topology.details.open": "View node details",
       "topology.details.title": "Connection details",
       "topology.details.close": "Close",
@@ -3291,15 +3092,13 @@
       "topology.details.viewers": "Viewers",
       "topology.details.noRooms": "No shared rooms reported.",
       "topology.details.unavailable": "This connection is no longer available. Showing the last known details.",
-      "topology.view.label": "Graph scale",
-      "topology.view.fit": "Fit to view",
-      "topology.view.readable": "Actual size",
       "topology.node.self": "this node",
       "topology.node.viewers": "VRChat viewers",
       "topology.role.leader": "leader",
       "topology.role.follower": "follower",
       "topology.role.sibling": "cascade peer",
       "topology.role.sharer": "sharer",
+      "topology.role.peer": "peer",
       "topology.role.electing": "electing…",
       "topology.state.connected": "connected",
       "topology.state.connecting": "connecting",
@@ -3307,42 +3106,15 @@
       "topology.state.failed": "failed",
       "topology.state.disconnected": "disconnected",
       "topology.state.unknown": "unknown",
-      "topology.edge.publishing": "publishing",
-      "topology.edge.leaderToYou": "cascade: leader",
-      "topology.edge.youToFollower": "cascade: follower",
-      "topology.edge.sibling": "cascade peer",
-      "topology.edge.viewers": "RTSP",
-      "topology.edge.peer": "connected",
-      "topology.legend.self": "This node",
-      "topology.legend.publisher": "Publisher / sharer",
-      "topology.legend.leader": "Cascade leader",
-      "topology.legend.follower": "Cascade follower",
-      "topology.legend.sibling": "Cascade peer",
-      "topology.legend.peer": "Connected peer",
-      "topology.legend.viewers": "VRChat viewers over RTSP (count only)",
-      "topology.legend.flowing": "media flowing",
-      "topology.legend.idle": "idle (connected, no media)",
       "topology.flow.flowing": "flowing",
       "topology.flow.ingestOnly": "receiving (no client)",
       "topology.flow.idle": "idle",
       "topology.kv.videoFlow": "video",
       "topology.kv.audioFlow": "audio",
-      "topology.kv.status": "status",
       "topology.kv.unknown": "unavailable (daemon unreachable)",
-      "topology.kv.peers": "connected peers",
-      "topology.kv.rooms": "joined rooms",
-      "topology.kv.cascade": "cascade",
-      "topology.kv.cascadeOff": "off",
       "topology.rooms": "Joined rooms",
-      "topology.noRooms": "No rooms joined yet.",
-      "topology.room.noPeers": "No peers connected in this room yet.",
-      "topology.activity.tx": "TX {count} msg / {bytes}",
-      "topology.activity.rx": "RX {count} msg / {bytes}",
-      "topology.activity.broadcast": "Broadcast",
       "topology.emptyHint": "No peers connected yet — peers appear here as rooms are joined.",
       "topology.aria": "Topology: {peers} connected peers across {rooms} joined rooms",
-      "topology.contextRoom": "This tab's room",
-      "topology.contextNotJoined": "(not joined yet)",
       "topoStrip.room": "room",
       "topoStrip.notJoined": "not joined yet",
       "topoStrip.peersCount": "{count} peers",
@@ -3718,6 +3490,7 @@
       "settings.savedRestart": "Saved",
       "settings.savedNextStart": "Saved",
       "settings.savedLive": "Saved",
+      "settings.savedAuto": "Saved — applying automatically in a few seconds",
       "settings.enterGib": "Enter a number of GiB for {label}.",
       "settings.enterNumber": "Enter a number for {label}.",
       "settings.gibUnit": "GiB",
@@ -3999,7 +3772,6 @@
       "escrow.joinedRooms": "参加済みルーム数",
       "escrow.totalSlots": "合計スロット数",
       "escrow.totalBytes": "合計保存容量",
-      "escrow.restartNotice": "ルーム・有効設定・上限の変更にはデーモンの再起動が必要です。再起動までは設定済みルームと参加済みルームが異なる場合があります。",
       "escrow.roomLabel": "mistl room",
       "escrow.roomPlaceholder": "tce-xxxxxxxx… または任意のルーム",
       "escrow.addRoom": "ルームを追加",
@@ -4024,19 +3796,19 @@
       "settings.section.escrow": "Escrow",
       "settings.drawer.escrow": "Escrow 設定",
       "settings.field.escrow.rooms.label": "Escrow ルーム",
-      "settings.field.escrow.rooms.desc": "アプリの mistl room を指定します。ルームの変更はデーモン再起動後に反映されます。",
+      "settings.field.escrow.rooms.desc": "アプリの mistl room を指定します。ルームの変更は自動で再起動して反映されます。",
       "settings.field.escrow.enabled.label": "Escrow を有効化",
-      "settings.field.escrow.enabled.desc": "設定したルームの暗号化チェックポイントを保存します。デーモンの再起動が必要です。",
+      "settings.field.escrow.enabled.desc": "設定したルームの暗号化チェックポイントを保存します。保存すると自動で再起動して反映されます。",
       "settings.field.escrow.max_blob_bytes.label": "blob の最大容量",
-      "settings.field.escrow.max_blob_bytes.desc": "暗号化 blob ごとの GiB 上限（既定 0.03125 GiB = 32 MiB、最大 1 GiB）。デーモンの再起動が必要です。",
+      "settings.field.escrow.max_blob_bytes.desc": "暗号化 blob ごとの GiB 上限（既定 0.03125 GiB = 32 MiB、最大 1 GiB）。保存すると自動で再起動して反映されます。",
       "settings.field.escrow.max_total_bytes.label": "合計容量の上限",
-      "settings.field.escrow.max_total_bytes.desc": "保存データ全体の GiB 上限（既定 1 GiB、最大 1024 GiB）。デーモンの再起動が必要です。",
+      "settings.field.escrow.max_total_bytes.desc": "保存データ全体の GiB 上限（既定 1 GiB、最大 1024 GiB）。保存すると自動で再起動して反映されます。",
       "settings.field.escrow.max_slots_per_room.label": "ルームごとのスロット上限",
-      "settings.field.escrow.max_slots_per_room.desc": "ルームごとの最大スロット数（既定 1024、範囲 1〜65536）。デーモンの再起動が必要です。",
+      "settings.field.escrow.max_slots_per_room.desc": "ルームごとの最大スロット数（既定 1024、範囲 1〜65536）。保存すると自動で再起動して反映されます。",
       "settings.field.escrow.auto_replicas.label": "目標コピー数",
-      "settings.field.escrow.auto_replicas.desc": "スロットごとの暗号化コピーの目標数（1〜8、既定 3）。1 にすると自動複製を停止します。デーモンの再起動が必要です。",
+      "settings.field.escrow.auto_replicas.desc": "スロットごとの暗号化コピーの目標数（1〜8、既定 3）。1 にすると自動複製を停止します。保存すると自動で再起動して反映されます。",
       "settings.field.escrow.dead_after_secs.label": "プロバイダーの期限（秒）",
-      "settings.field.escrow.dead_after_secs.desc": "この秒数以上確認できないプロバイダーを置き換えます（最小 60、既定 86400）。デーモンの再起動が必要です。",
+      "settings.field.escrow.dead_after_secs.desc": "この秒数以上確認できないプロバイダーを置き換えます（最小 60、既定 86400）。保存すると自動で再起動して反映されます。",
       "ai.sharing.toggle": "{model}を{room}に共有",
       "ai.sharing.noHttp": "接続先で有効なHTTP接続先を追加してください。",
       "ai.sharing.noRooms": "ルームを追加すると、モデルを提供できます。",
@@ -4117,6 +3889,8 @@
       "ai.model.empty": "一致するモデルがありません",
       "ai.model.voice": "音声 (voice)",
       "daemon.connected": "接続中",
+      "daemon.applying": "設定を適用中…",
+      "daemon.applyWaiting": "配信・トンネル終了後に設定を適用します",
       "pageTitle": "MISTL ダッシュボード",
       "lang.en": "EN",
       "lang.zh": "中文",
@@ -4252,7 +4026,6 @@
       "stream.cascade.consensusPeers": "Raftピア数",
       "stream.cascade.offNote": "カスケードはオフです ([stream] cascade = false)",
       "topology.title": "トポロジー",
-      "topology.desc": "接続の様子を確認できます。ホバーで概要、ノードを選択すると詳細を表示します。",
       "topology.details.open": "ノードの詳細を表示",
       "topology.details.title": "接続の詳細",
       "topology.details.close": "閉じる",
@@ -4265,15 +4038,13 @@
       "topology.details.viewers": "視聴者数",
       "topology.details.noRooms": "共有ルームの情報はありません。",
       "topology.details.unavailable": "現在この接続は確認できません。最後に取得した情報を表示しています。",
-      "topology.view.label": "グラフの表示サイズ",
-      "topology.view.fit": "全体を表示",
-      "topology.view.readable": "標準サイズ",
       "topology.node.self": "このノード",
       "topology.node.viewers": "VRChat視聴者",
       "topology.role.leader": "リーダー",
       "topology.role.follower": "フォロワー",
       "topology.role.sibling": "カスケードピア",
       "topology.role.sharer": "共有元",
+      "topology.role.peer": "ピア",
       "topology.role.electing": "選出中…",
       "topology.state.connected": "接続中",
       "topology.state.connecting": "接続処理中",
@@ -4281,42 +4052,15 @@
       "topology.state.failed": "失敗",
       "topology.state.disconnected": "切断",
       "topology.state.unknown": "不明",
-      "topology.edge.publishing": "配信中",
-      "topology.edge.leaderToYou": "カスケード: リーダー",
-      "topology.edge.youToFollower": "カスケード: フォロワー",
-      "topology.edge.sibling": "カスケードピア",
-      "topology.edge.viewers": "RTSP",
-      "topology.edge.peer": "接続中",
-      "topology.legend.self": "このノード",
-      "topology.legend.publisher": "配信元 / 共有元",
-      "topology.legend.leader": "カスケードリーダー",
-      "topology.legend.follower": "カスケードフォロワー",
-      "topology.legend.sibling": "カスケードピア",
-      "topology.legend.peer": "接続中のピア",
-      "topology.legend.viewers": "VRChat視聴者・RTSP経由（件数のみ）",
-      "topology.legend.flowing": "メディア転送中",
-      "topology.legend.idle": "アイドル（接続中・メディアなし）",
       "topology.flow.flowing": "転送中",
       "topology.flow.ingestOnly": "受信中（クライアント未受信）",
       "topology.flow.idle": "アイドル",
       "topology.kv.videoFlow": "映像",
       "topology.kv.audioFlow": "音声",
-      "topology.kv.status": "状態",
       "topology.kv.unknown": "取得不可（デーモンに接続できません）",
-      "topology.kv.peers": "接続中のピア数",
-      "topology.kv.rooms": "参加中のルーム数",
-      "topology.kv.cascade": "カスケード",
-      "topology.kv.cascadeOff": "オフ",
       "topology.rooms": "参加中のルーム",
-      "topology.noRooms": "まだルームに参加していません。",
-      "topology.room.noPeers": "まだこのルームに接続中のピアはいません。",
-      "topology.activity.tx": "TX {count}件 / {bytes}",
-      "topology.activity.rx": "RX {count}件 / {bytes}",
-      "topology.activity.broadcast": "ブロードキャスト",
       "topology.emptyHint": "まだ接続中のピアはいません。ルームに参加すると、ここに表示されます。",
       "topology.aria": "トポロジー: {rooms} ルームで {peers} 件のピアと接続中",
-      "topology.contextRoom": "このタブのルーム",
-      "topology.contextNotJoined": "（未参加）",
       "topoStrip.room": "ルーム",
       "topoStrip.notJoined": "未参加",
       "topoStrip.peersCount": "ピア {count} 件",
@@ -4692,6 +4436,7 @@
       "settings.savedRestart": "保存しました",
       "settings.savedNextStart": "保存しました",
       "settings.savedLive": "保存しました",
+      "settings.savedAuto": "保存しました。数秒後に自動で適用します",
       "settings.enterGib": "{label} にはGiB単位の数値を入力してください。",
       "settings.enterNumber": "{label} には数値を入力してください。",
       "settings.gibUnit": "GiB",
@@ -4973,7 +4718,6 @@
       "escrow.joinedRooms": "已加入房间数",
       "escrow.totalSlots": "槽位总数",
       "escrow.totalBytes": "已存储总容量",
-      "escrow.restartNotice": "更改房间、启用状态和限制需要重启守护进程。重启前，已配置房间与已加入房间可能不同。",
       "escrow.roomLabel": "mistl room",
       "escrow.roomPlaceholder": "tce-xxxxxxxx… 或自定义房间",
       "escrow.addRoom": "添加房间",
@@ -4998,19 +4742,19 @@
       "settings.section.escrow": "Escrow",
       "settings.drawer.escrow": "Escrow 设置",
       "settings.field.escrow.rooms.label": "Escrow 房间",
-      "settings.field.escrow.rooms.desc": "请使用应用的 mistl room。更改房间将在重启守护进程后生效。",
+      "settings.field.escrow.rooms.desc": "请使用应用的 mistl room。更改房间后会自动重启以生效。",
       "settings.field.escrow.enabled.label": "启用 Escrow",
-      "settings.field.escrow.enabled.desc": "在配置的房间中保存加密检查点。需要重启守护进程。",
+      "settings.field.escrow.enabled.desc": "在配置的房间中保存加密检查点。保存后会自动重启以生效。",
       "settings.field.escrow.max_blob_bytes.label": "blob 大小上限",
-      "settings.field.escrow.max_blob_bytes.desc": "每个加密 blob 的 GiB 上限（默认 0.03125 GiB = 32 MiB，最大 1 GiB）。需要重启守护进程。",
+      "settings.field.escrow.max_blob_bytes.desc": "每个加密 blob 的 GiB 上限（默认 0.03125 GiB = 32 MiB，最大 1 GiB）。保存后会自动重启以生效。",
       "settings.field.escrow.max_total_bytes.label": "总容量上限",
-      "settings.field.escrow.max_total_bytes.desc": "所有保留数据的 GiB 上限（默认 1 GiB，最大 1024 GiB）。需要重启守护进程。",
+      "settings.field.escrow.max_total_bytes.desc": "所有保留数据的 GiB 上限（默认 1 GiB，最大 1024 GiB）。保存后会自动重启以生效。",
       "settings.field.escrow.max_slots_per_room.label": "每个房间的槽位上限",
-      "settings.field.escrow.max_slots_per_room.desc": "每个房间的最大槽位数（默认 1024，范围 1–65536）。需要重启守护进程。",
+      "settings.field.escrow.max_slots_per_room.desc": "每个房间的最大槽位数（默认 1024，范围 1–65536）。保存后会自动重启以生效。",
       "settings.field.escrow.auto_replicas.label": "目标副本数",
-      "settings.field.escrow.auto_replicas.desc": "每个槽位的加密副本目标数（1–8，默认 3）。设为 1 可关闭自动复制。需要重启守护进程。",
+      "settings.field.escrow.auto_replicas.desc": "每个槽位的加密副本目标数（1–8，默认 3）。设为 1 可关闭自动复制。保存后会自动重启以生效。",
       "settings.field.escrow.dead_after_secs.label": "提供者失效时间（秒）",
-      "settings.field.escrow.dead_after_secs.desc": "超过此秒数未出现时替换提供者（最小 60，默认 86400）。需要重启守护进程。",
+      "settings.field.escrow.dead_after_secs.desc": "超过此秒数未出现时替换提供者（最小 60，默认 86400）。保存后会自动重启以生效。",
       "ai.model.voice": "音色",
       "ai.model.empty": "没有匹配的模型",
       "ai.model.roomAuto": "由{provider}选择",
@@ -5086,6 +4830,8 @@
       "ai.tab.tasks": "任务",
       "settings.ai.providers.keyPlaceholder": "API密钥",
       "daemon.connected": "已连接",
+      "daemon.applying": "正在应用设置…",
+      "daemon.applyWaiting": "推流和隧道结束后应用设置",
       "pageTitle": "MISTL 仪表盘",
       "lang.en": "EN",
       "lang.zh": "中文",
@@ -5221,7 +4967,6 @@
       "stream.cascade.consensusPeers": "Raft 节点数",
       "stream.cascade.offNote": "级联已关闭 ([stream] cascade = false)",
       "topology.title": "拓扑",
-      "topology.desc": "查看当前连接。悬停显示概要，选择节点查看详情。",
       "topology.details.open": "查看节点详情",
       "topology.details.title": "连接详情",
       "topology.details.close": "关闭",
@@ -5234,15 +4979,13 @@
       "topology.details.viewers": "观看人数",
       "topology.details.noRooms": "暂无共享房间信息。",
       "topology.details.unavailable": "此连接已不可用，正在显示最后获取的信息。",
-      "topology.view.label": "图形缩放",
-      "topology.view.fit": "显示全部",
-      "topology.view.readable": "实际大小",
       "topology.node.self": "本节点",
       "topology.node.viewers": "VRChat 观看者",
       "topology.role.leader": "主节点",
       "topology.role.follower": "从节点",
       "topology.role.sibling": "级联节点",
       "topology.role.sharer": "共享源",
+      "topology.role.peer": "节点",
       "topology.role.electing": "选举中…",
       "topology.state.connected": "已连接",
       "topology.state.connecting": "连接中",
@@ -5250,42 +4993,15 @@
       "topology.state.failed": "失败",
       "topology.state.disconnected": "已断开",
       "topology.state.unknown": "未知",
-      "topology.edge.publishing": "推流中",
-      "topology.edge.leaderToYou": "级联：主节点",
-      "topology.edge.youToFollower": "级联：从节点",
-      "topology.edge.sibling": "级联节点",
-      "topology.edge.viewers": "RTSP",
-      "topology.edge.peer": "已连接",
-      "topology.legend.self": "本节点",
-      "topology.legend.publisher": "推流源 / 共享源",
-      "topology.legend.leader": "级联主节点",
-      "topology.legend.follower": "级联从节点",
-      "topology.legend.sibling": "级联同级节点",
-      "topology.legend.peer": "已连接的节点",
-      "topology.legend.viewers": "VRChat 观看者，经 RTSP（仅计数）",
-      "topology.legend.flowing": "媒体传输中",
-      "topology.legend.idle": "空闲（已连接，无媒体）",
       "topology.flow.flowing": "传输中",
       "topology.flow.ingestOnly": "接收中（无客户端）",
       "topology.flow.idle": "空闲",
       "topology.kv.videoFlow": "视频",
       "topology.kv.audioFlow": "音频",
-      "topology.kv.status": "状态",
       "topology.kv.unknown": "不可用（无法连接守护进程）",
-      "topology.kv.peers": "已连接的节点数",
-      "topology.kv.rooms": "已加入的房间数",
-      "topology.kv.cascade": "级联",
-      "topology.kv.cascadeOff": "关闭",
       "topology.rooms": "已加入的房间",
-      "topology.noRooms": "尚未加入任何房间。",
-      "topology.room.noPeers": "此房间中暂无已连接的节点。",
-      "topology.activity.tx": "TX {count} 条 / {bytes}",
-      "topology.activity.rx": "RX {count} 条 / {bytes}",
-      "topology.activity.broadcast": "广播",
       "topology.emptyHint": "尚无已连接的节点——加入房间后节点会显示在这里。",
       "topology.aria": "拓扑：在 {rooms} 个房间中与 {peers} 个节点相连",
-      "topology.contextRoom": "此标签页的房间",
-      "topology.contextNotJoined": "（尚未加入）",
       "topoStrip.room": "房间",
       "topoStrip.notJoined": "尚未加入",
       "topoStrip.peersCount": "{count} 个节点",
@@ -5333,7 +5049,7 @@
       "chatRelay.log.col.kind": "类型",
       "chatRelay.log.col.content": "内容",
       "chatRelay.log.empty": "该房间尚无中继的 tc-chat 消息。",
-      "chatRelay.log.disabled": "tc-chat 中继已关闭。请在下方设置房间并启用(需要重启守护进程)。",
+      "chatRelay.log.disabled": "tc-chat 中继已关闭。请在设置中添加房间并启用 tc-chat。",
       "chatRelay.log.noRooms": "尚未配置 tc-chat 房间。",
       "chatRelay.log.notJoined": "未加入",
       "store.browser.drive": "我的网盘",
@@ -5664,6 +5380,7 @@
       "settings.savedRestart": "已保存",
       "settings.savedNextStart": "已保存",
       "settings.savedLive": "已保存",
+      "settings.savedAuto": "已保存，几秒后自动应用",
       "settings.enterGib": "请为{label}输入以 GiB 为单位的数值。",
       "settings.enterNumber": "请为{label}输入一个数值。",
       "settings.gibUnit": "GiB",
@@ -6232,7 +5949,11 @@
       var uptime = state.daemonUptimeBase !== null
         ? state.daemonUptimeBase + Math.floor((Date.now() - state.daemonUptimeAt) / 1000)
         : state.daemon.uptime_secs;
-      label = el("span", { text: t("daemon.connected") });
+      /* restart_pending: a saved setting needs a process restart, which the
+         daemon performs itself once idle (daemon::restart). */
+      var pending = state.daemon.restart_pending;
+      if (pending) daemonPill.className = "pill warn";
+      label = el("span", { text: t(!pending ? "daemon.connected" : pending.waiting_idle ? "daemon.applyWaiting" : "daemon.applying") });
       daemonPill.title = t("daemon.running", { pid: state.daemon.pid, version: state.daemon.version, uptime: fmtUptime(uptime) });
     } else {
       daemonPill.className = "pill err";
@@ -6625,971 +6346,158 @@
     });
   });
 
-  /* ---------- topology card (topology.status), embedded in the Stream
-     panel ----------
-     Node-link graph, drawn with plain inline SVG (no library): this node
-     fixed at the vertical center, a publisher/sharer column to its left, a
-     peers column (cascade leader/follower/sibling, or a generic connected
-     peer from `net`) to its right, and an aggregate viewers node furthest
-     right. Layout is a deterministic left-to-right column assignment by
-     role, not a physics simulation -- see the module doc in
-     `src/topology.rs` for exactly what's genuinely observable versus
-     inferred here (e.g. RTSP viewers are a count only, never per-viewer
-     identity).
-
-     This card is the *single* stream visualization: it absorbed both the
-     old standalone "Topology" nav tab and the old linear cascade
-     mini-diagram (sharer -> leader -> relays -> VRChat) that used to sit
-     beside it. What those conveyed lives on here as: the cascade role
-     badge + "receiving from" source line in the card header, hop order
-     (leader pinned to the top of the cascade column), full node ids as
-     hover tooltips, and the cascade leader/self/peer-count rows merged
-     into this card's kv list.
-
-     Edges that are actually carrying media *right now* animate ("marching
-     ants") and turn green. "Now" comes from stream.status's `flow` ages --
-     milliseconds since the last real video access unit / audio frame went
-     through the RTSP server -- compared against FLOW_STALL_MS at render
-     time. RTSP dummy keepalives deliberately don't refresh those ages, so
-     a keepalive-only stall (static screen, publisher gone quiet) renders
-     as idle even though the connection is up. */
-
+  /* ---------- live topology (topology.status) ---------- */
   var SVG_NS = "http://www.w3.org/2000/svg";
   var topologySvg = document.getElementById("topology-svg");
-  var topologyLegend = document.getElementById("topology-legend");
-  var topologyKv = document.getElementById("topology-kv");
-  var topologyRooms = document.getElementById("topology-rooms");
-  var topologyContextEl = document.getElementById("topology-context");
   var topologyEmptyNote = document.getElementById("topology-empty-note");
+  var topologyFlowNote = document.getElementById("topology-flow-note");
+  var FLOW_STALL_MS = 3000;
+  var TOPO_NODE_H = 48;
+  var topologyActivityMemory = null;
+  var topologyTimer = null;
+  var topologyPolling = false;
+  var topologyRequest = null;
   var topologyPresentation = window.MistlTopology.create({
-    document: document, window: window, t: t, copy: copyToClipboard,
-    graph: topologySvg, controls: document.getElementById("topology-view-controls"),
+    document: document, window: window, t: t, copy: copyToClipboard, graph: topologySvg,
+    makeNode: function (parent, model, radius) {
+      return topologyNodeBox(parent, 0, 0, 104, model.label, null, "kind-" + model.kind, model.key, model.state, radius);
+    },
+    onVisibilityChange: syncTopologyPolling,
     focusFallback: function () { topologySvg.focus({ preventScroll: true }); }
   });
 
   function svgEl(tag, attrs) {
     var node = document.createElementNS(SVG_NS, tag);
-    if (attrs) {
-      Object.keys(attrs).forEach(function (k) { node.setAttribute(k, attrs[k]); });
-    }
+    Object.keys(attrs || {}).forEach(function (key) { node.setAttribute(key, attrs[key]); });
     return node;
   }
 
-  /* Node box width now auto-fits its label/sub text instead of being fixed,
-     so a box is only as wide as it needs to be to stay readable -- clamped
-     to a sane range. TOPO_NODE_W_MIN doubles as the old fixed width for the
-     narrow-content case. */
-  var TOPO_NODE_W_MIN = 112;
-  var TOPO_NODE_W_MAX = 220;
-  var TOPO_NODE_H = 144;
-  var TOPO_ROW_H = 48;
-  /* Auto-layout: once a side's node count exceeds this, it wraps into a new
-     sub-column instead of growing one very tall column. */
-  var TOPO_MAX_ROWS_PER_COL = 5;
-  /* Horizontal clearances used when stacking columns outward from the self
-     box -- see topologyStackColumnsOutward. TOPO_COL_GAP is the edge-to-edge
-     gap between two same-side sub-columns; TOPO_SELF_GAP is the (larger)
-     gap between the self box and the nearest column on either side, which
-     also has to leave room for that edge's label; TOPO_VIEWER_GAP is the gap
-     between the last right-side column and the viewers box. TOPO_MARGIN is
-     the minimum clearance from any box edge to the SVG's own edge. */
-  var TOPO_COL_GAP = 28;
-  var TOPO_SELF_GAP = 44;
-  var TOPO_VIEWER_GAP = 56;
-  var TOPO_MARGIN = 24;
-  /* Minimum vertical pitch between rows in the same column -- keep
-     TOPO_ROW_H too, in case it's ever tuned larger than node height + gap. */
-  var TOPO_ROW_PITCH = Math.max(TOPO_NODE_H + 16, TOPO_ROW_H);
-  /* Media older than this (ms since the last real frame, per
-     stream.status.flow) is considered stalled: edges stop animating. Real
-     video ticks every few dozen ms, so 3s cleanly separates "flowing" from
-     "keepalive only" without flickering on jitter. */
-  var FLOW_STALL_MS = 3000;
+  function topologyStateClass(state) {
+    if (state === "connected") return "state-connected";
+    if (state === "connecting" || state === "reconnecting") return "state-connecting";
+    return "state-down";
+  }
 
-  /* Three-state i18n key for one media's video/audio kv row: a client
-     actually received it recently ("flowing"), it only arrived from the
-     browser with nobody attached to play it back ("ingestOnly" -- the gap
-     that used to render as a false-positive "転送中"), or neither
-     ("idle"). */
   function flowStatusKey(deliveredFresh, ingestFresh) {
-    if (deliveredFresh) return "topology.flow.flowing";
-    if (ingestFresh) return "topology.flow.ingestOnly";
-    return "topology.flow.idle";
+    return deliveredFresh ? "topology.flow.flowing" : ingestFresh ? "topology.flow.ingestOnly" : "topology.flow.idle";
   }
 
-  function topologyStateClass(connState) {
-    if (connState === "connected") return "state-connected";
-    if (connState === "connecting" || connState === "reconnecting") return "state-connecting";
-    return "state-down"; // failed / disconnected / unknown
-  }
-
-  /* ---- data-activity pulses (topology.status's optional `activity` field)
-     ----
-     One entry per (room, peer) pair that has ever seen traffic this daemon
-     run (`node_id: null` = room-wide broadcast TX). This section turns a
-     rising message counter into a brief, CSS-driven flash on whatever's
-     already rendered for that room/peer -- the SVG peer edge, the per-room
-     breakdown's tx/rx glyphs, or (for a broadcast entry, which has no peer
-     row) the room chip itself. Deliberately decoupled from renderTopology's
-     own render-skip cache (topologyLastSig): activity ticks constantly
-     while the graph's actual shape (nodes/edges/rooms) usually doesn't, so
-     gating this on that signature would either force a full re-render every
-     poll (defeating the point of the cache) or get silently swallowed by
-     it. Instead this runs on every poll unconditionally and only ever
-     mutates classList on elements the last real render already produced. */
-
-  var TOPOLOGY_ACTIVITY_FLASH_MS = 1500;
-
-  /* null = not yet seeded (page just loaded, or the daemon connection was
-     just lost) -- see updateTopologyActivity. */
-  var topologyActivityMemory = null;
-
-  /* Registries of currently-rendered elements an activity pulse can target,
-     keyed the same way `activity` entries are. Populated by
-     renderTopologyGraph / renderTopologyRoomBreakdown every time they
-     actually rebuild their DOM, and left alone (so still valid) whenever a
-     poll's render is skipped, since the elements they point to haven't
-     changed either. */
-  var topologyEdgeRegistry = {};     // node_id -> [SVGPathElement, ...]
-  var topologyRoomPeerRegistry = {}; // "room|nodeId" -> { tx: el|null, rx: el|null }
-  var topologyRoomChipRegistry = {}; // room -> chip element (broadcast target)
-
-  function topologyActivityKey(room, nodeId) {
-    return room + "|" + (nodeId || "");
-  }
-
-  /* Looks up a (room, node_id) pair's tx/rx activity entry -- shared by the
-     delta-animation trigger below and by renderTopologyRoomBreakdown's
-     cumulative-counter tooltips and glyph visibility. */
-  function topologyActivityMap(data) {
-    var map = {};
-    var activity = (data && Array.isArray(data.activity)) ? data.activity : [];
-    activity.forEach(function (entry) {
-      if (!entry || !entry.room) return;
-      map[topologyActivityKey(entry.room, entry.node_id)] = entry;
-    });
-    return map;
-  }
-
-  /* "TX 3 msg / 1.2 KB · RX 1 msg / 88 B"-style summary for a tooltip, or
-     null when the entry has never seen traffic in either direction. */
-  function topologyActivitySummary(entry) {
-    if (!entry) return null;
-    var parts = [];
-    if (entry.tx) parts.push(t("topology.activity.tx", { count: entry.tx.count, bytes: fmtBytes(entry.tx.bytes) }));
-    if (entry.rx) parts.push(t("topology.activity.rx", { count: entry.rx.count, bytes: fmtBytes(entry.rx.bytes) }));
-    return parts.length ? parts.join(" · ") : null;
-  }
-
-  /* Adds `className` to `el`, then removes it again after the flash window
-     -- restarting the timer (rather than stacking a second one) if the same
-     class is re-triggered before the previous flash finished decaying. */
-  function topologyFlash(el, className) {
-    if (!el) return;
-    el.classList.add(className);
-    el._topoFlashTimers = el._topoFlashTimers || {};
-    clearTimeout(el._topoFlashTimers[className]);
-    el._topoFlashTimers[className] = setTimeout(function () {
-      el.classList.remove(className);
-    }, TOPOLOGY_ACTIVITY_FLASH_MS);
-  }
-
-  /* Flashes whatever's currently registered for one (room, node, direction)
-     triple: the shared SVG edge for that peer (keyed by node id only -- the
-     graph draws one edge per peer, unioned across rooms, same as the rest
-     of buildTopologyGraph -- so activity in any one room lights that same
-     edge), plus either that peer's row in the per-room breakdown, or --
-     when nodeId is null, i.e. a room-wide broadcast with no peer row -- the
-     room's own chip. */
-  function topologyFireActivity(room, nodeId, dir) {
-    if (nodeId) {
-      (topologyEdgeRegistry[nodeId] || []).forEach(function (path) {
-        topologyFlash(path, dir === "tx" ? "activity-tx" : "activity-rx");
-      });
-      var rowEls = topologyRoomPeerRegistry[topologyActivityKey(room, nodeId)];
-      if (rowEls) topologyFlash(rowEls[dir], "active");
-    } else {
-      topologyFlash(topologyRoomChipRegistry[room], "activity-flash");
-    }
-  }
-
-  /* Delta-based activity trigger: compares this poll's `data.activity`
-     counts against the previous poll's (topologyActivityMemory) and fires
-     topologyFireActivity for whichever (room, peer, direction) triples show
-     a *higher* message count than last time -- age_ms alone is deliberately
-     not the trigger (a merely-recent-but-unchanged age would otherwise
-     re-flash on every poll). The one place age_ms *is* used is a key with
-     no previous count to diff against -- the very first poll after page
-     load / a reconnect, or a (room, peer) entry newly appearing mid-session
-     (its first-ever message) -- where a sub-poll-interval age is the only
-     signal that something "just happened" rather than happened minutes ago.
-     Counts reset to zero on a daemon restart; if any remembered count is
-     ever higher than the fresh value for the same key, the whole snapshot
-     is treated as a silent reseed (no animation this poll) rather than
-     misreading a counter rollback as a burst of new traffic. */
-  function updateTopologyActivity(data) {
-    var activity = (data && Array.isArray(data.activity)) ? data.activity : null;
-    if (!activity) {
-      topologyActivityMemory = null; // reseed cleanly whenever the field reappears
-      return;
-    }
-
-    var firstSeed = topologyActivityMemory === null;
-    var prevMemory = topologyActivityMemory || {};
-    var restarted = false;
-    if (!firstSeed) {
-      activity.forEach(function (entry) {
-        if (!entry || !entry.room) return;
-        var prev = prevMemory[topologyActivityKey(entry.room, entry.node_id)];
-        if (!prev) return;
-        ["tx", "rx"].forEach(function (dir) {
-          var prevCount = prev[dir] ? prev[dir].count : null;
-          var newCount = entry[dir] ? entry[dir].count : null;
-          if (prevCount != null && newCount != null && newCount < prevCount) restarted = true;
-        });
-      });
-    }
-
-    var nextMemory = {};
-    activity.forEach(function (entry) {
-      if (!entry || !entry.room) return;
-      var key = topologyActivityKey(entry.room, entry.node_id);
-      var prev = (!firstSeed && !restarted) ? prevMemory[key] : null;
-      nextMemory[key] = { tx: entry.tx || null, rx: entry.rx || null };
-
-      ["tx", "rx"].forEach(function (dir) {
-        var cur = entry[dir];
-        if (!cur) return;
-        var prevCount = prev && prev[dir] ? prev[dir].count : null;
-        var isNew = prevCount == null
-          ? (cur.age_ms != null && cur.age_ms < POLL_INTERVAL_MS)
-          : cur.count > prevCount;
-        if (isNew && !restarted) topologyFireActivity(entry.room, entry.node_id, dir);
-      });
-    });
-    topologyActivityMemory = nextMemory;
-  }
-
-  /* Pure: turns a `topology.status` payload into the node/edge lists the
-     renderer lays out and draws. Kept separate from the drawing code so the
-     categorization logic (who's a cascade leader/follower/sibling versus a
-     plain connected peer) is easy to read in isolation. */
-  function buildTopologyGraph(data) {
-    var selfInfo = (data && data.self) || {};
-    var netPeers = (data && Array.isArray(data.peers)) ? data.peers : [];
-    var stream = (data && data.stream) || { running: false };
-    var cascade = stream.running && stream.backend === "relay" ? stream.cascade : null;
-    var cascadeActive = !!(cascade && cascade.enabled);
-    var role = cascadeActive ? (cascade.role || "unknown") : null;
-    var leaderId = cascadeActive ? cascade.leader : null;
-    var relayPeers = cascadeActive && Array.isArray(cascade.relay_peers) ? cascade.relay_peers : [];
-    var publisherId = stream.running ? (stream.publisher || null) : null;
-
-    /* Is media *actually* moving right now? `flow` ages are ms since the
-       last real video AU / audio frame went through the RTSP server (null =
-       never); keepalives don't refresh them, so keepalive-only correctly
-       reads as idle here. This (ingest) side only proves media arrived from
-       the browser -- it says nothing about whether any RTSP client ever got
-       it, which is what drives the edges below (publisher/follower edges
-       represent ingest into this node, so they intentionally stay on the
-       ingest signal). */
-    var flow = stream.running && stream.flow ? stream.flow : null;
-    var videoFlowing = !!(flow && flow.video_age_ms != null && flow.video_age_ms < FLOW_STALL_MS);
-    var audioFlowing = !!(flow && flow.audio_age_ms != null && flow.audio_age_ms < FLOW_STALL_MS);
-    var mediaFlowing = videoFlowing || audioFlowing;
-
-    /* Delivery-aware siblings: ms since media was last actually dispatched
-       to a *playing* RTSP session, i.e. since a client plausibly received
-       it -- see `video_delivered_age_ms`/`audio_delivered_age_ms` on
-       `stream.status`. Used only for the video/audio kv rows below, so
-       "転送中" (flowing) there means a client actually got it, not merely
-       that it arrived from the browser. */
-    var videoDelivered = !!(flow && flow.video_delivered_age_ms != null && flow.video_delivered_age_ms < FLOW_STALL_MS);
-    var audioDelivered = !!(flow && flow.audio_delivered_age_ms != null && flow.audio_delivered_age_ms < FLOW_STALL_MS);
-
-    var shown = {};
-    if (selfInfo.node_id) shown[selfInfo.node_id] = true;
-
-    /* mistlib's connection state for every peer it currently sees, keyed by
-       node id -- used below to give cascade nodes (leader/follower/sibling)
-       the same state dot generic peers already get, whenever that peer also
-       shows up in `net`'s connected-nodes list. */
-    var peerStateById = {};
-    netPeers.forEach(function (p) { if (p && p.node_id) peerStateById[p.node_id] = p.state; });
-
-    var leftNodes = [];
-    var rightNodes = [];
-    var viewerNode = null;
-
-    if (publisherId) {
-      var pubSub = cascadeActive && role !== "leader" ? t("topology.role.leader") : t("topology.role.sharer");
-      /* Everything this node forwards came in on this edge, so it flows
-         exactly when the stream as a whole does. */
-      leftNodes.push({ id: publisherId, label: shortNodeId(publisherId), sub: pubSub, kind: "publisher", edge: "publishing", flowing: mediaFlowing, state: peerStateById[publisherId] || null });
-      shown[publisherId] = true;
-    }
-
-    relayPeers.forEach(function (peerId) {
-      if (shown[peerId]) return;
-      shown[peerId] = true;
-      var isLeader = peerId === leaderId;
-      var knownState = peerStateById[peerId] || null;
-      if (isLeader) {
-        rightNodes.push({ id: peerId, label: shortNodeId(peerId), sub: t("topology.role.leader"), kind: "leader", edge: "leaderToYou", state: knownState });
-      } else if (role === "leader") {
-        /* As leader we re-publish what we forward, so follower edges carry
-           media whenever the stream flows. */
-        rightNodes.push({ id: peerId, label: shortNodeId(peerId), sub: t("topology.role.follower"), kind: "follower", edge: "youToFollower", flowing: mediaFlowing, state: knownState });
-      } else {
-        rightNodes.push({ id: peerId, label: shortNodeId(peerId), sub: t("topology.role.sibling"), kind: "sibling", edge: "sibling", state: knownState });
-      }
-    });
-
-    /* The old linear cascade diagram always showed the chain in hop order
-       (sharer -> leader -> relays); preserve that by pinning the leader to
-       the top of the cascade column. Only cascade nodes are in rightNodes
-       at this point, and Array#sort is stable, so follower order is kept. */
-    rightNodes.sort(function (a, b) {
-      return (a.kind === "leader" ? 0 : 1) - (b.kind === "leader" ? 0 : 1);
-    });
-
-    netPeers.forEach(function (p) {
-      if (!p || !p.node_id || shown[p.node_id]) return;
-      shown[p.node_id] = true;
-      var stateKey = "topology.state." + p.state;
-      rightNodes.push({
-        id: p.node_id,
-        label: shortNodeId(p.node_id),
-        sub: t(stateKey) === stateKey ? p.state : t(stateKey),
-        kind: "peer",
-        state: p.state,
-        edge: "peer"
-      });
-    });
-
-    if (stream.running) {
-      var clients = stream.clients != null ? stream.clients : 0;
-      /* RTSP fans out to playing sessions only: no viewers, no media on
-         this edge no matter how fresh the input is. */
-      viewerNode = { label: t("topology.node.viewers"), sub: String(clients), kind: "viewers", edge: "viewers", flowing: mediaFlowing && clients > 0 };
-    }
-
-    var roomsCount = (data && Array.isArray(data.rooms)) ? data.rooms.length : 0;
-    return {
-      self: selfInfo, leftNodes: leftNodes, rightNodes: rightNodes, viewerNode: viewerNode,
-      cascadeActive: cascadeActive, role: role, roomsCount: roomsCount,
-      stream: stream, cascade: cascadeActive ? cascade : null, relayPeersCount: relayPeers.length,
-      videoFlowing: videoFlowing, audioFlowing: audioFlowing,
-      videoDelivered: videoDelivered, audioDelivered: audioDelivered
-    };
-  }
-
-  /* Estimates a label's rendered width in the topology SVG without an
-     actual text-measurement round trip (canvas measureText / getBBox would
-     require the text to already be in the DOM). Counts characters, weighting
-     CJK/full-width glyphs -- roughly twice as wide as Latin ones at the same
-     font-size -- as 2 "units". Exact kerning doesn't matter here, only "wide
-     enough that the label never clips". */
-  function topologyCharUnits(ch) {
-    var code = ch.codePointAt(0);
-    if ((code >= 0x3000 && code <= 0x30FF) ||  // CJK punctuation, Hiragana, Katakana
-        (code >= 0x3400 && code <= 0x9FFF) ||  // CJK Unified Ideographs (+ Ext A)
-        (code >= 0xAC00 && code <= 0xD7A3) ||  // Hangul syllables
-        (code >= 0xF900 && code <= 0xFAFF) ||  // CJK compatibility ideographs
-        (code >= 0xFF00 && code <= 0xFFEF)) {  // full-width forms
-      return 2;
-    }
-    return 1;
-  }
-
-  function topologyTextUnits(str) {
-    var units = 0;
-    Array.from(str).forEach(function (ch) { units += topologyCharUnits(ch); });
-    return units;
-  }
-
-  /* Node box width, auto-fit to whichever of the label (11.5px sans, 600
-     weight) or sub-label (9.5px mono, 700 weight) is wider, clamped to a
-     readable-but-not-huge range. Per-unit px figures are tuned by eye
-     against the two font rules in the stylesheet, not measured exactly --
-     see topologyCharUnits for why an exact measurement isn't used. */
-  function topologyNodeWidth(label, sub) {
-    var labelW = topologyTextUnits(label || "") * 6.8;
-    var subW = topologyTextUnits(sub || "") * 5.6;
-    var w = Math.max(labelW, subW) + 20;
-    return Math.max(TOPO_NODE_W_MIN, Math.min(TOPO_NODE_W_MAX, w));
-  }
-
-  /* Largest label width (in topologyTextUnits, same weighting topologyNodeWidth
-     uses for its label side) that fits inside a TOPO_NODE_W_MAX-wide box
-     without truncation -- the exact inverse of topologyNodeWidth's label
-     term, so a label right at this budget is exactly the one that would have
-     started clamping the box width. */
-  var TOPO_LABEL_MAX_UNITS = Math.floor((TOPO_NODE_W_MAX - 20) / 6.8);
-
-  /* Node labels (namely self's display_name, free text with no server-side
-     length limit) can be far wider than TOPO_NODE_W_MAX, which
-     topologyNodeWidth clamps to -- without this, the label overflows the box
-     it's centered in. Truncates the string itself (head+tail with an
-     ellipsis, CJK-aware via topologyTextUnits/topologyCharUnits so a
-     double-width glyph string doesn't sneak past the budget) once its unit
-     width would exceed TOPO_LABEL_MAX_UNITS; short labels pass through
-     unchanged. Pure function of the string, so render-signature gating
-     (topologyRenderSnapshot) stays deterministic poll-to-poll. */
-  function topologyTruncateLabel(label, maxUnits) {
-    maxUnits = maxUnits || TOPO_LABEL_MAX_UNITS;
-    if (!label || topologyTextUnits(label) <= maxUnits) return label;
-    var budget = Math.max(maxUnits - 1, 2); // reserve 1 unit for the ellipsis glyph
-    var headUnits = Math.ceil(budget * 0.6);
-    var tailUnits = budget - headUnits;
-    function takeUnits(str, units, fromEnd) {
-      str = Array.from(str);
-      var out = "";
-      var used = 0;
-      if (!fromEnd) {
-        for (var i = 0; i < str.length && used < units; i++) {
-          var u = topologyCharUnits(str[i]);
-          if (used + u > units) break;
-          out += str[i];
-          used += u;
-        }
-      } else {
-        for (var j = str.length - 1; j >= 0 && used < units; j--) {
-          var u2 = topologyCharUnits(str[j]);
-          if (used + u2 > units) break;
-          out = str[j] + out;
-          used += u2;
-        }
-      }
-      return out;
-    }
-    return takeUnits(label, headUnits, false) + "…" + takeUnits(label, tailUnits, true);
-  }
-
-  /* Keep graph geometry here; inspection and keyboard interactions belong
-     to the independent presentation feature. The full display model stays
-     available even when a compact graph label needs an ellipsis. */
-  function topologyNodeBox(parent, x, y, w, label, sub, kindClass, id, stateLabel) {
-    var g = svgEl("g", { transform: "translate(" + (x - w / 2) + "," + (y - TOPO_NODE_H / 2) + ")" });
-    topologyPresentation.bindNode(g, id || (kindClass === "kind-viewers" ? "viewers" : "self"));
-    var displayLabel = topologyTruncateLabel(label, Math.floor((w - 20) / 7.4));
-    g.appendChild(svgEl("rect", { class: "topology-node-hit", x: 0, y: 20, width: w, height: TOPO_NODE_H - 20, rx: 12 }));
-    var radius = kindClass === "kind-self" ? 30 : 25;
-    g.appendChild(svgEl("circle", {
-      class: "topology-node-box " + kindClass, cx: w / 2, cy: TOPO_NODE_H / 2, r: radius
-    }));
-    // A simple device glyph keeps the circular marker separate from its label.
-    var glyph = svgEl("g", { class: "topology-node-glyph", transform: "translate(" + (w / 2 - 10) + "," + (TOPO_NODE_H / 2 - 10) + ")", "aria-hidden": "true" });
-    glyph.appendChild(svgEl("rect", { x: 0, y: 1, width: 20, height: 14, rx: 3 }));
-    glyph.appendChild(svgEl("path", { d: "M6 20h8M10 15v5" }));
-    g.appendChild(glyph);
-    var labelEl = svgEl("text", { class: "topology-node-label", x: w / 2, y: TOPO_NODE_H / 2 + 45, "text-anchor": "middle" });
-    labelEl.textContent = displayLabel;
-    g.appendChild(labelEl);
-    if (sub) {
-      var subEl = svgEl("text", { class: "topology-node-sub", x: w / 2, y: TOPO_NODE_H / 2 + 59, "text-anchor": "middle" });
-      subEl.textContent = topologyTruncateLabel(sub, Math.floor((w - 20) / 6.4));
-      g.appendChild(subEl);
-    }
+  function topologyNodeBox(parent, x, y, w, label, sub, kindClass, id, stateLabel, radius) {
+    radius = radius == null ? (kindClass === "kind-self" ? 30 : 25) : radius;
+    var cx = w / 2, cy = TOPO_NODE_H / 2;
+    var g = svgEl("g", { transform: "translate(" + (x - cx) + "," + (y - cy) + ")" });
+    g.appendChild(svgEl("rect", { class: "topology-node-hit", x: 0, y: cy - radius - 10, width: w, height: radius * 2 + 40, rx: 16 }));
+    g.appendChild(svgEl("circle", { class: "topology-node-dot", cx: cx, cy: cy, r: radius }));
+    var text = svgEl("text", { class: "topology-node-label", x: cx, y: cy + radius + 15, "text-anchor": "middle" });
+    text.textContent = label;
+    g.appendChild(text);
+    topologyPresentation.bindNode(g, id);
     parent.appendChild(g);
-    return { x: x, y: y, w: w, h: TOPO_NODE_H, radius: radius, el: g };
+    return { el: g, cx: cx, cy: cy, radius: radius };
   }
 
-  /* ---- auto-layout helpers (column wrapping + label collision avoidance) ----
-     Kept as small pure functions so renderTopologyGraph reads as: compute
-     positions, draw boxes, draw edges. No randomness and no dependence on
-     the previous render -- same graph in always produces the same layout
-     out, which matters because the card re-renders on every topology poll. */
+  /* ---- auto-layout helpers live in the topology presentation feature. ---- */
 
-  /* How a side (leftNodes or rightNodes) with `count` entries wraps into
-     sub-columns of at most TOPO_MAX_ROWS_PER_COL rows each. `maxRows` is the
-     tallest column on that side (needed for the shared card height), and
-     `extraCols` is how many sub-columns beyond the first it needed (needed
-     for the shared viewBox width / x-offsets). */
-  function topologyColStats(count) {
-    var numCols = count > 0 ? Math.ceil(count / TOPO_MAX_ROWS_PER_COL) : 0;
-    var maxRows = count > 0 ? Math.min(count, TOPO_MAX_ROWS_PER_COL) : 0;
-    return { numCols: numCols, maxRows: maxRows, extraCols: Math.max(numCols - 1, 0) };
-  }
-
-  /* Per-column max node width for one side, given each node's own auto-fit
-     width and how many columns that side wrapped into (topologyColStats).
-     Needed because a column can no longer assume a fixed node width -- it
-     has to be at least as wide as its widest member. */
-  function topologyColumnWidths(nodeWidths, numCols) {
-    var widths = [];
-    for (var c = 0; c < numCols; c++) widths.push(TOPO_NODE_W_MIN);
-    nodeWidths.forEach(function (w, i) {
-      var c = Math.floor(i / TOPO_MAX_ROWS_PER_COL);
-      if (w > widths[c]) widths[c] = w;
-    });
-    return widths;
-  }
-
-  /* Lays out `colWidths.length` sub-columns end-to-end starting from
-     `anchorEdge` (the self box's edge facing that side) and growing outward
-     in `direction` (-1 = leftward/decreasing x, +1 = rightward/increasing
-     x). The nearest column gets `firstGap` clearance from the anchor (extra
-     room for that edge's label); every column after that gets `colGap` from
-     the previous one. Returns each column's center x plus `outerEdge`, the
-     outermost column's far edge -- the extreme point of that whole side,
-     used both to know how much to shift the diagram to keep it in bounds
-     and to know where the next thing further out (e.g. the viewers box) can
-     start. */
-  function topologyStackColumnsOutward(anchorEdge, colWidths, firstGap, colGap, direction) {
-    var centers = [];
-    var edge = anchorEdge;
-    for (var c = 0; c < colWidths.length; c++) {
-      edge += direction * (c === 0 ? firstGap : colGap);
-      var center = edge + direction * colWidths[c] / 2;
-      centers.push(center);
-      edge = center + direction * colWidths[c] / 2;
-    }
-    return { centers: centers, outerEdge: edge };
-  }
-
-  /* y for row `rowInCol` of `rowsInCol` total rows in one sub-column, with
-     the column centered as a group around centerY (so a short column
-     clusters near the self node's row instead of being spread over the
-     whole card). */
-  function topologyColRowY(rowInCol, rowsInCol, centerY) {
-    var groupH = (rowsInCol - 1) * TOPO_ROW_PITCH;
-    return centerY - groupH / 2 + rowInCol * TOPO_ROW_PITCH;
-  }
-
-  function topologyRectsOverlap(a, b) {
-    return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
-  }
-
-  function topologyCountOverlaps(rects, rect) {
-    var n = 0;
-    for (var i = 0; i < rects.length; i++) {
-      if (topologyRectsOverlap(rects[i], rect)) n++;
-    }
-    return n;
-  }
-
-  /* Point on a cubic bezier at parameter t in [0,1] -- used to sample an
-     edge path when checking whether it passes through a node box. */
-  function topologyCubicPoint(x1, y1, cx1, cy1, cx2, cy2, x2, y2, t) {
-    var mt = 1 - t;
-    return {
-      x: mt * mt * mt * x1 + 3 * mt * mt * t * cx1 + 3 * mt * t * t * cx2 + t * t * t * x2,
-      y: mt * mt * mt * y1 + 3 * mt * mt * t * cy1 + 3 * mt * t * t * cy2 + t * t * t * y2
-    };
-  }
-
-  function topologyPointInRect(pt, rect, pad) {
-    pad = pad || 0;
-    return pt.x >= rect.x - pad && pt.x <= rect.x + rect.w + pad &&
-      pt.y >= rect.y - pad && pt.y <= rect.y + rect.h + pad;
-  }
-
-  /* Samples ~20 interior points along a cubic bezier (skipping the
-     endpoints themselves, which legitimately touch their own boxes) and
-     counts how many land inside any of `rects`. Used both to test "does
-     this edge cross a node box" (hits > 0) and to pick the least-bad bend
-     when no bend avoids every box (fewest hits wins). */
-  function topologyPathHitCount(x1, y1, cx1, cy1, cx2, cy2, x2, y2, rects) {
-    var samples = 24;
-    var hits = 0;
-    for (var i = 1; i < samples; i++) {
-      var pt = topologyCubicPoint(x1, y1, cx1, cy1, cx2, cy2, x2, y2, i / samples);
-      for (var r = 0; r < rects.length; r++) {
-        if (topologyPointInRect(pt, rects[r], 2)) { hits++; break; }
-      }
-    }
-    return hits;
-  }
-
-  /* Places one edge label clear of every rect placed so far (node boxes,
-     then earlier labels -- draw order is deterministic so this never
-     depends on anything but the graph itself). Candidates, in order: the
-     straight-line midpoint (which is also the bezier's parametric midpoint
-     here, since the curve's control points share the midpoint's x); that
-     same x nudged up/down; then two points shifted along the straight line
-     toward either endpoint. First collision-free candidate wins; if every
-     candidate collides, the least-bad one is used so the label always ends
-     up somewhere. */
-  function placeTopologyEdgeLabel(parent, placedRects, label, x1, y1, x2, y2) {
-    var midX = (x1 + x2) / 2;
-    var midY = (y1 + y2) / 2;
-    /* CJK-aware width estimate (topologyTextUnits weights CJK/full-width
-       glyphs as 2 "units" vs 1 for Latin, same as topologyNodeWidth uses for
-       node boxes) -- a plain label.length here undersizes the dodge rect for
-       ja/zh labels, letting them land on node boxes they should have dodged
-       around. */
-    var w = topologyTextUnits(label) * 6.2 + 8;
-    var h = 12;
-    var candidates = [];
-    [0, -10, 10, -20, 20, -30, 30].forEach(function (dy) {
-      candidates.push({ x: midX, y: midY - 5 + dy });
-    });
-    [0.38, 0.62].forEach(function (t) {
-      candidates.push({ x: x1 + t * (x2 - x1), y: y1 + t * (y2 - y1) - 5 });
-    });
-
-    var bestPos = candidates[0];
-    var bestRect = null;
-    var bestOverlaps = Infinity;
-    for (var i = 0; i < candidates.length; i++) {
-      var c = candidates[i];
-      var rect = { x: c.x - w / 2, y: c.y - h / 2, w: w, h: h };
-      var overlaps = topologyCountOverlaps(placedRects, rect);
-      if (overlaps < bestOverlaps) {
-        bestOverlaps = overlaps;
-        bestPos = c;
-        bestRect = rect;
-      }
-      if (overlaps === 0) break;
-    }
-
-    placedRects.push(bestRect);
-    var labelEl = svgEl("text", { class: "topology-edge-label", x: bestPos.x, y: bestPos.y, "text-anchor": "middle" });
-    labelEl.textContent = label;
-    parent.appendChild(labelEl);
-  }
-
-  /* Vertical offsets tried, in order, when an edge's default curve would
-     cross a node box it doesn't touch -- e.g. self <-> a node in a
-     second-or-later wrapped sub-column, whose default curve can pass
-     straight through an earlier sub-column's boxes. Both control points
-     move by the same offset, which bows the whole curve up or down without
-     moving its endpoints. Small offsets first so a bend is no bigger than
-     it needs to be. */
-  var TOPO_EDGE_BEND_OFFSETS = [0, -22, 22, -44, 44, -72, 72, -108, 108, -150, 150, -200, 200, -260, 260, -330, 330, -400, 400];
-
-  function topologyEdge(parent, from, to, label, opts) {
-    opts = opts || {};
-    /* Direction is encoded by the caller's (from, to) order -- e.g. a
-       cascade leader feeding this node is passed as (leaderBox, selfBox) --
-       so the arrowhead (always at the path's end, via marker-end) lands on
-       the right node without this function needing a separate "reverse"
-       flag. */
-    var x1 = from.x <= to.x ? from.x + (from.radius || from.w / 2) : from.x - (from.radius || from.w / 2);
-    var x2 = from.x <= to.x ? to.x - (to.radius || to.w / 2) : to.x + (to.radius || to.w / 2);
-    var cx = x1 + (x2 - x1) / 2;
-    var cy1 = from.y, cy2 = to.y;
-
-    /* If this edge's path would cross a node box it doesn't start/end at
-       (most commonly a wrapped-column edge passing over an earlier
-       sub-column -- see TOPO_EDGE_BEND_OFFSETS above), bow the curve
-       vertically until it clears every box, or -- if no offset in the list
-       clears all of them -- use whichever offset clears the most. */
-    if (opts.nodeRects && opts.nodeRects.length) {
-      var obstacles = opts.nodeRects.filter(function (r) { return r.box !== from && r.box !== to; });
-      if (obstacles.length) {
-        var bestDy = 0, bestHits = Infinity;
-        for (var i = 0; i < TOPO_EDGE_BEND_OFFSETS.length; i++) {
-          var dy = TOPO_EDGE_BEND_OFFSETS[i];
-          var hits = topologyPathHitCount(x1, from.y, cx, from.y + dy, cx, to.y + dy, x2, to.y, obstacles);
-          if (hits < bestHits) { bestHits = hits; bestDy = dy; }
-          if (hits === 0) break;
-        }
-        cy1 = from.y + bestDy;
-        cy2 = to.y + bestDy;
-      }
-    }
-
-    var path = svgEl("path", {
-      class: "topology-edge" + (opts.dashed ? " dashed" : "") + (opts.flowing ? " flowing" : ""),
-      d: "M" + x1 + " " + from.y + " C " + cx + " " + cy1 + ", " + cx + " " + cy2 + ", " + x2 + " " + to.y
-    });
-    if (!opts.noArrow) path.setAttribute("marker-end", "url(#topology-arrow)");
-    parent.appendChild(path);
-    if (label) {
-      if (opts.placedRects) {
-        /* Dodge candidates are built from the *final* (possibly bent)
-           control-point y's, not the straight-line endpoint y's, so the
-           label tracks the path actually drawn above rather than the path
-           as if it had never bent. */
-        placeTopologyEdgeLabel(parent, opts.placedRects, label, x1, cy1, x2, cy2);
-      } else {
-        /* No collision-tracking array passed -- fall back to the old plain
-           midpoint placement so this signature stays usable standalone. */
-        var midPt = topologyCubicPoint(x1, from.y, cx, cy1, cx, cy2, x2, to.y, 0.5);
-        var labelEl = svgEl("text", { class: "topology-edge-label", x: midPt.x, y: midPt.y - 5, "text-anchor": "middle" });
-        labelEl.textContent = label;
-        parent.appendChild(labelEl);
-      }
-    }
-    return path;
-  }
-
-  function topologyArrowDefs() {
-    var defs = svgEl("defs");
-    var arrow = svgEl("marker", {
-      id: "topology-arrow", viewBox: "0 0 10 10", refX: 9, refY: 5,
-      markerWidth: 7, markerHeight: 7, orient: "auto-start-reverse"
-    });
-    var arrowPath = svgEl("path", { d: "M0 0 L10 5 L0 10 z", class: "topology-edge-arrowhead" });
-    arrow.appendChild(arrowPath);
-    defs.appendChild(arrow);
-    return defs;
-  }
-
-  function edgeLabelFor(kind) {
-    switch (kind) {
-      case "publishing": return t("topology.edge.publishing");
-      case "leaderToYou": return t("topology.edge.leaderToYou");
-      case "youToFollower": return t("topology.edge.youToFollower");
-      case "sibling": return t("topology.edge.sibling");
-      case "viewers": return t("topology.edge.viewers");
-      default: return t("topology.edge.peer");
-    }
-  }
-
-  function renderTopologyGraph(graph) {
-    topologySvg.innerHTML = "";
-    topologySvg.appendChild(topologyArrowDefs());
-    /* Every edge this rebuild draws replaces the last one, so the activity
-       registry has to be thrown away and rebuilt alongside it -- see the
-       "data-activity pulses" section above topologyStateClass. */
-    topologyEdgeRegistry = {};
-
-    var rightCount = graph.rightNodes.length;
-    var leftCount = graph.leftNodes.length;
-    var leftStats = topologyColStats(leftCount);
-    var rightStats = topologyColStats(rightCount);
-
-    /* Height only depends on the tallest single sub-column on either side
-       (not on the raw node count), because taller sides wrap into more
-       columns instead of one long one. */
-    var rows = Math.max(leftStats.maxRows, rightStats.maxRows, 1);
-    var height = Math.max(rows * TOPO_ROW_PITCH + 40, 160);
-    var centerY = height / 2;
-
-    var selfLabel = graph.self.display_name || shortNodeId(graph.self.node_id) || t("topology.node.self");
-    var selfSub = graph.cascadeActive
-      ? (graph.role === "leader" ? t("topology.role.leader") : graph.role === "follower" ? t("topology.role.follower") : t("topology.role.electing"))
-      : t("topology.node.self");
-    var selfW = topologyNodeWidth(selfLabel, selfSub);
-
-    /* Auto-fit width for every node, computed up front so column widths
-       (which have to fit their widest member) and column x positions (which
-       stack columns edge-to-edge) can both be derived from real box sizes
-       instead of the old fixed TOPO_NODE_W. */
-    var leftWidths = graph.leftNodes.map(function (n) { return topologyNodeWidth(n.label, n.sub); });
-    var rightWidths = graph.rightNodes.map(function (n) { return topologyNodeWidth(n.label, n.sub); });
-    var viewerW = graph.viewerNode ? topologyNodeWidth(graph.viewerNode.label, graph.viewerNode.sub) : 0;
-
-    var leftColWidths = topologyColumnWidths(leftWidths, leftStats.numCols);
-    var rightColWidths = topologyColumnWidths(rightWidths, rightStats.numCols);
-
-    /* Place the self box just far enough from the left margin to fit
-       whatever the left side actually needs -- 0 clearance (self hugs
-       TOPO_MARGIN) when there are no left-side columns at all, which is the
-       common case (no publisher/sharer). Measured by first stacking the left
-       columns in a frame where the self box's *left edge* is at 0 (purely to
-       find how far left they reach); neededLeftSpace is that distance, so
-       self's real left edge lands at TOPO_MARGIN + neededLeftSpace and the
-       columns themselves get shifted into world space alongside it. This
-       replaces the old fixed xSelfBase=250 anchor, which left a constant
-       ~194px dead zone on the left whenever leftNodes was empty (offsetX
-       could only ever shift the diagram right, never pull it left). The
-       right side is stacked directly from the real self position, since
-       nothing needs to shift it. */
-    var leftLayoutRel = topologyStackColumnsOutward(0, leftColWidths, TOPO_SELF_GAP, TOPO_COL_GAP, -1);
-    var neededLeftSpace = -leftLayoutRel.outerEdge;
-    var xSelf = TOPO_MARGIN + neededLeftSpace + selfW / 2;
-    var leftCenters = leftLayoutRel.centers.map(function (c) { return c + (xSelf - selfW / 2); });
-    var rightLayout = topologyStackColumnsOutward(xSelf + selfW / 2, rightColWidths, TOPO_SELF_GAP, TOPO_COL_GAP, 1);
-    var rightCenters = rightLayout.centers;
-
-    var viewerCenter = null;
-    var rightmost = rightLayout.outerEdge;
-    if (graph.viewerNode) {
-      viewerCenter = rightLayout.outerEdge + TOPO_VIEWER_GAP + viewerW / 2;
-      rightmost = viewerCenter + viewerW / 2;
-    }
-
-    var viewBoxW = rightmost + TOPO_MARGIN;
-    topologySvg.setAttribute("viewBox", "0 0 " + viewBoxW + " " + height);
-    /* Keep readable type at every peer count. Large graphs scroll inside
-       the viewport rather than shrinking every label to fit the dock. */
-    var naturalW = Math.round(viewBoxW * 1.25);
-    topologyPresentation.setGraphWidth(naturalW);
-    topologySvg.style.margin = "0 auto";
-
-    var selfBox = topologyNodeBox(topologySvg, xSelf, centerY, selfW, selfLabel, selfSub, "kind-self", graph.self.node_id || null);
-
-    /* All node boxes are placed and drawn before any edge/label, so label
-       collision-avoidance below can see every box up front -- including
-       ones in sub-columns drawn later in source order but visually to the
-       right of an earlier edge's label. `nodeRects` mirrors `placedRects`
-       but keeps a reference to each box's own object, so edge routing can
-       tell "the box this edge touches" apart from "a box this edge must
-       route around". */
-    var placedRects = [{ x: selfBox.x - selfBox.w / 2, y: selfBox.y - selfBox.h / 2, w: selfBox.w, h: selfBox.h }];
-    var nodeRects = [{ x: selfBox.x - selfBox.w / 2, y: selfBox.y - selfBox.h / 2, w: selfBox.w, h: selfBox.h, box: selfBox }];
-
-    /* Hover-highlight registry: every node's box element keyed by the same
-       key its incident edges are recorded under (a real node id where one
-       exists, else a synthetic "self"/"viewers" key), so hovering a node can
-       dim every edge that doesn't mention its key. Rebuilt on every render
-       and thrown away with the old DOM subtree on the next one -- nothing
-       here needs explicit teardown. */
-    var hoverNodes = [{ key: "self", el: selfBox.el }];
-    var hoverEdges = [];
-
-    function stateLabelFor(state) {
-      if (!state) return null;
-      var stateKey = "topology.state." + state;
-      return t(stateKey) === stateKey ? state : t(stateKey);
-    }
-
-    var leftBoxes = graph.leftNodes.map(function (n, i) {
-      var colIndex = Math.floor(i / TOPO_MAX_ROWS_PER_COL);
-      var rowIndex = i % TOPO_MAX_ROWS_PER_COL;
-      var rowsInCol = Math.min(TOPO_MAX_ROWS_PER_COL, leftCount - colIndex * TOPO_MAX_ROWS_PER_COL);
-      var x = leftCenters[colIndex];
-      var y = topologyColRowY(rowIndex, rowsInCol, centerY);
-      var box = topologyNodeBox(topologySvg, x, y, leftWidths[i], n.label, n.sub, "kind-" + n.kind, n.id || null, stateLabelFor(n.state));
-      placedRects.push({ x: x - box.w / 2, y: y - box.h / 2, w: box.w, h: box.h });
-      nodeRects.push({ x: x - box.w / 2, y: y - box.h / 2, w: box.w, h: box.h, box: box });
-      hoverNodes.push({ key: n.id || ("left" + i), el: box.el });
-      return box;
-    });
-
-    var rightBoxes = graph.rightNodes.map(function (n, i) {
-      var colIndex = Math.floor(i / TOPO_MAX_ROWS_PER_COL);
-      var rowIndex = i % TOPO_MAX_ROWS_PER_COL;
-      var rowsInCol = Math.min(TOPO_MAX_ROWS_PER_COL, rightCount - colIndex * TOPO_MAX_ROWS_PER_COL);
-      var x = rightCenters[colIndex];
-      var y = topologyColRowY(rowIndex, rowsInCol, centerY);
-      var kindClass = n.kind === "peer" ? "kind-peer" : "kind-" + n.kind;
-      var box = topologyNodeBox(topologySvg, x, y, rightWidths[i], n.label, n.sub, kindClass, n.id || null, stateLabelFor(n.state));
-      /* Any right-column node with a known connection state gets the same
-         dot generic peers do -- cascade nodes (leader/follower/sibling) get
-         one too whenever mistlib also reports them via `net`. */
-      if (n.state) {
-        var dot = svgEl("circle", { class: "topology-dot " + topologyStateClass(n.state), cx: x + 19, cy: y - 19, r: 5 });
-        topologySvg.appendChild(dot);
-      }
-      placedRects.push({ x: x - box.w / 2, y: y - box.h / 2, w: box.w, h: box.h });
-      nodeRects.push({ x: x - box.w / 2, y: y - box.h / 2, w: box.w, h: box.h, box: box });
-      hoverNodes.push({ key: n.id || ("right" + i), el: box.el });
-      return box;
-    });
-
-    var viewerBox = null;
-    if (graph.viewerNode) {
-      viewerBox = topologyNodeBox(topologySvg, viewerCenter, centerY, viewerW, graph.viewerNode.label, graph.viewerNode.sub, "kind-viewers");
-      placedRects.push({ x: viewerBox.x - viewerBox.w / 2, y: viewerBox.y - viewerBox.h / 2, w: viewerBox.w, h: viewerBox.h });
-      nodeRects.push({ x: viewerBox.x - viewerBox.w / 2, y: viewerBox.y - viewerBox.h / 2, w: viewerBox.w, h: viewerBox.h, box: viewerBox });
-      hoverNodes.push({ key: "viewers", el: viewerBox.el });
-    }
-
-    /* Edges + labels, in the same draw order as before, now sharing
-       placedRects so every label dodges every box (and every
-       already-placed label), sharing nodeRects so every edge's path bends
-       around any box it isn't attached to, and recording each edge's
-       endpoint keys for hover highlighting below. */
-    /* Registers a peer's edge so a later activity pulse (topologyFireActivity)
-       can find it -- keyed by node id only, since a given peer has exactly
-       one edge on this graph no matter how many rooms it's active in. */
-    function registerActivityEdge(id, path) {
-      if (!id) return;
-      (topologyEdgeRegistry[id] = topologyEdgeRegistry[id] || []).push(path);
-    }
-
-    graph.leftNodes.forEach(function (n, i) {
-      var path = topologyEdge(topologySvg, leftBoxes[i], selfBox, edgeLabelFor(n.edge), { flowing: !!n.flowing, placedRects: placedRects, nodeRects: nodeRects });
-      hoverEdges.push({ el: path, from: n.id || ("left" + i), to: "self" });
-      registerActivityEdge(n.id, path);
-    });
-
-    graph.rightNodes.forEach(function (n, i) {
-      var box = rightBoxes[i];
-      var dashed = n.edge === "sibling";
-      var noArrow = n.edge === "peer" || n.edge === "sibling";
-      var key = n.id || ("right" + i);
-      var path;
-      // A cascade leader feeds *this* node, so that edge is drawn
-      // leader-box -> self-box (arrowhead lands on self); every other edge
-      // in this column is drawn self -> peer.
-      if (n.edge === "leaderToYou") {
-        path = topologyEdge(topologySvg, box, selfBox, edgeLabelFor(n.edge), { flowing: !!n.flowing, placedRects: placedRects, nodeRects: nodeRects });
-      } else {
-        path = topologyEdge(topologySvg, selfBox, box, edgeLabelFor(n.edge), { dashed: dashed, noArrow: noArrow, flowing: !!n.flowing, placedRects: placedRects, nodeRects: nodeRects });
-      }
-      hoverEdges.push({ el: path, from: "self", to: key });
-      registerActivityEdge(n.id, path);
-    });
-
-    if (viewerBox) {
-      var viewerPath = topologyEdge(topologySvg, selfBox, viewerBox, edgeLabelFor("viewers"), { flowing: !!graph.viewerNode.flowing, placedRects: placedRects, nodeRects: nodeRects });
-      hoverEdges.push({ el: viewerPath, from: "self", to: "viewers" });
-    }
-
-    hoverNodes.forEach(function (node) {
-      function highlightEdges() {
-        hoverEdges.forEach(function (edge) {
-          if (edge.from !== node.key && edge.to !== node.key) edge.el.classList.add("dimmed");
-        });
-      }
-      function resetEdges() {
-        hoverEdges.forEach(function (edge) { edge.el.classList.remove("dimmed"); });
-      }
-      node.el.addEventListener("mouseenter", highlightEdges);
-      node.el.addEventListener("focus", highlightEdges);
-      node.el.addEventListener("mouseleave", resetEdges);
-      node.el.addEventListener("blur", resetEdges);
-    });
-
-    topologyEmptyNote.hidden = !(leftCount === 0 && rightCount === 0 && !graph.viewerNode);
-
-    topologySvg.setAttribute("aria-label", t("topology.aria", {
-      peers: graph.rightNodes.length,
-      rooms: graph.roomsCount
-    }));
-  }
-
-  /* `graph` may be null (daemon unreachable / no data yet). The legend only
-     lists kinds actually present in the current graph -- self is always
-     shown, everything else (including the two kinds that used to have no
-     legend entry at all: generic connected peers and cascade siblings)
-     appears only once a node of that kind exists, so an idle dashboard
-     doesn't advertise roles it isn't currently displaying. */
-  function renderTopologyLegend(graph) {
-    topologyLegend.innerHTML = "";
-    var present = { self: true };
-    if (graph) {
-      graph.leftNodes.forEach(function (n) { present[n.kind] = true; });
-      graph.rightNodes.forEach(function (n) { present[n.kind] = true; });
-      if (graph.viewerNode) present.viewers = true;
-    }
-    var allItems = [
-      ["kind-self", "topology.legend.self", "self"],
-      ["kind-publisher", "topology.legend.publisher", "publisher"],
-      ["kind-leader", "topology.legend.leader", "leader"],
-      ["kind-follower", "topology.legend.follower", "follower"],
-      ["kind-sibling", "topology.legend.sibling", "sibling"],
-      ["kind-peer", "topology.legend.peer", "peer"],
-      ["kind-viewers", "topology.legend.viewers", "viewers"]
-    ];
-    allItems.filter(function (item) { return present[item[2]]; }).forEach(function (item) {
-      var wrap = el("span", { class: "topology-legend-item" });
-      wrap.appendChild(el("span", { class: "topology-legend-dot " + item[0] }));
-      wrap.appendChild(el("span", { text: t(item[1]) }));
-      topologyLegend.appendChild(wrap);
-    });
-    /* Edge-state swatches (media flowing vs idle) only mean something once
-       the graph actually has at least one edge to draw them for. */
-    var hasEdges = !!(graph && (graph.leftNodes.length || graph.rightNodes.length || graph.viewerNode));
-    if (hasEdges) {
-      [["flowing", "topology.legend.flowing"], ["", "topology.legend.idle"]].forEach(function (item) {
-        var wrap = el("span", { class: "topology-legend-item" });
-        wrap.appendChild(el("span", { class: "topology-legend-line" + (item[0] ? " " + item[0] : "") }));
-        wrap.appendChild(el("span", { text: t(item[1]) }));
-        topologyLegend.appendChild(wrap);
+  function buildTopologyGraph(data) {
+    data = data || {};
+    var self = data.self || {}, selfKey = self.node_id || "self";
+    var stream = data.stream || { running: false };
+    var cascade = stream.running && stream.backend === "relay" && stream.cascade && stream.cascade.enabled ? stream.cascade : null;
+    var flow = stream.running && stream.flow || {};
+    function fresh(age) { return age != null && age < FLOW_STALL_MS; }
+    var mediaAges = [flow.video_age_ms, flow.audio_age_ms].filter(function (age) { return age != null; });
+    var mediaMs = mediaAges.length ? Math.max(0, FLOW_STALL_MS - Math.min.apply(null, mediaAges)) : 0;
+    var rooms = Array.from(new Set((data.rooms || []).concat((data.room_peers || []).map(function (r) { return r.room; }))));
+    var hubs = rooms.length >= 2;
+    var membership = new Map(), peers = new Map(), nodes = [], edges = [];
+    (data.peers || []).forEach(function (p) { if (p.node_id !== self.node_id) peers.set(p.node_id, p); });
+    (data.room_peers || []).forEach(function (r) {
+      (r.peers || []).forEach(function (p) {
+        if (p.node_id === self.node_id) return;
+        var info = peers.get(p.node_id) || {};
+        peers.set(p.node_id, Object.assign({}, p, info));
+        var joined = membership.get(p.node_id) || [];
+        joined.push(r.room); membership.set(p.node_id, joined);
       });
+    });
+    function ensurePeer(id) { if (id && id !== self.node_id && !peers.has(id)) peers.set(id, { node_id: id }); }
+    var publisher = stream.running && stream.publisher;
+    ensurePeer(publisher);
+    if (cascade) { ensurePeer(cascade.leader); (cascade.relay_peers || []).forEach(ensurePeer); }
+    nodes.push({ key: selfKey, id: self.node_id, did: self.did, name: self.display_name,
+      label: self.display_name || shortNodeId(self.node_id) || t("topology.node.self"), kind: "self",
+      role: cascade ? t("topology.role." + (cascade.role === "leader" || cascade.role === "follower" ? cascade.role : "electing")) : t("topology.node.self"), rooms: rooms });
+    function edge(source, target, flowMs) {
+      if (source === target) return;
+      edges.push({ key: JSON.stringify([source, target]), source: source, target: target, flowMs: flowMs || 0 });
     }
+    if (hubs) rooms.forEach(function (room) {
+      var key = "room:" + room;
+      nodes.push({ key: key, label: room, kind: "room", role: t("topology.rooms"), rooms: [room] });
+      edge(selfKey, key);
+    });
+    peers.forEach(function (p, id) {
+      if (!id) return;
+      var kind = id === publisher ? "publisher" : cascade && id === cascade.leader ? "leader"
+        : cascade && (cascade.relay_peers || []).indexOf(id) >= 0 ? (cascade.role === "leader" ? "follower" : "sibling") : "peer";
+      var roleKey = kind === "publisher" ? (cascade && cascade.role !== "leader" ? "leader" : "sharer") : kind;
+      var incoming = id === publisher || kind === "leader";
+      var flowing = incoming || kind === "follower" ? mediaMs : 0;
+      var joined = membership.get(id) || [];
+      nodes.push({ key: id, id: id, did: p.did, name: p.name, label: p.name || shortNodeId(id), kind: kind,
+        rawState: p.state || "unknown", state: t("topology.state." + (p.state || "unknown")),
+        role: t("topology.role." + roleKey), rooms: joined,
+        media: stream.running && kind !== "peer" ? t(flowing ? "topology.flow.flowing" : "topology.flow.idle") : null });
+      if (hubs && joined.length) joined.forEach(function (room) { edge("room:" + room, id); });
+      else if (!incoming) edge(selfKey, id, flowing);
+      if (incoming) edge(id, selfKey, flowing);
+      else if (hubs && joined.length && flowing) edge(selfKey, id, flowing);
+    });
+    if (stream.running) {
+      nodes.push({ key: "viewers", label: t("topology.node.viewers"), kind: "viewers", role: t("topology.node.viewers"),
+        connection: "RTSP", viewers: String(stream.clients || 0), media: t(mediaMs && stream.clients > 0 ? "topology.flow.flowing" : "topology.flow.idle") });
+      edge(selfKey, "viewers", stream.clients > 0 ? mediaMs : 0);
+    }
+    return { nodes: nodes, edges: edges, selfKey: selfKey, hubs: hubs, membership: membership, rooms: rooms,
+      stream: stream, cascade: cascade, videoFlowing: fresh(flow.video_age_ms), audioFlowing: fresh(flow.audio_age_ms),
+      videoDelivered: fresh(flow.video_delivered_age_ms), audioDelivered: fresh(flow.audio_delivered_age_ms) };
   }
 
-  /* Card-header chrome absorbed from the old cascade card: the LEADER /
-     FOLLOWER / ELECTING role badge and the "Receiving from: …" source
-     line, plus the "cascade off" config note below the card. */
+  function updateTopologyActivity(data, graph) {
+    var activity = data && Array.isArray(data.activity) ? data.activity : null;
+    if (!activity) { topologyActivityMemory = null; return; }
+    var previous = topologyActivityMemory || new Map(), restarted = false, next = new Map();
+    function key(entry) { return JSON.stringify([entry.room, entry.node_id || null]); }
+    activity.forEach(function (entry) {
+      var prev = previous.get(key(entry));
+      ["tx", "rx"].forEach(function (dir) {
+        if (prev && prev[dir] && entry[dir] && (entry[dir].count < prev[dir].count || entry[dir].bytes < prev[dir].bytes)) restarted = true;
+      });
+    });
+    var budget = 48;
+    activity.forEach(function (entry) {
+      var prev = previous.get(key(entry)); next.set(key(entry), entry);
+      if (restarted || !entry.room) return;
+      ["tx", "rx"].forEach(function (dir) {
+        var cur = entry[dir], old = prev && prev[dir];
+        if (!cur) return;
+        var count = old ? cur.count - old.count : cur.count > 0 && cur.age_ms < 1000 ? 1 : 0;
+        var bytes = old ? Math.max(0, cur.bytes - old.bytes) : Math.min(cur.bytes, 65536);
+        if (count <= 0 || budget <= 0) return;
+        var targets = entry.node_id ? [entry.node_id] : Array.from(graph.membership.keys()).filter(function (id) {
+          return graph.membership.get(id).indexOf(entry.room) >= 0;
+        });
+        targets.forEach(function (id) {
+          if (budget-- <= 0) return;
+          var joined = graph.membership.get(id) || [];
+          var path = graph.hubs && joined.indexOf(entry.room) >= 0 ? [graph.selfKey, "room:" + entry.room, id] : [graph.selfKey, id];
+          topologyPresentation.activity(dir === "rx" ? path.reverse() : path, count, bytes);
+        });
+      });
+    });
+    topologyActivityMemory = next;
+  }
+
   function renderCascadeChrome(graph) {
     var c = graph && graph.cascade;
     var stream = graph && graph.stream;
@@ -7687,319 +6595,40 @@
     renderStoreTopoStrip();
   }
 
-  /* Names the room the topology card's *current host panel* is showing, so
-     the same re-parented card reads correctly no matter which panel it's
-     sitting in. Only panels backed by a single-room networked module get a
-     line (Stream maps to "stream" for forward-compat -- topology.status's
-     `modules` map doesn't have a "stream" entry today, so that lookup
-     simply misses and the line stays hidden until/unless it's added).
-     Multi-room modules (Store, chat_relay) aren't listed here since their
-     mini-strip already shows every room as its own chip. */
-  var TOPOLOGY_PANEL_MODULE = { "panel-chat": "stream" };
-
-  function renderTopologyContext() {
-    if (!topologyContextEl) return;
-    var module = TOPOLOGY_PANEL_MODULE[topologyHostPanel];
-    var data = state.topology;
-    var info = module && data && data.modules && data.modules[module] ? data.modules[module] : null;
-    if (!info) {
-      topologyContextEl.hidden = true;
-      return;
-    }
-    var text = t("topology.contextRoom") + ": " + (info.room || "—");
-    if (!info.joined) text += " " + t("topology.contextNotJoined");
-    topologyContextEl.textContent = text;
-    topologyContextEl.hidden = false;
-  }
-
-  /* Signature of everything the render below actually reads, so a poll that
-     changes nothing visible can skip the DOM rebuild entirely. That matters
-     because a full rebuild restarts the "marching ants" flowing-edge
-     animation, drops any open SVG <title> tooltip, and clears text
-     selection inside the card -- all on every 5s poll otherwise, even
-     between two identical snapshots. `flow` ages are already bucketed into
-     stable booleans by buildTopologyGraph, so the signature doesn't churn
-     while media keeps flowing. currentLang is included so a language switch
-     (which re-renders via rerenderAllDynamic without a new poll) still
-     rebuilds with the new strings, and topologyHostPanel is included so a
-     panel switch's module-context line stays correct. */
-  function topologyRenderSnapshot(data, graph) {
-    if (!data) return { lang: currentLang, data: null };
-    var module = TOPOLOGY_PANEL_MODULE[topologyHostPanel];
-    return {
-      lang: currentLang,
-      hostPanel: topologyHostPanel,
-      moduleInfo: module && data.modules ? data.modules[module] : null,
-      self: { id: graph.self.node_id, name: graph.self.display_name, cascadeActive: graph.cascadeActive, role: graph.role },
-      left: graph.leftNodes.map(function (n) { return [n.id, n.label, n.sub, n.kind, n.state || null, !!n.flowing]; }),
-      right: graph.rightNodes.map(function (n) { return [n.id, n.label, n.sub, n.kind, n.state || null, !!n.flowing]; }),
-      viewer: graph.viewerNode ? [graph.viewerNode.label, graph.viewerNode.sub, !!graph.viewerNode.flowing] : null,
-      peersCount: (data.peers || []).length,
-      rooms: data.rooms || [],
-      /* Drives the per-room breakdown (renderTopologyRoomBreakdown) when
-         present; the module/stream/consensus room ids are included too since
-         they feed that same breakdown's module badges but otherwise aren't
-         part of this signature (topoStrips render unconditionally on every
-         call, unaffected by the dedup below). */
-      roomPeers: data.room_peers || null,
-      moduleRoomInfo: data.modules ? [data.modules.chat_relay, data.modules.ai, data.modules.store] : null,
-      streamRoom: (data.stream && data.stream.room) || null,
-      consensusRoom: (data.consensus && data.consensus.room) || null,
-      cascade: graph.cascade ? [graph.cascade.role, graph.cascade.leader, graph.cascade.self, graph.cascade.source, graph.relayPeersCount] : null,
-      consensusPeers: (data.consensus && data.consensus.active && Array.isArray(data.consensus.peers)) ? data.consensus.peers.length : null,
-      streamRunning: graph.stream.running,
-      cascadeOff: !!(graph.stream.running && graph.stream.backend === "relay" && graph.stream.cascade && !graph.stream.cascade.enabled),
-      videoFlow: graph.stream.running ? [graph.videoDelivered, graph.videoFlowing] : null,
-      audioFlow: graph.stream.running ? [graph.audioDelivered, graph.audioFlowing] : null
-    };
-  }
-
-  /* Which modules use a given room id, as short badge labels for the
-     per-room breakdown below -- reuses each module's own user-facing panel
-     title (chat_relay/ai/store/stream) plus the existing cascade label
-     instead of inventing a second set of i18n strings for the same
-     concepts. chat_relay now shares store's multi-room shape (it can relay
-     several rooms at once), so it's checked the same way. */
-  function topologyModuleBadgesForRoom(data, room) {
-    var badges = [];
-    var modules = data.modules || {};
-    if (modules.chat_relay && Array.isArray(modules.chat_relay.rooms) &&
-        modules.chat_relay.rooms.some(function (r) { return r && r.room === room; })) {
-      badges.push(t("chatRelay.title"));
-    }
-    if (modules.ai && modules.ai.room === room) badges.push(t("ai.title"));
-    if (modules.store && Array.isArray(modules.store.rooms) &&
-        modules.store.rooms.some(function (r) { return r && r.room === room; })) {
-      badges.push(t("store.title"));
-    }
-    if (data.stream && data.stream.room === room) badges.push(t("stream.title"));
-    if (data.consensus && data.consensus.room === room) badges.push(t("topology.kv.cascade"));
-    return badges;
-  }
-
-  /* Per-room breakdown, driven by topology.status's `room_peers` (one entry
-     per joined room, each carrying the peers mistlib reports as connected
-     in that *specific* room -- unlike the process-wide `peers` union the
-     rest of this card and the per-module mini-strips use). Only called when
-     the daemon actually sends that field; see the `Array.isArray` guard in
-     renderTopology, which falls back to the flat room-chip list otherwise
-     so an older daemon still renders cleanly. */
-  function renderTopologyRoomBreakdown(data) {
-    var roomPeers = data.room_peers || [];
-    /* Every chip/row this rebuild draws replaces the last one, so the
-       activity registries (topologyRoomPeerRegistry/topologyRoomChipRegistry)
-       have to be thrown away and rebuilt alongside them -- same reasoning as
-       topologyEdgeRegistry in renderTopologyGraph. */
-    topologyRoomPeerRegistry = {};
-    topologyRoomChipRegistry = {};
-    if (!roomPeers.length) {
-      topologyRooms.appendChild(el("span", { text: t("topology.noRooms") }));
-      return;
-    }
-    var activityMap = topologyActivityMap(data);
-    topologyRooms.appendChild(el("div", { class: "topology-rooms-heading", text: t("topology.rooms") }));
-    var list = el("div", { class: "topology-room-breakdown" });
-    roomPeers.forEach(function (entry) {
-      var room = entry && entry.room;
-      if (!room) return;
-      var peers = (entry && Array.isArray(entry.peers)) ? entry.peers : [];
-      var item = el("div", { class: "topology-room-item" });
-
-      var head = el("div", { class: "topology-room-item-head" });
-      /* Room-wide broadcast traffic has no peer row of its own, so its
-         cumulative counters (when any) ride on the room chip's tooltip, and
-         topologyFireActivity flashes the chip itself (see
-         .topology-room-chip.activity-flash) for a fresh broadcast send. */
-      var broadcastSummary = topologyActivitySummary(activityMap[topologyActivityKey(room, null)]);
-      var chipTitle = t("common.clickToCopy");
-      if (broadcastSummary) chipTitle += "\n" + t("topology.activity.broadcast") + ": " + broadcastSummary;
-      var chip = el("button", { type: "button", class: "badge mono topology-room-chip", text: room, title: chipTitle });
-      chip.addEventListener("click", function () { copyToClipboard(room); });
-      head.appendChild(chip);
-      topologyRoomChipRegistry[room] = chip;
-      topologyModuleBadgesForRoom(data, room).forEach(function (label) {
-        head.appendChild(el("span", { class: "badge topology-room-module-badge", text: label }));
-      });
-      item.appendChild(head);
-
-      var peersEl = el("div", { class: "topology-room-peers" });
-      if (!peers.length) {
-        peersEl.appendChild(el("span", { class: "topology-room-empty", text: t("topology.room.noPeers") }));
-      } else {
-        peers.forEach(function (p) {
-          if (!p || !p.node_id) return;
-          var stateKey = "topology.state." + p.state;
-          var stateLabel = t(stateKey) === stateKey ? p.state : t(stateKey);
-          var activityEntry = activityMap[topologyActivityKey(room, p.node_id)];
-          var activitySummary = topologyActivitySummary(activityEntry);
-          var title = p.node_id + " · " + stateLabel;
-          if (activitySummary) title += "\n" + activitySummary;
-          var peerEl = el("button", { type: "button", class: "topology-room-peer" });
-          topologyPresentation.bindNode(peerEl, p.node_id);
-          peerEl.appendChild(el("span", { class: "topo-strip-dot " + topologyStateClass(p.state) }));
-          peerEl.appendChild(el("span", { class: "mono", text: shortNodeId(p.node_id) }));
-          /* TX/RX glyphs only appear once that direction has ever carried
-             traffic (activityEntry.tx/rx is non-null) -- an idle-but-
-             connected peer keeps the plain dot+id it always had. Once
-             present, topologyFireActivity briefly highlights one via its
-             "active" class on every fresh delta (see updateTopologyActivity). */
-          var txEl = null, rxEl = null;
-          if (activityEntry && (activityEntry.tx || activityEntry.rx)) {
-            var dirs = el("span", { class: "topology-room-peer-dirs" });
-            if (activityEntry.tx) { txEl = el("span", { class: "topology-room-peer-dir tx", text: "▲" }); dirs.appendChild(txEl); }
-            if (activityEntry.rx) { rxEl = el("span", { class: "topology-room-peer-dir rx", text: "▼" }); dirs.appendChild(rxEl); }
-            peerEl.appendChild(dirs);
-          }
-          peersEl.appendChild(peerEl);
-          topologyRoomPeerRegistry[topologyActivityKey(room, p.node_id)] = { tx: txEl, rx: rxEl };
-        });
-      }
-      item.appendChild(peersEl);
-      list.appendChild(item);
-    });
-    topologyRooms.appendChild(list);
-  }
-
-  /* Adapt daemon-derived graph data into presentation-only records. The
-     inspection feature does not import the graph renderer or app state. */
-  function topologyDetailModels(data, graph) {
-    if (!data || !graph) return [];
-    var roomPeers = Array.isArray(data.room_peers) ? data.room_peers : null;
-    function peerRooms(id) {
-      return roomPeers && roomPeers.filter(function (room) {
-        return (room.peers || []).some(function (peer) { return peer.node_id === id; });
-      }).map(function (room) { return room.room; });
-    }
-    function stateLabel(state) {
-      if (!state) return null;
-      var key = "topology.state." + state;
-      return t(key) === key ? state : t(key);
-    }
-    var records = [{
-      key: graph.self.node_id || "self", id: graph.self.node_id,
-      label: graph.self.display_name || shortNodeId(graph.self.node_id) || t("topology.node.self"),
-      role: graph.cascadeActive ? t("topology.role." + (graph.role === "leader" || graph.role === "follower" ? graph.role : "electing")) : t("topology.node.self"),
-      rooms: data.rooms || []
-    }];
-    graph.leftNodes.concat(graph.rightNodes).forEach(function (node) {
-      records.push({
-        key: node.id, id: node.id, label: node.label,
-        role: t("topology.legend." + node.kind), state: stateLabel(node.state),
-        connection: edgeLabelFor(node.edge), rooms: peerRooms(node.id),
-        media: node.flowing == null ? null : t(node.flowing ? "topology.flow.flowing" : "topology.flow.idle")
-      });
-    });
-    if (graph.viewerNode) records.push({
-      key: "viewers", label: graph.viewerNode.label, role: t("topology.legend.viewers"),
-      connection: "RTSP", viewers: graph.viewerNode.sub,
-      media: t(graph.viewerNode.flowing ? "topology.flow.flowing" : "topology.flow.idle")
-    });
-    return records;
-  }
-
-  var topologyLastSig = null;
 
   function renderTopology() {
     var data = state.topology;
-    renderTopoStrips();   /* cheap, own DOM -- always kept current */
-
-    var graph = data ? buildTopologyGraph(data) : null;
-    topologyPresentation.setSnapshot(topologyDetailModels(data, graph));
-    var sig = JSON.stringify(topologyRenderSnapshot(data, graph));
-    if (sig === topologyLastSig) return;
-    topologyLastSig = sig;
-    topologyPresentation.beginRender();
-
-    topologyKv.innerHTML = "";
-    topologyRooms.innerHTML = "";
-    /* Cleared here (not just inside renderTopologyRoomBreakdown) so the flat
-       room-chip fallback below and the "no data" early return also drop any
-       stale activity-registry entries from a previous render. */
-    topologyRoomPeerRegistry = {};
-    topologyRoomChipRegistry = {};
-
-    if (!data) {
-      topologyEmptyNote.hidden = true;
-      topologySvg.innerHTML = "";
-      topologyEdgeRegistry = {};
-      topologySvg.setAttribute("viewBox", "0 0 640 80");
-      topologyPresentation.setGraphWidth(400);
-      var placeholder = svgEl("text", { x: "320", y: "44", "text-anchor": "middle", class: "topology-node-sub" });
-      placeholder.textContent = t("topology.kv.unknown");
-      topologySvg.appendChild(placeholder);
-      addKv(topologyKv, t("topology.kv.status"), t("topology.kv.unknown"));
-      renderTopologyLegend(null);
-      renderCascadeChrome(null);
-      renderTopologyContext();
-      topologyPresentation.endRender();
-      return;
-    }
-
-    renderTopologyGraph(graph);
-    renderTopologyLegend(graph);
+    var graph = buildTopologyGraph(data);
+    renderTopoStrips();
+    topologyPresentation.setGraph(graph);
+    topologySvg.setAttribute("aria-label", t("topology.aria", { peers: graph.nodes.filter(function (n) { return !!n.id && n.kind !== "self"; }).length, rooms: graph.rooms.length }));
+    topologyEmptyNote.hidden = !!data && graph.nodes.length > 1;
+    topologyEmptyNote.textContent = t(data ? "topology.emptyHint" : "topology.kv.unknown");
     renderCascadeChrome(graph);
-
-    addKv(topologyKv, t("topology.kv.peers"), (data.peers || []).length);
-    addKv(topologyKv, t("topology.kv.rooms"), (data.rooms || []).length);
-    var cascadeText = graph.cascadeActive
-      ? (graph.role === "leader" ? t("topology.role.leader") : graph.role === "follower" ? t("topology.role.follower") : t("topology.role.electing"))
-      : t("topology.kv.cascadeOff");
-    addKv(topologyKv, t("topology.kv.cascade"), cascadeText);
-    if (graph.cascade) {
-      addKvId(topologyKv, t("stream.cascade.leader"), graph.cascade.leader);
-      addKvId(topologyKv, t("stream.cascade.self"), graph.cascade.self);
-      addKv(topologyKv, t("stream.cascade.relayPeers"), graph.relayPeersCount);
-      if (data.consensus && data.consensus.active && Array.isArray(data.consensus.peers)) {
-        addKv(topologyKv, t("stream.cascade.consensusPeers"), data.consensus.peers.length);
-      }
-    }
-    if (graph.stream.running) {
-      addKv(topologyKv, t("topology.kv.videoFlow"), t(flowStatusKey(graph.videoDelivered, graph.videoFlowing)));
-      addKv(topologyKv, t("topology.kv.audioFlow"), t(flowStatusKey(graph.audioDelivered, graph.audioFlowing)));
-    }
-
-    /* Per-room breakdown when the daemon reports `room_peers` (pairs each
-       joined room with the modules using it and the peers actually
-       connected in it); falls back to the flat room-chip list for an older
-       daemon that doesn't send that field yet. */
-    if (Array.isArray(data.room_peers)) {
-      renderTopologyRoomBreakdown(data);
-    } else {
-      var rooms = data.rooms || [];
-      if (rooms.length) {
-        topologyRooms.appendChild(el("span", { text: t("topology.rooms") + ": " }));
-        rooms.forEach(function (room) {
-          var chip = el("button", { type: "button", class: "badge mono topology-room-chip", text: room, title: t("common.clickToCopy") });
-          chip.addEventListener("click", function () { copyToClipboard(room); });
-          topologyRooms.appendChild(chip);
-        });
-      } else {
-        topologyRooms.appendChild(el("span", { text: t("topology.noRooms") }));
-      }
-    }
-    renderTopologyContext();
-    topologyPresentation.endRender();
+    topologyFlowNote.hidden = !graph.stream.running;
+    topologyFlowNote.textContent = graph.stream.running ? t("topology.kv.videoFlow") + ": " + t(flowStatusKey(graph.videoDelivered, graph.videoFlowing))
+      + " · " + t("topology.kv.audioFlow") + ": " + t(flowStatusKey(graph.audioDelivered, graph.audioFlowing)) : "";
+    return graph;
   }
 
   function pollTopology() {
-    return api("topology.status", {}).then(function (data) {
+    if (topologyRequest || !topologyPresentation.isVisible()) return topologyRequest;
+    topologyRequest = api("topology.status", {}).then(function (data) {
       state.topology = data;
-      renderTopology();
-      /* After renderTopology, so a peer/room appearing for the first time
-         this poll is already in the flash registries (edge paths, breakdown
-         rows) before its activity fires. Runs on every poll regardless of
-         renderTopology's own render-skip cache -- see the "data-activity
-         pulses" doc comment above topologyStateClass for why activity can't
-         ride on that gate. */
-      updateTopologyActivity(data);
+      updateTopologyActivity(data, renderTopology());
     }, function () {
-      state.topology = null;
-      renderTopology();
-      updateTopologyActivity(null); // daemon unreachable -- reseed memory once it's back
-    });
+      state.topology = null; renderTopology(); topologyActivityMemory = null;
+    }).finally(function () { topologyRequest = null; });
+    return topologyRequest;
   }
 
-  /* The shared poll updates the persistent topology dock on every page. */
+  function syncTopologyPolling() {
+    var active = topologyPolling && topologyPresentation && topologyPresentation.isVisible();
+    if (active && !topologyTimer) {
+      pollTopology();
+      topologyTimer = setInterval(pollTopology, 1000);
+    } else if (!active && topologyTimer) { clearInterval(topologyTimer); topologyTimer = null; }
+  }
 
   /* ---------- ai panel ---------- */
 
@@ -8181,8 +6810,7 @@
     refresh: function (button) {
       if (!button) return Promise.resolve(escrowPoll).catch(function () {}).then(pollEscrow);
       return withBusy(button, pollEscrow).catch(function (err) { showToast(err.message || String(err), "error"); });
-    },
-    restart: restartDaemon
+    }
   });
 
   function escrowArchiveError(resp) {
@@ -8202,7 +6830,7 @@
 
   function changeEscrowRoom(cmd, room) {
     return api(cmd, { room: room }).then(function (data) {
-      showToast(t(data.applies === "daemon restart" ? "settings.savedRestart" : "settings.savedLive"), "success");
+      showToast(t(data.applies === "auto restart" ? "settings.savedAuto" : "settings.savedLive"), "success");
       // Let an older status poll finish before fetching the saved configuration.
       return Promise.resolve(escrowPoll).catch(function () {}).then(function () {
         return Promise.all([pollEscrow(), pollConfig()]);
@@ -11161,6 +9789,7 @@
       // running (see ai::reload_provider_if_running) -- no badge, no
       // "next start" wording, just confirmation that it's live now.
       var toastKey = applies === "daemon restart" ? "settings.savedRestart"
+        : applies === "auto restart" ? "settings.savedAuto"
         : applies === "applied immediately" ? "settings.savedLive"
         : "settings.savedNextStart";
       showToast(t(toastKey), "success");
@@ -12848,7 +11477,6 @@
   function pollAll() {
     pollDaemonStatus();
     pollStreamStatus();
-    pollTopology();
     pollAiStatus();
     pollChatRelayRooms();
     // Start escrow polling when first opened, then keep its last-known state fresh.
@@ -12902,6 +11530,7 @@
   function startPolling() {
     if (pollTimer) return;
     pollAll();
+    topologyPolling = true; syncTopologyPolling();
     pollTimer = setInterval(function () {
       if (deferForViewSwitch(pollAll, pollAllPending)) return;
       pollAll();
@@ -12909,6 +11538,7 @@
   }
 
   function stopPolling() {
+    topologyPolling = false; syncTopologyPolling();
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   }
 
@@ -12970,12 +11600,10 @@
 
   // One persistent host: navigation never hides or recreates the graph.
   var topologyCardEl = document.getElementById("topology-card");
-  var topologyFoldEl = document.getElementById("topology-fold");
-  var topologyHostPanel = null;
   document.getElementById("topology-dock").appendChild(topologyCardEl);
   function placeTopologyCard(activeId) {
-    topologyHostPanel = activeId;
-    renderTopologyContext();
+    var dock = document.getElementById("topology-dock");
+    if (topologyCardEl.parentElement !== dock) dock.appendChild(topologyCardEl);
   }
 
   function showPanel(id) {
@@ -13036,7 +11664,6 @@
     var a = e.target.closest ? e.target.closest('a[href="#topology-card"]') : null;
     if (!a) return;
     e.preventDefault();
-    if (topologyFoldEl) topologyFoldEl.open = true;
     var card = document.getElementById("topology-card");
     if (card) card.scrollIntoView({ behavior: "smooth", block: "start" });
   });

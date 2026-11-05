@@ -210,6 +210,15 @@ impl BotEngine {
             .get(id)
             .and_then(|state| state.next_fire)
     }
+
+    async fn background_due(&self, state: &AppState, now: DateTime<Local>) -> Vec<PipelineConfig> {
+        let config = state.config().bot;
+        if !state.network.permitted() || !config.enabled {
+            self.ticks.lock().await.clear();
+            return Vec::new();
+        }
+        self.take_due(&config.pipelines, now).await
+    }
 }
 
 fn compute_next_fire(expr: &str, now: DateTime<Local>) -> Option<DateTime<Local>> {
@@ -246,18 +255,11 @@ async fn init_engine(state: &Arc<AppState>) -> Result<Arc<BotEngine>> {
 }
 
 /// Daemon-lifetime background task: every second, run any pipeline whose
-/// schedule has come due. A no-op (logged) when `[bot] enabled = false` --
-/// like `scheduler.enabled`, this master switch is only checked once at
-/// startup (see `crate::config::applies_when`'s `"bot.enabled" => "daemon
-/// restart"` entry); `bot.pipelines` itself, in contrast, is re-read from
-/// config on *every* tick below, so pipeline add/edit/remove/reschedule
-/// takes effect on the very next tick with no daemon restart needed. Manual
-/// `bot.run` still works regardless of this switch.
+/// schedule has come due. Reads the master switch and pipelines every tick,
+/// so enabling/disabling or editing schedules applies without a restart.
+/// Manual `bot.run` still works regardless of this switch; disabling does
+/// not cancel a pipeline already executing.
 pub fn spawn_background(state: Arc<AppState>) {
-    if !state.config().bot.enabled {
-        info!("bot: disabled via config; background tick loop not started");
-        return;
-    }
     tokio::spawn(async move {
         if let Err(error) = run_background(state).await {
             warn!(%error, "bot: background task failed to start");
@@ -277,8 +279,7 @@ async fn run_background(state: Arc<AppState>) -> Result<()> {
     loop {
         ticker.tick().await;
         let now = Local::now();
-        let pipelines = state.config().bot.pipelines;
-        for pipeline in engine.take_due(&pipelines, now).await {
+        for pipeline in engine.background_due(&state, now).await {
             // `take_due` already excludes still-running pipelines, but
             // acquire the guard here too (not just trust that check) so the
             // running-set is the single source of truth shared with manual
@@ -925,6 +926,35 @@ mod tests {
     use super::*;
     use crate::config::AiProviderConfig;
     use std::collections::HashMap;
+
+    #[tokio::test]
+    async fn master_switch_reenables_existing_engine_with_fresh_schedule() {
+        let state = AppState::for_test();
+        let engine = test_engine();
+        let now = Local::now();
+        let mut config = state.config();
+        config.bot.enabled = false;
+        config.bot.pipelines = vec![sample_pipeline("toggle", "@every 1h")];
+        state.set_config(config.clone());
+        assert!(engine.background_due(&state, now).await.is_empty());
+        assert!(engine.next_fire_of("toggle").await.is_none());
+        config.bot.enabled = true;
+        state.set_config(config.clone());
+        assert!(engine.background_due(&state, now).await.is_empty());
+        let later = now + chrono::Duration::hours(1);
+        assert_eq!(engine.background_due(&state, later).await.len(), 1);
+        config.bot.enabled = false;
+        state.set_config(config.clone());
+        assert!(engine.background_due(&state, later).await.is_empty());
+        assert!(engine.next_fire_of("toggle").await.is_none());
+        config.bot.enabled = true;
+        state.set_config(config);
+        assert!(engine.background_due(&state, later).await.is_empty());
+        assert_eq!(
+            engine.next_fire_of("toggle").await,
+            Some(later + chrono::Duration::hours(1))
+        );
+    }
 
     fn sample_pipeline(id: &str, schedule: &str) -> PipelineConfig {
         PipelineConfig {

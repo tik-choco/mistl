@@ -27,14 +27,10 @@
 //!   the (percent-encoded, sandbox-relative) path to a temp file and streams
 //!   it back the same way `/api/store/download` does, or 404 JSON error if
 //!   the path is unknown/outside the sandbox.
-//! - `GET /api/dev/instance` -> 200 JSON `{"instance": "<hex>"}`, a random
-//!   nonce picked once per process start. In debug builds the dashboard HTML
-//!   ([`index_html_body`]) carries an extra script that polls this and
-//!   reloads the page when the value changes, so a tab left open across a
-//!   `just watch` rebuild+restart picks up the new daemon on its own instead
-//!   of needing a manual refresh. Release builds serve the plain embedded
-//!   HTML (no poll), but the route itself stays cheap and harmless either
-//!   way (a per-process random number, nothing sensitive).
+//! - `GET /api/dev/instance` -> 200 JSON with a per-process `instance` nonce.
+//!   In debug builds it also returns an asset fingerprint, and the dashboard
+//!   polls for changes to either value. Release builds do not poll or read
+//!   dashboard assets from disk.
 //! - anything else -> 404 JSON error
 //!
 //! Security:
@@ -330,34 +326,48 @@ async fn read_body_to_file(
     file.flush().await
 }
 
-/// The dashboard HTML to serve for `GET /`. In debug builds this is
-/// [`super::INDEX_HTML`] with [`LIVE_RELOAD_SCRIPT`] spliced in before
-/// `</body>`; release builds get the embedded HTML unmodified.
-fn index_html_body() -> std::borrow::Cow<'static, str> {
+/// The dashboard HTML to serve for `GET /`, including the runtime bootstrap.
+/// Debug builds also use disk assets and insert the live-reload script.
+fn index_html_body() -> String {
+    // Capture before reading the page, so an edit during loading is noticed
+    // by the first poll rather than becoming the new baseline unnoticed.
+    #[cfg(debug_assertions)]
+    let assets = super::assets::fingerprint();
+    let html = super::assets::index_html();
     let bootstrap = format!(
         "<script>window.mistlRuntime={};</script>",
         crate::runtime::build_info()
     );
-    let html = super::INDEX_HTML.replacen("<head>", &format!("<head>{bootstrap}"), 1);
-    std::borrow::Cow::Owned(html.replacen("</body>", LIVE_RELOAD_SCRIPT, 1))
+    #[cfg(debug_assertions)]
+    let bootstrap = format!(
+        "{bootstrap}<script>window.mistlAssetFingerprint={};</script>",
+        json!(assets)
+    );
+    let html = html.replacen("<head>", &format!("<head>{bootstrap}"), 1);
+    #[cfg(debug_assertions)]
+    let html = html.replacen("</body>", LIVE_RELOAD_SCRIPT, 1);
+    html
 }
 
-/// Debug-only live-reload poll: fetches the per-process `/api/dev/instance`
-/// nonce every second and reloads the page the first time it changes,
-/// which happens whenever `just watch` rebuilds and restarts the daemon. A
-/// poll that fails outright (daemon down mid-rebuild) is swallowed and just
+/// Debug-only live-reload poll. Failed polls (e.g. during a rebuild) are
 /// retried on the next tick.
+#[cfg(debug_assertions)]
 const LIVE_RELOAD_SCRIPT: &str = r#"<script>
 (function () {
   var lastInstance = window.mistlRunId || null;
+  var lastAssets = window.mistlAssetFingerprint || null;
   function poll() {
     fetch("/api/dev/instance", { cache: "no-store" })
       .then(function (r) { return r.json(); })
       .then(function (json) {
         var id = json && json.data && json.data.instance;
         if (!id) return;
-        if (lastInstance === null) { lastInstance = id; return; }
-        if (id !== lastInstance) { location.reload(); }
+        if (lastInstance !== null && id !== lastInstance) { location.reload(); return; }
+        lastInstance = id;
+        var assets = json.data.assets;
+        if (typeof assets !== "string") return;
+        if (lastAssets !== null && assets !== lastAssets) { location.reload(); return; }
+        lastAssets = assets;
       })
       .catch(function () { /* daemon rebuilding; retry next tick */ });
   }
@@ -579,10 +589,8 @@ async fn write_html_response(
     reason: &str,
     body: &str,
 ) -> io::Result<()> {
-    // The dashboard HTML is baked into the binary (`include_str!`), so a
-    // browser heuristically caching `/` (we send no validators) keeps
-    // showing a stale UI after the daemon is rebuilt. `no-cache` forces a
-    // fresh copy on every load.
+    // `no-cache` forces a fresh copy on every load, including after a rebuild
+    // or a development asset edit.
     let head = format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nContent-Security-Policy: {CSP}\r\nX-Frame-Options: DENY\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
         body.len()
@@ -755,18 +763,20 @@ async fn handle_connection_inner(
         ("GET", "/favicon.png") => {
             write_binary_response(stream, 200, "OK", "image/png", super::FAVICON_PNG).await
         }
-        ("GET", path) if super::assets::feature_asset(path).is_some() => {
-            let (content_type, body) = super::assets::feature_asset(path).unwrap();
-            write_feature_response(stream, content_type, body).await
+        ("GET", path) if path.starts_with("/assets/features/") => {
+            match super::assets::feature_asset(path) {
+                Some((content_type, body)) => {
+                    write_feature_response(stream, content_type, &body).await
+                }
+                None => write_error(stream, 404, "Not Found", "not found").await,
+            }
         }
         ("GET", "/api/dev/instance") => {
-            write_json_response(
-                stream,
-                200,
-                "OK",
-                &json!({"ok": true, "data": {"instance": instance_id}}),
-            )
-            .await
+            #[cfg(debug_assertions)]
+            let data = json!({"instance": instance_id, "assets": super::assets::fingerprint()});
+            #[cfg(not(debug_assertions))]
+            let data = json!({"instance": instance_id});
+            write_json_response(stream, 200, "OK", &json!({"ok": true, "data": data})).await
         }
         ("POST", "/api/call") => {
             // The dashboard polls this every 5s while a tab is open (status
@@ -1792,7 +1802,65 @@ mod tests {
         assert!(head.ends_with("\r\n\r\n"));
     }
 
-    // -- socket-level parsing (no AppState needed) -----------------------------
+    // -- socket-level requests and responses ----------------------------------
+
+    async fn dashboard_request(path: &str, authorized: bool) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            handle_connection_inner(&mut socket, AppState::for_test(), "test-instance", "token")
+                .await
+                .unwrap();
+        });
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let cookie = if authorized {
+            format!("Cookie: mistl_session_{}=token\r\n", addr.port())
+        } else {
+            String::new()
+        };
+        client
+            .write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n{cookie}\r\n").as_bytes())
+            .await
+            .unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).await.unwrap();
+        server.await.unwrap();
+        response
+    }
+
+    #[tokio::test]
+    async fn dashboard_assets_and_fingerprint_require_a_session() {
+        for path in ["/", "/assets/features/authz.js", "/api/dev/instance"] {
+            let response = dashboard_request(path, false).await;
+            assert!(response.starts_with("HTTP/1.1 401 "), "{path}");
+        }
+        let traversal = dashboard_request("/assets/features/../../.env", true).await;
+        assert!(traversal.starts_with("HTTP/1.1 404 "));
+
+        let html = dashboard_request("/", true).await;
+        assert!(html.starts_with("HTTP/1.1 200 "));
+        assert!(html.contains("Cache-Control: no-cache\r\n"));
+        assert!(html.contains(&format!("Content-Security-Policy: {CSP}\r\n")));
+        assert!(html.contains("X-Content-Type-Options: nosniff\r\n"));
+        assert_eq!(
+            html.contains("window.mistlAssetFingerprint="),
+            cfg!(debug_assertions)
+        );
+        assert_eq!(html.contains("/api/dev/instance"), cfg!(debug_assertions));
+
+        let feature = dashboard_request("/assets/features/authz.js", true).await;
+        assert!(feature.starts_with("HTTP/1.1 200 "));
+        assert!(feature.contains("Content-Type: text/javascript; charset=utf-8\r\n"));
+        assert!(feature.contains("Cache-Control: no-cache\r\n"));
+        assert!(feature.contains("X-Content-Type-Options: nosniff\r\n"));
+
+        let response = dashboard_request("/api/dev/instance", true).await;
+        let body = response.split_once("\r\n\r\n").unwrap().1;
+        let json: Value = serde_json::from_str(body).unwrap();
+        assert_eq!(json["data"]["instance"], "test-instance");
+        assert_eq!(json["data"]["assets"].is_string(), cfg!(debug_assertions));
+    }
 
     #[tokio::test]
     async fn feature_response_revalidates_scripts_with_exact_length() {

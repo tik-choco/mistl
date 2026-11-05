@@ -48,7 +48,10 @@ async function rebuild() {
 }
 function snapshot() {
   const files = [];
+  const liveAssets = path.join(root, 'src', 'web', 'assets');
   function walk(p) {
+    // The debug daemon serves these files from disk and reloads open tabs.
+    if (p === liveAssets) return;
     const stat = statSync(p);
     if (stat.isDirectory()) for (const name of readdirSync(p).sort()) walk(path.join(p, name));
     else files.push(`${p}:${stat.mtimeMs}:${stat.size}`);

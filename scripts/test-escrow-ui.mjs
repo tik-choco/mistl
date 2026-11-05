@@ -82,7 +82,7 @@ window.fetch = async (url, options) => {
     const status=fixtures["escrow.status"];status.enabled=cfg.enabled;
     for(const r of status.rooms) r.configured=cfg.rooms.includes(r.room);
     for(const room of cfg.rooms) if(!status.rooms.some(r=>r.room===room)) status.rooms.push({room,configured:true,joined:false,slots:0,bytes:0});
-    return {ok:true,json:async()=>({ok:true,data:{applies:"daemon restart",enabled:cfg.enabled,rooms:cfg.rooms}})};
+    return {ok:true,json:async()=>({ok:true,data:{applies:"auto restart",enabled:cfg.enabled,rooms:cfg.rooms}})};
   }
   if (request.cmd === 'chat.log') data = request.args.room === room ? chatMessages : [];
   else if (request.cmd === 'tunnel.room.set') { fixtures['tunnel.status'].room = request.args.room; data = {room:request.args.room}; }
@@ -112,7 +112,7 @@ window.fetch = async (url, options) => {
       });
       fixtures['ai.status'].providing = fixtures['ai.status'].rooms.some(room=>room.providing);
     }
-    data = {applies:section==='ai'?'applied immediately':'daemon restart'};
+    data = {applies:section==='ai'?'applied immediately':'auto restart'};
   }
   else { assert.ok(Object.hasOwn(fixtures, request.cmd), 'fixture for ' + request.cmd); data = fixtures[request.cmd]; }
   return {ok:true, json:async () => ({ok:true, data:structuredClone(data)})};
@@ -120,12 +120,11 @@ window.fetch = async (url, options) => {
 const flush = async () => { await new Promise(resolve=>setTimeout(resolve,5)); for (let i=0; i<15; i++) await new Promise(resolve => setImmediate(resolve)); };
 let failEscrow=false;
 fixtures["config.show"].escrow={enabled:false,rooms:["configured"],max_blob_bytes:33554432,max_total_bytes:1073741824,max_slots_per_room:1024,auto_replicas:3,dead_after_secs:86400};
-fixtures["escrow.status"]={enabled:false,running:true,applies:"daemon restart",bytes:5000,rooms:[
+fixtures["escrow.status"]={enabled:false,running:true,applies:"auto restart",bytes:5000,rooms:[
   {room:"configured",configured:true,joined:false,slots:2,bytes:400,auto:{target:3,slots:2,healthy:1,replicating:1,degraded:0,conflicts:0,held:1,insufficient_capacity:false,providers:[{did:'did:key:self',node:'self',self:true,online:true},{did:'did:key:<img src=x>',node:'peer',self:false,online:false}]}},
   {room:"old/<img src=x>",configured:false,joined:true,slots:3,bytes:500},
   {room:"raft",configured:false,joined:true,slots:0,bytes:0,replication:{role:'leader'}}
 ],head:{secret:"HEAD-SECRET"},blob:"BLOB-SECRET"};
-fixtures["daemon.restart"]={restarting:true};
 try {
   document.write(html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, ''));
   for (const [, attrs, source] of scripts) {
@@ -145,7 +144,6 @@ try {
   assert.ok(page.classList.contains('active'));
   assert.equal(page.querySelectorAll('tbody tr').length,3);
   assert.match(page.querySelector('[data-escrow-summary]').textContent,/5000 B|4.9 KB/);
-  assert.equal(page.querySelector('[data-escrow-restart-notice]').hidden,false);
   assert.equal(page.querySelectorAll('img').length,0);
   assert.ok(page.textContent.includes('old/<img src=x>'));
   assert.ok(!page.textContent.includes('HEAD-SECRET') && !page.textContent.includes('BLOB-SECRET'));
@@ -198,7 +196,7 @@ try {
   const chips=q('#settings-escrow-rooms');chips.value='invalid room';const before=calls.length;chips.dispatchEvent(new window.KeyboardEvent('keydown',{key:'Enter',bubbles:true}));await flush();assert.equal(calls.length,before);
   chips.value='valid-chip';chips.dispatchEvent(new window.KeyboardEvent('keydown',{key:'Enter',bubbles:true}));await flush();assert.ok(calls.some(c=>c.cmd==='config.set'&&c.args.path==='escrow.rooms'&&c.args.value.includes('valid-chip')));
   const blob=q('#settings-escrow-max_blob_bytes');blob.value='0.0625';blob.dispatchEvent(new window.Event('blur'));await flush();assert.ok(calls.some(c=>c.cmd==='config.set'&&c.args.path==='escrow.max_blob_bytes'&&c.args.value===67108864));
-  assert.equal(blob.closest('.settings-field').querySelector('.badge.restart').style.display,'inline-block');
+  assert.equal(blob.closest('.settings-field').querySelector('.badge.restart').style.display,'none');
   for(const [key,value] of [['auto_replicas','4'],['dead_after_secs','120']]) {
     const field=q('#settings-escrow-'+key);field.value=value;field.dispatchEvent(new window.Event('blur'));await flush();
     assert.ok(calls.some(c=>c.cmd==='config.set'&&c.args.path==='escrow.'+key&&c.args.value===Number(value)));
@@ -206,8 +204,7 @@ try {
   const enabled=q('#settings-escrow-enabled');enabled.checked=false;enabled.dispatchEvent(new window.Event('change'));await flush();assert.ok(calls.some(c=>c.cmd==='config.set'&&c.args.path==='escrow.enabled'&&c.args.value===false));
   for(const language of ['en','zh','ja']) {q('#lang-'+language+'-btn').click();await flush();assert.ok(!page.textContent.includes('escrow.configured'));assert.ok(page.textContent.includes('Escrow'));assert.ok(!copies.textContent.includes('escrow.state.'));assert.ok(!copies.textContent.includes('escrow.providersOnline'));}
   window.__mistlViewSwitchUntil=0;const count=calls.filter(c=>c.cmd==='escrow.status').length;intervals.find(i=>i.ms===5000).callback();await flush();assert.ok(calls.filter(c=>c.cmd==='escrow.status').length>count);
-  page.querySelector('[data-escrow-restart]').click();await flush();assert.ok(calls.some(c=>c.cmd==='daemon.restart'));
-  console.log('PASS: Escrow status/mesh states and providers/safe text/row export-import/validation/add-remove/config settings/all locales/polling/restart');
+  console.log('PASS: Escrow status/mesh states and providers/safe text/row export-import/validation/add-remove/config settings/all locales/polling/auto-apply');
 } finally {
   process.removeListener('unhandledRejection', onUnhandled);
   window.happyDOM.abort();

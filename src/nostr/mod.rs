@@ -723,6 +723,11 @@ pub fn spawn_background(state: Arc<AppState>) {
         return;
     }
     tokio::spawn(async move {
+        // Serialize startup with live toggles so a queued start cannot undo a stop.
+        let _apply = state.config_apply.lock().await;
+        if !state.network.permitted() || !state.config().nostr.enabled {
+            return;
+        }
         let mut guard = RUNNING.lock().await;
         if guard.is_some() {
             return;

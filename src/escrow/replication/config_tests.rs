@@ -109,13 +109,13 @@ fn replication_config_rejects_unknown_cluster_fields_and_malformed_shapes() {
 }
 
 #[test]
-fn replication_config_updates_validate_atomically_and_require_restart() {
+fn replication_config_updates_validate_atomically_and_schedule_auto_restart() {
     let initial =
         config::set_by_path(&Config::default(), "escrow.rooms", json!(["room-a"])).unwrap();
     let value = json!([{"room":"room-a","voters":["0123456789abcdef","123456789abcdef0","23456789abcdef01"]}]);
     let updated = config::set_by_path(&initial, "escrow.replication", value).unwrap();
     assert_eq!(updated.escrow.replication.len(), 1);
-    assert_eq!(config::applies_when("escrow.replication"), "daemon restart");
+    assert_eq!(config::applies_when("escrow.replication"), "auto restart");
     assert!(config::set_by_path(&updated, "escrow.rooms", json!([])).is_err());
     assert!(
         config::set_by_path(

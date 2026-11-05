@@ -12,7 +12,6 @@
     var error = root.querySelector("[data-escrow-error]");
     var summary = root.querySelector("[data-escrow-summary]");
     var body = root.querySelector("tbody"), rows = new Map(), last = null;
-    var restart = root.querySelector("[data-escrow-restart]");
     var exportButton = root.querySelector("[data-escrow-export]");
     var importButton = root.querySelector("[data-escrow-import]");
     var archiveInput = root.querySelector("[data-escrow-file]");
@@ -42,7 +41,6 @@
     root.querySelector("[data-escrow-refresh]").addEventListener("click", function (event) {
       options.refresh(event.currentTarget);
     });
-    restart.addEventListener("click", function () { options.restart(restart); });
     function setArchiveBusy(value) {
       archiveBusy = value;
       exportButton.disabled = value; importButton.disabled = value;
@@ -176,7 +174,6 @@
       });
       rows.forEach(function (row, key) { if (!kept.has(key)) { row.remove(); rows.delete(key); } });
       root.querySelector("[data-escrow-empty]").hidden = rooms.length !== 0;
-      root.querySelector("[data-escrow-restart-notice]").hidden = data.applies !== "daemon restart";
     }
     return { render: render, refreshLanguage: function () {
       if (validationError) setError(t("escrow.invalidRoom"));

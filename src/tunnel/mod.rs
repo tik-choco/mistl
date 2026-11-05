@@ -186,6 +186,11 @@ pub fn spawn_background(state: Arc<AppState>) {
         return;
     }
     tokio::spawn(async move {
+        // A config save may have disabled the service while startup was queued.
+        let _apply = state.config_apply.lock().await;
+        if !state.network.permitted() || !state.config().tunnel.enabled {
+            return;
+        }
         match start(&state).await {
             Ok(result) => info!(%result, "tunnel: auto-started from [tunnel] enabled = true"),
             Err(error) => warn!(

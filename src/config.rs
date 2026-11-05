@@ -812,17 +812,14 @@ impl Default for SchedulerConfig {
 /// Bot pipeline engine: source -> transform(s) -> sink(s) automation runs
 /// (see `crate::bot` and `tc-docs/drafts/bot-pipeline-v1.md`). Mirrors
 /// `[scheduler]`'s shape -- a master switch plus a list of user-defined
-/// entries -- but the entries themselves (`pipelines`) are read live on
-/// every tick (see `applies_when`, and `crate::bot::spawn_background`'s doc
-/// comment) rather than only at daemon start.
+/// entries. Both the switch and pipelines are read live on every tick.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BotConfig {
     /// Master switch for the background tick loop that fires due pipelines.
     /// Manual `bot.run` still works regardless -- only the automatic
-    /// scheduling is gated. Mirrors `SchedulerConfig::enabled` exactly,
-    /// including needing a daemon restart to take effect (see
-    /// `crate::bot::spawn_background`).
+    /// scheduling is gated. Changes apply on the next tick, like
+    /// `SchedulerConfig::enabled`, and do not cancel an in-flight run.
     pub enabled: bool,
     pub pipelines: Vec<PipelineConfig>,
 }
@@ -1479,46 +1476,27 @@ pub fn set_by_path(config: &Config, path: &str, value: serde_json::Value) -> Res
 }
 
 /// When a change to `path` actually takes effect, shown to users by the CLI
-/// and dashboard. Services read config as they start, so most fields apply
-/// on the next `*.start`; the p2p room is joined once per daemon lifetime
-/// and the dashboard listener binds at daemon startup.
+/// and dashboard. This is also the dispatcher's source of truth for scheduling
+/// a debounced, idle-only self-restart. Live settings are read each tick or
+/// applied by config.set; remaining service settings are read on next start.
+/// The dashboard listener alone requires an explicit daemon restart.
 pub fn applies_when(path: &str) -> &'static str {
     match path {
         "ui.enabled" | "ui.listen" => "daemon restart",
-        path if path.starts_with("escrow.") => "daemon restart",
-        // The background updater re-reads config each tick, but its cadence
-        // and enabled state are simplest to reason about across a restart.
-        "update.auto_check" | "update.check_interval_hours" => "daemon restart",
-        // chat_relay/ai/stream join their rooms once at service start and hold
-        // it for the process lifetime; before any p2p service ran it applies
-        // on next start, but "daemon restart" is the safe universal answer.
-        // `storage.room_ids` (and its legacy alias `storage.room_id`) is the
-        // one exception -- `storage::store` re-resolves the whole list on
-        // every call and hops rooms live, so it falls through to "next
-        // service start" below (true immediately, since the next `store.*`
-        // command *is* its next "start").
+        path if path.starts_with("escrow.") => "auto restart",
+        // Chat's OnceCell cannot be reset, and AI/stream legacy room paths
+        // lack a safe service-only restart preserving in-flight operations.
+        // Storage resolves its rooms on each call and keeps the default below.
         "chat_relay.rooms" | "chat_relay.enabled" | "ai.room_id" | "stream.room"
-        | "stream.relay_room" | "stream.share_room" => "daemon restart",
-        // The background tick loop is only started once at daemon startup
-        // (see `scheduler::spawn_background`); toggling it live would need
-        // a way to stop an already-running loop, which isn't implemented.
-        "scheduler.enabled" => "daemon restart",
-        // Same reasoning as `scheduler.enabled` -- `crate::bot`'s tick loop
-        // is only started once at daemon startup. `bot.pipelines` is
-        // deliberately NOT listed here: the tick loop re-reads it on every
-        // tick (see `crate::bot::spawn_background`), so pipeline
-        // add/edit/remove takes effect on the very next tick, not a restart.
-        "bot.enabled" => "daemon restart",
-        // Same reasoning again -- `crate::tunnel::spawn_background` only
-        // auto-joins once at daemon startup. `tunnel.room_id`/`auto_accept`/
-        // `allow_peers`/`stdio_enabled`/`stdio_command` deliberately fall
-        // through to the "next service start" default below: they're read
-        // fresh by `tunnel.start`/each new inbound authorization, so a
-        // `mistl tunnel start` (or the next connection attempt) already *is*
-        // that "next start", no daemon restart required.
-        "tunnel.enabled" => "daemon restart",
-        // Like `tunnel.enabled`: only read by the startup auto-start.
-        "nostr.enabled" => "daemon restart",
+        | "stream.relay_room" | "stream.share_room" => "auto restart",
+        // Daemon-lifetime loops re-read their switches/cadence every tick.
+        "scheduler.enabled"
+        | "bot.enabled"
+        | "update.auto_check"
+        | "update.check_interval_hours" => "applied immediately",
+        // Start/stop in-process on save, persisting the same intent as the
+        // corresponding manual commands. Offline mode still prevents starts.
+        "tunnel.enabled" | "nostr.enabled" => "applied immediately",
         // These feed the running AI provider's upstream/model resolution.
         // `daemon::dispatch`'s `config.set` handler reloads it live right
         // after a save (see `ai::reload_provider_if_running`) when one is
@@ -2518,18 +2496,13 @@ mod tests {
         assert!(config.scheduler.enabled);
         let updated = set_by_path(&config, "scheduler.enabled", json!(false)).unwrap();
         assert!(!updated.scheduler.enabled);
-        // Not covered by `applies_when_answers_the_documented_table` (that
-        // table only covers the room-setting/ai-provider paths), so kept
-        // here rather than dropped as a duplicate.
-        assert_eq!(applies_when("scheduler.enabled"), "daemon restart");
+        assert_eq!(applies_when("scheduler.enabled"), "applied immediately");
     }
 
     /// The `applies_when` table has one genuinely non-obvious answer worth
     /// pinning: `storage.room_ids` (and its legacy alias `storage.room_id`)
-    /// answers "next service start" while every other room setting answers
-    /// "daemon restart", plus the `ai.*` provider-family paths that answer
-    /// "applied immediately". Everything else is a straightforward string
-    /// match not worth enumerating test-by-test.
+    /// answers "next service start", legacy room settings schedule an automatic
+    /// restart, and live switches/provider settings apply immediately.
     #[test]
     fn applies_when_answers_the_documented_table() {
         // Unlike chat_relay/ai/stream room settings, storage's rooms are
@@ -2537,24 +2510,37 @@ mod tests {
         // so changing them should never tell the user to restart the daemon.
         // Both the current field name and its legacy alias answer the same.
         let next_service_start = ["storage.room_ids", "storage.room_id"];
-        // Room settings that join once at service start and hold for the
-        // process lifetime -- daemon restart is the safe universal answer.
-        let daemon_restart = [
+        let auto_restart = [
             "chat_relay.rooms",
             "chat_relay.enabled",
             "ai.room_id",
             "stream.room",
             "stream.relay_room",
             "stream.share_room",
+            "escrow.enabled",
+            "escrow.rooms",
+            "escrow.replication",
         ];
-        // These feed reload_provider_if_running (ai::mod), unlike
-        // ai.room_id above which still needs a restart (joins its room once).
-        let applied_immediately = ["ai.providers", "ai.default_ref", "ai.tts", "ai.stt"];
+        let applied_immediately = [
+            "ai.providers",
+            "ai.default_ref",
+            "ai.tts",
+            "ai.stt",
+            "scheduler.enabled",
+            "bot.enabled",
+            "tunnel.enabled",
+            "nostr.enabled",
+            "update.auto_check",
+            "update.check_interval_hours",
+        ];
         for path in next_service_start {
             assert_eq!(applies_when(path), "next service start", "path: {path}");
         }
-        for path in daemon_restart {
+        for path in ["ui.enabled", "ui.listen"] {
             assert_eq!(applies_when(path), "daemon restart", "path: {path}");
+        }
+        for path in auto_restart {
+            assert_eq!(applies_when(path), "auto restart", "path: {path}");
         }
         for path in applied_immediately {
             assert_eq!(applies_when(path), "applied immediately", "path: {path}");
@@ -2994,11 +2980,11 @@ mod tests {
     }
 
     #[test]
-    fn set_by_path_updates_bot_enabled_and_applies_when_requires_a_restart() {
+    fn set_by_path_updates_bot_enabled_live() {
         let config = Config::default();
         let updated = set_by_path(&config, "bot.enabled", json!(false)).unwrap();
         assert!(!updated.bot.enabled);
-        assert_eq!(applies_when("bot.enabled"), "daemon restart");
+        assert_eq!(applies_when("bot.enabled"), "applied immediately");
         assert_eq!(applies_when("bot.pipelines"), "next service start");
     }
 

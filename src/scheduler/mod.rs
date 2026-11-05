@@ -238,6 +238,13 @@ impl SchedulerService {
         }
         due
     }
+
+    async fn background_due(&self, state: &AppState, now: chrono::DateTime<Local>) -> Vec<Job> {
+        if !state.network.permitted() || !state.config().scheduler.enabled {
+            return Vec::new();
+        }
+        self.take_due_jobs(now).await
+    }
 }
 
 fn compute_next_fire(job: &Job, now: chrono::DateTime<Local>) -> Option<chrono::DateTime<Local>> {
@@ -298,23 +305,19 @@ async fn init_service() -> Result<Arc<SchedulerService>> {
 
 /// Daemon-lifetime background task: every second, fire any job whose
 /// next-fire has arrived (each execution spawned independently, so
-/// overlapping runs of the same job are allowed, like tc-sched). A no-op
-/// (logged) when `[scheduler] enabled = false` -- manual `sched.*` commands
+/// overlapping runs of the same job are allowed, like tc-sched). Checks
+/// `[scheduler] enabled` every tick -- manual `sched.*` commands
 /// (including "run now") still work either way, only the automatic tick
 /// loop is gated.
 pub fn spawn_background(state: Arc<AppState>) {
-    if !state.config().scheduler.enabled {
-        info!("scheduler: disabled via config; background tick loop not started");
-        return;
-    }
     tokio::spawn(async move {
-        if let Err(error) = run_background().await {
+        if let Err(error) = run_background(state).await {
             warn!(%error, "scheduler: background task failed to start");
         }
     });
 }
 
-async fn run_background() -> Result<()> {
+async fn run_background(state: Arc<AppState>) -> Result<()> {
     let service = ensure_service()
         .await
         .context("scheduler: initializing service")?;
@@ -326,7 +329,7 @@ async fn run_background() -> Result<()> {
     loop {
         ticker.tick().await;
         let now = Local::now();
-        for job in service.take_due_jobs(now).await {
+        for job in service.background_due(&state, now).await {
             let data_dir = service.data_dir.clone();
             tokio::spawn(async move {
                 runner::execute_and_record(&data_dir, &job).await;
@@ -542,6 +545,33 @@ pub async fn handle(cmd: &str, args: Value, _state: &Arc<AppState>) -> Result<Va
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn master_switch_disables_and_reenables_existing_scheduler() {
+        let state = AppState::for_test();
+        let now = Local::now();
+        let service = SchedulerService {
+            data_dir: PathBuf::new(),
+            jobs: RwLock::new(vec![JobState {
+                job: sample_job("toggle", "toggle"),
+                next_fire: Some(now),
+            }]),
+        };
+        let mut config = state.config();
+        config.scheduler.enabled = false;
+        state.set_config(config.clone());
+        assert!(service.background_due(&state, now).await.is_empty());
+        config.scheduler.enabled = true;
+        state.set_config(config.clone());
+        assert_eq!(service.background_due(&state, now).await.len(), 1);
+        config.scheduler.enabled = false;
+        state.set_config(config.clone());
+        let later = now + chrono::Duration::hours(2);
+        assert!(service.background_due(&state, later).await.is_empty());
+        config.scheduler.enabled = true;
+        state.set_config(config);
+        assert_eq!(service.background_due(&state, later).await.len(), 1);
+    }
 
     fn scratch_dir(name: &str) -> PathBuf {
         let suffix: u64 = rand::random();

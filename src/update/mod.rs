@@ -61,9 +61,8 @@ const MAX_SIG_BYTES: u64 = 4 * 1024;
 /// Delay before the background task's first check after daemon startup,
 /// so updates never compete with startup work.
 const FIRST_CHECK_DELAY: Duration = Duration::from_secs(30);
-/// Config re-poll cadence while `[update] auto_check` is off, so enabling
-/// it via `config.set` applies without a daemon restart.
-const DISABLED_RECHECK: Duration = Duration::from_secs(15 * 60);
+/// Re-read enabled state and cadence even during a long check interval.
+const CONFIG_RECHECK: Duration = Duration::from_secs(1);
 /// Allow the daemon and its users time to settle after an automatic stage.
 const RESTART_GRACE: Duration = Duration::from_secs(60);
 /// How often to re-check idleness and the restart settings.
@@ -227,22 +226,25 @@ pub fn spawn_auto_update(state: Arc<AppState>) {
     }
     tokio::spawn(async move {
         tokio::time::sleep(FIRST_CHECK_DELAY).await;
+        let mut last_check = None;
         loop {
             // Re-read config each round so `config.set` hot-reloads apply.
             let update = state.config().update;
-            if !update.auto_check {
-                tokio::time::sleep(DISABLED_RECHECK).await;
-                continue;
+            if state.network.permitted() && auto_check_due(&update, last_check) {
+                if let Err(error) = auto_check_once(&update, &state).await {
+                    warn!(%error, "update: background check failed");
+                    record_check(format!("auto-check failed: {error:#}"));
+                }
+                last_check = Some(tokio::time::Instant::now());
             }
-            if let Err(error) = auto_check_once(&update, &state).await {
-                warn!(%error, "update: background check failed");
-                record_check(format!("auto-check failed: {error:#}"));
-            }
-            let interval =
-                Duration::from_secs(update.check_interval_hours.max(1).saturating_mul(3600));
-            tokio::time::sleep(interval).await;
+            tokio::time::sleep(CONFIG_RECHECK).await;
         }
     });
+}
+
+fn auto_check_due(update: &UpdateConfig, last_check: Option<tokio::time::Instant>) -> bool {
+    let interval = Duration::from_secs(update.check_interval_hours.max(1).saturating_mul(3600));
+    update.auto_check && last_check.is_none_or(|last| last.elapsed() >= interval)
 }
 
 /// One background round: check, and stage when allowed. Missing assets and
@@ -339,7 +341,7 @@ fn spawn_restart_waiter(state: Arc<AppState>) {
             if !update.auto_restart || !update.auto_apply {
                 break;
             }
-            if !crate::stream::is_running().await && crate::tunnel::active_conns().await == 0 {
+            if crate::daemon::restart::is_idle().await {
                 if let Some(version) = staged_version() {
                     info!(from = CURRENT_VERSION, to = %version, "update: restarting into staged version");
                     record_check(format!("restarting into v{version}"));
@@ -815,6 +817,25 @@ fn last_check() -> (Option<String>, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn auto_check_observes_live_switch_and_shorter_interval() {
+        let mut update = UpdateConfig::default();
+        update.auto_check = false;
+        assert!(!auto_check_due(&update, None));
+        update.auto_check = true;
+        assert!(auto_check_due(&update, None));
+        let last = Some(tokio::time::Instant::now());
+        update.check_interval_hours = 24;
+        tokio::time::advance(Duration::from_secs(3600)).await;
+        assert!(!auto_check_due(&update, last));
+        update.check_interval_hours = 1;
+        assert!(auto_check_due(&update, last));
+        update.auto_check = false;
+        assert!(!auto_check_due(&update, last));
+        update.auto_check = true;
+        assert!(auto_check_due(&update, last));
+    }
 
     #[test]
     fn staged_version_matches_only_the_same_release() {

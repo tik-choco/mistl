@@ -1969,7 +1969,13 @@ pub fn dispatch(cli: Cli) -> Result<()> {
                     && applies != "next service start"
                     && applies != "applied immediately"
                 {
-                    println!("note: this change takes effect after a {applies}");
+                    if applies == "auto restart" {
+                        println!(
+                            "note: the daemon will restart automatically after saving, once streams and tunnel connections are idle"
+                        );
+                    } else {
+                        println!("note: this change takes effect after a {applies}");
+                    }
                 }
                 Ok(())
             }
