@@ -156,7 +156,7 @@ try {
   assert.deepEqual([...q('#sidenav').children].map(el=>el.getAttribute('href') || el.getAttribute('data-i18n')), [
     '#panel-overview', '#panel-chat', '#panel-ai', 'nav.group.network', '#panel-tunnel', '#panel-nostr',
     'nav.group.data', '#panel-store', '#panel-escrow', 'nav.group.automation', '#panel-scheduler', '#panel-bot',
-    'nav.group.manage', '#panel-profile', '#panel-access', '#panel-update', '#panel-settings'
+    'nav.group.manage', '#panel-access', '#panel-settings'
   ]);
   assert.ok([...document.querySelectorAll('#sidenav .sidenav-group')].every(el=>el.tagName==='DIV' && el.getAttribute('role')==='presentation'));
   assert.ok(!calls.some(c=>c.cmd==='escrow.status'), 'Vault polling waits until the panel is opened');

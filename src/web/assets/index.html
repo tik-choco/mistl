@@ -283,7 +283,7 @@
     align-items: center;
     gap: 10px;
   }
-  .panel h2 .spacer, .chat-page-head .spacer { flex: 1; }
+  .panel h2 .spacer, .chat-page-head .spacer, .subtab-page-head .spacer { flex: 1; }
   .panel-span2 { grid-column: auto; }   /* legacy hook: single-view is full width */
 
   /* ---- in-panel sub-tabs ----
@@ -296,12 +296,9 @@
        </div>
        <div class="subtab-page" data-subtab="x">…</div> …
      The tablist and its pages must live in the same .panel. The active tab
-     is remembered per panel (localStorage mistl-subtab-<panel-id>). Tab
-     visibility is pure UI state -- polling never gates on it, so tables in
-     hidden pages keep updating. Panel-wide furniture (topo strips,
-     topology slots, settings drawers) stays OUTSIDE the pages: the
-     topology card is re-parented into panels and must not vanish inside a
-     hidden tab. */
+     is remembered per panel (localStorage mistl-subtab-<panel-id>).
+     Individual pollers decide whether to update hidden pages. Shared topology
+     slots stay OUTSIDE the pages so the card cannot vanish in a hidden tab. */
   .subtabs {
     display: flex;
     flex-wrap: wrap;
@@ -336,7 +333,7 @@
      into a page doesn't change their spacing */
   .subtab-page { display: none; flex-direction: column; gap: 16px; min-width: 0; }
   .subtab-page.active { display: flex; animation: risein var(--dur) var(--ease); }
-  .chat-page-head { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; color: var(--text-dim); }
+  .chat-page-head, .subtab-page-head { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; color: var(--text-dim); }
 
   .hint-banner {
     display: flex;
@@ -1729,9 +1726,7 @@
     <a href="#panel-scheduler"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l3 2"/><path d="M9 2h6"/></svg><span data-i18n="nav.scheduler">Scheduler</span></a>
     <a href="#panel-bot"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="2"/><circle cx="9" cy="14" r="1.2"/><circle cx="15" cy="14" r="1.2"/><path d="M12 8V4"/><circle cx="12" cy="3" r="1"/><path d="M2 13h2M20 13h2"/></svg><span data-i18n="nav.bot">Bot</span></a>
     <div class="sidenav-group" role="presentation" data-i18n="nav.group.manage">Manage</div>
-    <a href="#panel-profile"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/></svg><span data-i18n="nav.profile">Profile</span></a>
     <a href="#panel-access"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v6c0 5 8 9 8 9s8-4 8-9V6Z"/><path d="m8 12 3 3 5-6"/></svg><span data-authz-title>Access</span></a>
-    <a href="#panel-update"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m8 11 4 4 4-4"/><path d="M4 17v2a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-2"/></svg><span data-i18n="nav.update">Updates</span></a>
     <a href="#panel-settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg><span data-i18n="nav.settings">Settings</span></a>
   </nav>
 
@@ -1752,6 +1747,38 @@
       <button id="btn-stop-daemon" class="danger" data-i18n="overview.stopDaemon">Stop daemon</button>
     </div>
     <div class="topology-slot" id="topology-slot-overview"></div>
+    <hr class="sep">
+    <h3 data-i18n="profile.title">Profile</h3>
+    <dl class="kv" id="profile-kv"></dl>
+    <div class="profile-avatar-row">
+      <div class="avatar-preview" id="profile-avatar-preview" aria-hidden="true"></div>
+      <div class="avatar-controls">
+        <div class="store-dropzone" id="profile-avatar-dropzone" tabindex="0" role="button" data-i18n-aria-label="profile.avatarPick" aria-label="Set profile image">
+          <span data-i18n="profile.avatarDropText">Drag an image here, or click to choose</span>
+          <span class="muted" style="font-size: 11.5px;" data-i18n="profile.avatarHint">PNG, JPEG or WebP. Downscaled to 256px and stored on this node.</span>
+          <input type="file" id="profile-avatar-input" accept="image/png,image/jpeg,image/webp" hidden>
+        </div>
+        <div class="avatar-actions">
+          <button type="button" id="btn-profile-avatar-remove" class="danger" data-i18n="profile.avatarRemove" hidden>Remove image</button>
+        </div>
+      </div>
+    </div>
+    <form class="inline" id="profile-form">
+      <div class="field" style="flex: 1;">
+        <label for="profile-display-name" data-i18n="profile.displayNameLabel">Display name</label>
+        <input type="text" id="profile-display-name" autocomplete="off">
+      </div>
+      <button type="submit" class="primary" id="btn-profile-save" data-i18n="profile.save">Save</button>
+    </form>
+    <details class="settings-drawer" id="settings-drawer-identity">
+      <summary>
+        <svg class="gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg>
+        <span data-i18n="settings.drawer.identity">Identity settings</span>
+        <span class="drawer-chevron" aria-hidden="true"></span>
+      </summary>
+      <div class="settings-drawer-body" id="settings-drawer-body-identity"></div>
+    </details>
+    <div id="identity-app"></div>
   </section>
 
   <section class="panel panel-span2" id="panel-chat">
@@ -1841,6 +1868,7 @@
             <span id="topology-flow-note" hidden></span>
           </div>
           <p class="topology-empty-note" id="topology-empty-note" hidden></p>
+          <button type="button" id="topology-maximize" class="graph-maximize" aria-pressed="false" aria-label="Maximize" title="Maximize">⛶</button>
         </div>
       </div>
     </div>
@@ -2614,95 +2642,65 @@
     <div id="authz-app"></div>
   </section>
 
-  <section class="panel" id="panel-profile">
-    <h2><span data-i18n="profile.title">Profile</span> <span class="spacer"></span>
-      <button data-role="refresh" data-target="profile" data-i18n="common.refresh">Refresh</button>
-    </h2>
-    <dl class="kv" id="profile-kv"></dl>
-    <div class="profile-avatar-row">
-      <div class="avatar-preview" id="profile-avatar-preview" aria-hidden="true"></div>
-      <div class="avatar-controls">
-        <div class="store-dropzone" id="profile-avatar-dropzone" tabindex="0" role="button" data-i18n-aria-label="profile.avatarPick" aria-label="Set profile image">
-          <span data-i18n="profile.avatarDropText">Drag an image here, or click to choose</span>
-          <span class="muted" style="font-size: 11.5px;" data-i18n="profile.avatarHint">PNG, JPEG or WebP. Downscaled to 256px and stored on this node.</span>
-          <input type="file" id="profile-avatar-input" accept="image/png,image/jpeg,image/webp" hidden>
-        </div>
-        <div class="avatar-actions">
-          <button type="button" id="btn-profile-avatar-remove" class="danger" data-i18n="profile.avatarRemove" hidden>Remove image</button>
-        </div>
-      </div>
-    </div>
-    <form class="inline" id="profile-form">
-      <div class="field" style="flex: 1;">
-        <label for="profile-display-name" data-i18n="profile.displayNameLabel">Display name</label>
-        <input type="text" id="profile-display-name" autocomplete="off">
-      </div>
-      <button type="submit" class="primary" id="btn-profile-save" data-i18n="profile.save">Save</button>
-    </form>
-    <details class="settings-drawer" id="settings-drawer-identity">
-      <summary>
-        <svg class="gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg>
-        <span data-i18n="settings.drawer.identity">Identity settings</span>
-        <span class="drawer-chevron" aria-hidden="true"></span>
-      </summary>
-      <div class="settings-drawer-body" id="settings-drawer-body-identity"></div>
-    </details>
-    <div id="identity-app"></div>
-  </section>
-
-  <section class="panel" id="panel-update">
-    <h2><span data-i18n="update.title">Updates</span> <span class="spacer"></span>
-      <button data-role="refresh" data-target="update" data-i18n="common.refresh">Refresh</button>
-    </h2>
-    <dl class="kv" id="update-kv"></dl>
-    <div class="info-hint" id="update-available-hint" hidden></div>
-    <div class="row">
-      <button id="btn-update-check" class="primary" data-i18n="update.checkBtn">Check now</button>
-      <button id="btn-update-apply" class="primary" data-i18n="update.applyBtn" hidden>Update now</button>
-      <button id="btn-update-version" data-i18n="update.otherVersion">Install another version…</button>
-    </div>
-    <hr class="sep">
-    <div class="flow-grid">
-      <div class="flow-card">
-        <h3 data-i18n="update.installTitle">Install for your user</h3>
-        <p data-i18n="update.installDesc">Copies mistl to a fixed per-user location so updates and start-at-login work reliably. No admin needed.</p>
-        <div class="row">
-          <button id="btn-install" class="primary" data-i18n="update.installBtn">Install mistl</button>
-        </div>
-      </div>
-      <div class="flow-card">
-        <h3 data-i18n="update.autostartTitle">Start at login</h3>
-        <p data-i18n="update.autostartDesc">Launch the mistl daemon automatically when you sign in.</p>
-        <label class="switch-control"><span data-i18n="update.autostartLabel">Start mistl at login</span> <span class="toggle-switch"><input type="checkbox" role="switch" id="chk-autostart"><span class="slider" aria-hidden="true"></span></span></label>
-      </div>
-      <div class="flow-card">
-        <h3 data-i18n="update.pathTitle">Command line</h3>
-        <p data-i18n="update.pathDesc">Add mistl to your PATH so the mistl command works in any new terminal.</p>
-        <label class="switch-control"><span data-i18n="update.pathLabel">Use mistl from any terminal</span> <span class="toggle-switch"><input type="checkbox" role="switch" id="chk-cli-path"><span class="slider" aria-hidden="true"></span></span></label>
-      </div>
-    </div>
-    <details class="settings-drawer" id="settings-drawer-update">
-      <summary>
-        <svg class="gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg>
-        <span data-i18n="settings.drawer.update">Update settings</span>
-        <span class="drawer-chevron" aria-hidden="true"></span>
-      </summary>
-      <div class="settings-drawer-body" id="settings-drawer-body-update"></div>
-    </details>
-  </section>
-
   <section class="panel panel-span2" id="panel-settings">
-    <h2><span data-i18n="settings.title">Settings</span> <span class="spacer"></span>
-      <button data-role="refresh" data-target="settings" data-i18n="common.refresh">Refresh</button>
-    </h2>
-    <div class="flow-card" id="dev-mode-card">
-      <h3 data-i18n="settings.developerTitle">Developer mode</h3>
-      <p data-i18n="settings.developerDesc">Shows this daemon's detailed debug logs in real time, docked at the bottom of the dashboard.</p>
-      <label class="switch-control"><span data-i18n="settings.developerLabel">Enable developer mode</span> <span class="toggle-switch"><input type="checkbox" role="switch" id="chk-dev-mode"><span class="slider" aria-hidden="true"></span></span></label>
+    <h2><span data-i18n="settings.title">Settings</span></h2>
+    <div class="subtabs" role="tablist" data-i18n-aria-label="settings.title" aria-label="Settings">
+      <button type="button" data-subtab-target="general" data-i18n="settings.tabs.general">General</button>
+      <button type="button" data-subtab-target="update" data-i18n="update.title">Updates</button>
     </div>
-    <p class="muted" style="font-size: 12px;" data-i18n="settings.movedNote">Stream, AI, tc-chat relay, Storage and Identity settings now live inside their own tabs.</p>
-    <hr class="sep">
-    <div id="settings-body"></div>
+    <div class="subtab-page" data-subtab="general">
+      <div class="subtab-page-head"><span class="spacer"></span>
+        <button data-role="refresh" data-target="settings" data-i18n="common.refresh">Refresh</button>
+      </div>
+      <div class="flow-card" id="dev-mode-card">
+        <h3 data-i18n="settings.developerTitle">Developer mode</h3>
+        <p data-i18n="settings.developerDesc">Shows this daemon's detailed debug logs in real time, docked at the bottom of the dashboard.</p>
+        <label class="switch-control"><span data-i18n="settings.developerLabel">Enable developer mode</span> <span class="toggle-switch"><input type="checkbox" role="switch" id="chk-dev-mode"><span class="slider" aria-hidden="true"></span></span></label>
+      </div>
+      <p class="muted" style="font-size: 12px;" data-i18n="settings.movedNote">Stream, AI, tc-chat relay, Storage and Identity settings are available in their respective sections.</p>
+      <hr class="sep">
+      <div id="settings-body"></div>
+    </div>
+    <div class="subtab-page" data-subtab="update">
+      <div class="subtab-page-head"><span class="spacer"></span>
+        <button data-role="refresh" data-target="update" data-i18n="common.refresh">Refresh</button>
+      </div>
+      <dl class="kv" id="update-kv"></dl>
+      <div class="info-hint" id="update-available-hint" hidden></div>
+      <div class="row">
+        <button id="btn-update-check" class="primary" data-i18n="update.checkBtn">Check now</button>
+        <button id="btn-update-apply" class="primary" data-i18n="update.applyBtn" hidden>Update now</button>
+        <button id="btn-update-version" data-i18n="update.otherVersion">Install another version…</button>
+      </div>
+      <hr class="sep">
+      <div class="flow-grid">
+        <div class="flow-card">
+          <h3 data-i18n="update.installTitle">Install for your user</h3>
+          <p data-i18n="update.installDesc">Copies mistl to a fixed per-user location so updates and start-at-login work reliably. No admin needed.</p>
+          <div class="row">
+            <button id="btn-install" class="primary" data-i18n="update.installBtn">Install mistl</button>
+          </div>
+        </div>
+        <div class="flow-card">
+          <h3 data-i18n="update.autostartTitle">Start at login</h3>
+          <p data-i18n="update.autostartDesc">Launch the mistl daemon automatically when you sign in.</p>
+          <label class="switch-control"><span data-i18n="update.autostartLabel">Start mistl at login</span> <span class="toggle-switch"><input type="checkbox" role="switch" id="chk-autostart"><span class="slider" aria-hidden="true"></span></span></label>
+        </div>
+        <div class="flow-card">
+          <h3 data-i18n="update.pathTitle">Command line</h3>
+          <p data-i18n="update.pathDesc">Add mistl to your PATH so the mistl command works in any new terminal.</p>
+          <label class="switch-control"><span data-i18n="update.pathLabel">Use mistl from any terminal</span> <span class="toggle-switch"><input type="checkbox" role="switch" id="chk-cli-path"><span class="slider" aria-hidden="true"></span></span></label>
+        </div>
+      </div>
+      <details class="settings-drawer" id="settings-drawer-update">
+        <summary>
+          <svg class="gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg>
+          <span data-i18n="settings.drawer.update">Update settings</span>
+          <span class="drawer-chevron" aria-hidden="true"></span>
+        </summary>
+        <div class="settings-drawer-body" id="settings-drawer-body-update"></div>
+      </details>
+    </div>
   </section>
 </main>
 <aside id="topology-dock" aria-label="Topology" data-i18n-aria-label="topology.title"></aside>
@@ -2989,9 +2987,7 @@
       "nav.bot": "Bot",
       "nav.tunnel": "Tunnel",
       "nav.nostr": "Nostr relay",
-      "nav.profile": "Profile",
       "nav.settings": "Settings",
-      "nav.update": "Updates",
       "update.title": "Updates",
       "update.current": "Current version",
       "update.latest": "Latest release",
@@ -3120,6 +3116,8 @@
       "stream.cascade.offNote": "Cascade off ([stream] cascade = false)",
       "topology.title": "Topology",
       "topology.details.open": "View node details",
+      "topology.maximize": "Maximize",
+      "topology.restore": "Restore",
       "topology.details.title": "Connection details",
       "topology.details.close": "Close",
       "topology.details.copy": "Copy node ID",
@@ -3527,6 +3525,7 @@
       "profile.avatarRemoved": "Profile image removed.",
       "profile.avatarBadType": "Choose a PNG, JPEG or WebP image.",
       "settings.title": "Settings",
+      "settings.tabs.general": "General",
       "settings.developerTitle": "Developer mode",
       "settings.developerDesc": "Shows this daemon's detailed debug logs in real time, docked at the bottom of the dashboard.",
       "settings.developerLabel": "Enable developer mode",
@@ -3561,7 +3560,7 @@
       "settings.drawer.scheduler": "Scheduler settings",
       "settings.drawer.bot": "Bot settings",
       "settings.advanced": "Advanced",
-      "settings.movedNote": "Stream, AI, tc-chat relay, Storage and Identity settings now live inside their own tabs.",
+      "settings.movedNote": "Stream, AI, tc-chat relay, Storage and Identity settings are available in their respective sections.",
       "settings.section.identity": "Identity",
       "settings.section.storage": "Storage",
       "settings.section.stream": "Stream",
@@ -3971,9 +3970,7 @@
       "nav.bot": "Bot",
       "nav.tunnel": "トンネル",
       "nav.nostr": "Nostr リレー",
-      "nav.profile": "プロフィール",
       "nav.settings": "設定",
-      "nav.update": "更新",
       "update.title": "更新",
       "update.current": "現在のバージョン",
       "update.latest": "最新リリース",
@@ -4102,6 +4099,8 @@
       "stream.cascade.offNote": "カスケードはオフです ([stream] cascade = false)",
       "topology.title": "トポロジー",
       "topology.details.open": "ノードの詳細を表示",
+      "topology.maximize": "最大化",
+      "topology.restore": "元に戻す",
       "topology.details.title": "接続の詳細",
       "topology.details.close": "閉じる",
       "topology.details.copy": "ノードIDをコピー",
@@ -4509,6 +4508,7 @@
       "profile.avatarRemoved": "プロフィール画像を削除しました。",
       "profile.avatarBadType": "PNG、JPEG、またはWebP画像を選択してください。",
       "settings.title": "設定",
+      "settings.tabs.general": "一般",
       "settings.developerTitle": "開発者モード",
       "settings.developerDesc": "このデーモンの詳細なデバッグログを、ダッシュボード下部にリアルタイムで表示します。",
       "settings.developerLabel": "開発者モードを有効にする",
@@ -4543,7 +4543,7 @@
       "settings.drawer.scheduler": "スケジューラ設定",
       "settings.drawer.bot": "Bot設定",
       "settings.advanced": "詳細設定",
-      "settings.movedNote": "ストリーム・AI・tc-chatリレー・ストレージ・アイデンティティの設定は、各タブ内に移動しました。",
+      "settings.movedNote": "ストリーム・AI・tc-chatリレー・ストレージ・アイデンティティの設定は、それぞれのセクションにあります。",
       "settings.section.identity": "本人情報",
       "settings.section.storage": "ストレージ",
       "settings.section.stream": "ストリーム",
@@ -4948,9 +4948,7 @@
       "nav.bot": "Bot",
       "nav.tunnel": "隧道",
       "nav.nostr": "Nostr 中继",
-      "nav.profile": "个人资料",
       "nav.settings": "设置",
-      "nav.update": "更新",
       "update.title": "更新",
       "update.current": "当前版本",
       "update.latest": "最新版本",
@@ -5079,6 +5077,8 @@
       "stream.cascade.offNote": "级联已关闭 ([stream] cascade = false)",
       "topology.title": "拓扑",
       "topology.details.open": "查看节点详情",
+      "topology.maximize": "最大化",
+      "topology.restore": "还原",
       "topology.details.title": "连接详情",
       "topology.details.close": "关闭",
       "topology.details.copy": "复制节点 ID",
@@ -5489,6 +5489,7 @@
       "profile.avatarRemoved": "头像已移除。",
       "profile.avatarBadType": "请选择 PNG、JPEG 或 WebP 格式的图片。",
       "settings.title": "设置",
+      "settings.tabs.general": "常规",
       "settings.developerTitle": "开发者模式",
       "settings.developerDesc": "实时显示该守护进程的详细调试日志，停靠在控制台底部。",
       "settings.developerLabel": "启用开发者模式",
@@ -5523,7 +5524,7 @@
       "settings.drawer.scheduler": "调度器设置",
       "settings.drawer.bot": "Bot 设置",
       "settings.advanced": "高级",
-      "settings.movedNote": "串流、AI、tc-chat 中继、存储和身份设置现在位于各自的标签页中。",
+      "settings.movedNote": "串流、AI、tc-chat 中继、存储和身份设置位于各自的部分中。",
       "settings.section.identity": "身份",
       "settings.section.storage": "存储",
       "settings.section.stream": "串流",
@@ -6161,6 +6162,7 @@
   }
 
   document.getElementById("btn-refresh-overview").addEventListener("click", function (e) {
+    pollProfile();
     runAction(e.currentTarget, "daemon.status", {}, function (data) {
       state.daemon = data;
       state.daemonUptimeBase = data.uptime_secs;
@@ -6484,6 +6486,7 @@
   var topologyRequest = null;
   var topologyPresentation = window.MistlTopology.create({
     document: document, window: window, t: t, copy: copyToClipboard, graph: topologySvg,
+    maximize: document.getElementById("topology-maximize"),
     makeNode: function (parent, model, radius) {
       return topologyNodeBox(parent, 0, 0, 104, model.label, null, "kind-" + model.kind, model.key, model.state, radius);
     },
@@ -9581,7 +9584,6 @@
 
   document.getElementById("btn-profile-hint-focus").addEventListener("click", function () {
     navigateTo("panel-profile");
-    setTimeout(function () { profileDisplayNameInput.focus(); }, 300);
   });
 
   function renderAvatar(data) {
@@ -9796,10 +9798,6 @@
     });
   }
 
-  document.querySelector('[data-target="profile"]').addEventListener("click", function (e) {
-    runAction(e.currentTarget, "profile.show", {}, renderProfile);
-  });
-
   document.getElementById("profile-form").addEventListener("submit", function (e) {
     e.preventDefault();
     var value = profileDisplayNameInput.value.trim();
@@ -9919,6 +9917,7 @@
       document.getElementById("settings-drawer-" + section.replace(/_/g, "-"));
     if (drawer) drawer.open = true;
     if (section === "ai" && subtabActivate["panel-ai"]) subtabActivate["panel-ai"]("tasks");
+    if (section === "ui" && subtabActivate["panel-settings"]) subtabActivate["panel-settings"]("general");
     if (input) {
       var details = input.closest ? input.closest("details") : null;
       while (details) {
@@ -11424,6 +11423,12 @@
     }, function () { /* daemon may be down; leave last-known state */ });
   }
 
+  function updateVisible() {
+    var panel = document.getElementById("panel-settings");
+    return !document.hidden && panel.classList.contains("active") &&
+      panel.querySelector('[data-subtab="update"]').classList.contains("active");
+  }
+
   var updateRefreshBtn = document.querySelector('[data-target="update"]');
   if (updateRefreshBtn) {
     updateRefreshBtn.addEventListener("click", function (e) {
@@ -11784,11 +11789,9 @@
     // Start escrow polling when first opened, then keep its last-known state fresh.
     if (escrowRequested) pollEscrow().catch(function () { /* retain last-known state */ });
     if (nostrVisible()) pollNostr();
-    /* folder sync entries change in the background (daemon-side
-       connect/retry loop), so poll them on the same unconditional cycle as
-       everything else above rather than gating on panel visibility --
-       pollAll has no active-panel gating for any of its other calls, so
-       there is no existing gating pattern to mirror here either. */
+    if (updateVisible()) pollUpdate();
+    /* Folder sync entries change in the background (daemon-side
+       connect/retry loop), so poll them regardless of panel visibility. */
     pollStoreSyncList();
     /* scheduler jobs' next_run keeps advancing and runs land in the
        background, so poll both unconditionally alongside folder sync
@@ -11877,16 +11880,18 @@
   var PANEL_IDS = [
     "panel-overview", "panel-chat", "panel-ai",
     "panel-tunnel", "panel-nostr", "panel-store", "panel-escrow",
-    "panel-scheduler", "panel-bot", "panel-profile", "panel-access", "panel-update", "panel-settings"
+    "panel-scheduler", "panel-bot", "panel-access", "panel-settings"
   ];
   var sideLinks = Array.prototype.slice.call(document.querySelectorAll("#sidenav a"));
 
-  /* Former top-level views that now live as tabs of another panel: old
-     links and settings shortcuts keep working and open the right tab. */
+  /* Former top-level views keep their old links and settings shortcuts. */
   var PANEL_ALIASES = {
     "panel-stream": { panel: "panel-chat", tab: "stream" },
-    "panel-chat-relay": { panel: "panel-chat", tab: "rooms" }
+    "panel-chat-relay": { panel: "panel-chat", tab: "rooms" },
+    "panel-profile": { panel: "panel-overview", focus: "profile-display-name" },
+    "panel-update": { panel: "panel-settings", tab: "update" }
   };
+  var pendingAliasFocus = null;
 
   function panelFromHash() {
     var id = (location.hash || "").replace(/^#/, "");
@@ -11896,18 +11901,20 @@
 
   function revealAliasTab(id) {
     var alias = PANEL_ALIASES[id];
-    if (alias && subtabActivate[alias.panel]) subtabActivate[alias.panel](alias.tab);
+    if (alias && alias.tab && subtabActivate[alias.panel]) subtabActivate[alias.panel](alias.tab);
   }
 
   // One persistent host: navigation never hides or recreates the graph.
   var topologyCardEl = document.getElementById("topology-card");
   document.getElementById("topology-dock").appendChild(topologyCardEl);
   function placeTopologyCard(activeId) {
+    if (topologyCardEl.classList.contains("graph-maximized")) return;
     var dock = document.getElementById("topology-dock");
     if (topologyCardEl.parentElement !== dock) dock.appendChild(topologyCardEl);
   }
 
   function showPanel(id) {
+    var wasActive = document.getElementById(id).classList.contains("active");
     if (id === "panel-ai" || id === "panel-settings") aiRefreshModels(false);
     /* poll-driven DOM renders defer until the entrance animation finishes;
        450ms = --dur 340ms + margin */
@@ -11935,19 +11942,31 @@
     });
     if (id === "panel-escrow") pollEscrow().catch(function (err) { showToast(err.message || String(err), "error"); });
     if (nostrVisible()) pollNostr();
+    if (pollTimer && !wasActive && updateVisible()) pollUpdate();
   }
 
   function routeFromHash() {
-    revealAliasTab((location.hash || "").replace(/^#/, ""));
-    showPanel(panelFromHash());
+    var id = (location.hash || "").replace(/^#/, "");
+    var alias = PANEL_ALIASES[id];
+    var panel = panelFromHash();
+    revealAliasTab(id);
+    showPanel(panel);
+    var focus = alias && alias.focus || (pendingAliasFocus && pendingAliasFocus.panel === panel && pendingAliasFocus.focus);
+    pendingAliasFocus = null;
+    if (focus) {
+      var target = document.getElementById(focus);
+      if (target) target.focus();
+    }
   }
 
   function navigateTo(id) {
-    if (PANEL_ALIASES[id]) {
+    var alias = PANEL_ALIASES[id];
+    pendingAliasFocus = alias && alias.focus ? { panel: alias.panel, focus: alias.focus } : null;
+    if (alias) {
       revealAliasTab(id);
-      id = PANEL_ALIASES[id].panel;
+      id = alias.panel;
     }
-    if (location.hash === "#" + id) showPanel(id);   /* same hash: no hashchange fires */
+    if (location.hash === "#" + id) routeFromHash();  /* same hash: no hashchange fires */
     else location.hash = "#" + id;                   /* else hashchange -> routeFromHash */
   }
 
@@ -11975,8 +11994,7 @@
   /* Wires every .subtabs tablist declared in markup (the CSS block above
      the .subtabs rules documents the contract). Self-discovering so a
      panel can gain tabs with markup + i18n keys alone -- no shared init
-     edits. Showing/hiding pages is pure UI state: it never gates polling,
-     and pollers keep rendering into hidden pages. */
+     edits. Each poller decides whether it needs to update hidden pages. */
   var subtabActivate = {};   /* panelId -> activate(name), for JS flows that must reveal a specific tab before focusing something inside it */
 
   function initSubTabs() {
@@ -12043,6 +12061,7 @@
           }
         }
         if (panel.id === "panel-ai" && name === "sharing" && panel.classList.contains("active")) aiRefreshModels(false);
+        if (panel.id === "panel-settings" && name === "update" && changed && updateVisible()) pollUpdate();
         try { localStorage.setItem(storeKey, name); } catch (e) { /* ignore */ }
       }
       subtabActivate[panel.id] = activate;
@@ -12097,7 +12116,6 @@
   pollBotLogs();
   pollBotItems();
   pollConfig();
-  pollUpdate();
   pollTunnelStatus();
   pollTunnelRoomList();
   initDevMode();

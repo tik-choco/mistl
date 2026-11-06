@@ -101,7 +101,8 @@ try {
   document.write(html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, ''));
   for (const [, attrs, source] of scripts) {
     const src = attrs.match(/src="([^"]+)"/);
-    window.eval(src ? fs.readFileSync(new URL('../src/web' + src[1], import.meta.url), 'utf8') : source);
+    const code = src ? fs.readFileSync(new URL('../src/web' + src[1], import.meta.url), 'utf8') : source;
+    window.eval(code.replace('  /* ---------- init ---------- */', '  window.__testFocusSettingsField = focusSettingsField;\n  /* ---------- init ---------- */'));
   }
   await flush();
   assert.deepEqual(errors, [], 'page boots without runtime errors');
@@ -1053,6 +1054,100 @@ try {
       const css=window.getComputedStyle(control);assert.equal(css.width,'36px');assert.equal(css.height,'22px');
     }
   }
+
+  // Merged panels preserve old links, independent refreshes and settings shortcuts.
+  const q = selector => document.querySelector(selector);
+  const count = cmd => calls.filter(call => call.cmd === cmd).length;
+  const settings = q('#panel-settings');
+  const generalTab = settings.querySelector('[data-subtab-target="general"]');
+  const updateTab = settings.querySelector('[data-subtab-target="update"]');
+  assert.equal(q('#panel-profile'), null);
+  assert.equal(q('#panel-update'), null);
+  for (const id of ['profile-kv','profile-avatar-input','profile-form','settings-drawer-identity','identity-app']) {
+    assert.ok(q('#panel-overview').contains(document.getElementById(id)), id + ' is in Overview');
+  }
+  for (const id of ['update-kv','btn-update-check','btn-update-apply','btn-update-version','btn-install','chk-autostart','chk-cli-path','settings-drawer-update']) {
+    assert.ok(settings.querySelector('[data-subtab="update"]').contains(document.getElementById(id)), id + ' is in Updates');
+  }
+  assert.equal(generalTab.getAttribute('aria-selected'), 'true');
+  document.querySelector('a[href="#panel-overview"]').click();await flush();
+  fixtures['profile.show'].display_name = '';
+  let profileCalls = count('profile.show'), daemonCalls = count('daemon.status');
+  document.getElementById('btn-refresh-overview').click();await flush();
+  assert.equal(count('profile.show'), profileCalls + 1, 'Overview refresh reloads the profile');
+  assert.equal(count('daemon.status'), daemonCalls + 1, 'Overview refresh reloads daemon status');
+  assert.equal(document.getElementById('profile-hint-banner').hidden, false);
+  document.getElementById('btn-profile-hint-focus').click();await flush();
+  assert.ok(q('#panel-overview').classList.contains('active'));
+  assert.equal(window.location.hash, '#panel-overview');
+  assert.equal(document.activeElement, document.getElementById('profile-display-name'));
+  assert.equal(q('#sidenav a[href="#panel-overview"]').getAttribute('aria-current'), 'page');
+  document.querySelector('a[href="#panel-chat"]').click();await flush();
+  window.location.hash = '#panel-profile';await flush();
+  assert.ok(q('#panel-overview').classList.contains('active'), 'Old profile bookmarks open Overview');
+  assert.equal(document.activeElement, document.getElementById('profile-display-name'));
+  window.__testFocusSettingsField('settings-identity-display_name');
+  await new Promise(resolve => setTimeout(resolve, 350));await flush();
+  assert.ok(document.getElementById('settings-drawer-identity').open);
+  assert.equal(document.activeElement, document.getElementById('settings-identity-display_name'), 'Identity shortcut focuses its own field');
+
+  const oldUpdateLink = document.createElement('a');
+  oldUpdateLink.href = '#panel-update';document.body.appendChild(oldUpdateLink);
+  let updateCalls = count('update.status');
+  oldUpdateLink.click();await flush();
+  assert.ok(settings.classList.contains('active'));
+  assert.equal(window.location.hash, '#panel-settings');
+  assert.equal(updateTab.getAttribute('aria-selected'), 'true');
+  assert.ok(count('update.status') > updateCalls, 'Opening Updates refreshes its status');
+  assert.equal(q('#sidenav a[href="#panel-settings"]').getAttribute('aria-current'), 'page');
+  updateCalls = count('update.status');
+  document.querySelector('[data-target="update"]').click();await flush();
+  assert.equal(count('update.status'), updateCalls + 1, 'Updates refresh requests update status');
+  window.__mistlViewSwitchUntil = 0;updateCalls = count('update.status');
+  intervals.find(timer => timer.ms === 5000).callback();await flush();
+  assert.equal(count('update.status'), updateCalls + 1, 'Updates poll while their tab is visible');
+  fixtures['update.releases'] = {releases:[{version:'0.0.9',asset_available:true,downgrade:true}]};
+  document.getElementById('btn-update-version').click();await flush();
+  const versionDialog = q('.update-version-modal');
+  assert.equal(versionDialog.hidden, false);
+  versionDialog.querySelector('.tg-choice').click();
+  assert.ok(versionDialog.textContent.includes('0.0.9'));
+  versionDialog.querySelector('.modal-close').click();
+  assert.equal(document.activeElement, document.getElementById('btn-update-version'));
+  updateTab.dispatchEvent(new window.KeyboardEvent('keydown',{key:'ArrowRight',bubbles:true}));
+  assert.equal(generalTab.getAttribute('aria-selected'), 'true');
+  assert.equal(document.activeElement, generalTab);
+  window.__mistlViewSwitchUntil = 0;updateCalls = count('update.status');
+  intervals.find(timer => timer.ms === 5000).callback();await flush();
+  assert.equal(count('update.status'), updateCalls, 'Updates do not poll on the General tab');
+  let configCalls = count('config.show');
+  document.querySelector('[data-target="settings"]').click();await flush();
+  assert.equal(count('config.show'), configCalls + 1, 'General refresh requests configuration');
+  oldUpdateLink.click();await flush();
+  assert.equal(updateTab.getAttribute('aria-selected'), 'true', 'Following the same old link reopens Updates');
+  window.location.hash = '#panel-update';await flush();
+  assert.ok(settings.classList.contains('active'), 'Old update bookmarks open Settings');
+  assert.equal(updateTab.getAttribute('aria-selected'), 'true');
+  window.__testFocusSettingsField('settings-update-auto_check');
+  await new Promise(resolve => setTimeout(resolve, 350));await flush();
+  assert.ok(document.getElementById('settings-drawer-update').open);
+  assert.equal(document.activeElement, document.getElementById('settings-update-auto_check'));
+  window.__testFocusSettingsField('settings-ui-listen');
+  await new Promise(resolve => setTimeout(resolve, 350));await flush();
+  assert.equal(generalTab.getAttribute('aria-selected'), 'true', 'UI shortcut opens General');
+  assert.equal(document.activeElement, document.getElementById('settings-ui-listen'));
+  oldUpdateLink.remove();
+  for (const [language, general, update, profile] of [
+    ['en','General','Updates','Profile'],
+    ['zh','常规','更新','个人资料'],
+    ['ja','一般','更新','プロフィール']
+  ]) {
+    document.getElementById('lang-'+language+'-btn').click();await flush();
+    assert.equal(generalTab.textContent, general);
+    assert.equal(updateTab.textContent, update);
+    assert.equal(q('#panel-overview h3[data-i18n="profile.title"]').textContent, profile);
+  }
+  console.log('PASS: merged navigation, legacy links, profile focus, settings shortcuts, tab refresh and polling, version wizard, en/zh/ja labels');
   document.querySelectorAll('.toast.error button').forEach(b=>b.click());
   assert.deepEqual(errors, []);
   assert.equal(document.querySelectorAll('.toast.error').length, 0, 'no hidden initialization failure');

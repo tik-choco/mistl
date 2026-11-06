@@ -40,6 +40,7 @@
         return [model.key, model];
       }));
       updateLabels();
+      if (maximize) maximize.refresh();
       if (dialog.open) renderDetail();
       if (hovered && !dialog.open) showPreview(hovered, hovered.getAttribute("data-topology-key"));
     }
@@ -273,7 +274,13 @@
         markSelected();
       }
     };
+    var maximize = null;
     if (options.graph) layout = createGraph(options, presentation, hidePreview);
+    if (options.maximize) maximize = createMaximize({
+      document: doc, card: options.graph.closest("#topology-card"), graph: options.graph,
+      toggle: options.maximize, layout: layout, fitMax: options.fitMax,
+      label: function (expanded) { return t(expanded ? "topology.restore" : "topology.maximize"); }
+    });
     presentation.activity = function (path, count, bytes) { layout.activity(path, count, bytes); };
     presentation.isVisible = function () { return layout.isVisible(); };
     return presentation;
@@ -329,7 +336,7 @@
       particles.forEach(function (p) { p.el.remove(); }); particles = [];
     }
     function syncVisibility() {
-      var next = !doc.hidden && intersecting && !card.closest("[hidden]") && win.getComputedStyle(card).display !== "none";
+      var next = !doc.hidden && (intersecting || !!card.closest(".graph-maximized")) && !card.closest("[hidden]") && win.getComputedStyle(card).display !== "none";
       if (visible === next) return;
       visible = next;
       card.classList.toggle("is-paused", !visible);
@@ -667,6 +674,10 @@
         userView = false; fitting = true; scale = 1; panX = panY = 0; camera();
       },
       fit: function () { userView = false; fit(); },
+      setFitMax: function (value) {
+        options.fitMax = value; userView = false; fitting = true;
+        hidePreview(); resize();
+      },
       worldPoint: function (event) { return world(point(event)); },
       position: function (key) { var n = nodes.get(key); return n && !n.removing ? { x: n.x, y: n.y } : null; },
       isVisible: function () { syncVisibility(); return visible; },
@@ -682,5 +693,47 @@
     };
   }
 
-  root.MistlTopology = Object.freeze({ create: create, createGraph: createGraph });
+  var activeMaximize = null;
+  function createMaximize(options) {
+    var doc = options.document, card = options.card, toggle = options.toggle;
+    var expanded = false, placeholder = null, overflow = "";
+    function refresh() {
+      var label = options.label(expanded);
+      toggle.setAttribute("aria-pressed", String(expanded));
+      toggle.setAttribute("aria-label", label); toggle.title = label;
+      toggle.textContent = expanded ? "\u2921" : "\u2922";
+    }
+    function set(value) {
+      if (expanded === value) return;
+      if (value && activeMaximize) activeMaximize.restore();
+      expanded = value;
+      if (value) {
+        // Escape transformed panels and the dock's stacking/scroll context.
+        placeholder = doc.createComment("graph position");
+        card.before(placeholder); doc.body.appendChild(card);
+        overflow = doc.body.style.overflow; doc.body.style.overflow = "hidden";
+        activeMaximize = control;
+      }
+      card.classList.toggle("graph-maximized", value);
+      if (!value) {
+        placeholder.replaceWith(card); placeholder = null;
+        doc.body.style.overflow = overflow; activeMaximize = null;
+      }
+      refresh();
+      options.layout.setFitMax(value ? 4 : (options.fitMax || 1.25));
+      (value ? options.graph : toggle).focus({ preventScroll: true });
+    }
+    var control = { refresh: refresh, restore: function () { set(false); } };
+    toggle.addEventListener("click", function () { set(!expanded); });
+    doc.addEventListener("keydown", function (event) {
+      if (!expanded || event.key !== "Escape" || event.defaultPrevented) return;
+      // Native dialogs and feature editors handle their own Escape first.
+      if (doc.querySelector('dialog[open], .modal-overlay:not([hidden])')) return;
+      event.preventDefault(); event.stopImmediatePropagation(); set(false);
+    }, true);
+    refresh();
+    return control;
+  }
+
+  root.MistlTopology = Object.freeze({ create: create, createGraph: createGraph, createMaximize: createMaximize });
 })(window);

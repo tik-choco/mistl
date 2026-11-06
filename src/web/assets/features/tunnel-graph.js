@@ -2,7 +2,7 @@
   'use strict';
   const words = {
     ja: {
-      self:'このノード', fit:'全体表示', legacy:'グラフ未対応・状態待ち',
+      self:'このノード', fit:'全体表示', maximize:'最大化', restore:'元に戻す', legacy:'グラフ未対応・状態待ち',
       broadcast:'Broadcast', broadcastHelp:'ON: ルーム全体から接続を受付。OFF: 線で結んだ相手だけ。各転送の承認は別途必要です。TCP のデータ複製ではありません。',
       lock:'編集ロック', lockHelp:'他ノードによる線・転送設定の変更を止めます。既存の通信は続きます。所有者は編集できます。',
       locked:'ロック中', settings:'ノードの設定',
@@ -37,7 +37,7 @@
       nAccepted:'{peer} が承認しました。{local} への接続が {target} へ転送されます。', nAddFailed:'{peer} は承認しましたが、このノードでポートを開けませんでした: {detail}',
     },
     en: {
-      self:'This node', fit:'Fit', legacy:'Graph unsupported or waiting for state',
+      self:'This node', fit:'Fit', maximize:'Maximize', restore:'Restore', legacy:'Graph unsupported or waiting for state',
       broadcast:'Broadcast', broadcastHelp:'ON accepts connections from the room. OFF limits traffic to linked peers. Forward approval still applies. TCP data is not duplicated.',
       lock:'Edit lock', lockHelp:'Stops remote changes to links and forwards. Existing traffic continues. The owner can still edit.',
       locked:'Locked', settings:'Node settings',
@@ -73,6 +73,7 @@
     },
     // Only the strings added after the first release; the rest fall back to English.
     zh: {
+      maximize:'最大化', restore:'还原',
       waitAccept:'等待 {peer} 接受', waitApprove:'等待 {peer} 批准连接', deniedBy:'{peer} 拒绝了连接',
       cancel:'取消提议', cancelled:'提议已取消。', proposalWire:'等待批准', toPeer:'→ {peer}（{addr}）',
       nDenied:'{peer} 拒绝了你的提议（{target}）。', nTimeout:'{peer} 未回应，提议已超时（{target}）。',
@@ -113,7 +114,8 @@
     const svg = doc.createElementNS('http://www.w3.org/2000/svg', 'svg');
     svg.classList.add('tg-graph'); svg.setAttribute('aria-label', 'Tunnel'); svg.setAttribute('tabindex','0');
     const fit = button('⛶','tg-fit',()=>layout.fit());
-    viewport.append(svg,fit); host.append(message,viewport);
+    const maximizeButton = el('button','graph-maximize tg-maximize'); maximizeButton.type='button';
+    viewport.append(svg,fit,maximizeButton); host.append(message,viewport);
     const ns = (tag, attrs, parent) => {
       const e=doc.createElementNS(svg.namespaceURI,tag);
       Object.entries(attrs||{}).forEach(([key,value])=>e.setAttribute(key,value));
@@ -133,7 +135,6 @@
     let opener = null, wizard = null;
     overlay.addEventListener('pointerdown', e => { if (e.target === overlay) closeModal(); });
     overlay.addEventListener('keydown', e => {
-      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); cancelLink(); closeModal(); return; }
       if (e.key !== 'Tab') return;
       const items = focusables(); if (!items.length) return;
       const first = items[0], last = items[items.length - 1];
@@ -640,7 +641,13 @@
     });
     svg.addEventListener('click',e=>{if(win.performance.now()<suppressLinkUntil){e.stopImmediatePropagation();e.preventDefault();}},true);
     doc.addEventListener('pointercancel',()=>{if(drag)cancelLink();});
-    doc.addEventListener('keydown',e=>{if(e.key==='Escape'&&(source||drag)){cancelLink();notice('');}});
+    doc.addEventListener('keydown',e=>{
+      if(e.key!=='Escape'||e.defaultPrevented)return;
+      if(!overlay.hidden){e.preventDefault();e.stopImmediatePropagation();closeModal();}
+      else if(source||drag){e.preventDefault();e.stopImmediatePropagation();cancelLink();notice('');}
+    },true);
+    const maximize=root.MistlTopology.createMaximize({document:doc,card:host,graph:svg,
+      toggle:maximizeButton,layout,fitMax:2.2,label:expanded=>t(expanded?'restore':'maximize')});
 
     // Localized text for a session notice that carries a machine-readable code
     // (the outcome of a proposal); anything else keeps the daemon's text.
@@ -687,6 +694,8 @@
       if(room!==nextRoom){room=nextRoom;cancelLink();closeModal();signature='';traffic.clear();noticeSeen=null;layout.reset();}
       announce(data&&data.notices); snapshot=data;
       fit.setAttribute('aria-label',t('fit'));fit.title=t('fit');
+      maximize.refresh();
+      if(!data?.running)maximize.restore();
       viewport.hidden=!data?.running;
       if(!data?.running||!data.graph){
         models=[];signature='';cancelLink();closeModal();traffic.clear();layout.reset();layout.isVisible();

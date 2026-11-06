@@ -1,4 +1,19 @@
 /* The viewport owns pan/zoom; its contents never widen the persistent dock. */
+.graph-maximized {
+  position: fixed; inset: 12px; z-index: 95; margin: 0; min-width: 0; min-height: 0;
+  display: flex; flex-direction: column; box-sizing: border-box;
+  background: var(--panel); border: 1px solid var(--panel-border); border-radius: 14px;
+  box-shadow: 0 12px 60px rgba(0, 0, 0, .3);
+}
+#topology-card.graph-maximized .topology-graph-wrap { flex: 1; min-height: 0; }
+#topology-card.graph-maximized .topology-svg { height: 100%; }
+.graph-maximize {
+  position: absolute; right: 12px; bottom: 12px; width: 36px; height: 36px;
+  padding: 0; font-size: 18px;
+}
+@media (max-width: 600px) {
+  .graph-maximized { inset: 0; border-radius: 0; }
+}
 #topology-card { padding: 0; overflow: hidden; }
 #topology-card .topology-graph-wrap {
   position: relative; min-width: 0; width: 100%; overflow: hidden;
@@ -77,7 +92,7 @@
 #topology-card .topology-node-hit { fill: transparent; stroke: none; }
 .topology-detail .btn:focus:not(:focus-visible) { outline: none; }
 .topology-preview {
-  position: fixed; z-index: 40; width: max-content; max-width: min(360px, calc(100vw - 16px));
+  position: fixed; z-index: 96; width: max-content; max-width: min(360px, calc(100vw - 16px));
   padding: 12px 14px; border: 1px solid var(--panel-border); border-radius: 12px;
   background: var(--panel); color: var(--text); box-shadow: 0 8px 32px rgba(0, 0, 0, .18);
   font: 12px/1.55 var(--sans); overflow-wrap: anywhere;
