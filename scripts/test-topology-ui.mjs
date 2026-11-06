@@ -32,8 +32,8 @@ const snapshot = () => ({
   self:{node_id:'self',did:'did:key:self',display_name:'My node'}, rooms:['design','studio'],
   peers:[{node_id:'alice',name:'Alice',state:'connected'},{node_id:'bob',state:'connected'},
     {node_id:'carol',state:'connecting'},{node_id:'dave',state:'failed'}],
-  room_peers:[{room:'design',peers:[{node_id:'alice',state:'connected'},{node_id:'bob',state:'connected'}]},
-    {room:'studio',peers:[{node_id:'alice',state:'connected'},{node_id:'carol',state:'connecting'},{node_id:'dave',state:'failed'}]}],
+  room_peers:[{room:'design',features:['storage','ai','storage'],peers:[{node_id:'alice',state:'connected'},{node_id:'bob',state:'connected'}]},
+    {room:'studio',features:['storage'],peers:[{node_id:'alice',state:'connected'},{node_id:'carol',state:'connecting'},{node_id:'dave',state:'failed'}]}],
   stream:{running:false}, activity:[]
 });
 let response = snapshot();
@@ -54,11 +54,23 @@ try {
   window.eval(html.slice(start, html.indexOf('  /* ---------- ai panel ---------- */', start)));
   const feature = window.topologyPresentation;
   let graph = window.renderTopology();
-  assert.equal(graph.nodes.length, 7, 'Self, four peers and two hollow room hubs');
-  assert.equal(graph.edges.length, 7, 'A peer in two rooms links to both hubs');
+  assert.equal(graph.nodes.length, 9, 'Self, four peers, two features and two rooms');
+  assert.equal(graph.edges.length, 10, 'Shared room and peer membership form a DAG');
+  const hasEdge = (graph, source, target) => graph.edges.some(e=>e.source===source&&e.target===target);
+  for (const feature of ['ai','storage']) {
+    assert.ok(hasEdge(graph,'self','feature:'+feature));
+    assert.ok(hasEdge(graph,'feature:'+feature,'room:design'), 'A shared room hangs under both features');
+  }
+  assert.equal(graph.nodes.filter(n=>n.key==='room:design').length, 1, 'Shared rooms are not duplicated');
+  assert.ok(hasEdge(graph,'feature:storage','room:studio'));
+  assert.ok(hasEdge(graph,'room:design','alice') && hasEdge(graph,'room:studio','alice'));
+  assert.equal(hasEdge(graph,'self','room:design'), false);
+  assert.equal(hasEdge(graph,'self','alice'), false);
   settle();
   const getNode = key => [...svg.querySelectorAll('[data-topology-key]')].find(n=>n.getAttribute('data-topology-key')===key);
   const alice = getNode('alice'), bob = getNode('bob');
+  const dotRadius = key => Number(getNode(key).querySelector('.topology-node-dot').getAttribute('r'));
+  assert.ok(dotRadius('self') > dotRadius('alice') && dotRadius('alice') > dotRadius('feature:storage') && dotRadius('feature:storage') > dotRadius('room:design'));
   const transform = alice.getAttribute('transform');
   window.renderTopology();
   assert.equal(getNode('alice'), alice, 'Polling preserves DOM and keyboard targets');
@@ -89,6 +101,15 @@ try {
   feature.setSnapshot(longModels); assert.equal(content.firstChild, child, 'Stable detail preserves text selection');
   dialog.querySelector('.topology-detail-close').click();
   assert.equal(document.activeElement, alice, 'Dialog restores persistent node focus');
+  const storage = getNode('feature:storage'), design = getNode('room:design');
+  storage.dispatchEvent(new window.KeyboardEvent('keydown', {key:'Enter',bubbles:true}));
+  assert.deepEqual([...dialog.querySelectorAll('.topology-detail-rooms li')].map(n=>n.textContent), ['design','studio'], 'Feature details list its rooms');
+  assert.equal(dialog.querySelector('.primary').hidden, true, 'Feature nodes do not expose synthetic node IDs');
+  dialog.querySelector('.topology-detail-close').click();
+  design.dispatchEvent(new window.KeyboardEvent('keydown', {key:' ',bubbles:true}));
+  assert.ok(dialog.textContent.includes('topology.feature.ai') && dialog.textContent.includes('topology.feature.storage'));
+  assert.deepEqual([...dialog.querySelectorAll('dd')].map(n=>n.textContent), ['topology.node.room','topology.feature.ai · topology.feature.storage','2'], 'Room details list its features and peer count');
+  dialog.querySelector('.topology-detail-close').click();
   window.MistlPeers = {byDid:()=>null,byNode:id=>id==='bob'?{name:'Bobby'}:null,label:p=>p.name,avatarEl:()=>document.createElement('span')};
   window.renderTopology(); assert.equal(bob.querySelector('text').textContent, 'Bobby');
 
@@ -116,18 +137,30 @@ try {
   feature.activity = (path,count,bytes) => { paths.push([...path]); originalActivity(path,count,bytes); };
   response.activity = [{room:'design',node_id:'alice',tx:{count:10,bytes:40000,age_ms:20},rx:null}];
   window.updateTopologyActivity(response, window.buildTopologyGraph(response));
-  assert.deepEqual(paths.at(-1), ['self','room:design','alice'], 'TX routes through room hub');
+  assert.deepEqual(paths.at(-1), ['self','feature:ai','room:design','alice'], 'TX routes through the first sorted feature and room');
   assert.ok(svg.querySelectorAll('.topology-particle').length > 0); advance(20); settle();
   window.updateTopologyActivity(response, window.buildTopologyGraph(response));
   assert.equal(svg.querySelectorAll('.topology-particle').length, 0, 'Unchanged counters produce no traffic');
   response.activity = [{...response.activity[0],rx:{count:4,bytes:8000,age_ms:10}}];
   window.updateTopologyActivity(response, graph);
-  assert.deepEqual(paths.at(-1), ['alice','room:design','self'], 'RX reverses route'); settle();
+  assert.deepEqual(paths.at(-1), ['alice','room:design','feature:ai','self'], 'RX reverses the entire route'); settle();
   response.activity = [{...response.activity[0],tx:{count:200,bytes:900000,age_ms:20}}];
   graph = window.renderTopology(); window.updateTopologyActivity(response, graph);
   assert.ok(svg.querySelectorAll('.topology-particle').length > 1, 'Count/byte deltas scale burst'); settle();
   response.activity = [{...response.activity[0],tx:{count:1,bytes:1,age_ms:10}}];
   window.updateTopologyActivity(response, graph); assert.equal(frames.size, 0, 'Rollback silently reseeds');
+  response.room_peers[1].features = [];
+  graph = window.renderTopology(); settle();
+  assert.ok(hasEdge(graph,'self','room:studio'), 'Featureless rooms hang directly under self');
+  assert.equal(hasEdge(graph,'feature:storage','room:studio'), false);
+  assert.equal(getNode('room:design'), design, 'Membership changes preserve existing room nodes');
+  assert.equal(getNode('feature:storage'), storage, 'Membership changes preserve existing feature nodes');
+  response.activity.push({room:'studio',node_id:'carol',rx:{count:1,bytes:200,age_ms:10}});
+  window.updateTopologyActivity(response, graph);
+  assert.deepEqual(paths.at(-1), ['carol','room:studio','self'], 'Featureless activity still travels through the room'); settle();
+  getNode('room:studio').dispatchEvent(new window.KeyboardEvent('keydown', {key:'Enter',bubbles:true}));
+  assert.ok(dialog.textContent.includes('topology.details.noFeatures'));
+  dialog.querySelector('.topology-detail-close').click();
   motion.matches = true; motion.dispatchEvent(new window.Event('change')); settle();
   response.peers[3].state = 'connected'; window.renderTopology();
   assert.ok(getNode('dave').classList.contains('has-activity'), 'Reduced-motion reconnect uses a static highlight');
@@ -139,7 +172,14 @@ try {
   response.stream = {running:true,backend:'relay',publisher:'alice',clients:2,
     cascade:{enabled:true,role:'follower',leader:'alice',source:'leader',relay_peers:['alice']},
     flow:{video_age_ms:20,audio_age_ms:40,video_delivered_age_ms:10,audio_delivered_age_ms:20}};
-  window.renderTopology(); advance(20);
+  graph = window.renderTopology(); advance(20);
+  assert.ok(hasEdge(graph,'room:design','alice') && hasEdge(graph,'alice','self'), 'Incoming media remains separate from room membership');
+  assert.ok(graph.edges.some(e=>e.source==='self'&&e.target==='viewers'&&e.flowMs>0), 'RTSP delivery keeps its direct media edge');
+  const leaderGraph = window.buildTopologyGraph({...response,stream:{...response.stream,
+    cascade:{enabled:true,role:'leader',leader:'self',relay_peers:['bob']}}});
+  assert.ok(leaderGraph.nodes.some(n=>n.key==='bob'&&n.kind==='follower'));
+  assert.ok(leaderGraph.edges.some(e=>e.source==='self'&&e.target==='bob'&&e.flowMs>0), 'Cascade followers keep their outgoing media edge');
+  assert.ok(hasEdge(leaderGraph,'room:design','bob'));
   assert.ok(svg.querySelector('.topology-particle.is-media'), 'Media creates a continuous particle stream');
   assert.equal(document.getElementById('cascade-role-badge').hidden, false);
   assert.equal(document.getElementById('topology-flow-note').hidden, false);
@@ -166,13 +206,23 @@ try {
   settle(); assert.equal(getNode('alice'), undefined);
   dialog.querySelector('.topology-detail-close').click(); assert.equal(document.activeElement, svg);
   graph = window.buildTopologyGraph({...snapshot(),rooms:['design'],room_peers:[]});
-  assert.equal(graph.nodes.some(n=>n.kind==='room'), false);
-  assert.ok(graph.edges.every(e=>e.source==='self'||e.target==='self'), 'One room uses direct links');
+  assert.equal(graph.nodes.filter(n=>n.kind==='room').length, 1, 'Even one room is always shown');
+  assert.ok(hasEdge(graph,'self','room:design'), 'Missing features from older backends use a direct room link');
+  graph = window.buildTopologyGraph({...snapshot(),rooms:['design'],room_peers:[snapshot().room_peers[0]]});
+  assert.ok(hasEdge(graph,'self','feature:ai') && hasEdge(graph,'feature:ai','room:design') && hasEdge(graph,'room:design','alice'), 'A single room keeps the complete hierarchy');
+  const literalRoom = '<img src=x onerror=alert(1)>' + 'room'.repeat(30);
+  window.state.topology = {self:{node_id:'self'},rooms:[literalRoom],room_peers:[{room:literalRoom,features:['storage'],peers:[]}]};
+  window.renderTopology(); settle();
+  getNode('feature:storage').dispatchEvent(new window.KeyboardEvent('keydown', {key:'Enter',bubbles:true}));
+  assert.ok(dialog.textContent.includes(literalRoom));
+  assert.equal(dialog.querySelector('img'), null, 'Room IDs in feature details stay literal text');
+  assert.equal(svg.querySelector('img'), null);
+  dialog.querySelector('.topology-detail-close').click();
   window.state.topology = {self:{node_id:'self'},peers:[],rooms:[]}; window.renderTopology(); settle();
   assert.equal(svg.querySelectorAll('.topology-node').length, 1); assert.ok(getNode('self').classList.contains('is-alone'));
   assert.equal(document.getElementById('topology-empty-note').hidden, false);
   assert.equal(document.getElementById('topology-fold'), null); assert.equal(document.getElementById('topology-legend'), null);
   assert.equal(svg.querySelector('.topology-node-sub, .topology-edge-label, .topology-node-glyph'), null);
   assert.match(html, /var POLL_INTERVAL_MS = 5000;/);
-  console.log('PASS: topology diff/positions, hubs, cooled rAF, hover, a11y/details, peer names, zoom/pan/pinch/drag/fit, activity deltas/directions, reduced motion, flow expiry, visibility/1s polling, removal/empty state');
+  console.log('PASS: topology feature/room/peer DAG, shared and featureless rooms, diff/positions, cooled rAF, hover, a11y/details, peer names, zoom/pan/pinch/drag/fit, activity paths/deltas/directions, reduced motion, flow expiry, visibility/1s polling, removal/empty state');
 } finally { await window.happyDOM.close(); }

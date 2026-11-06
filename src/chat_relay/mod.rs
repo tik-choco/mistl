@@ -88,6 +88,7 @@ use tokio::sync::{Mutex, OnceCell};
 use tracing::{debug, warn};
 
 use crate::daemon::AppState;
+use crate::net::RoomUse;
 
 /// Handle `chat.*` IPC commands:
 /// - `chat.rooms` `{}` -> `{enabled, rooms: [{room, joined}]}` (relay status)
@@ -329,7 +330,7 @@ async fn init_service(state: &Arc<AppState>) -> Result<Option<Arc<ChatRelayServi
             );
             continue;
         }
-        match crate::net::ensure_started(state, room.clone()).await {
+        match crate::net::ensure_started(state, RoomUse::ChatRelay, room.clone()).await {
             Ok(_) => rooms.push(room.clone()),
             Err(err) => warn!(%err, room, "chat relay: failed to join room"),
         }

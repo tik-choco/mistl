@@ -75,6 +75,7 @@ use tracing::warn;
 
 use super::{Store, guess_mime, sha256_hex};
 use crate::daemon::AppState;
+use crate::net::RoomUse;
 
 /// `tc-storage-folder-access-grant-v1` HMAC domain prefix for
 /// `accessGrantProof`, matching `src/crypto/folderKeyProof.ts`'s
@@ -374,7 +375,7 @@ pub async fn share_folder(
         }
     }
 
-    crate::net::ensure_started(state, room.clone())
+    crate::net::ensure_started(state, RoomUse::Storage, room.clone())
         .await
         .context("storage: joining share room")?;
     let identity = crate::identity::current(state).await?;
@@ -502,7 +503,7 @@ pub async fn unshare(folder_id: &str, store: &Store, _state: &Arc<AppState>) -> 
         removed.room_id
     };
     pending_lock().entries.retain(|e| e.folder_id != folder_id);
-    let _ = crate::net::leave_room(&room_id).await;
+    let _ = crate::net::leave_room(RoomUse::Storage, &room_id).await;
     Ok(true)
 }
 
@@ -529,7 +530,9 @@ async fn run_background(state: Arc<AppState>) -> Result<()> {
     }
     let identity = crate::identity::current(&state).await?;
     for entry in &initial {
-        if let Err(err) = crate::net::ensure_started(&state, entry.room_id.clone()).await {
+        if let Err(err) =
+            crate::net::ensure_started(&state, RoomUse::Storage, entry.room_id.clone()).await
+        {
             warn!(%err, folder_id = %entry.folder_id, room = %entry.room_id, "folder-share (owner): failed to join room");
         }
     }

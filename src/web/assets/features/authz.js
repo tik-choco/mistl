@@ -4,7 +4,7 @@
   const words = {
     en: {
       title: 'Access', help: 'Choose who can use this node and how much they can use.', refresh: 'Refresh',
-      ai: 'AI', escrow: 'Escrow', open: 'Open', allowlist: 'Allowlist',
+      ai: 'AI', escrow: 'Distributed vault', open: 'Open', allowlist: 'Allowlist',
       openHelp: 'Anyone can use this service unless blocked.', allowlistHelp: 'Only allowed peers with a verified identity can use this service.',
       denyHelp: 'Blocks always take priority. Allow rules require a verified identity.',
       allow: 'Allow someone', deny: 'Block someone', limits: 'Limits', mode: 'Change access mode',
@@ -52,7 +52,7 @@
     },
     ja: {
       title: 'アクセス制御', help: 'このノードを利用できる相手と、利用できる量を設定します。', refresh: '更新',
-      ai: 'AI', escrow: 'エスクロー', open: '公開', allowlist: '許可リスト',
+      ai: 'AI', escrow: '分散保管庫', open: '公開', allowlist: '許可リスト',
       openHelp: 'ブロックした相手以外は誰でも利用できます。', allowlistHelp: '許可した、本人確認済みのピアだけが利用できます。',
       denyHelp: 'ブロックが常に優先されます。許可ルールは本人確認済みの相手に適用されます。',
       allow: '相手を許可', deny: '相手をブロック', limits: '利用上限', mode: 'アクセス方式を変更',

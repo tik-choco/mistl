@@ -1,6 +1,7 @@
 //! Local IPC bridge for already encrypted public escrow requests.
 use super::protocol::{Delete, Head, MAX_MESSAGE, hex_string};
 use crate::daemon::AppState;
+use crate::net::RoomUse;
 use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde_json::{Value, json};
@@ -261,7 +262,7 @@ pub(super) async fn request(args: Value, state: &Arc<AppState>) -> Result<Value>
     prepare(&args["request"], "validation")?;
     state.network.require_online()?;
     let client = client();
-    let _transport = crate::net::ensure_started(state, room.into()).await?;
+    let _transport = crate::net::ensure_started(state, RoomUse::Escrow, room.into()).await?;
     client
         .round_trip(room, peer, &args["request"], REQUEST_WAIT, |bytes| {
             crate::net::send_direct(room, peer, bytes)

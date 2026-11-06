@@ -221,6 +221,7 @@ const READ_ONLY: &[&[&str]] = &[
     &["tunnel", "ls"],
     &["config", "show"],
     &["update", "check"],
+    &["update", "list"],
     &["update", "status"],
     &["autostart", "status"],
     &["path", "status"],
@@ -731,6 +732,11 @@ mod tests {
         );
         assert_eq!(classify(&run(&["tunnel", "room"])), Safety::Mutating);
         assert_eq!(classify(&run(&["update", "apply"])), Safety::Mutating);
+        assert_eq!(classify(&run(&["update", "list"])), Safety::ReadOnly);
+        assert_eq!(
+            classify(&run(&["update", "install", "1.0.0"])),
+            Safety::Mutating
+        );
         assert_eq!(classify(&run(&["sched", "rm", "job-1"])), Safety::Mutating);
     }
 

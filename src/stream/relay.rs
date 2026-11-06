@@ -160,6 +160,7 @@ use tracing::{debug, info, warn};
 
 use crate::consensus::{ConsensusRole, ConsensusView, RelayConsensus};
 use crate::daemon::AppState;
+use crate::net::RoomUse;
 use crate::stream::rtp_out::{self, AudioCodec};
 use crate::stream::rtsp::RtspServer;
 
@@ -351,7 +352,7 @@ impl RelayCapture {
         // from. The same room id is also what the consensus control plane and
         // `mistlib::publish_local_track`/`unpublish_local_track` need as
         // their `room` -- it's the actual on-wire session id.
-        crate::net::ensure_started(state, room.clone()).await?;
+        crate::net::ensure_started(state, RoomUse::Stream, room.clone()).await?;
 
         let node_id = crate::identity::current(state)
             .await

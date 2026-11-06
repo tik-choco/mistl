@@ -30,6 +30,7 @@ use tokio::sync::OnceCell;
 use tracing::warn;
 
 use crate::daemon::AppState;
+use crate::net::RoomUse;
 
 use super::delegation::{self, DelegationV1};
 
@@ -184,7 +185,7 @@ pub(super) async fn start_pairing(
 
     let code = generate_code();
     let room = room_id(&code);
-    crate::net::ensure_started(state, room.clone())
+    crate::net::ensure_started(state, RoomUse::Pairing, room.clone())
         .await
         .context("pairing: joining pairing room")?;
     ensure_handler_registered(state.clone()).await;
@@ -228,7 +229,7 @@ async fn leave_waiting_session_room() {
             .map(|s| s.room.clone())
     };
     if let Some(room) = room
-        && let Err(err) = crate::net::leave_room(&room).await
+        && let Err(err) = crate::net::leave_room(RoomUse::Pairing, &room).await
     {
         warn!(%err, room, "pairing: failed to leave room while replacing/cancelling a session");
     }
@@ -248,7 +249,7 @@ async fn expire_session(room: &str) {
             _ => false,
         }
     };
-    if should_leave && let Err(err) = crate::net::leave_room(room).await {
+    if should_leave && let Err(err) = crate::net::leave_room(RoomUse::Pairing, room).await {
         warn!(%err, room, "pairing: failed to leave room after session timeout");
     }
 }
@@ -269,7 +270,7 @@ pub(super) async fn cancel() -> bool {
     let Some(room) = room else {
         return false;
     };
-    if let Err(err) = crate::net::leave_room(&room).await {
+    if let Err(err) = crate::net::leave_room(RoomUse::Pairing, &room).await {
         warn!(%err, room, "pairing: failed to leave room on cancel");
     }
     true
@@ -428,7 +429,7 @@ async fn handle_pair_request(state: &Arc<AppState>, room: &str, msg: Value) {
     // One-shot: the code is now spent, so leave the room and mark the
     // session issued -- even if persistence above failed, the delegation
     // was already broadcast and is the source of truth on the wire.
-    if let Err(err) = crate::net::leave_room(room).await {
+    if let Err(err) = crate::net::leave_room(RoomUse::Pairing, room).await {
         warn!(%err, room, "pairing: failed to leave room after issuing a delegation");
     }
     {

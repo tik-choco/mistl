@@ -12,8 +12,18 @@ document.body.innerHTML = html.slice(start, end);
 window.eval(fs.readFileSync(new URL('../src/web/assets/features/storage.js', import.meta.url), 'utf8'));
 
 const root = document.getElementById('panel-store');
-assert.equal(root.querySelectorAll('.store-main > .subtab-page').length, 5, 'All five storage destinations stay in the workspace');
+assert.equal(root.querySelectorAll('.store-main > .subtab-page').length, 3, 'Files, sandbox and sync stay in the storage workspace');
 assert.ok(root.contains(document.getElementById('store-sync-form')), 'Folder sync remains in its original panel');
+const vault = document.getElementById('panel-escrow');
+assert.equal(root.nextElementSibling, vault, 'Distributed vault follows storage as a separate panel');
+assert.ok(root.contains(document.getElementById('settings-drawer-storage')));
+assert.ok(vault.contains(document.getElementById('settings-drawer-escrow')));
+const stack = [];
+for (const match of html.slice(start, end).matchAll(/<(\/)?(div|section|details)\b[^>]*>/g)) {
+  if (match[1]) assert.equal(stack.pop(), match[2], `Balanced closing ${match[2]} tag`);
+  else stack.push(match[2]);
+}
+assert.deepEqual(stack, [], 'Storage and vault tags remain balanced');
 const copies = [], saves = [];
 let uploads = 0;
 let locale = 'en';

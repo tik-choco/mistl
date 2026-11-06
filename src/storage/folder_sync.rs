@@ -99,6 +99,7 @@ use super::sandbox::Sandbox;
 use super::sharelink::ShareProfile;
 use super::{Store, sha256_hex};
 use crate::daemon::AppState;
+use crate::net::RoomUse;
 
 /// [`SyncEntry::status`] value while the initial access-grant handshake and
 /// first full fetch haven't completed yet (freshly [`register_sync`]ed, or
@@ -1100,7 +1101,7 @@ async fn run_initial_handshake(
 ) -> Result<()> {
     let mut progress = |line: &str| debug!(folder_id = %entry.folder_id, "folder-sync: {line}");
 
-    crate::net::ensure_started(state, entry.room_id.clone())
+    crate::net::ensure_started(state, RoomUse::Storage, entry.room_id.clone())
         .await
         .context("folder-sync: joining share room")?;
     broadcast_hello(&entry.room_id, state).await;
@@ -1208,7 +1209,7 @@ async fn run_initial_handshake(
 /// (if the owner doesn't answer quickly) the last known-good cid, covering
 /// a failure that was transient/local rather than caused by a stale cid.
 async fn run_resync(entry: &SyncEntry, store: &Store, state: &Arc<AppState>) -> Result<()> {
-    crate::net::ensure_started(state, entry.room_id.clone())
+    crate::net::ensure_started(state, RoomUse::Storage, entry.room_id.clone())
         .await
         .context("folder-sync: rejoining share room")?;
     broadcast_hello(&entry.room_id, state).await;
@@ -1247,7 +1248,7 @@ pub async fn stop_sync(folder_id: &str, store: &Store, _state: &Arc<AppState>) -
     let Some(entry) = removed else {
         return Ok(false);
     };
-    let _ = crate::net::leave_room(&entry.room_id).await;
+    let _ = crate::net::leave_room(RoomUse::Storage, &entry.room_id).await;
     Ok(true)
 }
 
@@ -1550,7 +1551,9 @@ async fn run_background(state: Arc<AppState>) -> Result<()> {
             still_connecting.push(entry);
             continue;
         }
-        if let Err(error) = crate::net::ensure_started(&state, entry.room_id.clone()).await {
+        if let Err(error) =
+            crate::net::ensure_started(&state, RoomUse::Storage, entry.room_id.clone()).await
+        {
             warn!(%error, folder_id = %entry.folder_id, "folder-sync: failed to rejoin room on startup");
             continue;
         }

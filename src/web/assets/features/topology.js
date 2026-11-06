@@ -66,7 +66,7 @@
           if (!node.querySelector) return;
           var label = node.querySelector(".topology-node-label");
           if (label) {
-            label.textContent = compactLabel(model.label, 22);
+            label.textContent = compactLabel(model.label, model.kind === "feature" || model.kind === "room" ? 18 : 22);
           }
           var title = node.querySelector("title");
           if (title) title.textContent = [model.label, model.id, model.role, model.state].filter(Boolean).join(" · ");
@@ -174,6 +174,8 @@
       row("topology.details.connection", model.connection);
       row("topology.details.media", model.media);
       row("topology.details.viewers", model.viewers);
+      if (model.features) row("topology.details.features", model.features.length ? model.features.join(" · ") : t("topology.details.noFeatures"));
+      row("topology.details.peers", model.peers);
       content.appendChild(list);
       if (model.rooms) {
         content.appendChild(element("h4", "topology-detail-section", t("topology.rooms")));
@@ -278,8 +280,8 @@
   }
 
   function createGraph(options, inspection, hidePreview) {
-    var doc = options.document, win = options.window, svg = options.graph;
-    var card = svg.closest("#topology-card") || svg;
+    var doc = options.document, win = options.window || doc.defaultView, svg = options.graph;
+    var card = options.card || svg.closest("#topology-card") || svg;
     var nodes = new Map(), edges = new Map(), liveNodes = [], liveEdges = [];
     var particles = [], raf = null, alpha = 0, lastFrame = 0, particleBudget = 48;
     var width = 640, height = 380, scale = 1, panX = 0, panY = 0;
@@ -295,8 +297,9 @@
       return node;
     }
     var viewport = el("g", { class: "topology-viewport" }, svg);
-    var edgeLayer = el("g", { "aria-hidden": "true" }, viewport);
+    var edgeLayer = el("g", options.onEdgeActivate ? {} : { "aria-hidden": "true" }, viewport);
     var particleLayer = el("g", { "aria-hidden": "true", class: "topology-particles" }, viewport);
+    var labelLayer = options.makeEdgeLabel ? el("g", { "pointer-events": "none", "aria-hidden": "true" }, viewport) : null;
     var nodeLayer = el("g", {}, viewport);
     function now() { return win.performance.now(); }
     function clamp(n, min, max) { return Math.max(min, Math.min(max, n)); }
@@ -311,7 +314,7 @@
         minX = Math.min(minX, n.x - 40); maxX = Math.max(maxX, n.x + 40);
         minY = Math.min(minY, n.y - 28); maxY = Math.max(maxY, n.y + 38);
       });
-      scale = clamp(Math.min((width - 48) / (maxX - minX), (height - 72) / (maxY - minY)), 0.15, 1.25);
+      scale = clamp(Math.min((width - 48) / (maxX - minX), (height - 72) / (maxY - minY)), 0.15, options.fitMax || 1.25);
       panX = -(minX + maxX) / 2 * scale; panY = -(minY + maxY) / 2 * scale;
       camera();
     }
@@ -355,10 +358,20 @@
         var adjacent = e.source.key === key || e.target.key === key;
         e.el.classList.toggle("is-dimmed", !!key && !adjacent);
         e.el.classList.toggle("is-highlighted", !!key && adjacent);
+        if (e.label) {
+          e.label.classList.toggle("is-dimmed", !!key && !adjacent);
+          e.label.classList.toggle("is-highlighted", !!key && adjacent);
+        }
       });
       particles.forEach(function (p) {
         p.el.classList.toggle("is-dimmed", !!key && !p.path.some(function (n) { return n.key === key; }));
       });
+    }
+    // Short spokes keep each feature's rooms visibly clustered around it.
+    function restLength(a, b) {
+      var kinds = [a.kind, b.kind];
+      if (kinds.indexOf("feature") >= 0) return kinds.indexOf("room") >= 0 ? 55 : 65;
+      return kinds.indexOf("room") >= 0 ? 85 : 130;
     }
     function physics() {
       // Positions survive snapshots. Cooling is independent of traffic animations.
@@ -377,7 +390,7 @@
       liveEdges.forEach(function (e) {
         var a = e.source, b = e.target, dx = b.x - a.x, dy = b.y - a.y;
         var distance = Math.sqrt(dx * dx + dy * dy) || 1;
-        var force = (distance - (a.kind === "room" || b.kind === "room" ? 95 : 130)) * 0.025 * alpha;
+        var force = (distance - (options.linkDistance || restLength(a, b))) * 0.025 * alpha;
         var fx = dx / distance * force, fy = dy / distance * force;
         a.vx += fx; a.vy += fy; b.vx -= fx; b.vy -= fy;
       });
@@ -385,7 +398,7 @@
         var center = n.kind === "self" ? 0.035 : 0.0015;
         n.vx = (n.vx - n.x * center * alpha) * 0.78;
         n.vy = (n.vy - n.y * center * alpha) * 0.78;
-        if (drag && drag.node === n) { n.vx = n.vy = 0; return; }
+        if (n.pinned || drag && drag.node === n) { n.vx = n.vy = 0; return; }
         n.x += n.vx; n.y += n.vy;
       });
       alpha *= 0.974;
@@ -430,16 +443,19 @@
       var flowing = false;
       edges.forEach(function (e, key) {
         if (e.removing && (!nodes.has(e.source.key) || !nodes.has(e.target.key) || Math.min(e.source.life, e.target.life) === 0)) {
-          e.el.remove(); edges.delete(key); return;
+          e.el.remove(); if (e.label) e.label.remove(); edges.delete(key); return;
         }
         var a = e.source, b = e.target;
         var geometry = [a.x.toFixed(2), a.y.toFixed(2), b.x.toFixed(2), b.y.toFixed(2)].join(" ");
         if (geometry !== e.geometry) {
           e.el.setAttribute("x1", a.x); e.el.setAttribute("y1", a.y);
           e.el.setAttribute("x2", b.x); e.el.setAttribute("y2", b.y); e.geometry = geometry;
+          positionEdgeLabel(e);
         }
         var opacity = Math.min(a.life, b.life);
-        if (e.opacity !== opacity) { e.el.setAttribute("opacity", opacity); e.opacity = opacity; }
+        if (e.opacity !== opacity) {
+          e.el.setAttribute("opacity", opacity); if (e.label) e.label.setAttribute("opacity", opacity); e.opacity = opacity;
+        }
         if (!e.removing && e.flowUntil > time && !reduced) {
           flowing = true;
           if (time >= e.nextParticle) { addParticle([a, b], 1.8, 0, true); e.nextParticle = time + 240; }
@@ -463,6 +479,9 @@
       // No timer keeps a settled, inactive graph alive.
       if (moving || changing || flowing || particles.length) wake(); else lastFrame = 0;
     }
+    function positionEdgeLabel(e) {
+      if (e.label) e.label.setAttribute("transform", "translate(" + ((e.source.x + e.target.x) / 2) + "," + ((e.source.y + e.target.y) / 2) + ")");
+    }
     function update(graph) {
       particleBudget = 48;
       var nextNodes = new Set(graph.nodes.map(function (n) { return n.key; }));
@@ -476,7 +495,7 @@
       nodes.forEach(function (n, key) { n.el.classList.remove("has-activity"); if (!nextNodes.has(key) && !n.removing) { n.removing = true; changed = true; } });
       graph.nodes.forEach(function (model, index) {
         var n = nodes.get(model.key);
-        var radius = model.kind === "self" ? 10 : model.kind === "room" ? 4.5 : 5.5 + Math.min(3, Math.sqrt(degree.get(model.key) || 0));
+        var radius = model.kind === "self" ? 10 : model.kind === "feature" ? 5.5 : model.kind === "room" ? 4.5 : 5.5 + Math.min(3, Math.sqrt(degree.get(model.key) || 0));
         if (!n) {
           var link = graph.edges.find(function (e) { return e.source === model.key && nodes.has(e.target) || e.target === model.key && nodes.has(e.source); });
           var neighbour = link && nodes.get(link.source === model.key ? link.target : link.source);
@@ -506,16 +525,35 @@
       edges.forEach(function (e, key) {
         if (!nextEdges.has(key)) {
           e.removing = true;
-          if (!e.source.removing && !e.target.removing) { e.el.remove(); edges.delete(key); }
+          if (!e.source.removing && !e.target.removing) { e.el.remove(); if (e.label) e.label.remove(); edges.delete(key); }
         }
       });
       graph.edges.forEach(function (model) {
         var e = edges.get(model.key);
         if (!e) {
           e = { el: el("line", { class: "topology-edge" }, edgeLayer), nextParticle: 0 };
+          if (options.onEdgeActivate) {
+            e.el.setAttribute("role", "button"); e.el.setAttribute("tabindex", "0");
+            e.el.addEventListener("click", function () { if (now() >= suppressUntil) options.onEdgeActivate(e.model, e.el); });
+            e.el.addEventListener("keydown", function (event) {
+              if (event.key === "Enter" || event.key === " ") { event.preventDefault(); options.onEdgeActivate(e.model, e.el); }
+            });
+          }
           edges.set(model.key, e); changed = true;
         }
+        // The hook may reuse the previous label; geometry and lifetime stay here.
+        if (options.makeEdgeLabel && e.model !== model) {
+          var previousLabel = e.label;
+          e.label = options.makeEdgeLabel(labelLayer, model, previousLabel);
+          if (previousLabel && previousLabel !== e.label) previousLabel.remove();
+          if (e.label) e.label.setAttribute("opacity", e.opacity == null ? 0 : e.opacity);
+        }
+        e.model = model;
+        var edgeClass = "topology-edge" + (model.className ? " " + model.className : "");
+        if (e.className !== edgeClass) { e.el.setAttribute("class", edgeClass); e.className = edgeClass; }
+        if (options.onEdgeActivate) e.el.setAttribute("aria-label", model.label || model.key);
         e.source = nodes.get(model.source); e.target = nodes.get(model.target); e.removing = false;
+        positionEdgeLabel(e);
         e.flowUntil = model.flowMs ? now() + model.flowMs : 0;
         e.el.classList.toggle("is-flowing", e.flowUntil > now());
       });
@@ -568,7 +606,9 @@
       if (!drag.moved) return;
       hidePreview();
       if (drag.node) {
-        var position = world(p); drag.node.x = position.x; drag.node.y = position.y; wake(0.4);
+        var position = world(p); drag.node.x = position.x; drag.node.y = position.y;
+        if (options.pinDragged) drag.node.pinned = true;
+        wake(0.4);
       } else {
         userView = true; fitting = false;
         panX += p.x - drag.last.x; panY += p.y - drag.last.y; camera();
@@ -594,7 +634,7 @@
       var dy = event.key === "ArrowDown" ? 20 : event.key === "ArrowUp" ? -20 : 0;
       if (dx || dy) {
         event.preventDefault();
-        if (n) { n.x += dx; n.y += dy; wake(0.5); }
+        if (n) { n.x += dx; n.y += dy; if (options.pinDragged) n.pinned = true; wake(0.5); }
         else { userView = true; fitting = false; panX += dx; panY += dy; camera(); }
       } else if (event.key === "+" || event.key === "=" || event.key === "-") {
         event.preventDefault(); zoom(scale * (event.key === "-" ? 0.8 : 1.25), { x: width / 2, y: height / 2 });
@@ -617,6 +657,18 @@
     resize(); camera();
     return {
       update: update, highlight: highlight,
+      reset: function () {
+        if (raf !== null) win.cancelAnimationFrame(raf);
+        raf = null; alpha = 0; lastFrame = 0; clearParticles();
+        nodes.forEach(function (n, key) { inspection.unbindNode(n.el, key); n.el.remove(); });
+        edges.forEach(function (e) { e.el.remove(); if (e.label) e.label.remove(); });
+        nodes.clear(); edges.clear(); liveNodes = []; liveEdges = [];
+        drag = null; pinch = null; pointers.clear(); highlightKey = null;
+        userView = false; fitting = true; scale = 1; panX = panY = 0; camera();
+      },
+      fit: function () { userView = false; fit(); },
+      worldPoint: function (event) { return world(point(event)); },
+      position: function (key) { var n = nodes.get(key); return n && !n.removing ? { x: n.x, y: n.y } : null; },
       isVisible: function () { syncVisibility(); return visible; },
       suppressClick: function () { return now() < suppressUntil; },
       activity: function (keys, count, bytes) {
@@ -630,5 +682,5 @@
     };
   }
 
-  root.MistlTopology = Object.freeze({ create: create });
+  root.MistlTopology = Object.freeze({ create: create, createGraph: createGraph });
 })(window);

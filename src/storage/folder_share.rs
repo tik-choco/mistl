@@ -66,6 +66,7 @@ use tokio::sync::{OnceCell, broadcast};
 use super::sharelink::{self, ShareProfile};
 use super::{Store, decode_data_url, sha256_hex};
 use crate::daemon::AppState;
+use crate::net::RoomUse;
 
 /// `tc-storage-folder-key-v1` HMAC/hash domain prefix, matching
 /// `src/crypto/folderKeyProof.ts` and the Go reference's
@@ -983,7 +984,7 @@ async fn fetch_folder_share_once(
     // refcounted, so this coexists with the configured `storage.room_ids` and
     // any other active share rooms) instead of requiring `storage.room_ids`
     // to contain it -- shares from different rooms can be fetched concurrently.
-    crate::net::ensure_started(state, share.room_id.clone())
+    crate::net::ensure_started(state, RoomUse::Storage, share.room_id.clone())
         .await
         .context("storage: joining share room")?;
 
@@ -1055,7 +1056,7 @@ async fn fetch_folder_share_once(
     // joined-but-idle room is cheap, so no guard object for now. Continuous
     // sync flows in `folder_sync` keep their room for the sync's lifetime
     // instead.)
-    let _ = crate::net::leave_room(&share.room_id).await;
+    let _ = crate::net::leave_room(RoomUse::Storage, &share.room_id).await;
     result
 }
 

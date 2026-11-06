@@ -1,4 +1,6 @@
-//! Self-update from GitHub Releases: check, verify, and stage new binaries.
+//! Self-update from GitHub Releases: list, check, verify, and stage binaries.
+//! Explicit versions may install older releases or prereleases; automatic
+//! updates and apply without a version remain upgrade-only.
 //!
 //! Policy is "download & stage": `update.apply` (and the background task
 //! when `[update] auto_apply` is on) downloads the release binary for this
@@ -75,9 +77,14 @@ static RESTART_WAITER_RUNNING: AtomicBool = AtomicBool::new(false);
 ///   the last background/manual check result.
 /// - `update.check` `{}` -> `{current, latest, update_available,
 ///   asset_available, notes_url}`.
-/// - `update.apply` `{restart?: bool}` -> `{updated: false, current,
+/// - `update.releases` `{limit?: number}` -> `{current, target, auto_apply,
+///   releases: [{version, prerelease, published_at, asset_available, current,
+///   downgrade, notes_url}]}`, including prereleases but excluding drafts
+///   (default 20, maximum 50).
+/// - `update.apply` `{restart?: bool, version?: string}` -> `{updated: false, current,
 ///   latest}` when already up to date, else download + verify + stage and
-///   `{updated: true, from, to, restart: "none"|"scheduled"}`.
+///   `{updated: true, from, to, restart: "none"|"scheduled"}`. Explicit
+///   versions allow downgrades and add `downgrade` and `auto_apply` fields.
 pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Value> {
     if cmd != "update.status" {
         state.network.require_online()?;
@@ -88,6 +95,7 @@ pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Val
     match cmd {
         "update.status" => cmd_status(state),
         "update.check" => cmd_check(state).await,
+        "update.releases" => cmd_releases(args, state).await,
         "update.apply" => cmd_apply(args, state).await,
         _ => bail!("unknown update command: {cmd}"),
     }
@@ -150,7 +158,70 @@ async fn cmd_check(state: &Arc<AppState>) -> Result<Value> {
     }))
 }
 
+async fn cmd_releases(args: Value, state: &Arc<AppState>) -> Result<Value> {
+    let update = state.config().update;
+    let repo = effective_repo(&update.repo);
+    let client = build_client()?;
+    let limit = release_limit(&args);
+    let url = format!("https://api.github.com/repos/{repo}/releases?per_page={limit}");
+    let releases = parse_releases(&fetch_github_json(&client, &url, None).await?)?;
+    let releases: Vec<Value> = releases
+        .into_iter()
+        .map(|release| {
+            json!({
+                "version": release.version,
+                "prerelease": release.prerelease,
+                "published_at": release.published_at,
+                "asset_available": release.asset(&asset_name(&release.version, TARGET)).is_some(),
+                "current": release.version == CURRENT_VERSION,
+                "downgrade": is_downgrade(CURRENT_VERSION, &release.version),
+                "notes_url": release.notes_url,
+            })
+        })
+        .collect();
+    Ok(json!({
+        "current": CURRENT_VERSION,
+        "target": TARGET,
+        "auto_apply": update.auto_apply,
+        "releases": releases,
+    }))
+}
+
+fn release_limit(args: &Value) -> usize {
+    args.get("limit")
+        .and_then(Value::as_f64)
+        .unwrap_or(20.0)
+        .clamp(1.0, 50.0) as usize
+}
+
+fn normalize_version(version: &str) -> Result<Option<&str>> {
+    if version.is_empty() {
+        return Ok(None);
+    }
+    let normalized = version.strip_prefix('v').unwrap_or(version);
+    semver::Version::parse(normalized)
+        .map_err(|_| anyhow::anyhow!("invalid version {version:?}"))?;
+    Ok(Some(normalized))
+}
+
+fn should_stage(current: &str, target: &str, explicit: bool) -> bool {
+    if explicit {
+        target != current
+    } else {
+        is_update_available(current, target)
+    }
+}
+
+fn is_downgrade(current: &str, target: &str) -> bool {
+    is_update_available(target, current)
+}
+
 async fn cmd_apply(args: Value, state: &Arc<AppState>) -> Result<Value> {
+    let version = match args.get("version") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(version)) => normalize_version(version)?,
+        Some(value) => bail!("invalid version {value}"),
+    };
     let restart = args
         .get("restart")
         .and_then(Value::as_bool)
@@ -158,17 +229,27 @@ async fn cmd_apply(args: Value, state: &Arc<AppState>) -> Result<Value> {
     let update = state.config().update;
     let repo = effective_repo(&update.repo);
     let client = build_client()?;
-    let release = fetch_latest_release_recorded(&client, &repo, update.prerelease).await?;
+    let release = match version {
+        Some(version) => fetch_version_release_recorded(&client, &repo, version).await?,
+        None => fetch_latest_release_recorded(&client, &repo, update.prerelease).await?,
+    };
+    let explicit = version.is_some();
+    let downgrade = is_downgrade(CURRENT_VERSION, &release.version);
 
     // Serialize both the staged-version check and the replace with auto-apply.
     let _guard = apply_lock().lock().await;
-    if !is_update_available(CURRENT_VERSION, &release.version) {
+    if !should_stage(CURRENT_VERSION, &release.version, explicit) {
         record_check("up to date".to_string());
-        return Ok(json!({
+        let mut response = json!({
             "updated": false,
             "current": CURRENT_VERSION,
             "latest": release.version,
-        }));
+        });
+        if explicit {
+            response["downgrade"] = json!(downgrade);
+            response["auto_apply"] = json!(update.auto_apply);
+        }
+        return Ok(response);
     }
 
     if !is_staged_version(&release.version, staged_version().as_deref()) {
@@ -190,7 +271,11 @@ async fn cmd_apply(args: Value, state: &Arc<AppState>) -> Result<Value> {
             record_check(format!("apply failed: {error:#}"));
             return Err(error);
         }
-        record_check(format!("updated to v{}", release.version));
+        record_check(if explicit {
+            format!("installed v{}", release.version)
+        } else {
+            format!("updated to v{}", release.version)
+        });
         info!(
             from = CURRENT_VERSION,
             to = %release.version,
@@ -207,12 +292,17 @@ async fn cmd_apply(args: Value, state: &Arc<AppState>) -> Result<Value> {
     } else {
         "none"
     };
-    Ok(json!({
+    let mut response = json!({
         "updated": true,
         "from": CURRENT_VERSION,
         "to": release.version,
         "restart": restart_mode,
-    }))
+    });
+    if explicit {
+        response["downgrade"] = json!(downgrade);
+        response["auto_apply"] = json!(update.auto_apply);
+    }
+    Ok(response)
 }
 
 /// Spawn the periodic background auto-check (and, with `[update]
@@ -361,6 +451,8 @@ struct ReleaseInfo {
     version: String,
     /// `html_url`: the human release page (notes, manual downloads).
     notes_url: String,
+    prerelease: bool,
+    published_at: Option<String>,
     assets: Vec<ReleaseAsset>,
 }
 
@@ -438,14 +530,35 @@ async fn fetch_latest_release(
     } else {
         format!("https://api.github.com/repos/{repo}/releases/latest")
     };
+    let value = fetch_github_json(client, &url, None).await?;
+    if prerelease {
+        parse_releases(&value)?
+            .into_iter()
+            .next()
+            .with_context(|| format!("update: {repo} has no releases"))
+    } else {
+        parse_release(&value)
+    }
+}
+
+async fn fetch_github_json(
+    client: &reqwest::Client,
+    url: &str,
+    not_found: Option<&str>,
+) -> Result<Value> {
     let response = client
-        .get(&url)
+        .get(url)
         .header(reqwest::header::ACCEPT, "application/vnd.github+json")
         .send()
         .await
         .with_context(|| format!("update: GET {url}"))?;
     if !response.status().is_success() {
         let status = response.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            if let Some(message) = not_found {
+                bail!("{message}");
+            }
+        }
         let body: String = response
             .text()
             .await
@@ -455,20 +568,36 @@ async fn fetch_latest_release(
             .collect();
         bail!("update: GitHub API returned {status} for {url}: {body}");
     }
-    let value: Value = response
+    response
         .json()
         .await
-        .with_context(|| format!("update: parsing GitHub API response from {url}"))?;
-    let release = if prerelease {
-        value
-            .as_array()
-            .and_then(|releases| releases.first())
-            .cloned()
-            .with_context(|| format!("update: {repo} has no releases"))?
-    } else {
-        value
-    };
-    parse_release(&release)
+        .with_context(|| format!("update: parsing GitHub API response from {url}"))
+}
+
+async fn fetch_version_release_recorded(
+    client: &reqwest::Client,
+    repo: &str,
+    version: &str,
+) -> Result<ReleaseInfo> {
+    let url = format!("https://api.github.com/repos/{repo}/releases/tags/v{version}");
+    let not_found = format!("release v{version} not found in {repo}");
+    let result = fetch_github_json(client, &url, Some(&not_found))
+        .await
+        .and_then(|value| parse_release(&value));
+    if let Err(error) = &result {
+        record_check(format!("check failed: {error:#}"));
+    }
+    result
+}
+
+fn parse_releases(value: &Value) -> Result<Vec<ReleaseInfo>> {
+    value
+        .as_array()
+        .context("update: releases JSON is not a list")?
+        .iter()
+        .filter(|release| release.get("draft").and_then(Value::as_bool) != Some(true))
+        .map(parse_release)
+        .collect()
 }
 
 fn parse_release(release: &Value) -> Result<ReleaseInfo> {
@@ -493,6 +622,14 @@ fn parse_release(release: &Value) -> Result<ReleaseInfo> {
         .unwrap_or_default();
     Ok(ReleaseInfo {
         version: tag.strip_prefix('v').unwrap_or(tag).to_string(),
+        prerelease: release
+            .get("prerelease")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        published_at: release
+            .get("published_at")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         notes_url: release
             .get("html_url")
             .and_then(Value::as_str)
@@ -817,6 +954,95 @@ fn last_check() -> (Option<String>, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_version_is_normalized_and_validated() {
+        assert_eq!(normalize_version("").unwrap(), None);
+        for version in ["1.2.3", "1.2.3-beta.1", "1.2.3+build.7"] {
+            assert_eq!(normalize_version(version).unwrap(), Some(version));
+            let prefixed = format!("v{version}");
+            assert_eq!(normalize_version(&prefixed).unwrap(), Some(version));
+        }
+        for version in [
+            "v",
+            "vv1.2.3",
+            "1.2",
+            "nightly",
+            " 1.2.3",
+            "1.2.3/asset",
+            "1.2.3?x",
+            "1.2.3#x",
+        ] {
+            assert_eq!(
+                normalize_version(version).unwrap_err().to_string(),
+                format!("invalid version {version:?}")
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_install_allows_downgrades_and_prereleases_but_skips_current() {
+        for target in ["1.9.0", "2.0.0-beta.1", "2.1.0-beta.1", "2.1.0"] {
+            assert!(should_stage("2.0.0", target, true));
+        }
+        assert!(!should_stage("2.0.0", "2.0.0", true));
+        assert!(!should_stage("2.0.0", "1.9.0", false));
+        assert!(!should_stage("2.0.0", "2.0.0-beta.1", false));
+        assert!(should_stage("2.0.0", "2.1.0", false));
+        // Explicit installs use exact strings, including build metadata.
+        assert!(should_stage("2.0.0+local", "2.0.0", true));
+        assert!(is_downgrade("2.0.0", "1.9.0"));
+        assert!(is_downgrade("2.0.0", "2.0.0-beta.1"));
+        assert!(!is_downgrade("2.0.0", "2.0.0"));
+        assert!(!is_downgrade("2.0.0", "2.1.0-beta.1"));
+        assert!(!is_downgrade("unknown", "1.0.0"));
+    }
+
+    #[test]
+    fn release_list_skips_drafts_and_preserves_metadata_and_order() {
+        let releases = parse_releases(&json!([
+            {"draft": true},
+            {"tag_name": "v2.0.0-beta.1", "prerelease": true,
+             "published_at": "2026-11-01T00:00:00Z",
+             "assets": [{"name": asset_name("2.0.0-beta.1", TARGET),
+                         "browser_download_url": "https://github.com/example/binary"}]},
+            {"tag_name": "v1.9.0", "prerelease": false, "published_at": null},
+            {"tag_name": "v1.8.0"}
+        ]))
+        .unwrap();
+        assert_eq!(releases.len(), 3);
+        assert_eq!(releases[0].version, "2.0.0-beta.1");
+        assert!(releases[0].prerelease);
+        assert_eq!(
+            releases[0].published_at.as_deref(),
+            Some("2026-11-01T00:00:00Z")
+        );
+        assert!(
+            releases[0]
+                .asset(&asset_name("2.0.0-beta.1", TARGET))
+                .is_some()
+        );
+        assert_eq!(releases[1].version, "1.9.0");
+        assert!(!releases[1].prerelease);
+        assert!(releases[1].published_at.is_none());
+        assert!(releases[1].assets.is_empty());
+        assert_eq!(releases[2].version, "1.8.0");
+        assert!(!releases[2].prerelease);
+        assert!(releases[2].published_at.is_none());
+        assert!(parse_releases(&json!([])).unwrap().is_empty());
+        assert!(parse_releases(&json!({})).is_err());
+        assert!(parse_releases(&json!([{}])).is_err());
+    }
+
+    #[test]
+    fn release_list_limit_defaults_and_clamps() {
+        assert_eq!(release_limit(&json!({})), 20);
+        assert_eq!(release_limit(&json!({"limit": null})), 20);
+        for (input, expected) in [(-10, 1), (0, 1), (1, 1), (20, 20), (50, 50), (100, 50)] {
+            assert_eq!(release_limit(&json!({"limit": input})), expected);
+        }
+        assert_eq!(release_limit(&json!({"limit": u64::MAX})), 50);
+    }
 
     #[tokio::test(start_paused = true)]
     async fn auto_check_observes_live_switch_and_shorter_interval() {

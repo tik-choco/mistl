@@ -19,7 +19,7 @@
 //!    `net::start_engine`), so that per-instance override has no meaning
 //!    here and is dropped entirely -- there is no `mistlib_config()`
 //!    equivalent in this port. `new` instead calls
-//!    `crate::net::ensure_started(state, room)`, and takes `self_id` from
+//!    `crate::net::ensure_started(state, RoomUse::Tunnel, room)`, and takes `self_id` from
 //!    the returned `Transport::node_id` (mistl's DID-derived 16-hex-char
 //!    node id, an opaque string on the wire, so this is fully
 //!    wire-compatible with a `p2p` peer's random per-install uuid).
@@ -63,6 +63,7 @@ use super::event::{self, dispatch_event};
 use super::payload::P2pPayload;
 use super::state::{PeerRole, RTCManagerInner};
 use crate::daemon::AppState;
+use crate::net::RoomUse;
 use crate::tunnel::forward_args::{node_scoped_target, split_node_scope};
 
 /// A peer's proposal to establish a forward: the peer wants to reach
@@ -167,7 +168,7 @@ impl RTCManagerHandle {
         // unaffected). `self_id` is mistl's DID-derived node id, taken from
         // the returned `Transport` rather than generated per-instance the
         // way the standalone `p2p` binary did.
-        let transport = crate::net::ensure_started(state, room.clone()).await?;
+        let transport = crate::net::ensure_started(state, RoomUse::Tunnel, room.clone()).await?;
         let self_id = transport.node_id.clone();
 
         let handle = Self {
@@ -531,7 +532,7 @@ impl RTCManagerHandle {
             .closed
             .store(true, std::sync::atomic::Ordering::Release);
         let room = self.current_room().await;
-        let _ = crate::net::leave_room(&room).await;
+        let _ = crate::net::leave_room(RoomUse::Tunnel, &room).await;
     }
 
     /// Switches this manager to a different room without tearing down the
@@ -545,12 +546,11 @@ impl RTCManagerHandle {
     /// holds here, one layer further down -- `crate::net::ensure_started` is
     /// what now owns that one-time `mistlib::init`, and it happily reuses
     /// the already-initialized engine on every call -- so there's still no
-    /// need to rebuild `RTCManagerHandle`. This instead calls
-    /// `crate::net::leave_room(old)` (refcounted: a no-op for mistlib itself
-    /// if another module still holds `old`) followed by
-    /// `crate::net::ensure_started(state, new)`, then updates `inner.room`
-    /// so both `current_room()` and the room-filter closure registered in
-    /// `new` immediately start treating `new` as this manager's room.
+    /// need to rebuild `RTCManagerHandle`. This instead joins the new room
+    /// with `RoomUse::Tunnel`, updates `inner.room`, and releases the old
+    /// room with the same feature. The refcount keeps the old mistlib session
+    /// alive if another holder still needs it. Both `current_room()` and the
+    /// room-filter closure registered in `new` then use the new room.
     ///
     /// Every handler registered via `on_*` stays wired (they live on this
     /// same `inner`, untouched here). Only per-room membership state is
@@ -567,14 +567,14 @@ impl RTCManagerHandle {
         if old_room == room {
             return Ok(());
         }
-        crate::net::ensure_started(state, room.clone()).await?;
+        crate::net::ensure_started(state, RoomUse::Tunnel, room.clone()).await?;
         *self.inner.room.write().await = room;
 
         self.inner.peers.write().await.clear();
         self.inner.peer_roles.write().await.clear();
         self.inner.peer_forward_keys.write().await.clear();
         self.inner.peer_epochs.write().await.clear();
-        let _ = crate::net::leave_room(&old_room).await;
+        let _ = crate::net::leave_room(RoomUse::Tunnel, &old_room).await;
         self.send_role_to_all().await;
         Ok(())
     }

@@ -4,8 +4,8 @@ import vm from 'node:vm';
 import { Window } from 'happy-dom';
 
 const html = fs.readFileSync(new URL('../src/web/assets/index.html', import.meta.url), 'utf8');
-const start = html.indexOf('    <div class="subtab-page" data-subtab="nostr" id="panel-nostr">');
-const end = html.indexOf('    <div class="topology-slot" id="topology-slot-store">', start);
+const start = html.indexOf('  <section class="panel panel-span2" id="panel-nostr">');
+const end = html.indexOf('  <section class="panel" id="panel-access">', start);
 assert.ok(start >= 0 && end > start);
 const translationsStart = html.indexOf('  var T = {');
 const translationsEnd = html.indexOf('\n  };', translationsStart);

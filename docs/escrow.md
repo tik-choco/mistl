@@ -1,4 +1,7 @@
-# Encrypted checkpoint escrow
+# Distributed vault (encrypted checkpoint escrow)
+
+The dashboard calls this feature the **distributed vault** (分散保管庫). The CLI
+command, configuration section and protocol keep the `escrow` name.
 
 Configured rooms use automatic replication across providers by default. An opt-in,
 fixed-voter [Raft replication prototype](escrow-replication.md) is also available

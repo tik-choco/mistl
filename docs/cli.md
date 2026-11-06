@@ -38,7 +38,7 @@ $ mistl store put .\file.bin  # -> returns a CID
 $ mistl store ls
 $ mistl store get <cid> --output .\file.bin
 
-# Encrypted checkpoint escrow
+# Distributed vault (encrypted checkpoint escrow; the CLI keeps the `escrow` name)
 $ mistl escrow status            # configured rooms and automatic replication status
 $ mistl escrow status-json       # machine-readable status
 $ mistl escrow slots <room>      # automatic replication status for each slot
@@ -78,6 +78,13 @@ $ mistl tunnel tui            # interactive terminal UI (talks to the daemon)
 
 # Web dashboard
 $ mistl ui                    # starts the daemon if needed, opens the browser
+
+# Updates (GitHub Releases; sha256 and signature verified before install)
+$ mistl update                # check for a newer release
+$ mistl update apply --restart   # install the latest release and restart now
+$ mistl update list           # recent releases, including prereleases
+$ mistl update install 0.6.1  # install a specific version (also older ones)
+$ mistl update status
 
 # AI network
 $ mistl ai provide start      # turn provide on for enabled Rooms with a nonempty shared list
@@ -265,7 +272,7 @@ These two settings used to live in the (now removed) `[mailbox]` section as
 `chat_rooms`/`chat_relay`; a config.toml still carrying them is migrated to
 `[chat_relay]` on the next daemon start, and the old section is dropped.
 
-### Encrypted checkpoint escrow
+### Distributed vault (escrow)
 
 An opt-in [Raft replication prototype](escrow-replication.md) can replicate
 new escrow rooms across a fixed set of storage nodes. It has bounded history and

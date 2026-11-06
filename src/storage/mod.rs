@@ -49,6 +49,7 @@ use tokio::sync::{Mutex, OnceCell};
 
 use crate::config::StorageConfig;
 use crate::daemon::AppState;
+use crate::net::RoomUse;
 
 pub use index::IndexEntry;
 use resolver::RoomPeerResolver;
@@ -123,7 +124,7 @@ impl Store {
         // of silently losing track.
         for old in current.clone() {
             if !desired.contains(&old) {
-                crate::net::leave_room(&old)
+                crate::net::leave_room(RoomUse::Storage, &old)
                     .await
                     .with_context(|| format!("storage: leaving room {old:?}"))?;
                 current.remove(&old);
@@ -131,7 +132,7 @@ impl Store {
         }
         for new_room in &desired {
             if !current.contains(new_room) {
-                crate::net::ensure_started(state, new_room.clone())
+                crate::net::ensure_started(state, RoomUse::Storage, new_room.clone())
                     .await
                     .context("storage: starting p2p transport")?;
                 current.insert(new_room.clone());
@@ -824,7 +825,7 @@ pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Val
                 .filter(|s| !s.trim().is_empty())
             {
                 Some(room) => {
-                    crate::net::ensure_started(state, room.to_string())
+                    crate::net::ensure_started(state, RoomUse::Storage, room.to_string())
                         .await
                         .context("storage: joining room")?;
                     std::iter::once(room.to_string()).collect()
@@ -838,7 +839,7 @@ pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Val
                         );
                     }
                     for room in &configured {
-                        crate::net::ensure_started(state, room.clone())
+                        crate::net::ensure_started(state, RoomUse::Storage, room.clone())
                             .await
                             .context("storage: joining room")?;
                     }

@@ -21,7 +21,7 @@ const fixtures = {
   'stream.status': {running:false},
   'ai.external.get': {registrations:[]},
   'ai.status': {providing:true, serving:false, rooms:[{provider_id:'home',room:'home-room',enabled:true,joined:true,providing:true,peers:3},{provider_id:'team',room:'team-room',enabled:true,joined:false,providing:false,peers:0}]},
-  'topology.status': {self:{node_id:longId, did:longId, display_name:'\u9577\u3044\u540d\u524d\u306e\u30ce\u30fc\u30c9'.repeat(12)}, rooms:[room], peers:[{node_id:'peer-two',state:'connected'}], room_peers:[{room,peers:[{node_id:'peer-two',state:'connected'}]}], modules:{ai:{room:'unrelated-mailbox',joined:false},chat_relay:{rooms:[{room,joined:true}]}, store:{rooms:[]}}, stream:{running:false}},
+  'topology.status': {self:{node_id:longId, did:longId, display_name:'\u9577\u3044\u540d\u524d\u306e\u30ce\u30fc\u30c9'.repeat(12)}, rooms:[room], peers:[{node_id:'peer-two',state:'connected'}], room_peers:[{room,features:['chat_relay','storage'],peers:[{node_id:'peer-two',state:'connected'}]}], modules:{ai:{room:'unrelated-mailbox',joined:false},chat_relay:{rooms:[{room,joined:true}]}, store:{rooms:[]}}, stream:{running:false}},
   'profile.show': {did:longId, display_name:'UI test'},
   'chat.rooms': {enabled:true, rooms:[{room,joined:true},{room:'random',joined:false}]},
   'store.ls': [{cid:'bafy-long-file-id',name:longName,size:12400,stored_at:'2026-09-22T00:00:00Z'}, {cid:'bafy-photo',name:'photo.png',size:4567,stored_at:'2026-09-21T00:00:00Z'}],
@@ -53,6 +53,7 @@ const onUnhandled = error => errors.push(error);
 process.on('unhandledRejection', onUnhandled);
 window.addEventListener('error', event => errors.push(event.error || event.message));
 window.localStorage.setItem('mistl-lang', 'ja');
+window.localStorage.setItem('mistl-subtab-panel-store', 'nostr');
 window.mistlRuntime = build;
 window.setInterval = (callback, ms) => { intervals.push({callback,ms}); return intervals.length; };
 window.clearInterval = () => {};
@@ -104,6 +105,8 @@ try {
   }
   await flush();
   assert.deepEqual(errors, [], 'page boots without runtime errors');
+  assert.equal(document.querySelector('#panel-store [data-subtab-target="files"]').getAttribute('aria-selected'), 'true');
+  assert.equal(window.localStorage.getItem('mistl-subtab-panel-store'), 'files', 'Removed Nostr tab falls back to files');
   assert.equal(document.querySelectorAll('.store-file-open').length, 2);
   const fileButton = [...document.querySelectorAll('.store-file-open')].find(node => node.title === longName);
   assert.ok(fileButton, 'long filename remains available in full');
@@ -123,6 +126,17 @@ try {
   const topologyDialog = document.querySelector('.topology-detail');
   assert.equal(topologyDialog.open, true);
   assert.ok(topologyDialog.textContent.includes(longId), 'detail carries the full node ID');
+  topologyDialog.querySelector('.topology-detail-close').click();
+
+  const featureNode = document.querySelector('#topology-svg [data-topology-key="feature:chat_relay"]');
+  assert.ok(featureNode.getAttribute('aria-label').includes('tc-chatリレー'), 'Topology feature names are localized');
+  assert.equal(document.querySelectorAll('#topology-svg .kind-room').length, 1, 'A shared room has one node even with two features');
+  featureNode.dispatchEvent(new window.KeyboardEvent('keydown', {key:'Enter', bubbles:true}));
+  assert.ok(topologyDialog.textContent.includes(room), 'Feature details list its rooms in the assembled dashboard');
+  topologyDialog.querySelector('.topology-detail-close').click();
+  document.querySelector('#topology-svg .kind-room').dispatchEvent(new window.KeyboardEvent('keydown', {key:'Enter', bubbles:true}));
+  assert.ok(topologyDialog.textContent.includes('tc-chatリレー') && topologyDialog.textContent.includes('ストレージ'));
+  assert.ok(topologyDialog.textContent.includes('ピア数'));
   topologyDialog.querySelector('.topology-detail-close').click();
 
   document.querySelector('a[href="#panel-chat"]').click();
@@ -187,8 +201,10 @@ try {
   pendingRows[0].querySelector('button.primary').click();
   await flush();
   assert.deepEqual(calls.filter(c=>c.cmd==='tunnel.auth.approve').map(c=>c.args), [{id:7, remember:false}]);
-  const waiting = document.querySelector('#tunnel-graph .tg-outgoing .tg-wait');
-  assert.ok(waiting && waiting.textContent.includes('peer-two'), 'an unanswered own proposal shows as waiting on the graph');
+  document.querySelector('#tunnel-graph [data-node-id="self"]').dispatchEvent(new window.Event('click',{bubbles:true}));
+  const waiting = document.querySelector('.tg-modal .tg-outgoing .tg-wait');
+  assert.ok(waiting && waiting.textContent.includes('peer-two'), 'the own node dialog lists the unanswered proposal');
+  document.querySelector('.tg-modal:not([hidden]) .modal-close').click();
   assert.equal(document.getElementById('tunnel-history').tagName, 'DETAILS', 'trust & history no longer needs subtabs');
   assert.equal(document.querySelector('#panel-tunnel [data-subtab-target]'), null, 'the tunnel panel has no subtabs left');
   // Model references, room cards and bot transforms share one picker.
@@ -893,6 +909,8 @@ try {
   const tabNames={en:['Connections','Tasks','Sharing'],ja:['\u63a5\u7d9a\u5148','\u30bf\u30b9\u30af','\u63d0\u4f9b'],zh:['\u8fde\u63a5','\u4efb\u52a1','\u5171\u4eab']};
   for(const language of ['en','zh','ja']) {
     document.getElementById('lang-'+language+'-btn').click();await flush();
+    assert.equal(document.querySelector('#topology-svg [data-topology-key="feature:chat_relay"]'), featureNode, 'Language changes preserve topology nodes');
+    assert.equal(featureNode.querySelector('.topology-node-label').textContent, {en:'tc-chat relay',zh:'tc-chat 中继',ja:'tc-chatリレー'}[language]);
     assert.ok(!document.getElementById('ai-task-editor').textContent.includes('ai.model.'));
     assert.deepEqual([...document.querySelectorAll('#panel-ai [data-subtab-target]')].map(n=>n.textContent),tabNames[language]);
     assert.ok(!sharing().textContent.includes('ai.sharing.'));

@@ -7,6 +7,19 @@ import './test-i18n.mjs';
 
 const html = fs.readFileSync(new URL('../src/web/assets/index.html', import.meta.url), 'utf8');
 const scripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/g)];
+for (const width of [390, 720, 721]) {
+  const viewport = new Window({width, settings:{disableJavaScriptEvaluation:true, disableJavaScriptFileLoading:true, disableCSSFileLoading:true}});
+  viewport.document.write(html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, ''));
+  const nav = viewport.document.querySelector('#sidenav');
+  const navStyle = viewport.getComputedStyle(nav);
+  assert.equal(viewport.getComputedStyle(nav.querySelector('.sidenav-group')).display, width <= 720 ? 'none' : 'block');
+  assert.equal(navStyle.flexDirection, width <= 720 ? 'row' : 'column');
+  if (width <= 720) {
+    assert.equal(navStyle.overflowX, 'auto');
+    assert.equal(viewport.getComputedStyle(nav.querySelector('a')).whiteSpace, 'nowrap');
+  }
+  viewport.happyDOM.abort();
+}
 const longName = '\u8a2d\u8a08\u8cc7\u6599\u3068\u30ec\u30d3\u30e5\u30fc\u7528\u306e\u9577\u3044\u30d5\u30a1\u30a4\u30eb\u540d'.repeat(8) + '<img src=x onerror=alert(1)>.txt';
 const longId = 'did:key:z6Mk' + 'sample-long-node-identifier'.repeat(8);
 const room = 'design-review';
@@ -53,6 +66,7 @@ const onUnhandled = error => errors.push(error);
 process.on('unhandledRejection', onUnhandled);
 window.addEventListener('error', event => errors.push(event.error || event.message));
 window.localStorage.setItem('mistl-lang', 'ja');
+window.localStorage.setItem('mistl-subtab-panel-store', 'escrow');
 window.mistlRuntime = build;
 window.setInterval = (callback, ms) => { intervals.push({callback,ms}); return intervals.length; };
 window.clearInterval = () => {};
@@ -129,19 +143,33 @@ try {
   document.write(html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, ''));
   for (const [, attrs, source] of scripts) {
     const src = attrs.match(/src="([^"]+)"/);
-    window.eval(src ? fs.readFileSync(new URL('../src/web' + src[1], import.meta.url), 'utf8') : source);
+    const code = src ? fs.readFileSync(new URL('../src/web' + src[1], import.meta.url), 'utf8') : source;
+    window.eval(code.replace('  /* ---------- init ---------- */', '  window.__testFocusSettingsField = focusSettingsField;\n  /* ---------- init ---------- */'));
   }
   await flush();
   assert.deepEqual(errors, []);
   const q=s=>document.querySelector(s), page=q('#panel-escrow');
+  assert.equal(q('#panel-store').nextElementSibling, page);
+  assert.equal(page.tagName, 'SECTION');
+  assert.equal(q('#panel-store [data-subtab-target="files"]').getAttribute('aria-selected'), 'true');
+  assert.equal(window.localStorage.getItem('mistl-subtab-panel-store'), 'files', 'Removed escrow tab falls back to files');
+  assert.deepEqual([...q('#sidenav').children].map(el=>el.getAttribute('href') || el.getAttribute('data-i18n')), [
+    '#panel-overview', '#panel-chat', '#panel-ai', 'nav.group.network', '#panel-tunnel', '#panel-nostr',
+    'nav.group.data', '#panel-store', '#panel-escrow', 'nav.group.automation', '#panel-scheduler', '#panel-bot',
+    'nav.group.manage', '#panel-profile', '#panel-access', '#panel-update', '#panel-settings'
+  ]);
+  assert.ok([...document.querySelectorAll('#sidenav .sidenav-group')].every(el=>el.tagName==='DIV' && el.getAttribute('role')==='presentation'));
+  assert.ok(!calls.some(c=>c.cmd==='escrow.status'), 'Vault polling waits until the panel is opened');
   assert.equal(q('#settings-escrow-max_blob_bytes').value,'0.03125');
   assert.equal(q('#settings-escrow-max_total_bytes').value,'1');
   assert.equal(q('#settings-escrow-max_slots_per_room').value,'1024');
   assert.equal(q('#settings-escrow-auto_replicas').value,'3');
   assert.equal(q('#settings-escrow-dead_after_secs').value,'86400');
   window.location.hash='#panel-escrow';window.dispatchEvent(new window.Event('hashchange'));await flush();
-  assert.ok(q('#panel-store').classList.contains('active'));
+  assert.ok(!q('#panel-store').classList.contains('active'));
   assert.ok(page.classList.contains('active'));
+  assert.equal(q('#sidenav a[href="#panel-escrow"]').getAttribute('aria-current'), 'page');
+  assert.ok(calls.some(c=>c.cmd==='escrow.status'), 'Opening the vault starts polling');
   assert.equal(page.querySelectorAll('tbody tr').length,3);
   assert.match(page.querySelector('[data-escrow-summary]').textContent,/5000 B|4.9 KB/);
   assert.equal(page.querySelectorAll('img').length,0);
@@ -202,7 +230,21 @@ try {
     assert.ok(calls.some(c=>c.cmd==='config.set'&&c.args.path==='escrow.'+key&&c.args.value===Number(value)));
   }
   const enabled=q('#settings-escrow-enabled');enabled.checked=false;enabled.dispatchEvent(new window.Event('change'));await flush();assert.ok(calls.some(c=>c.cmd==='config.set'&&c.args.path==='escrow.enabled'&&c.args.value===false));
-  for(const language of ['en','zh','ja']) {q('#lang-'+language+'-btn').click();await flush();assert.ok(!page.textContent.includes('escrow.configured'));assert.ok(page.textContent.includes('Escrow'));assert.ok(!copies.textContent.includes('escrow.state.'));assert.ok(!copies.textContent.includes('escrow.providersOnline'));}
+  for(const [language, groups, vault] of [
+    ['en', ['Network','Data','Automation','Manage'], 'Distributed vault'],
+    ['zh', ['网络','数据','自动化','管理'], '分布式保管库'],
+    ['ja', ['ネットワーク','データ','自動化','管理'], '分散保管庫']
+  ]) {
+    q('#lang-'+language+'-btn').click();await flush();
+    assert.deepEqual([...document.querySelectorAll('#sidenav .sidenav-group')].map(el=>el.textContent), groups);
+    assert.equal(q('#sidenav a[href="#panel-escrow"]').textContent, vault);
+    assert.equal(page.querySelector('h2').textContent, vault);
+    assert.ok(!page.textContent.includes('escrow.configured'));assert.ok(!copies.textContent.includes('escrow.state.'));assert.ok(!copies.textContent.includes('escrow.providersOnline'));
+  }
+  window.location.hash='#panel-store';window.dispatchEvent(new window.Event('hashchange'));await flush();
+  window.__testFocusSettingsField('settings-escrow-enabled');await flush();
+  assert.ok(page.classList.contains('active'), 'Vault settings shortcut navigates to the standalone panel');
+  assert.ok(q('#settings-drawer-escrow').open);
   window.__mistlViewSwitchUntil=0;const count=calls.filter(c=>c.cmd==='escrow.status').length;intervals.find(i=>i.ms===5000).callback();await flush();assert.ok(calls.filter(c=>c.cmd==='escrow.status').length>count);
   console.log('PASS: Escrow status/mesh states and providers/safe text/row export-import/validation/add-remove/config settings/all locales/polling/auto-apply');
 } finally {

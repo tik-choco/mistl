@@ -21,6 +21,7 @@ use tracing::debug;
 
 use crate::config::{SinkConfig, WebhookHeader};
 use crate::daemon::AppState;
+use crate::net::RoomUse;
 
 use super::persist::{DeliveredItem, SinkOutcome};
 use super::source::Article;
@@ -265,7 +266,7 @@ async fn chat_post(
         .filter(|name| !name.trim().is_empty())
         .unwrap_or_else(|| "mistl".to_string());
 
-    crate::net::ensure_started(state, room.to_string())
+    crate::net::ensure_started(state, RoomUse::Bot, room.to_string())
         .await
         .with_context(|| format!("bot: joining chat-post room {room:?}"))?;
 
@@ -743,7 +744,7 @@ async fn article_publish(
         .filter(|name| !name.trim().is_empty())
         .unwrap_or_else(|| "mistl".to_string());
 
-    crate::net::ensure_started(state, room.to_string())
+    crate::net::ensure_started(state, RoomUse::Bot, room.to_string())
         .await
         .with_context(|| format!("bot: joining article-publish room {room:?}"))?;
 

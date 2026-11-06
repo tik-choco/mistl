@@ -26,9 +26,10 @@
 //! each with its own room id, connected peers, and per-room connection
 //! state (no cross-room dedup, so a peer in two rooms appears once under
 //! each). `room_peers` below wraps that (via `net::room_connections`),
-//! unioned with every room this process has joined via `net::joined_rooms`
+//! unioned with every room this process holds via `net::room_uses`
 //! so a just-joined room with no session-reported peers yet still shows up,
-//! with an empty peer list rather than being omitted.
+//! with an empty peer list rather than being omitted. `net::room_uses`
+//! supplies the features holding each room; mistlib-only rooms have none.
 //!
 //! `activity` (send/receive counts, bytes, and time since the last event,
 //! per room and peer) is *not* something mistlib tracks or exposes at all --
@@ -68,12 +69,12 @@ pub async fn handle(cmd: &str, _args: Value, state: &Arc<AppState>) -> Result<Va
 ///   a process-wide overview, kept for compatibility; see `room_peers` for
 ///   the room-scoped view
 ///   `did` is a live verified binding; `name` is self-claimed display metadata.
-/// - `room_peers`: `[{room, peers: [{node_id, state, did, name}]}]` -- per-room peer
-///   membership (`net::room_connections`), one entry for every room this
-///   process has joined (`net::joined_rooms`) unioned with every room
-///   mistlib currently reports a session for; a joined room with no
-///   session-reported peers yet still appears, with an empty `peers` array.
-///   Sorted by room id.
+/// - `room_peers`: `[{room, features, peers: [{node_id, state, did, name}]}]`
+///   -- per-room peer membership (`net::room_connections`), one entry for
+///   every room held by this process unioned with every room mistlib reports.
+///   `features` is the sorted list of holding feature ids (`net::room_uses`),
+///   or `[]` for a mistlib-only room. A room with no reported peers has an
+///   empty `peers` array. Sorted by room id.
 /// - `activity`: `[{room, node_id, tx, rx}]` -- send/receive activity
 ///   tracked by `net` itself at its send/receive choke points
 ///   (`net::activity_snapshot`), *not* by mistlib. `node_id` is `null` for a
@@ -101,7 +102,10 @@ async fn status(state: &Arc<AppState>) -> Result<Value> {
         "display_name": profile.get("display_name").cloned().unwrap_or(Value::Null),
     });
 
-    let rooms = crate::net::joined_rooms().await;
+    // Derive both fields from the same snapshot so concurrent joins/leaves
+    // cannot produce a room list that disagrees with its feature holders.
+    let room_uses = crate::net::room_uses().await;
+    let rooms = room_uses.iter().map(|(room, _)| room.clone()).collect();
 
     let mut peers = Vec::new();
     for node_id in crate::net::connected_nodes().await {
@@ -112,6 +116,7 @@ async fn status(state: &Arc<AppState>) -> Result<Value> {
 
     let net_snapshot = NetSnapshot {
         rooms,
+        room_uses,
         peers,
         room_connections: crate::net::room_connections().await,
         activity: crate::net::activity_snapshot(),
@@ -160,11 +165,11 @@ struct ModuleRooms {
 /// Everything [`build_status`] reads from `net`, bundled into one struct
 /// purely to keep that function's argument list short -- `rooms` and `peers`
 /// are unchanged from before this module tracked room-scoped membership and
-/// activity; `room_connections` and `activity` are `net::room_connections`'s
-/// and `net::activity_snapshot`'s plain-data return types, threaded through
-/// as-is rather than re-derived here.
+/// activity; `room_uses`, `room_connections`, and `activity` are `net`'s
+/// plain-data snapshots, threaded through as-is rather than re-derived here.
 struct NetSnapshot {
     rooms: Vec<String>,
+    room_uses: Vec<(String, Vec<&'static str>)>,
     peers: Vec<Value>,
     room_connections: Vec<(String, Vec<(String, String)>)>,
     activity: Vec<crate::net::ActivityEntry>,
@@ -183,11 +188,12 @@ fn build_status(
 ) -> Value {
     let NetSnapshot {
         rooms,
+        room_uses,
         peers,
         room_connections,
         activity,
     } = net;
-    let room_peers = build_room_peers(&rooms, &room_connections);
+    let room_peers = build_room_peers(&rooms, &room_connections, &room_uses);
     let activity_json = build_activity(&activity);
 
     // The content store is `null` only when no `storage.room_ids` are
@@ -233,14 +239,20 @@ fn build_status(
 /// room with no session-reported peers yet gets an empty `peers` array
 /// rather than being omitted; a room mistlib reports that isn't (yet, or no
 /// longer) in `joined_rooms` still appears too, since it's a live session
-/// regardless. Peers within a room are sorted by node id for a deterministic
-/// result; a `BTreeMap` keyed by room id gives the room ordering for free.
+/// regardless. Feature ids come from `room_uses` and are empty for a room
+/// only known to mistlib. Peers within a room are sorted by node id for a
+/// deterministic result; a `BTreeMap` keyed by room id gives the room ordering.
 fn build_room_peers(
     joined_rooms: &[String],
     room_connections: &[(String, Vec<(String, String)>)],
+    room_uses: &[(String, Vec<&'static str>)],
 ) -> Vec<Value> {
     let mut merged: std::collections::BTreeMap<&str, Vec<(&str, &str)>> =
         std::collections::BTreeMap::new();
+    let features_by_room: std::collections::HashMap<&str, &[&str]> = room_uses
+        .iter()
+        .map(|(room, features)| (room.as_str(), features.as_slice()))
+        .collect();
     for room in joined_rooms {
         merged.entry(room.as_str()).or_default();
     }
@@ -266,7 +278,8 @@ fn build_room_peers(
                     )
                 })
                 .collect();
-            json!({ "room": room, "peers": peers_json })
+            let features = features_by_room.get(room).copied().unwrap_or_default();
+            json!({ "room": room, "features": features, "peers": peers_json })
         })
         .collect()
 }
@@ -341,6 +354,7 @@ mod tests {
                 "room".into(),
                 vec![("0123456789abcdef".into(), "connected".into())],
             )],
+            &[],
         );
         assert_eq!(rooms[0]["peers"][0], peer);
     }
@@ -351,6 +365,10 @@ mod tests {
             json!({ "node_id": "abc123", "did": "did:key:z6Mk...", "display_name": "Ada" }),
             NetSnapshot {
                 rooms: vec!["room-a".to_string(), "room-b".to_string()],
+                room_uses: vec![
+                    ("room-a".to_string(), vec!["chat_relay", "storage"]),
+                    ("room-b".to_string(), vec!["ai"]),
+                ],
                 peers: vec![
                     json!({ "node_id": "peer1", "state": "connected" }),
                     json!({ "node_id": "peer2", "state": "connecting" }),
@@ -377,6 +395,11 @@ mod tests {
         assert_eq!(value["peers"][0]["node_id"], "peer1");
         assert_eq!(value["peers"][1]["state"], "connecting");
         assert_eq!(value["room_peers"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            value["room_peers"][0]["features"],
+            json!(["chat_relay", "storage"])
+        );
+        assert_eq!(value["room_peers"][1]["features"], json!(["ai"]));
         assert_eq!(value["activity"], json!([]));
         assert_eq!(value["consensus"]["active"], true);
         assert_eq!(value["consensus"]["role"], "leader");
@@ -394,6 +417,7 @@ mod tests {
             json!({ "node_id": "abc123", "did": "did:key:z6Mk...", "display_name": Value::Null }),
             NetSnapshot {
                 rooms: vec!["mistl-mailbox-v1".to_string()],
+                room_uses: vec![("mistl-mailbox-v1".to_string(), vec!["chat_relay"])],
                 peers: Vec::new(),
                 room_connections: Vec::new(),
                 activity: Vec::new(),
@@ -425,6 +449,7 @@ mod tests {
             json!({ "node_id": "abc123", "did": "did:key:z6Mk...", "display_name": Value::Null }),
             NetSnapshot {
                 rooms: vec!["storage-room-a".to_string()],
+                room_uses: vec![("storage-room-a".to_string(), vec!["storage"])],
                 peers: Vec::new(),
                 room_connections: Vec::new(),
                 activity: Vec::new(),
@@ -452,6 +477,7 @@ mod tests {
             json!({ "node_id": "abc123", "did": "did:key:z6Mk...", "display_name": Value::Null }),
             NetSnapshot {
                 rooms: Vec::new(),
+                room_uses: Vec::new(),
                 peers: Vec::new(),
                 room_connections: Vec::new(),
                 activity: Vec::new(),
@@ -487,6 +513,10 @@ mod tests {
             json!({ "node_id": "abc123", "did": "did:key:z6Mk...", "display_name": Value::Null }),
             NetSnapshot {
                 rooms: vec!["room-a".to_string(), "room-b".to_string()],
+                room_uses: vec![
+                    ("room-a".to_string(), vec!["ai"]),
+                    ("room-b".to_string(), vec!["ai", "storage"]),
+                ],
                 peers: Vec::new(),
                 room_connections: vec![
                     (
@@ -517,9 +547,11 @@ mod tests {
 
         // Sorted by room id: room-a, room-b, room-c.
         assert_eq!(room_peers[0]["room"], "room-a");
+        assert_eq!(room_peers[0]["features"], json!(["ai"]));
         assert_eq!(room_peers[0]["peers"], json!([]));
 
         assert_eq!(room_peers[1]["room"], "room-b");
+        assert_eq!(room_peers[1]["features"], json!(["ai", "storage"]));
         let room_b_peers = room_peers[1]["peers"].as_array().unwrap();
         assert_eq!(room_b_peers.len(), 2);
         // Peers within a room are sorted by node id.
@@ -529,6 +561,7 @@ mod tests {
         assert_eq!(room_b_peers[1]["state"], "connected");
 
         assert_eq!(room_peers[2]["room"], "room-c");
+        assert_eq!(room_peers[2]["features"], json!([]));
         assert_eq!(room_peers[2]["peers"][0]["node_id"], "peer3");
         assert_eq!(room_peers[2]["peers"][0]["state"], "reconnecting");
     }
@@ -577,6 +610,7 @@ mod tests {
             json!({ "node_id": "abc123", "did": "did:key:z6Mk...", "display_name": Value::Null }),
             NetSnapshot {
                 rooms: vec!["room-a".to_string()],
+                room_uses: vec![("room-a".to_string(), vec!["ai"])],
                 peers: Vec::new(),
                 room_connections: Vec::new(),
                 activity: entries,

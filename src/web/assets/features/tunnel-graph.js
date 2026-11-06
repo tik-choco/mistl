@@ -2,16 +2,15 @@
   'use strict';
   const words = {
     ja: {
-      title:'接続を組み立てる', help:'端子どうしをドラッグ（または順にクリック）してノードを結びます。線をクリックすると詳細を表示します。',
-      stopped:'Room ID で接続すると、ここにノードが表示されます。', self:'このノード', peer:'リモートノード', legacy:'グラフ未対応・状態待ち',
+      self:'このノード', fit:'全体表示', legacy:'グラフ未対応・状態待ち',
       broadcast:'Broadcast', broadcastHelp:'ON: ルーム全体から接続を受付。OFF: 線で結んだ相手だけ。各転送の承認は別途必要です。TCP のデータ複製ではありません。',
       lock:'編集ロック', lockHelp:'他ノードによる線・転送設定の変更を止めます。既存の通信は続きます。所有者は編集できます。',
       locked:'ロック中', settings:'ノードの設定',
-      add:'＋ ポート転送', addTitle:'ポート転送を追加', empty:'ポート転送はまだありません', remove:'削除', permissions:'接続・編集権限', connect:'接続端子', choose:'接続先の端子を選択してください（Esc で取消）',
+      add:'＋ ポート転送', addTitle:'ポート転送を追加', empty:'ポート転送はまだありません', remove:'削除', permissions:'接続・編集権限', connect:'リンク', choose:'接続先を選択（Esc で取消）',
       save:'追加', direct:'直接接続', room:'ルーム公開', pending:'片側のみ設定済み', disconnect:'線を削除',
       permissionHelp:'このノードに対する操作を、相手ごとに許可します。通信自体には従来の転送承認も適用されます。',
       links:'このノードにつながる線を変更', addGrant:'ポート転送を追加（ローカルサービス公開を含む）', removeGrant:'ポート転送を削除',
-      peerId:'相手の Node ID', grant:'権限を設定', close:'閉じる', reset:'配置を整える', owner:'所有者のみ変更できます',
+      peerId:'相手の Node ID', grant:'権限を設定', close:'閉じる',
       unavailable:'相手の状態を取得できていません。相手も対応版で接続してください。', denied:'編集権限がありません。相手側の「接続・編集権限」で許可してください。',
       applied:'設定を反映しました', failed:'変更できませんでした', partial:'片側の変更後に失敗しました。表示を確認して再試行してください。',
       broadcastDisconnect:'Broadcast が ON のノードがあります。線を削除してもルーム公開による通信は続きます。限定するには各ノードで Broadcast を OFF にしてください。',
@@ -38,16 +37,15 @@
       nAccepted:'{peer} が承認しました。{local} への接続が {target} へ転送されます。', nAddFailed:'{peer} は承認しましたが、このノードでポートを開けませんでした: {detail}',
     },
     en: {
-      title:'Build your connections', help:'Drag between ports (or click two ports in turn) to link nodes. Click a link for details.',
-      stopped:'Connect with a Room ID to show nodes here.', self:'This node', peer:'Remote node', legacy:'Graph unsupported or waiting for state',
+      self:'This node', fit:'Fit', legacy:'Graph unsupported or waiting for state',
       broadcast:'Broadcast', broadcastHelp:'ON accepts connections from the room. OFF limits traffic to linked peers. Forward approval still applies. TCP data is not duplicated.',
       lock:'Edit lock', lockHelp:'Stops remote changes to links and forwards. Existing traffic continues. The owner can still edit.',
       locked:'Locked', settings:'Node settings',
-      add:'+ Port forward', addTitle:'Add a port forward', empty:'No port forwards yet', remove:'Remove', permissions:'Connection permissions', connect:'Connection port', choose:'Choose the destination port (Esc to cancel)',
+      add:'+ Port forward', addTitle:'Add a port forward', empty:'No port forwards yet', remove:'Remove', permissions:'Connection permissions', connect:'Link', choose:'Choose a node (Esc to cancel)',
       save:'Add', direct:'Direct link', room:'Room broadcast', pending:'One side configured', disconnect:'Remove link',
       permissionHelp:'Grant each peer permission to modify this node. Existing forward authorization still applies to traffic.',
       links:'Change links involving this node', addGrant:'Add forwards (including publishing local services)', removeGrant:'Remove forwards',
-      peerId:'Peer Node ID', grant:'Set permissions', close:'Close', reset:'Arrange nodes', owner:'Only the owner can change this',
+      peerId:'Peer Node ID', grant:'Set permissions', close:'Close',
       unavailable:'Peer graph is unavailable. Connect the peer using a compatible version.', denied:'Permission required. Ask the peer owner to grant access in Connection permissions.',
       applied:'Changes applied', failed:'Could not apply change', partial:'One side changed before an error. Inspect the graph before retrying.',
       broadcastDisconnect:'Broadcast is enabled on a node. Removing the explicit link leaves room traffic enabled. Turn Broadcast OFF on each node to restrict it.',
@@ -86,10 +84,11 @@
   let instances = 0;
 
   function create(options) {
-    const doc = options.document, host = options.host;
+    const doc = options.document, host = options.host, win = options.window || doc.defaultView;
     let noticeSeen = null, subscribed = false;
-    let snapshot = null, models = [], positions = {}, source = null, drag = null, busy = false, signature = '', room = '', language = '';
-    const statsEls = new Map();
+    let snapshot = null, models = [], source = null, drag = null, busy = false, signature = '', room = '', language = '';
+    const statsEls = new Map(), shapes = new Map();
+    let layout, nodeDetail = null, detailSignature = '', traffic = new Map(), graphSnapshot = {nodes:[],edges:[]};
     function statKey(f) { return f.target || f.addr; }
     function formatBytes(n) {
       n = Number(n) || 0; const units = ['B','KB','MB','GB','TB']; let i = 0;
@@ -105,16 +104,21 @@
     const peersApi = () => root.MistlPeers && typeof root.MistlPeers.label === 'function' ? root.MistlPeers : null;
     const peerName = id => { const p = peersApi(); const peer = p && p.byNode && p.byNode(id); return peer && peer.name ? p.label(id) : ''; };
     const peerLabel = id => peerName(id) || id;
+    const shortLabel = id => id === snapshot?.self_id ? t('self') : (peerName(id) || String(id).slice(0, 8));
     const peerText = id => { const name = peerName(id); return name && name !== id ? name + ' (' + id + ')' : id; };
     const el = (tag, cls, text) => { const e = doc.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
     const button = (text, cls, action) => { const e = el('button', cls, text); e.type = 'button'; e.addEventListener('click', action); return e; };
-    const line = el('div', 'tg-toolbar'), title = el('h3'), hint = el('p', 'tg-help');
     const message = el('div', 'tg-message'); message.setAttribute('role', 'status'); message.setAttribute('aria-live', 'polite');
-    const viewport = el('div', 'tg-viewport'), canvas = el('div', 'tg-canvas');
-    const svg = doc.createElementNS('http://www.w3.org/2000/svg', 'svg'); svg.classList.add('tg-wires'); svg.setAttribute('aria-label', 'Connections');
-    const nodes = el('div', 'tg-nodes');
-    const arrange = button('', '', () => { positions = {}; savePositions(); drawNodes(); });
-    line.append(title, arrange); canvas.append(svg, nodes); viewport.append(canvas); host.append(line, hint, message, viewport);
+    const viewport = el('div', 'tg-viewport');
+    const svg = doc.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.classList.add('tg-graph'); svg.setAttribute('aria-label', 'Tunnel'); svg.setAttribute('tabindex','0');
+    const fit = button('⛶','tg-fit',()=>layout.fit());
+    viewport.append(svg,fit); host.append(message,viewport);
+    const ns = (tag, attrs, parent) => {
+      const e=doc.createElementNS(svg.namespaceURI,tag);
+      Object.entries(attrs||{}).forEach(([key,value])=>e.setAttribute(key,value));
+      if(parent)parent.append(e); return e;
+    };
 
     // Every editor (forward wizard, node settings, link details) opens in one
     // modal. It hangs off <body> so a transformed dashboard panel can never
@@ -129,7 +133,7 @@
     let opener = null, wizard = null;
     overlay.addEventListener('pointerdown', e => { if (e.target === overlay) closeModal(); });
     overlay.addEventListener('keydown', e => {
-      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeModal(); return; }
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); cancelLink(); closeModal(); return; }
       if (e.key !== 'Tab') return;
       const items = focusables(); if (!items.length) return;
       const first = items[0], last = items[items.length - 1];
@@ -140,18 +144,20 @@
     function modal(titleText) {
       if (overlay.hidden) { opener = doc.activeElement; overlay.hidden = false; }
       dialogTitle.textContent = titleText; dialogClose.setAttribute('aria-label', t('close')); dialogClose.title = t('close');
+      nodeDetail=null; detailSignature=''; statsEls.clear();
+      delete dialogBody.dataset.nodeId; delete dialogBody.dataset.step;
       dialogBody.replaceChildren(); dialogStatus.textContent = ''; dialogStatus.classList.remove('tg-error');
       return dialogBody;
     }
     function focusFirst(preferred) { (preferred || dialogBody.querySelector('input,.tg-chosen') || focusables().find(e => e !== dialogClose) || dialogClose).focus(); }
     function closeModal() {
       if (overlay.hidden) return;
-      overlay.hidden = true; wizard = null; dialogBody.replaceChildren();
+      overlay.hidden = true; wizard = null; nodeDetail=null; detailSignature=''; statsEls.clear(); dialogBody.replaceChildren();
       if (opener && opener.isConnected && opener.focus) opener.focus({preventScroll:true});
       opener = null;
+      if(layout) markSource();
     }
 
-    function savePositions() { try { root.localStorage.setItem('mistl-tunnel-layout:' + room, JSON.stringify(positions)); } catch (_) {} }
     function can(model, permission) { return model.self || !!(model.node && !model.node.locked && model.node.permissions[permission]); }
     function notice(text, error) {
       message.textContent = text; message.classList.toggle('tg-error', !!error);
@@ -178,86 +184,109 @@
       });
       if (!connected && (a.node.broadcast || b.node.broadcast)) notice(t('broadcastDisconnect'));
     }
-    function choose(id) {
-      if (!source) { source = id; notice(t('choose')); drawWires(); return; }
-      const from = source; source = null; drawWires(); if (from !== id) link(modelById(from),modelById(id),true);
-    }
-    function position(model, index) {
-      const saved = positions[model.id];
-      return saved && Number.isFinite(saved.x) && Number.isFinite(saved.y) ? saved : {x:30 + (index % 3)*324, y:40 + Math.floor(index/3)*360};
-    }
-    function drawNodes() {
-      const focused=doc.activeElement, focusedCard=focused?.closest('.tg-node');
-      const focusId=focusedCard?.dataset.nodeId, focusIndex=focusedCard?[...focusedCard.querySelectorAll('button,input,[tabindex]')].indexOf(focused):-1;
-      nodes.replaceChildren(); statsEls.clear();
-      models.forEach((model,index) => {
-        const card = el('article','tg-node' + (model.self ? ' tg-self' : '')); card.dataset.nodeId = model.id;
-        const pos = position(model,index); card.style.left = Math.max(8,pos.x) + 'px'; card.style.top = Math.max(8,pos.y) + 'px';
-        const head = el('div','tg-node-head'); head.tabIndex = 0; head.title = model.id; head.setAttribute('aria-label', model.id + ' — ' + t('help'));
-        const named = !model.self && peerName(model.id);
-        const avatar = named && peersApi().avatarEl ? peersApi().avatarEl(model.id, 18) : null;
-        head.append(avatar || el('span','tg-node-dot'), el('strong','',model.self ? t('self') : (named || t('peer'))));
-        const id = el('div','tg-node-id', model.id); id.title = model.id;
-        function connector(side) {
-          const port = button('', 'tg-port' + (side === 'left' ? ' tg-port-in' : ''), () => choose(model.id)); port.title = t('connect'); port.setAttribute('aria-label', t('connect') + ' — ' + model.id + ' (' + side + ')'); port.dataset.port = model.id;
-          port.addEventListener('pointerdown', e => { if (e.button !== 0) return; drag = {port:model.id,side,x:e.clientX,y:e.clientY,moved:false}; });
-          return port;
-        }
-        head.addEventListener('pointerdown', e => {
-          if (e.button !== 0) return;
-          drag = {id:model.id,card,x:e.clientX,y:e.clientY,left:parseFloat(card.style.left),top:parseFloat(card.style.top)};
-          if (head.setPointerCapture) head.setPointerCapture(e.pointerId);
-        });
-        head.addEventListener('keydown', e => {
-          const delta = {ArrowLeft:[-20,0],ArrowRight:[20,0],ArrowUp:[0,-20],ArrowDown:[0,20]}[e.key]; if (!delta) return;
-          e.preventDefault(); positions[model.id] = {x:Math.max(8,parseFloat(card.style.left)+delta[0]),y:Math.max(8,parseFloat(card.style.top)+delta[1])}; savePositions(); drawNodes();
-          [...nodes.querySelectorAll('.tg-node')].find(n=>n.dataset.nodeId===model.id)?.querySelector('.tg-node-head').focus();
-        });
-        card.append(head,id,connector('right'),connector('left'));
-        if (model.node) {
-          if (model.self) {
-            const gear = button('⚙','tg-gear',()=>showSettings(model)); gear.title = t('settings'); gear.setAttribute('aria-label', t('settings')); card.append(gear);
-          }
-          const badges = el('div','tg-badges');
-          if (model.node.broadcast) badges.append(el('span','tg-badge',t('broadcast')));
-          if (model.node.locked) badges.append(el('span','tg-badge',t('locked')));
-          if (badges.childNodes.length) card.append(badges);
-          const list = el('div','tg-forwards');
-          const outgoing = model.node.outgoing || [];
-          if (!model.node.forwards.length && !outgoing.length) list.append(el('p','tg-empty',t('empty')));
-          // Proposals this node sent that the peer has not answered yet.
-          outgoing.forEach(o => list.append(outgoingRow(o)));
-          model.node.forwards.forEach(f => {
-            const row = el('div','tg-forward'), text = el('div','tg-forward-text');
-            text.append(el('span','tg-proto',String(f.proto || '').toUpperCase()),el('span','',f.direction === 'serve' ? ' ↑ ' : ' ↓ '),el('span','',f.addr));
-            if (f.direction === 'connect') { const dest = el('small','',f.target); dest.title=f.target; text.append(dest); }
-            if (f.awaiting_approval) text.append(pill('tg-wait','⏳ '+fmt('waitApprove',{peer:peerLabel(f.approval_peer_id||'')}),f.approval_peer_id));
-            else if (f.denied_at_ms) text.append(pill('tg-denied','✕ '+fmt('deniedBy',{peer:peerLabel(f.approval_peer_id||'')}),f.approval_peer_id));
-            if (f.state === 'error') text.append(el('small','tg-error', t('error') + ': ' + f.error));
-            if (model.self) { const stats = el('small','tg-stats'); stats.textContent = statsText(f); text.append(stats); statsEls.set(statKey(f), stats); }
-            row.append(text);
-            const doRemove = () => {
-              if (!(options.confirm || root.confirm)(t('removeConfirm').replace('{target}', () => f.target))) return;
-              if (f.graph_managed) perform(() => command(model,{type:'remove_forward',target:f.target}));
-              else perform(() => options.api('tunnel.forward.remove',{target:f.target}));
-            };
-            if (model.self) {
-              const remove = button('×','tg-remove',doRemove);
-              remove.title=t('remove'); remove.setAttribute('aria-label',t('remove')+' '+f.addr); row.append(remove);
-            } else if (f.graph_managed) {
-              const remove = button('×','tg-remove',doRemove);
-              remove.title=t('remove'); remove.setAttribute('aria-label',t('remove')+' '+f.addr); remove.disabled=!can(model,'remove_forwards'); row.append(remove);
-            } else row.title=t('legacyForward');
-            list.append(row);
-          });
-          card.append(list);
-          // Remote nodes only offer the button when their owner granted it.
-          if (can(model,'add_forwards')) card.append(button(t('add'),'tg-add',()=>showForward(model)));
-        } else card.append(el('p','tg-empty',t('legacy')));
-        nodes.append(card);
+    function markSource() {
+      shapes.forEach((shape,id)=>{
+        shape.el.classList.add('tg-node');
+        shape.el.classList.toggle('tg-connecting',id===source);
+        shape.el.classList.toggle('is-selected',id===nodeDetail);
       });
-      drawWires();
-      if(focusId&&focusIndex>=0) [...nodes.children].find(c=>c.dataset.nodeId===focusId)?.querySelectorAll('button,input,[tabindex]')[focusIndex]?.focus({preventScroll:true});
+      layout.highlight(source||nodeDetail);
+    }
+    function choose(id) {
+      if(!modelById(id)?.node)return;
+      if (!source) { source=id; notice(t('choose')); markSource(); return; }
+      const from=source; source=null; markSource();
+      if(from!==id) link(modelById(from),modelById(id),true);
+    }
+    function activate(id) {
+      if(layout.suppressClick())return;
+      if(source)choose(id); else showNode(modelById(id));
+    }
+    function makeNode(parent,model,radius) {
+      const group=ns('g',{'data-topology-key':model.key,'data-node-id':model.key,tabindex:0,role:'button','aria-haspopup':'dialog'},parent);
+      ns('circle',{class:'tg-wait-ring',r:radius+6},group);
+      ns('circle',{class:'topology-node-hit',r:radius+10},group);
+      ns('circle',{class:'topology-node-dot',r:radius},group);
+      const avatar=ns('foreignObject',{x:-9,y:-9,width:18,height:18,class:'tg-avatar','pointer-events':'none'},group);
+      const label=ns('text',{class:'topology-node-label','text-anchor':'middle'},group);
+      const services=ns('g',{class:'tg-services'},group);
+      const badges=ns('text',{class:'tg-node-badges',x:radius+6,y:-radius-3},group);
+      const title=ns('title',{},group);
+      const handle=ns('circle',{class:'tg-link-handle',cx:radius+15,cy:0,r:5,'data-link-handle':model.key},group);
+      handle.addEventListener('pointerdown',e=>{
+        if(e.button!==0)return;
+        e.preventDefault();e.stopPropagation();
+        drag={id:model.key,x:e.clientX,y:e.clientY,moved:false};
+        handle.setPointerCapture(e.pointerId);
+      });
+      handle.addEventListener('click',e=>{e.stopPropagation();if(!layout.suppressClick())choose(model.key);});
+      group.addEventListener('click',()=>activate(model.key));
+      group.addEventListener('keydown',e=>{
+        if(e.key==='Enter'||e.key===' '){e.preventDefault();activate(model.key);}
+        else if(e.key.toLowerCase()==='l'){e.preventDefault();choose(model.key);}
+      });
+      group.addEventListener('mouseenter',()=>layout.highlight(source||model.key));
+      group.addEventListener('mouseleave',markSource);
+      group.addEventListener('focus',()=>layout.highlight(source||model.key));
+      group.addEventListener('blur',markSource);
+      shapes.set(model.key,{el:group,label,services,badges,avatar,title});
+      return {el:group,cx:0,cy:0};
+    }
+    layout=root.MistlTopology.createGraph({document:doc,window:win,graph:svg,card:viewport,pinDragged:true,fitMax:2.2,linkDistance:240,makeNode,makeEdgeLabel,
+      onEdgeActivate:edge=>{
+        const a=modelById(edge.source),b=modelById(edge.target);
+        if(a?.node&&b?.node)showEdge(a,b,edge.explicit,edge.allowed);
+      }
+    },{unbindNode:(node,key)=>{
+      shapes.delete(key);
+      if(doc.activeElement===node)svg.focus({preventScroll:true});
+    }},()=>{});
+    function showNode(model) {
+      if(!model)return;
+      const pane=modal(nodeLabel(model)); nodeDetail=model.id;
+      pane.dataset.nodeId=model.id;
+      pane.append(el('p','tg-full-id',model.id));
+      detailSignature=nodeSignature(model);
+      if(model.node) {
+        const list = el('div','tg-forwards');
+        const outgoing = model.node.outgoing || [];
+        if (!model.node.forwards.length && !outgoing.length) list.append(el('p','tg-empty',t('empty')));
+        // Proposals this node sent that the peer has not answered yet.
+        outgoing.forEach(o => list.append(outgoingRow(o)));
+        model.node.forwards.forEach(f => {
+          const row = el('div','tg-forward'), text = el('div','tg-forward-text');
+          text.append(el('span','tg-proto',String(f.proto || '').toUpperCase()),el('span','',f.direction === 'serve' ? ' ↑ ' : ' ↓ '),el('span','',f.addr));
+          if (f.direction === 'connect') { const dest = el('small','',f.target); dest.title=f.target; text.append(dest); }
+          if (f.awaiting_approval) text.append(pill('tg-wait','⏳ '+fmt('waitApprove',{peer:peerLabel(f.approval_peer_id||'')}),f.approval_peer_id));
+          else if (f.denied_at_ms) text.append(pill('tg-denied','✕ '+fmt('deniedBy',{peer:peerLabel(f.approval_peer_id||'')}),f.approval_peer_id));
+          if (f.state === 'error') text.append(el('small','tg-error', t('error') + ': ' + f.error));
+          if (model.self) { const stats = el('small','tg-stats'); stats.textContent = statsText(f); text.append(stats); statsEls.set(statKey(f), stats); }
+          row.append(text);
+          const doRemove = () => {
+            if (!(options.confirm || root.confirm)(t('removeConfirm').replace('{target}', () => f.target))) return;
+            if (f.graph_managed) perform(() => command(model,{type:'remove_forward',target:f.target}));
+            else perform(() => options.api('tunnel.forward.remove',{target:f.target}));
+          };
+          if (model.self) {
+            const remove = button('×','tg-remove',doRemove);
+            remove.title=t('remove'); remove.setAttribute('aria-label',t('remove')+' '+f.addr); row.append(remove);
+          } else if (f.graph_managed) {
+            const remove = button('×','tg-remove',doRemove);
+            remove.title=t('remove'); remove.setAttribute('aria-label',t('remove')+' '+f.addr); remove.disabled=!can(model,'remove_forwards'); row.append(remove);
+          } else row.title=t('legacyForward');
+          list.append(row);
+        });
+        pane.append(list);
+        const foot=el('div','tg-dialog-foot');
+        if(can(model,'add_forwards'))foot.append(button(t('add'),'tg-add',()=>showForward(modelById(model.id)||model)));
+        foot.append(button(t('connect'),'tg-link',()=>{closeModal();choose(model.id);}));
+        if(model.self)foot.append(button(t('settings'),'tg-gear',()=>showSettings(modelById(model.id)||model)));
+        pane.append(foot);
+      } else pane.append(el('p','tg-empty',t('legacy')));
+      markSource();focusFirst();
+    }
+    function nodeSignature(model) {
+      return JSON.stringify([model.id,model.node?{...model.node,forwards:model.node.forwards.map(({active_conns,bytes_in,bytes_out,peers,...f})=>f)}:null,peerName(model.id),lang()]);
     }
     // A status pill; the full peer id stays reachable next to a claimed name.
     function pill(cls, text, peerId) {
@@ -285,36 +314,110 @@
       self.node.forwards.forEach(f => { if (f.awaiting_approval && f.approval_peer_id) set.add(f.approval_peer_id); });
       return set;
     }
-    function drawWires() {
-      svg.replaceChildren();
-      let width=660,height=380;
-      const cards = new Map([...nodes.children].map(c=>[c.dataset.nodeId,c]));
-      cards.forEach(c=>{width=Math.max(width,parseFloat(c.style.left)+310);height=Math.max(height,parseFloat(c.style.top)+(c.offsetHeight||250)+40);c.classList.toggle('tg-connecting',c.dataset.nodeId===source);});
-      canvas.style.width=width+'px';canvas.style.height=height+'px'; svg.setAttribute('width',width);svg.setAttribute('height',height);
-      const waiting=waitingPeers();
+    function compactAddr(addr) {
+      addr=String(addr||'');
+      if (/^\d{1,5}$/.test(addr)) return ':'+addr;
+      const match=addr.match(/^(.*):(\d{1,5})$/);
+      if (!match) return null;
+      const host=match[1].replace(/^\[|\]$/g,'').toLowerCase();
+      return !host||['localhost','loopback','::1','0.0.0.0'].includes(host)||/^127\.\d+\.\d+\.\d+$/.test(host)?':'+match[2]:addr;
+    }
+    const edgeKey=(a,b)=>JSON.stringify([a,b].sort());
+    function portMappings() {
+      const pairs=new Map();
+      function add(from,to,proto,local,remote,pending=false) {
+        if(from===to||!modelById(from)||!modelById(to)||!remote)return;
+        const key=edgeKey(from,to),list=pairs.get(key)||[];
+        const mapping={from,to,proto:String(proto||'tcp').toUpperCase(),local,remote,pending};
+        if(!list.some(m=>JSON.stringify(m)===JSON.stringify(mapping)))list.push(mapping);
+        pairs.set(key,list);
+      }
+      models.forEach(model=>{
+        (model.node?.forwards||[]).forEach(f=>{
+          if(f.direction!=='connect')return;
+          const at=f.target.lastIndexOf('@');if(at<0)return;
+          const peer=f.target.slice(at+1),target=f.target.slice(0,at);
+          // Graph-managed service keys are opaque; use the published address.
+          const service=modelById(peer)?.node?.forwards.find(s=>s.direction==='serve'&&s.target===f.target);
+          const local=compactAddr(f.addr),remote=compactAddr(service?service.addr:target.replace(/^(tcp|udp):(?:\/\/)?/i,''));
+          if(local)add(model.id,peer,f.proto,local,remote,!!f.awaiting_approval);
+        });
+        (model.node?.outgoing||[]).forEach(o=>{
+          const local=compactAddr(o.local_addr||o.listen_port);
+          if(local)add(model.id,o.peer_id,o.proto,local,compactAddr(o.remote_addr),true);
+        });
+      });
+      const self=models.find(m=>m.self);
+      (self?.node?.forwards||[]).filter(f=>f.direction==='serve').forEach(f=>{
+        const remote=compactAddr(f.addr),proto=String(f.proto||'tcp').toUpperCase();
+        (f.peers||[]).filter(p=>p.active_conns>0).forEach(p=>{
+          const known=pairs.get(edgeKey(p.peer_id,self.id))||[];
+          if(!known.some(m=>m.from===p.peer_id&&m.to===self.id&&m.proto===proto&&m.remote===remote))add(p.peer_id,self.id,proto,'',remote);
+        });
+      });
+      pairs.forEach(list=>list.sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b))));
+      return pairs;
+    }
+    function mappingText(m) {
+      return (m.pending?'⏳ ':'')+m.proto+' '+shortLabel(m.from)+(m.local?' '+m.local:'')+' → '+shortLabel(m.to)+' '+m.remote;
+    }
+    // Keep text nodes stable across polls and unrelated graph changes.
+    function portLines(parent,lines,startY=0,center=false) {
+      const key=JSON.stringify(lines);
+      if(parent.dataset.ports===key)return;
+      parent.dataset.ports=key;parent.replaceChildren();
+      const visible=lines.slice(0,3);
+      if(lines.length>3)visible.push({text:'+'+(lines.length-3)});
+      visible.forEach((line,i)=>{
+        const text=ns('text',{x:0,y:startY+(i-(center?(visible.length-1)/2:0))*14,'text-anchor':'middle',class:line.pending?'tg-port-wait':''},parent);
+        text.textContent=line.text;
+      });
+      if(lines.length)ns('title',{},parent).textContent=lines.map(l=>l.text).join('\n');
+    }
+    function makeEdgeLabel(parent,edge,label) {
+      if(!label)label=ns('g',{class:'tg-port-label'},parent);
+      portLines(label,edge.mappings.map(m=>({text:mappingText(m),pending:m.pending})), -4, true);
+      return label;
+    }
+    function drawGraph(mappings) {
+      const waiting=waitingPeers(), edges=[];
       models.forEach((a,i)=>models.slice(i+1).forEach(b=>{
-        // The self <-> peer wire is pending while a proposal or approval is outstanding.
         const awaiting=(a.self&&waiting.has(b.id))||(b.self&&waiting.has(a.id));
-        const ab=!!a.node?.links.includes(b.id), ba=!!b.node?.links.includes(a.id), explicit=ab||ba;
+        const ab=!!a.node?.links.includes(b.id),ba=!!b.node?.links.includes(a.id),explicit=ab||ba;
         const allowed=!!a.node&&!!b.node&&(a.node.broadcast||ab)&&(b.node.broadcast||ba);
-        if (!awaiting&&(!a.node||!b.node)) return;
-        if (!explicit&&!allowed&&!awaiting) return;
-        let ca=cards.get(a.id),cb=cards.get(b.id);
-        if(parseFloat(ca.style.left)>parseFloat(cb.style.left)) [ca,cb]=[cb,ca];
-        const leftA=parseFloat(ca.style.left),leftB=parseFloat(cb.style.left),x1=leftA+282,y1=parseFloat(ca.style.top)+48,y2=parseFloat(cb.style.top)+48;
-        const horizontal=leftB-leftA>=310,x2=leftB+(horizontal?0:282);
-        const lane=Math.max(5,Math.min(y1,y2)-76);
-        const path=doc.createElementNS(svg.namespaceURI,'path');
-        path.setAttribute('d',horizontal
-          ? (leftB-leftA<400?`M ${x1} ${y1} C ${x1+22} ${y1}, ${x2-22} ${y2}, ${x2} ${y2}`:`M ${x1} ${y1} L ${x1+18} ${y1} L ${x1+18} ${lane} L ${x2-18} ${lane} L ${x2-18} ${y2} L ${x2} ${y2}`)
-          : `M ${x1} ${y1} C ${Math.max(x1,x2)+80} ${y1}, ${Math.max(x1,x2)+80} ${y2}, ${x2} ${y2}`);
-        path.setAttribute('class','tg-wire '+(explicit||allowed?(explicit?(allowed?'tg-direct':'tg-pending'):'tg-broadcast'):'')+(awaiting?' tg-awaiting':''));
-        path.setAttribute('role','button');path.setAttribute('tabindex','0');path.setAttribute('aria-label',`${a.id} ↔ ${b.id} · ${awaiting?t('proposalWire'):t(explicit?(allowed?'direct':'pending'):'room')}`);
-        const open=()=>{ if(a.node&&b.node) showEdge(a,b,explicit,allowed); };path.addEventListener('click',open);path.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();open();}});svg.append(path);
+        const ports=mappings.get(edgeKey(a.id,b.id))||[];
+        if(!awaiting&&!ports.length&&(!a.node||!b.node))return;
+        if(!explicit&&!allowed&&!awaiting&&!ports.length)return;
+        edges.push({key:JSON.stringify([a.id,b.id]),source:a.id,target:b.id,explicit,allowed,mappings:ports,
+          className:'tg-wire '+(explicit?(allowed?'tg-direct':'tg-pending'):'tg-broadcast')+(awaiting?' tg-awaiting':''),
+          label:nodeLabel(a)+' ↔ '+nodeLabel(b)+' · '+(awaiting?t('proposalWire'):t(explicit?(allowed?'direct':'pending'):(allowed?'room':'connect')))+(ports.length?' · '+ports.map(mappingText).join('; '):'')});
       }));
+      graphSnapshot={nodes:models.map(m=>({key:m.id,kind:m.self?'self':'peer',rawState:'connected'})),edges};
+      layout.update(graphSnapshot);
+      models.forEach(model=>{
+        const shape=shapes.get(model.id),node=model.node;
+        const label=shortLabel(model.id);
+        shape.label.textContent=Array.from(label).slice(0,18).join('')+(Array.from(label).length>18?'…':'');
+        shape.services.setAttribute('transform','translate(0,'+(Number(shape.label.getAttribute('y'))+14)+')');
+        portLines(shape.services,(node?.forwards||[]).filter(f=>f.direction==='serve').map(f=>({text:'↑ '+String(f.proto||'tcp').toUpperCase()+' '+(compactAddr(f.addr)||f.addr)})));
+        shape.el.setAttribute('aria-label',label);
+        shape.title.textContent=peerText(model.id);
+        shape.el.classList.toggle('tg-self',model.self);
+        shape.el.classList.toggle('tg-legacy',!node);
+        shape.el.classList.toggle('tg-waiting',waiting.has(model.id));
+        shape.el.classList.toggle('tg-has-error',!!node?.forwards.some(f=>f.state==='error'||f.denied_at_ms));
+        shape.badges.textContent=node?[node.forwards.length||'',node.broadcast?'◉':'',node.locked?'🔒':'',node.forwards.some(f=>f.state==='error'||f.denied_at_ms)?'!':''].filter(Boolean).join(' '):'';
+        shape.el.querySelector('.tg-link-handle').setAttribute('visibility',node?'visible':'hidden');
+        const peer=peersApi()?.byNode?.(model.id),avatarSignature=JSON.stringify([peer?.name,peer?.avatar]);
+        if(shape.avatarSignature!==avatarSignature){
+          shape.avatarSignature=avatarSignature;shape.avatar.replaceChildren();
+          if(peer&&peersApi().avatarEl)shape.avatar.append(peersApi().avatarEl(model.id,18));
+        }
+      });
+      markSource();
     }
     function showEdge(a,b,explicit,allowed) {
-      const pane=modal(t(explicit?(allowed?'direct':'pending'):'room'));
+      const pane=modal(t(explicit?(allowed?'direct':'pending'):(allowed?'room':'connect')));
       pane.append(flow([nodeLabel(a),''],[nodeLabel(b),''],'↔'));
       if (a.node.broadcast||b.node.broadcast) pane.append(el('p','tg-help',t('broadcastDisconnect')));
       const foot=el('div','tg-dialog-foot');
@@ -513,23 +616,31 @@
         input.addEventListener('change',()=>{const next={edit_links:!!grants.edit_links,add_forwards:!!grants.add_forwards,remove_forwards:!!grants.remove_forwards,[key]:input.checked};input.checked=!!grants[key];perform(async()=>{await command(model,{type:'permission',peer_id:id,permissions:next});Object.assign(grants,next);input.checked=!!next[key];});});
       });pane.append(row);
     }
+    let rubber=null, suppressLinkUntil=0;
+    function cancelLink() {
+      drag=null;source=null;if(rubber)rubber.remove();rubber=null;markSource();
+    }
     doc.addEventListener('pointermove',e=>{
       if(!drag)return;
-      if(drag.port){
-        drag.moved ||= Math.abs(e.clientX-drag.x)+Math.abs(e.clientY-drag.y)>6;
-        if(drag.moved){source=drag.port;drawWires();const rect=canvas.getBoundingClientRect(), card=[...nodes.children].find(c=>c.dataset.nodeId===drag.port);const path=doc.createElementNS(svg.namespaceURI,'path');path.setAttribute('class','tg-wire tg-direct');path.style.pointerEvents='none';path.setAttribute('d',`M ${parseFloat(card.style.left)+(drag.side==='left'?0:282)} ${parseFloat(card.style.top)+48} L ${e.clientX-rect.left} ${e.clientY-rect.top}`);svg.append(path);}
-        return;
-      }
-      positions[drag.id]={x:Math.max(8,drag.left+e.clientX-drag.x),y:Math.max(8,drag.top+e.clientY-drag.y)};
-      drag.card.style.left=positions[drag.id].x+'px';drag.card.style.top=positions[drag.id].y+'px';drawWires();
+      drag.moved ||= Math.hypot(e.clientX-drag.x,e.clientY-drag.y)>6;
+      if(!drag.moved)return;
+      source=drag.id;markSource();
+      const from=layout.position(drag.id),to=layout.worldPoint(e);
+      if(!from)return;
+      if(!rubber)rubber=ns('line',{class:'tg-rubber'},svg.querySelector('.topology-viewport'));
+      rubber.setAttribute('x1',from.x);rubber.setAttribute('y1',from.y);rubber.setAttribute('x2',to.x);rubber.setAttribute('y2',to.y);
     });
     doc.addEventListener('pointerup',e=>{
-      if(!drag)return;const ended=drag;drag=null;
-      if(ended.port&&ended.moved){const target=doc.elementFromPoint(e.clientX,e.clientY)?.closest('[data-port]');source=null;if(target)link(modelById(ended.port),modelById(target.dataset.port),true);drawWires();}
-      else savePositions();
+      if(!drag)return;const ended=drag;
+      if(ended.moved){
+        const target=doc.elementFromPoint(e.clientX,e.clientY)?.closest('[data-node-id]');
+        cancelLink();suppressLinkUntil=win.performance.now()+400;
+        if(target&&host.contains(target))link(modelById(ended.id),modelById(target.dataset.nodeId),true);
+      } else drag=null;
     });
-    doc.addEventListener('pointercancel',()=>{drag=null;source=null;drawWires();});
-    doc.addEventListener('keydown',e=>{if(e.key==='Escape'){source=null;drag=null;notice('');drawWires();}});
+    svg.addEventListener('click',e=>{if(win.performance.now()<suppressLinkUntil){e.stopImmediatePropagation();e.preventDefault();}},true);
+    doc.addEventListener('pointercancel',()=>{if(drag)cancelLink();});
+    doc.addEventListener('keydown',e=>{if(e.key==='Escape'&&(source||drag)){cancelLink();notice('');}});
 
     // Localized text for a session notice that carries a machine-readable code
     // (the outcome of a proposal); anything else keeps the daemon's text.
@@ -553,23 +664,50 @@
       });
       noticeSeen=keys;
     }
+    // PeerMetrics in tunnel.status identifies individual serve/connect paths.
+    // Unknown destinations and counter rollbacks only seed a new baseline.
+    function animateTraffic(data) {
+      const next=new Map();
+      (data.forwards||[]).forEach(f=>{
+        const metrics=f.peers?.length?f.peers:[{...f,peer_id:f.approval_peer_id||(f.direction==='connect'&&f.target?.includes('@')?f.target.slice(f.target.lastIndexOf('@')+1):'')}];
+        metrics.forEach(p=>{
+          if(!p.peer_id||p.peer_id===data.self_id)return;
+          const key=JSON.stringify([statKey(f),p.peer_id]),last=traffic.get(key);
+          const current={in:Number(p.bytes_in)||0,out:Number(p.bytes_out)||0,conns:Number(p.active_conns)||0};next.set(key,current);
+          if(!last||current.in<last.in||current.out<last.out)return;
+          const count=Math.max(1,current.conns-last.conns);
+          if(current.out>last.out)layout.activity([data.self_id,p.peer_id],count,current.out-last.out);
+          if(current.in>last.in)layout.activity([p.peer_id,data.self_id],count,current.in-last.in);
+        });
+      });
+      traffic=next;
+    }
     function render(data) {
-      announce(data&&data.notices);
-      snapshot=data;
       const nextRoom=data?.room||'';
-      if(room!==nextRoom){room=nextRoom;source=null;closeModal();positions={};try{positions=JSON.parse(root.localStorage.getItem('mistl-tunnel-layout:'+room)||'{}')||{};}catch(_){} signature='';}
-      title.textContent=t('title');arrange.textContent=t('reset');hint.textContent=data?.running?t('help'):t('stopped');
-      viewport.hidden=!data?.running;arrange.hidden=!data?.running;
-      if(!data?.running){models=[];signature='';source=null;closeModal();nodes.replaceChildren();svg.replaceChildren();statsEls.clear();return;}
-      if(!data.graph){hint.textContent=t('unavailable');models=[];signature='';closeModal();nodes.replaceChildren();svg.replaceChildren();statsEls.clear();return;}
+      if(room!==nextRoom){room=nextRoom;cancelLink();closeModal();signature='';traffic.clear();noticeSeen=null;layout.reset();}
+      announce(data&&data.notices); snapshot=data;
+      fit.setAttribute('aria-label',t('fit'));fit.title=t('fit');
+      viewport.hidden=!data?.running;
+      if(!data?.running||!data.graph){
+        models=[];signature='';cancelLink();closeModal();traffic.clear();layout.reset();layout.isVisible();
+        if(data?.running)notice(t('unavailable'),true);
+        return;
+      }
       const policy=data.graph.policy;
-      if(!subscribed&&peersApi()&&typeof peersApi().subscribe==='function'){subscribed=true;peersApi().subscribe(()=>{signature='';if(snapshot&&!drag)render(snapshot);});}
+      if(!subscribed&&peersApi()&&typeof peersApi().subscribe==='function'){subscribed=true;peersApi().subscribe(()=>{signature='';if(snapshot)render(snapshot);});}
       models=[{id:data.self_id,self:true,node:{...policy,forwards:data.forwards||[],outgoing:data.pending_outgoing||[]}},...(data.graph.nodes||[]).map(m=>({...m,self:false}))].map(m=>({...m,room,node:m.node?{...m.node,forwards:(m.node.forwards||[]).filter(f=>f&&typeof f.addr==='string'&&typeof f.target==='string')}:null}));
-      const names=models.map(m=>peerName(m.id)).join('\u0001');
-      const next=JSON.stringify(models.map(m=>({...m,node:m.node?{...m.node,forwards:m.node.forwards.map(({active_conns,bytes_in,bytes_out,peers,...f})=>f)}:null})))+names,lang=doc.documentElement.lang;
+      if(source&&!modelById(source))cancelLink();
+      const mappings=portMappings(),next=JSON.stringify([models.map(nodeSignature),[...mappings]]),languageNow=lang();
       updateStats(data.forwards);
-      if(drag||(next===signature&&lang===language))return;
-      signature=next;language=lang;drawNodes();
+      if(next!==signature||languageNow!==language){
+        signature=next;language=languageNow;drawGraph(mappings);
+        if(nodeDetail){
+          const model=modelById(nodeDetail);
+          if(!model)closeModal();
+          else if(nodeSignature(model)!==detailSignature)showNode(model);
+        }
+      } else layout.update(graphSnapshot);
+      layout.isVisible();animateTraffic(data);
     }
     return {render};
   }

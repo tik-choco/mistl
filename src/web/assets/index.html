@@ -206,6 +206,14 @@
     flex-direction: column;
     gap: 2px;
   }
+  .sidenav-group {
+    margin: 16px 12px 4px;
+    color: var(--text-dim);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
   .sidenav a {
     display: flex;
     align-items: center;
@@ -781,6 +789,8 @@
   .tunnel-rule-modal .tg-dialog-body input[type=text] { width: 100%; box-sizing: border-box; }
   .tunnel-rule-modal .tunnel-rule-warning { margin: 0; color: var(--warn); font-size: 12px; line-height: 1.6; }
   .tunnel-rule-modal .tunnel-rule-summary { overflow-wrap: anywhere; line-height: 1.6; }
+  .update-version-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .update-version-warning { margin: 0; color: var(--warn); font-size: 12px; line-height: 1.6; }
   .store-picker-path {
     font-size: 12px;
     color: var(--text-dim);
@@ -1382,6 +1392,7 @@
     }
     .sidenav a { white-space: nowrap; padding: 7px 11px; }
     .sidenav a.active::before { display: none; }
+    .sidenav-group { display: none; }
     main { padding: 16px 14px 40px; }
     .panel { padding: 18px 16px; }
     .topo-strip { font-size: 11.5px; }
@@ -1708,14 +1719,20 @@
     <a href="#panel-overview"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9.5 12 3l9 6.5"/><path d="M5 9.5V21h14V9.5"/></svg><span data-i18n="nav.overview">Overview</span></a>
     <a href="#panel-chat"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg><span data-i18n="nav.chat">Chat</span></a>
     <a href="#panel-ai"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3"/></svg><span data-i18n="nav.ai">AI</span></a>
+    <div class="sidenav-group" role="presentation" data-i18n="nav.group.network">Network</div>
+    <a href="#panel-tunnel"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="2.5"/><circle cx="19" cy="12" r="2.5"/><path d="M7.5 12h9"/><path d="m14 9 3 3-3 3"/><path d="m10 9-3 3 3 3"/></svg><span data-i18n="nav.tunnel">Tunnel</span></a>
+    <a href="#panel-nostr"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><path d="M8 8a6 6 0 0 0 0 8m8-8a6 6 0 0 1 0 8M5 5a10 10 0 0 0 0 14M19 5a10 10 0 0 1 0 14"/></svg><span data-i18n="nav.nostr">Nostr relay</span></a>
+    <div class="sidenav-group" role="presentation" data-i18n="nav.group.data">Data</div>
     <a href="#panel-store"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.7 4 3 9 3s9-1.3 9-3V5"/><path d="M3 12c0 1.7 4 3 9 3s9-1.3 9-3"/></svg><span data-i18n="nav.store">Store</span></a>
+    <a href="#panel-escrow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3"/></svg><span data-i18n="nav.escrow">Distributed vault</span></a>
+    <div class="sidenav-group" role="presentation" data-i18n="nav.group.automation">Automation</div>
     <a href="#panel-scheduler"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l3 2"/><path d="M9 2h6"/></svg><span data-i18n="nav.scheduler">Scheduler</span></a>
     <a href="#panel-bot"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="2"/><circle cx="9" cy="14" r="1.2"/><circle cx="15" cy="14" r="1.2"/><path d="M12 8V4"/><circle cx="12" cy="3" r="1"/><path d="M2 13h2M20 13h2"/></svg><span data-i18n="nav.bot">Bot</span></a>
-    <a href="#panel-tunnel"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="2.5"/><circle cx="19" cy="12" r="2.5"/><path d="M7.5 12h9"/><path d="m14 9 3 3-3 3"/><path d="m10 9-3 3 3 3"/></svg><span data-i18n="nav.tunnel">Tunnel</span></a>
+    <div class="sidenav-group" role="presentation" data-i18n="nav.group.manage">Manage</div>
     <a href="#panel-profile"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/></svg><span data-i18n="nav.profile">Profile</span></a>
+    <a href="#panel-access"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v6c0 5 8 9 8 9s8-4 8-9V6Z"/><path d="m8 12 3 3 5-6"/></svg><span data-authz-title>Access</span></a>
     <a href="#panel-update"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m8 11 4 4 4-4"/><path d="M4 17v2a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-2"/></svg><span data-i18n="nav.update">Updates</span></a>
     <a href="#panel-settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg><span data-i18n="nav.settings">Settings</span></a>
-    <a href="#panel-access"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v6c0 5 8 9 8 9s8-4 8-9V6Z"/><path d="m8 12 3 3 5-6"/></svg><span data-authz-title>Access</span></a>
   </nav>
 
 <main id="main">
@@ -1756,7 +1773,6 @@
       <span class="mono" data-role="room">&mdash;</span>
       <span class="topo-strip-note" data-role="note" hidden></span>
       <span class="topo-strip-peers" data-role="peers"></span>
-      <a href="#topology-card" data-i18n="topoStrip.viewFull">View full topology</a>
     </div>
     <div id="chat-relay-app"></div>
     <div class="topology-slot" id="topology-slot-chat-relay"></div>
@@ -1887,7 +1903,6 @@
       <span class="mono" data-role="room">&mdash;</span>
       <span class="topo-strip-note" data-role="note" hidden></span>
       <span class="topo-strip-peers" data-role="peers"></span>
-      <a href="#topology-card" data-i18n="topoStrip.viewFull">View full topology</a>
     </div>
     <div class="store-workspace">
     <aside class="store-sidebar">
@@ -1896,8 +1911,6 @@
         <button type="button" data-subtab-target="files"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span data-i18n="store.tabs.files">Files</span></button>
         <button type="button" data-subtab-target="sandbox"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 4h16v16H4zM4 14h5l1 3h4l1-3h5M12 7v6m-3-3 3 3 3-3"/></svg><span data-i18n="store.tabs.sandbox">Sandbox</span></button>
         <button type="button" data-subtab-target="sync"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M20 8a8 8 0 0 0-14-3L3 8m0-5v5h5M4 16a8 8 0 0 0 14 3l3-3m0 5v-5h-5"/></svg><span data-i18n="store.tabs.sync">Folder sync</span></button>
-        <button type="button" data-subtab-target="escrow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3"/></svg><span data-i18n="escrow.title">Escrow</span></button>
-        <button type="button" data-subtab-target="nostr"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="12" cy="12" r="2"/><path d="M8 8a6 6 0 0 0 0 8m8-8a6 6 0 0 1 0 8M5 5a10 10 0 0 0 0 14M19 5a10 10 0 0 1 0 14"/></svg><span data-i18n="nostr.title">Nostr relay</span></button>
       </div>
       <div class="store-sidebar-summary" data-store-summary></div>
     </aside>
@@ -2026,88 +2039,6 @@
       <div id="store-folder-share"></div>
       <div class="store-folder-access" id="store-folder-access" hidden></div>
     </div>
-    <div class="subtab-page" data-subtab="escrow" id="panel-escrow">
-      <div class="escrow-head">
-        <h3 data-i18n="escrow.title">Escrow</h3>
-        <button type="button" data-escrow-refresh data-i18n="common.refresh">Refresh</button>
-        <button type="button" data-escrow-export data-i18n="escrow.exportAll">Export all</button>
-        <button type="button" data-escrow-import data-i18n="escrow.importAll">Import all</button>
-        <input type="file" data-escrow-file accept=".mistl-escrow" hidden>
-      </div>
-      <p class="escrow-help" data-i18n="escrow.help">Use the same room as the app's 'mistl room'. tc-linkai shows an auto room like tce-xxxxxxxx… with a Copy button.</p>
-      <dl class="kv" data-escrow-summary aria-live="polite"></dl>
-      <form class="inline escrow-add-form" data-escrow-add-form novalidate>
-        <div class="field">
-          <label for="escrow-room" data-i18n="escrow.roomLabel">mistl room</label>
-          <input type="text" id="escrow-room" data-escrow-room maxlength="96" pattern="[A-Za-z0-9_.\/:\-]{1,96}" autocomplete="off" aria-describedby="escrow-room-error" data-i18n-placeholder="escrow.roomPlaceholder" placeholder="tce-xxxxxxxx… or a custom room">
-        </div>
-        <button type="submit" class="primary" data-escrow-add data-i18n="escrow.addRoom">Add room</button>
-      </form>
-      <p class="escrow-error" id="escrow-room-error" data-escrow-error role="alert" hidden></p>
-      <p class="escrow-result" data-escrow-result role="status" hidden></p>
-      <div class="table-wrap">
-        <table>
-          <thead><tr>
-            <th data-i18n="escrow.roomLabel">mistl room</th>
-            <th data-i18n="escrow.configured">Configured</th>
-            <th data-i18n="escrow.joined">Joined</th>
-            <th data-i18n="escrow.slots">Slots</th>
-            <th data-i18n="escrow.bytes">Stored bytes</th>
-            <th data-i18n="escrow.copies">Copies</th>
-            <th data-i18n="store.col.actions">Actions</th>
-          </tr></thead>
-          <tbody></tbody>
-        </table>
-        <div class="empty-note" data-escrow-empty data-i18n="escrow.empty">No escrow rooms. Add the app's mistl room to start.</div>
-      </div>
-      <p class="escrow-accounting" data-i18n="escrow.accounting">Removing a room retains its data. Total bytes include manifests and data for removed rooms. Rooms are joined only when Escrow and external connections are enabled.</p>
-      <details class="settings-drawer" id="settings-drawer-escrow">
-        <summary>
-          <svg class="gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg>
-          <span data-i18n="settings.drawer.escrow">Escrow settings</span>
-          <span class="drawer-chevron" aria-hidden="true"></span>
-        </summary>
-        <div class="settings-drawer-body" id="settings-drawer-body-escrow"></div>
-      </details>
-    </div>
-    <div class="subtab-page" data-subtab="nostr" id="panel-nostr">
-      <div class="nostr-card">
-        <div class="nostr-head">
-          <h3 data-i18n="nostr.title">Nostr relay</h3>
-          <span class="nostr-state" data-nostr-state role="status"></span>
-          <button type="button" class="primary" data-nostr-toggle disabled></button>
-        </div>
-        <p class="nostr-error" data-nostr-error role="alert" hidden></p>
-        <h4 data-i18n="nostr.url">Relay URL</h4>
-        <div class="nostr-url"><code data-nostr-url>—</code><button type="button" data-nostr-copy data-i18n="nostr.copy" disabled>Copy URL</button></div>
-        <p><span data-nostr-tls>—</span><code class="nostr-fingerprint" data-nostr-fingerprint></code></p>
-        <p class="nostr-help" data-nostr-tls-hint data-i18n="nostr.tlsHint" hidden>Public clients need a trusted certificate. Set cert_path and key_path in settings.</p>
-        <dl class="nostr-counters">
-          <div><dt data-i18n="nostr.events">Events</dt><dd data-nostr-events>0</dd></div>
-          <div><dt data-i18n="nostr.connections">Connections</dt><dd data-nostr-connections>0</dd></div>
-          <div><dt data-i18n="nostr.subscriptions">Subscriptions</dt><dd data-nostr-subscriptions>0</dd></div>
-        </dl>
-        <h4 data-i18n="nostr.meshRooms">Cluster rooms</h4>
-        <ul class="nostr-rooms" data-nostr-rooms hidden></ul>
-        <p class="nostr-help" data-nostr-rooms-hint data-i18n="nostr.roomsHint">Set rooms in settings to replicate events with other mistl nodes.</p>
-        <section data-nostr-upstreams hidden>
-          <h4 data-i18n="nostr.upstreamTitle">Upstream relays</h4>
-          <p class="nostr-help" data-nostr-gateway-hint></p>
-          <p class="nostr-help" data-nostr-interest hidden></p>
-          <ul class="nostr-upstream-list" data-nostr-upstream-rows></ul>
-          <p class="nostr-help" data-nostr-upstream-empty data-i18n="nostr.upstreamEmpty" hidden>No upstream relays configured.</p>
-        </section>
-        <details class="settings-drawer" id="settings-drawer-nostr">
-          <summary>
-            <svg class="gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg>
-            <span data-i18n="settings.drawer.nostr">Nostr relay settings</span>
-            <span class="drawer-chevron" aria-hidden="true"></span>
-          </summary>
-          <p class="nostr-help" data-i18n="nostr.settingsHint">Settings apply the next time the relay starts. Stop and start the relay after making changes.</p>
-          <div class="settings-drawer-body" id="settings-drawer-body-nostr"></div>
-        </details>
-      </div>
-    </div>
     </div>
     </div>
     <div class="topology-slot" id="topology-slot-store"></div>
@@ -2118,6 +2049,51 @@
         <span class="drawer-chevron" aria-hidden="true"></span>
       </summary>
       <div class="settings-drawer-body" id="settings-drawer-body-storage"></div>
+    </details>
+  </section>
+
+  <section class="panel panel-span2" id="panel-escrow">
+    <div class="escrow-head">
+      <h2 style="flex: 1;" data-i18n="escrow.title">Distributed vault</h2>
+      <button type="button" data-escrow-refresh data-i18n="common.refresh">Refresh</button>
+      <button type="button" data-escrow-export data-i18n="escrow.exportAll">Export all</button>
+      <button type="button" data-escrow-import data-i18n="escrow.importAll">Import all</button>
+      <input type="file" data-escrow-file accept=".mistl-escrow" hidden>
+    </div>
+    <p class="escrow-help" data-i18n="escrow.help">Use the same room as the app's 'mistl room'. tc-linkai shows an auto room like tce-xxxxxxxx… with a Copy button.</p>
+    <dl class="kv" data-escrow-summary aria-live="polite"></dl>
+    <form class="inline escrow-add-form" data-escrow-add-form novalidate>
+      <div class="field">
+        <label for="escrow-room" data-i18n="escrow.roomLabel">mistl room</label>
+        <input type="text" id="escrow-room" data-escrow-room maxlength="96" pattern="[A-Za-z0-9_.\/:\-]{1,96}" autocomplete="off" aria-describedby="escrow-room-error" data-i18n-placeholder="escrow.roomPlaceholder" placeholder="tce-xxxxxxxx… or a custom room">
+      </div>
+      <button type="submit" class="primary" data-escrow-add data-i18n="escrow.addRoom">Add room</button>
+    </form>
+    <p class="escrow-error" id="escrow-room-error" data-escrow-error role="alert" hidden></p>
+    <p class="escrow-result" data-escrow-result role="status" hidden></p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th data-i18n="escrow.roomLabel">mistl room</th>
+          <th data-i18n="escrow.configured">Configured</th>
+          <th data-i18n="escrow.joined">Joined</th>
+          <th data-i18n="escrow.slots">Slots</th>
+          <th data-i18n="escrow.bytes">Stored bytes</th>
+          <th data-i18n="escrow.copies">Copies</th>
+          <th data-i18n="store.col.actions">Actions</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="empty-note" data-escrow-empty data-i18n="escrow.empty">No escrow rooms. Add the app's mistl room to start.</div>
+    </div>
+    <p class="escrow-accounting" data-i18n="escrow.accounting">Removing a room retains its data. Total bytes include manifests and data for removed rooms. Rooms are joined only when Escrow and external connections are enabled.</p>
+    <details class="settings-drawer" id="settings-drawer-escrow">
+      <summary>
+        <svg class="gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg>
+        <span data-i18n="settings.drawer.escrow">Distributed vault settings</span>
+        <span class="drawer-chevron" aria-hidden="true"></span>
+      </summary>
+      <div class="settings-drawer-body" id="settings-drawer-body-escrow"></div>
     </details>
   </section>
 
@@ -2595,6 +2571,45 @@
     </details>
   </section>
 
+  <section class="panel panel-span2" id="panel-nostr">
+    <h2><span data-i18n="nostr.title">Nostr relay</span></h2>
+      <div class="nostr-card">
+        <div class="nostr-head">
+          <span class="nostr-state" data-nostr-state role="status"></span>
+          <button type="button" class="primary" data-nostr-toggle disabled></button>
+        </div>
+        <p class="nostr-error" data-nostr-error role="alert" hidden></p>
+        <h4 data-i18n="nostr.url">Relay URL</h4>
+        <div class="nostr-url"><code data-nostr-url>—</code><button type="button" data-nostr-copy data-i18n="nostr.copy" disabled>Copy URL</button></div>
+        <p><span data-nostr-tls>—</span><code class="nostr-fingerprint" data-nostr-fingerprint></code></p>
+        <p class="nostr-help" data-nostr-tls-hint data-i18n="nostr.tlsHint" hidden>Public clients need a trusted certificate. Set cert_path and key_path in settings.</p>
+        <dl class="nostr-counters">
+          <div><dt data-i18n="nostr.events">Events</dt><dd data-nostr-events>0</dd></div>
+          <div><dt data-i18n="nostr.connections">Connections</dt><dd data-nostr-connections>0</dd></div>
+          <div><dt data-i18n="nostr.subscriptions">Subscriptions</dt><dd data-nostr-subscriptions>0</dd></div>
+        </dl>
+        <h4 data-i18n="nostr.meshRooms">Cluster rooms</h4>
+        <ul class="nostr-rooms" data-nostr-rooms hidden></ul>
+        <p class="nostr-help" data-nostr-rooms-hint data-i18n="nostr.roomsHint">Set rooms in settings to replicate events with other mistl nodes.</p>
+        <section data-nostr-upstreams hidden>
+          <h4 data-i18n="nostr.upstreamTitle">Upstream relays</h4>
+          <p class="nostr-help" data-nostr-gateway-hint></p>
+          <p class="nostr-help" data-nostr-interest hidden></p>
+          <ul class="nostr-upstream-list" data-nostr-upstream-rows></ul>
+          <p class="nostr-help" data-nostr-upstream-empty data-i18n="nostr.upstreamEmpty" hidden>No upstream relays configured.</p>
+        </section>
+        <details class="settings-drawer" id="settings-drawer-nostr">
+          <summary>
+            <svg class="gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg>
+            <span data-i18n="settings.drawer.nostr">Nostr relay settings</span>
+            <span class="drawer-chevron" aria-hidden="true"></span>
+          </summary>
+          <p class="nostr-help" data-i18n="nostr.settingsHint">Settings apply the next time the relay starts. Stop and start the relay after making changes.</p>
+          <div class="settings-drawer-body" id="settings-drawer-body-nostr"></div>
+        </details>
+      </div>
+  </section>
+
   <section class="panel" id="panel-access">
     <div id="authz-app"></div>
   </section>
@@ -2644,6 +2659,7 @@
     <div class="row">
       <button id="btn-update-check" class="primary" data-i18n="update.checkBtn">Check now</button>
       <button id="btn-update-apply" class="primary" data-i18n="update.applyBtn" hidden>Update now</button>
+      <button id="btn-update-version" data-i18n="update.otherVersion">Install another version…</button>
     </div>
     <hr class="sep">
     <div class="flow-grid">
@@ -2806,19 +2822,19 @@
       "settings.field.nostr.max_filters.label": "Filters per request",
       "settings.field.nostr.max_limit.label": "Events per query",
       "settings.field.nostr.sync_days.label": "Peer sync history (days)",
-      "escrow.title": "Escrow",
+      "escrow.title": "Distributed vault",
       "escrow.export": "Export",
       "escrow.import": "Import",
       "escrow.exportAll": "Export all",
       "escrow.importAll": "Import all",
       "escrow.exportRoomAria": "Export {room}",
       "escrow.importRoomAria": "Import into {room}",
-      "escrow.importRoomConfirm": "Import only room {room} from this escrow file? Other rooms in the file are ignored. Slots will be added or updated, never deleted. Existing newer slots will be kept.",
+      "escrow.importRoomConfirm": "Import only room {room} from this vault file? Other rooms in the file are ignored. Slots will be added or updated, never deleted. Existing newer slots will be kept.",
       "escrow.importRoomEmpty": "The file has no slots for {room}.",
-      "escrow.importConfirm": "Import this escrow file? Slots will be added or updated, never deleted. Existing newer slots will be kept.",
+      "escrow.importConfirm": "Import this vault file? Slots will be added or updated, never deleted. Existing newer slots will be kept.",
       "escrow.importResult": "Imported {imported}, unchanged {unchanged}, skipped {skipped}",
       "escrow.importConfigure": "Add the room to serve it.",
-      "escrow.archiveError": "Escrow transfer failed ({status}).",
+      "escrow.archiveError": "Vault transfer failed ({status}).",
       "escrow.help": "Use the same room as the app's 'mistl room'. tc-linkai shows an auto room like tce-xxxxxxxx… with a Copy button.",
       "escrow.enabled": "Enabled (configured)",
       "escrow.running": "Running",
@@ -2844,14 +2860,14 @@
       "escrow.providerSelf": "you",
       "escrow.insufficientCapacity": "Insufficient local capacity",
       "escrow.bytes": "Stored bytes",
-      "escrow.empty": "No escrow rooms. Add the app's mistl room to start.",
+      "escrow.empty": "No vault rooms. Add the app's mistl room to start.",
       "escrow.invalidRoom": "Room IDs must be 1–96 characters using only A–Z, a–z, 0–9, _ . / : -",
-      "escrow.accounting": "Removing a room retains its data. Total bytes include manifests and data for removed rooms. Rooms are joined only when Escrow and external connections are enabled.",
-      "settings.section.escrow": "Escrow",
-      "settings.drawer.escrow": "Escrow settings",
-      "settings.field.escrow.rooms.label": "Escrow rooms",
+      "escrow.accounting": "Removing a room retains its data. Total bytes include manifests and data for removed rooms. Rooms are joined only when the distributed vault and external connections are enabled.",
+      "settings.section.escrow": "Distributed vault",
+      "settings.drawer.escrow": "Distributed vault settings",
+      "settings.field.escrow.rooms.label": "Vault rooms",
       "settings.field.escrow.rooms.desc": "Use the app's mistl room. Room changes apply automatically after a brief restart.",
-      "settings.field.escrow.enabled.label": "Enable Escrow",
+      "settings.field.escrow.enabled.label": "Enable the distributed vault",
       "settings.field.escrow.enabled.desc": "Store encrypted checkpoints in configured rooms. Applied automatically after a brief restart.",
       "settings.field.escrow.max_blob_bytes.label": "Maximum blob size",
       "settings.field.escrow.max_blob_bytes.desc": "GiB per encrypted blob (default 0.03125 GiB = 32 MiB; maximum 1 GiB). Applied automatically after a brief restart.",
@@ -2964,9 +2980,15 @@
       "chat.tabs.rooms": "tc-chat rooms",
       "chat.tabs.stream": "Screen share",
       "nav.store": "Storage",
+      "nav.escrow": "Distributed vault",
+      "nav.group.network": "Network",
+      "nav.group.data": "Data",
+      "nav.group.automation": "Automation",
+      "nav.group.manage": "Manage",
       "nav.scheduler": "Scheduler",
       "nav.bot": "Bot",
       "nav.tunnel": "Tunnel",
+      "nav.nostr": "Nostr relay",
       "nav.profile": "Profile",
       "nav.settings": "Settings",
       "nav.update": "Updates",
@@ -2979,6 +3001,23 @@
       "update.autostart": "Start at login",
       "update.checkBtn": "Check now",
       "update.applyBtn": "Update now",
+      "update.otherVersion": "Install another version…",
+      "update.versionStep": "{current} / 2",
+      "update.chooseVersion": "Which version do you want to install?",
+      "update.loadingReleases": "Loading releases…",
+      "update.releasesError": "Could not load releases: {error}",
+      "update.noReleases": "No releases found.",
+      "update.retryReleases": "Try again",
+      "update.currentBadge": "Current",
+      "update.prereleaseBadge": "Prerelease",
+      "update.noBinaryBadge": "No binary for this platform",
+      "update.confirmVersion": "Install v{version}?",
+      "update.downgradeWarning": "This version is older than the current version.",
+      "update.autoUpdateWarning": "Auto-update is on and will move to the newest release at the next check. Turn it off in Settings to keep this version.",
+      "update.restartNow": "Restart now",
+      "update.installVersion": "Install",
+      "update.restartScheduled": "Update downloaded. The daemon will restart now.",
+      "update.alreadyInstalled": "This version is already installed.",
       "update.installTitle": "Install for your user",
       "update.installDesc": "Copies mistl to a fixed per-user location so updates and start-at-login work reliably. No admin needed.",
       "update.installBtn": "Install mistl",
@@ -3090,10 +3129,24 @@
       "topology.details.connection": "Connection",
       "topology.details.media": "Media",
       "topology.details.viewers": "Viewers",
+      "topology.details.features": "Features",
+      "topology.details.noFeatures": "Unassigned",
+      "topology.details.peers": "Peers",
       "topology.details.noRooms": "No shared rooms reported.",
       "topology.details.unavailable": "This connection is no longer available. Showing the last known details.",
       "topology.node.self": "this node",
       "topology.node.viewers": "VRChat viewers",
+      "topology.node.feature": "Feature",
+      "topology.node.room": "Room",
+      "topology.feature.ai": "AI",
+      "topology.feature.chat_relay": "tc-chat relay",
+      "topology.feature.storage": "Storage",
+      "topology.feature.escrow": "Distributed vault",
+      "topology.feature.nostr": "Nostr",
+      "topology.feature.tunnel": "Tunnel",
+      "topology.feature.stream": "Stream",
+      "topology.feature.bot": "Bot",
+      "topology.feature.pairing": "Pairing",
       "topology.role.leader": "leader",
       "topology.role.follower": "follower",
       "topology.role.sibling": "cascade peer",
@@ -3121,7 +3174,6 @@
       "topoStrip.processWide": "Peers shown are process-wide (all joined rooms) — mistlib doesn't expose per-room membership.",
       "topoStrip.storeLocal": "local content store — no room",
       "topoStrip.chatRelayOff": "tc-chat relay is off or has no rooms configured",
-      "topoStrip.viewFull": "View topology",
       "ai.title": "AI",
       "ai.openSettings": "Open AI settings",
       "ai.endpointLabel": "OpenAI-compatible endpoint",
@@ -3752,19 +3804,19 @@
       "settings.field.nostr.max_filters.label": "リクエストごとのフィルター数の上限",
       "settings.field.nostr.max_limit.label": "クエリごとのイベント数の上限",
       "settings.field.nostr.sync_days.label": "ピア同期の履歴（日数）",
-      "escrow.title": "Escrow",
+      "escrow.title": "分散保管庫",
       "escrow.export": "エクスポート",
       "escrow.import": "インポート",
       "escrow.exportAll": "すべてエクスポート",
       "escrow.importAll": "すべてインポート",
       "escrow.exportRoomAria": "{room} をエクスポート",
       "escrow.importRoomAria": "{room} にインポート",
-      "escrow.importRoomConfirm": "この Escrow ファイルからルーム {room} だけをインポートしますか？ファイル内の他のルームは無視されます。スロットは追加・更新されますが、削除されません。既存のスロットのほうが新しい場合は、そのまま保持されます。",
+      "escrow.importRoomConfirm": "この分散保管庫のファイルからルーム {room} だけをインポートしますか？ファイル内の他のルームは無視されます。スロットは追加・更新されますが、削除されません。既存のスロットのほうが新しい場合は、そのまま保持されます。",
       "escrow.importRoomEmpty": "このファイルには {room} のスロットがありません。",
-      "escrow.importConfirm": "この Escrow ファイルをインポートしますか？スロットは追加・更新されますが、削除されません。既存のスロットのほうが新しい場合は、そのまま保持されます。",
+      "escrow.importConfirm": "この分散保管庫のファイルをインポートしますか？スロットは追加・更新されますが、削除されません。既存のスロットのほうが新しい場合は、そのまま保持されます。",
       "escrow.importResult": "インポート {imported} 件、変更なし {unchanged} 件、スキップ {skipped} 件",
       "escrow.importConfigure": "保存したデータを配信するには、ルームを追加してください。",
-      "escrow.archiveError": "Escrow データの転送に失敗しました（{status}）。",
+      "escrow.archiveError": "分散保管庫のデータの転送に失敗しました（{status}）。",
       "escrow.help": "アプリの「mistl room」と同じルームを使ってください。tc-linkai には tce-xxxxxxxx… のような自動生成ルームと Copy ボタンが表示されます。",
       "escrow.enabled": "有効（設定）",
       "escrow.running": "稼働中",
@@ -3790,14 +3842,14 @@
       "escrow.providerSelf": "自分",
       "escrow.insufficientCapacity": "ローカルの容量不足",
       "escrow.bytes": "保存容量",
-      "escrow.empty": "Escrow ルームがありません。アプリの mistl room を追加してください。",
+      "escrow.empty": "分散保管庫のルームがありません。アプリの mistl room を追加してください。",
       "escrow.invalidRoom": "ルーム ID は A–Z、a–z、0–9、_ . / : - のみで 1〜96 文字にしてください。",
-      "escrow.accounting": "ルームを削除しても保存データは残ります。合計容量にはマニフェストと削除済みルームのデータも含まれます。Escrow と外部接続が有効な場合のみルームに参加します。",
-      "settings.section.escrow": "Escrow",
-      "settings.drawer.escrow": "Escrow 設定",
-      "settings.field.escrow.rooms.label": "Escrow ルーム",
+      "escrow.accounting": "ルームを削除しても保存データは残ります。合計容量にはマニフェストと削除済みルームのデータも含まれます。分散保管庫と外部接続が有効な場合のみルームに参加します。",
+      "settings.section.escrow": "分散保管庫",
+      "settings.drawer.escrow": "分散保管庫の設定",
+      "settings.field.escrow.rooms.label": "分散保管庫のルーム",
       "settings.field.escrow.rooms.desc": "アプリの mistl room を指定します。ルームの変更は自動で再起動して反映されます。",
-      "settings.field.escrow.enabled.label": "Escrow を有効化",
+      "settings.field.escrow.enabled.label": "分散保管庫を有効化",
       "settings.field.escrow.enabled.desc": "設定したルームの暗号化チェックポイントを保存します。保存すると自動で再起動して反映されます。",
       "settings.field.escrow.max_blob_bytes.label": "blob の最大容量",
       "settings.field.escrow.max_blob_bytes.desc": "暗号化 blob ごとの GiB 上限（既定 0.03125 GiB = 32 MiB、最大 1 GiB）。保存すると自動で再起動して反映されます。",
@@ -3910,9 +3962,15 @@
       "chat.tabs.rooms": "tc-chatルーム",
       "chat.tabs.stream": "画面共有",
       "nav.store": "ストレージ",
+      "nav.escrow": "分散保管庫",
+      "nav.group.network": "ネットワーク",
+      "nav.group.data": "データ",
+      "nav.group.automation": "自動化",
+      "nav.group.manage": "管理",
       "nav.scheduler": "スケジューラ",
       "nav.bot": "Bot",
       "nav.tunnel": "トンネル",
+      "nav.nostr": "Nostr リレー",
       "nav.profile": "プロフィール",
       "nav.settings": "設定",
       "nav.update": "更新",
@@ -3925,6 +3983,23 @@
       "update.autostart": "ログイン時に起動",
       "update.checkBtn": "今すぐ確認",
       "update.applyBtn": "今すぐ更新",
+      "update.otherVersion": "別のバージョンをインストール…",
+      "update.versionStep": "{current} / 2",
+      "update.chooseVersion": "インストールするバージョンを選択してください",
+      "update.loadingReleases": "リリースを読み込み中…",
+      "update.releasesError": "リリースを読み込めませんでした: {error}",
+      "update.noReleases": "リリースが見つかりませんでした。",
+      "update.retryReleases": "再試行",
+      "update.currentBadge": "現在のバージョン",
+      "update.prereleaseBadge": "プレリリース",
+      "update.noBinaryBadge": "このプラットフォーム用のバイナリなし",
+      "update.confirmVersion": "v{version} をインストールしますか？",
+      "update.downgradeWarning": "現在より古いバージョンになります。",
+      "update.autoUpdateWarning": "自動更新がオンのため、次回の確認時に最新リリースへ更新されます。このバージョンを使い続けるには、設定で自動更新をオフにしてください。",
+      "update.restartNow": "今すぐ再起動",
+      "update.installVersion": "インストール",
+      "update.restartScheduled": "更新をダウンロードしました。デーモンを再起動します。",
+      "update.alreadyInstalled": "このバージョンは既にインストールされています。",
       "update.installTitle": "ユーザーにインストール",
       "update.installDesc": "mistl を固定のユーザー専用フォルダーにコピーし、更新とログイン時の起動を確実に動作させます。管理者権限は不要です。",
       "update.installBtn": "mistl をインストール",
@@ -4036,10 +4111,24 @@
       "topology.details.connection": "接続",
       "topology.details.media": "メディア",
       "topology.details.viewers": "視聴者数",
+      "topology.details.features": "機能",
+      "topology.details.noFeatures": "未割り当て",
+      "topology.details.peers": "ピア数",
       "topology.details.noRooms": "共有ルームの情報はありません。",
       "topology.details.unavailable": "現在この接続は確認できません。最後に取得した情報を表示しています。",
       "topology.node.self": "このノード",
       "topology.node.viewers": "VRChat視聴者",
+      "topology.node.feature": "機能",
+      "topology.node.room": "ルーム",
+      "topology.feature.ai": "AI",
+      "topology.feature.chat_relay": "tc-chatリレー",
+      "topology.feature.storage": "ストレージ",
+      "topology.feature.escrow": "分散保管庫",
+      "topology.feature.nostr": "Nostr",
+      "topology.feature.tunnel": "トンネル",
+      "topology.feature.stream": "配信",
+      "topology.feature.bot": "Bot",
+      "topology.feature.pairing": "ペアリング",
       "topology.role.leader": "リーダー",
       "topology.role.follower": "フォロワー",
       "topology.role.sibling": "カスケードピア",
@@ -4067,7 +4156,6 @@
       "topoStrip.processWide": "表示されるピアはプロセス全体（参加中の全ルーム）の集計です — mistlib はルーム別の内訳を公開していません。",
       "topoStrip.storeLocal": "ローカルのコンテンツストア — ルームなし",
       "topoStrip.chatRelayOff": "tc-chatリレーはオフ、またはルームが未設定です",
-      "topoStrip.viewFull": "トポロジーを表示",
       "ai.title": "AI",
       "ai.openSettings": "AI設定を開く",
       "ai.endpointLabel": "OpenAI互換エンドポイント",
@@ -4698,19 +4786,19 @@
       "settings.field.nostr.max_filters.label": "每次请求的过滤器上限",
       "settings.field.nostr.max_limit.label": "每次查询的事件上限",
       "settings.field.nostr.sync_days.label": "节点同步历史（天）",
-      "escrow.title": "Escrow",
+      "escrow.title": "分布式保管库",
       "escrow.export": "导出",
       "escrow.import": "导入",
       "escrow.exportAll": "全部导出",
       "escrow.importAll": "全部导入",
       "escrow.exportRoomAria": "导出 {room}",
       "escrow.importRoomAria": "导入到 {room}",
-      "escrow.importRoomConfirm": "仅从此 Escrow 文件导入房间 {room}？文件中的其他房间将被忽略。槽位只会添加或更新，不会删除。现有的较新槽位将保留。",
+      "escrow.importRoomConfirm": "仅从此分布式保管库文件导入房间 {room}？文件中的其他房间将被忽略。槽位只会添加或更新，不会删除。现有的较新槽位将保留。",
       "escrow.importRoomEmpty": "此文件中没有 {room} 的槽位。",
-      "escrow.importConfirm": "导入此 Escrow 文件？槽位只会添加或更新，不会删除。现有的较新槽位将保留。",
+      "escrow.importConfirm": "导入此分布式保管库文件？槽位只会添加或更新，不会删除。现有的较新槽位将保留。",
       "escrow.importResult": "已导入 {imported}，未更改 {unchanged}，已跳过 {skipped}",
       "escrow.importConfigure": "请添加房间以提供已存储的数据。",
-      "escrow.archiveError": "Escrow 数据传输失败（{status}）。",
+      "escrow.archiveError": "分布式保管库数据传输失败（{status}）。",
       "escrow.help": "请使用与应用的“mistl room”相同的房间。tc-linkai 会显示 tce-xxxxxxxx… 这样的自动房间，并提供 Copy 按钮。",
       "escrow.enabled": "已启用（配置）",
       "escrow.running": "运行中",
@@ -4736,14 +4824,14 @@
       "escrow.providerSelf": "自己",
       "escrow.insufficientCapacity": "本地容量不足",
       "escrow.bytes": "已存储容量",
-      "escrow.empty": "暂无 Escrow 房间。请添加应用的 mistl room。",
+      "escrow.empty": "暂无分布式保管库房间。请添加应用的 mistl room。",
       "escrow.invalidRoom": "房间 ID 必须为 1–96 个字符，只能使用 A–Z、a–z、0–9、_ . / : -",
-      "escrow.accounting": "移除房间会保留数据。总容量包括清单及已移除房间的数据。仅在 Escrow 和外部连接均启用时加入房间。",
-      "settings.section.escrow": "Escrow",
-      "settings.drawer.escrow": "Escrow 设置",
-      "settings.field.escrow.rooms.label": "Escrow 房间",
+      "escrow.accounting": "移除房间会保留数据。总容量包括清单及已移除房间的数据。仅在分布式保管库和外部连接均启用时加入房间。",
+      "settings.section.escrow": "分布式保管库",
+      "settings.drawer.escrow": "分布式保管库设置",
+      "settings.field.escrow.rooms.label": "分布式保管库房间",
       "settings.field.escrow.rooms.desc": "请使用应用的 mistl room。更改房间后会自动重启以生效。",
-      "settings.field.escrow.enabled.label": "启用 Escrow",
+      "settings.field.escrow.enabled.label": "启用分布式保管库",
       "settings.field.escrow.enabled.desc": "在配置的房间中保存加密检查点。保存后会自动重启以生效。",
       "settings.field.escrow.max_blob_bytes.label": "blob 大小上限",
       "settings.field.escrow.max_blob_bytes.desc": "每个加密 blob 的 GiB 上限（默认 0.03125 GiB = 32 MiB，最大 1 GiB）。保存后会自动重启以生效。",
@@ -4851,9 +4939,15 @@
       "chat.tabs.rooms": "tc-chat 房间",
       "chat.tabs.stream": "屏幕共享",
       "nav.store": "存储",
+      "nav.escrow": "分布式保管库",
+      "nav.group.network": "网络",
+      "nav.group.data": "数据",
+      "nav.group.automation": "自动化",
+      "nav.group.manage": "管理",
       "nav.scheduler": "调度器",
       "nav.bot": "Bot",
       "nav.tunnel": "隧道",
+      "nav.nostr": "Nostr 中继",
       "nav.profile": "个人资料",
       "nav.settings": "设置",
       "nav.update": "更新",
@@ -4866,6 +4960,23 @@
       "update.autostart": "登录时启动",
       "update.checkBtn": "立即检查",
       "update.applyBtn": "立即更新",
+      "update.otherVersion": "安装其他版本…",
+      "update.versionStep": "{current} / 2",
+      "update.chooseVersion": "要安装哪个版本？",
+      "update.loadingReleases": "正在加载发行版本…",
+      "update.releasesError": "无法加载发行版本：{error}",
+      "update.noReleases": "未找到发行版本。",
+      "update.retryReleases": "重试",
+      "update.currentBadge": "当前版本",
+      "update.prereleaseBadge": "预发布",
+      "update.noBinaryBadge": "没有适用于此平台的二进制文件",
+      "update.confirmVersion": "安装 v{version}？",
+      "update.downgradeWarning": "此版本早于当前版本。",
+      "update.autoUpdateWarning": "自动更新已开启，下次检查时将更新到最新版本。要保留此版本，请在设置中关闭自动更新。",
+      "update.restartNow": "立即重启",
+      "update.installVersion": "安装",
+      "update.restartScheduled": "更新已下载，守护进程将立即重启。",
+      "update.alreadyInstalled": "此版本已安装。",
       "update.installTitle": "为当前用户安装",
       "update.installDesc": "将 mistl 复制到固定的用户目录，使更新和开机自启动可靠运行。无需管理员权限。",
       "update.installBtn": "安装 mistl",
@@ -4977,10 +5088,24 @@
       "topology.details.connection": "连接",
       "topology.details.media": "媒体",
       "topology.details.viewers": "观看人数",
+      "topology.details.features": "功能",
+      "topology.details.noFeatures": "未分配",
+      "topology.details.peers": "节点数",
       "topology.details.noRooms": "暂无共享房间信息。",
       "topology.details.unavailable": "此连接已不可用，正在显示最后获取的信息。",
       "topology.node.self": "本节点",
       "topology.node.viewers": "VRChat 观看者",
+      "topology.node.feature": "功能",
+      "topology.node.room": "房间",
+      "topology.feature.ai": "AI",
+      "topology.feature.chat_relay": "tc-chat 中继",
+      "topology.feature.storage": "存储",
+      "topology.feature.escrow": "分布式保管库",
+      "topology.feature.nostr": "Nostr",
+      "topology.feature.tunnel": "隧道",
+      "topology.feature.stream": "串流",
+      "topology.feature.bot": "Bot",
+      "topology.feature.pairing": "配对",
       "topology.role.leader": "主节点",
       "topology.role.follower": "从节点",
       "topology.role.sibling": "级联节点",
@@ -5008,7 +5133,6 @@
       "topoStrip.processWide": "所示节点为进程级统计（所有已加入的房间）— mistlib 不提供按房间的成员列表。",
       "topoStrip.storeLocal": "本地内容存储 — 无房间",
       "topoStrip.chatRelayOff": "tc-chat 中继已关闭或未配置房间",
-      "topoStrip.viewFull": "查看拓扑",
       "ai.title": "AI",
       "ai.openSettings": "打开 AI 设置",
       "ai.endpointLabel": "OpenAI 兼容端点",
@@ -5928,6 +6052,7 @@
     renderProfile(state.identity);
     renderSettings(state.config);
     renderUpdate();
+    if (updateVersionWizard && !updateVersionSaving) renderUpdateVersionStep();
     renderTunnel(state.tunnel);
   }
 
@@ -6408,18 +6533,28 @@
     var mediaAges = [flow.video_age_ms, flow.audio_age_ms].filter(function (age) { return age != null; });
     var mediaMs = mediaAges.length ? Math.max(0, FLOW_STALL_MS - Math.min.apply(null, mediaAges)) : 0;
     var rooms = Array.from(new Set((data.rooms || []).concat((data.room_peers || []).map(function (r) { return r.room; }))));
-    var hubs = rooms.length >= 2;
+    var roomFeatures = new Map(), featureRooms = new Map();
     var membership = new Map(), peers = new Map(), nodes = [], edges = [];
+    rooms.forEach(function (room) { roomFeatures.set(room, []); });
     (data.peers || []).forEach(function (p) { if (p.node_id !== self.node_id) peers.set(p.node_id, p); });
     (data.room_peers || []).forEach(function (r) {
+      roomFeatures.set(r.room, Array.from(new Set((roomFeatures.get(r.room) || []).concat(r.features || []))).sort());
       (r.peers || []).forEach(function (p) {
         if (p.node_id === self.node_id) return;
         var info = peers.get(p.node_id) || {};
         peers.set(p.node_id, Object.assign({}, p, info));
         var joined = membership.get(p.node_id) || [];
-        joined.push(r.room); membership.set(p.node_id, joined);
+        if (joined.indexOf(r.room) < 0) joined.push(r.room);
+        membership.set(p.node_id, joined);
       });
     });
+    roomFeatures.forEach(function (features, room) {
+      features.forEach(function (feature) {
+        var joined = featureRooms.get(feature) || [];
+        joined.push(room); featureRooms.set(feature, joined);
+      });
+    });
+    function featureLabel(feature) { return t("topology.feature." + feature); }
     function ensurePeer(id) { if (id && id !== self.node_id && !peers.has(id)) peers.set(id, { node_id: id }); }
     var publisher = stream.running && stream.publisher;
     ensurePeer(publisher);
@@ -6431,10 +6566,19 @@
       if (source === target) return;
       edges.push({ key: JSON.stringify([source, target]), source: source, target: target, flowMs: flowMs || 0 });
     }
-    if (hubs) rooms.forEach(function (room) {
-      var key = "room:" + room;
-      nodes.push({ key: key, label: room, kind: "room", role: t("topology.rooms"), rooms: [room] });
+    Array.from(featureRooms.keys()).sort().forEach(function (feature) {
+      var key = "feature:" + feature;
+      nodes.push({ key: key, label: featureLabel(feature), kind: "feature", role: t("topology.node.feature"), rooms: featureRooms.get(feature) });
       edge(selfKey, key);
+    });
+    rooms.forEach(function (room) {
+      var key = "room:" + room;
+      var features = roomFeatures.get(room);
+      var peerCount = Array.from(membership.values()).filter(function (joined) { return joined.indexOf(room) >= 0; }).length;
+      nodes.push({ key: key, label: room, kind: "room", role: t("topology.node.room"),
+        features: features.map(featureLabel), peers: String(peerCount) });
+      if (features.length) features.forEach(function (feature) { edge("feature:" + feature, key); });
+      else edge(selfKey, key);
     });
     peers.forEach(function (p, id) {
       if (!id) return;
@@ -6448,17 +6592,17 @@
         rawState: p.state || "unknown", state: t("topology.state." + (p.state || "unknown")),
         role: t("topology.role." + roleKey), rooms: joined,
         media: stream.running && kind !== "peer" ? t(flowing ? "topology.flow.flowing" : "topology.flow.idle") : null });
-      if (hubs && joined.length) joined.forEach(function (room) { edge("room:" + room, id); });
+      if (joined.length) joined.forEach(function (room) { edge("room:" + room, id); });
       else if (!incoming) edge(selfKey, id, flowing);
       if (incoming) edge(id, selfKey, flowing);
-      else if (hubs && joined.length && flowing) edge(selfKey, id, flowing);
+      else if (joined.length && flowing) edge(selfKey, id, flowing);
     });
     if (stream.running) {
       nodes.push({ key: "viewers", label: t("topology.node.viewers"), kind: "viewers", role: t("topology.node.viewers"),
         connection: "RTSP", viewers: String(stream.clients || 0), media: t(mediaMs && stream.clients > 0 ? "topology.flow.flowing" : "topology.flow.idle") });
       edge(selfKey, "viewers", stream.clients > 0 ? mediaMs : 0);
     }
-    return { nodes: nodes, edges: edges, selfKey: selfKey, hubs: hubs, membership: membership, rooms: rooms,
+    return { nodes: nodes, edges: edges, selfKey: selfKey, roomFeatures: roomFeatures, membership: membership, rooms: rooms,
       stream: stream, cascade: cascade, videoFlowing: fresh(flow.video_age_ms), audioFlowing: fresh(flow.audio_age_ms),
       videoDelivered: fresh(flow.video_delivered_age_ms), audioDelivered: fresh(flow.audio_delivered_age_ms) };
   }
@@ -6490,7 +6634,13 @@
         targets.forEach(function (id) {
           if (budget-- <= 0) return;
           var joined = graph.membership.get(id) || [];
-          var path = graph.hubs && joined.indexOf(entry.room) >= 0 ? [graph.selfKey, "room:" + entry.room, id] : [graph.selfKey, id];
+          var path = [graph.selfKey];
+          if (joined.indexOf(entry.room) >= 0) {
+            var features = graph.roomFeatures.get(entry.room) || [];
+            if (features.length) path.push("feature:" + features[0]);
+            path.push("room:" + entry.room);
+          }
+          path.push(id);
           topologyPresentation.activity(dir === "rx" ? path.reverse() : path, count, bytes);
         });
       });
@@ -6765,7 +6915,7 @@
   });
 
 
-  /* ---------- escrow (Storage sub-page) ---------- */
+  /* ---------- escrow ---------- */
 
   var escrowRequested = false;
   var escrowPoll = null;
@@ -6857,8 +7007,7 @@
   });
 
   function nostrVisible() {
-    return !document.hidden && document.getElementById("panel-store").classList.contains("active") &&
-      document.getElementById("panel-nostr").classList.contains("active");
+    return !document.hidden && document.getElementById("panel-nostr").classList.contains("active");
   }
 
   function pollNostr() {
@@ -11302,6 +11451,159 @@
     });
   }
 
+  var updateVersionOverlay = el("div", { class: "modal-overlay tg-modal update-version-modal", hidden: "" });
+  var updateVersionDialog = el("div", { class: "modal-panel tg-dialog", role: "dialog", "aria-modal": "true", "aria-labelledby": "update-version-title" });
+  var updateVersionHeader = el("div", { class: "modal-header" });
+  var updateVersionTitle = el("h3", { id: "update-version-title" });
+  var updateVersionClose = el("button", { type: "button", class: "modal-close", text: "×" });
+  var updateVersionBody = el("div", { class: "tg-dialog-body" });
+  var updateVersionStatus = el("p", { class: "tg-dialog-status", role: "status", "aria-live": "polite" });
+  updateVersionHeader.append(updateVersionTitle, updateVersionClose);
+  updateVersionDialog.append(updateVersionHeader, updateVersionBody, updateVersionStatus);
+  updateVersionOverlay.appendChild(updateVersionDialog);
+  document.body.appendChild(updateVersionOverlay);
+  var updateVersionWizard = null;
+  var updateVersionOpener = null;
+  var updateVersionSaving = false;
+
+  function closeUpdateVersionWizard() {
+    if (updateVersionOverlay.hidden || updateVersionSaving) return;
+    updateVersionOverlay.hidden = true;
+    updateVersionWizard = null;
+    updateVersionBody.replaceChildren();
+    if (updateVersionOpener && updateVersionOpener.isConnected) updateVersionOpener.focus({ preventScroll: true });
+    updateVersionOpener = null;
+  }
+
+  updateVersionClose.addEventListener("click", closeUpdateVersionWizard);
+  updateVersionOverlay.addEventListener("pointerdown", function (e) {
+    if (e.target === updateVersionOverlay) closeUpdateVersionWizard();
+  });
+  updateVersionOverlay.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeUpdateVersionWizard(); return; }
+    if (e.key !== "Tab") return;
+    var focusable = Array.from(updateVersionDialog.querySelectorAll("button,input,select,[tabindex]")).filter(function (node) {
+      return !node.disabled && !node.closest("[hidden]");
+    });
+    if (!focusable.length) return;
+    var first = focusable[0], last = focusable[focusable.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  });
+
+  document.getElementById("btn-update-version").addEventListener("click", function (e) {
+    updateVersionOpener = e.currentTarget;
+    updateVersionWizard = { step: 0, selected: "", restart: false, releases: [], loading: true, error: "" };
+    updateVersionOverlay.hidden = false;
+    loadUpdateVersions();
+  });
+
+  function loadUpdateVersions() {
+    var w = updateVersionWizard;
+    if (!w) return;
+    w.loading = true; w.error = "";
+    renderUpdateVersionStep();
+    api("update.releases", {}).then(function (data) {
+      if (updateVersionWizard !== w) return;
+      data = data || {};
+      w.releases = Array.isArray(data.releases) ? data.releases : [];
+      w.autoApply = data.auto_apply === true;
+      w.loading = false;
+      renderUpdateVersionStep();
+    }, function (err) {
+      if (updateVersionWizard !== w) return;
+      w.loading = false; w.error = err.message || String(err);
+      renderUpdateVersionStep();
+    });
+  }
+
+  function renderUpdateVersionStep() {
+    var w = updateVersionWizard;
+    if (!w) return;
+    updateVersionTitle.textContent = t("update.otherVersion");
+    updateVersionClose.setAttribute("aria-label", t("common.close"));
+    updateVersionClose.title = t("common.close");
+    updateVersionBody.replaceChildren();
+    updateVersionStatus.textContent = "";
+    updateVersionStatus.classList.remove("tg-error");
+    updateVersionBody.appendChild(el("p", { class: "tg-step", text: t("update.versionStep", { current: w.step + 1 }) }));
+    var form = el("form", { class: "tg-wizard" });
+    var foot = el("div", { class: "tg-dialog-foot" });
+    var focus = null;
+    if (w.step === 0) {
+      form.appendChild(el("h4", { class: "tg-question", text: t("update.chooseVersion") }));
+      if (w.loading) {
+        updateVersionStatus.textContent = t("update.loadingReleases");
+      } else if (w.error) {
+        updateVersionStatus.textContent = t("update.releasesError", { error: w.error });
+        updateVersionStatus.classList.add("tg-error");
+        focus = el("button", { type: "button", text: t("update.retryReleases") });
+        focus.addEventListener("click", loadUpdateVersions);
+        form.appendChild(focus);
+      } else if (!w.releases.length) {
+        form.appendChild(el("p", { class: "tg-help", text: t("update.noReleases") }));
+      } else {
+        w.releases.forEach(function (release) {
+          release = release || {};
+          var version = typeof release.version === "string" ? release.version : "";
+          var current = release.current === true;
+          var row = el("button", { type: "button", class: "tg-choice" + (w.selected === version ? " tg-chosen" : ""), "aria-pressed": w.selected === version ? "true" : "false" });
+          row.disabled = !version || current || release.asset_available !== true;
+          row.appendChild(el("strong", { text: version.charAt(0) === "v" ? version : "v" + version }));
+          var meta = el("span", { class: "update-version-meta" });
+          if (release.published_at) meta.appendChild(el("small", { text: fmtLocalTime(release.published_at) }));
+          if (current) meta.appendChild(el("span", { class: "badge", text: t("update.currentBadge") }));
+          if (release.prerelease) meta.appendChild(el("span", { class: "badge", text: t("update.prereleaseBadge") }));
+          if (release.asset_available !== true) meta.appendChild(el("span", { class: "badge", text: t("update.noBinaryBadge") }));
+          row.appendChild(meta);
+          row.addEventListener("click", function () { w.selected = version; w.downgrade = release.downgrade === true; w.step = 1; renderUpdateVersionStep(); });
+          form.appendChild(row);
+        });
+      }
+    } else {
+      form.appendChild(el("h4", { class: "tg-question", text: t("update.confirmVersion", { version: w.selected.replace(/^v/, "") }) }));
+      if (w.downgrade) {
+        form.appendChild(el("p", { class: "update-version-warning", text: t("update.downgradeWarning") }));
+        if (w.autoApply) form.appendChild(el("p", { class: "update-version-warning", text: t("update.autoUpdateWarning") }));
+      }
+      var label = el("label");
+      var restart = el("input", { type: "checkbox" });
+      restart.checked = w.restart;
+      restart.addEventListener("change", function () { w.restart = restart.checked; });
+      label.append(restart, document.createTextNode(" " + t("update.restartNow")));
+      form.appendChild(label);
+      var back = el("button", { type: "button", class: "tg-back", text: t("tunnel.rules.back") });
+      back.addEventListener("click", function () { w.step = 0; renderUpdateVersionStep(); });
+      var submit = el("button", { type: "submit", class: "primary", text: t("update.installVersion") });
+      foot.append(back, submit);
+      focus = restart;
+      form.addEventListener("submit", function (e) {
+        e.preventDefault();
+        if (updateVersionSaving) return;
+        updateVersionSaving = true; updateVersionClose.disabled = true; back.disabled = true; restart.disabled = true;
+        updateVersionOverlay.setAttribute("aria-busy", "true");
+        withBusy(submit, function () { return api("update.apply", { version: w.selected, restart: w.restart }); }).then(function (result) {
+          updateVersionSaving = false; updateVersionClose.disabled = false;
+          updateVersionOverlay.removeAttribute("aria-busy");
+          closeUpdateVersionWizard();
+          showToast(t(result.updated === false ? "update.alreadyInstalled" : w.restart ? "update.restartScheduled" : "update.staged"), "success");
+          if (result.updated !== false && result.downgrade && result.auto_apply) showToast(t("update.autoUpdateWarning"));
+          pollUpdate();
+        }, function (err) {
+          updateVersionSaving = false; updateVersionClose.disabled = false; back.disabled = false; restart.disabled = false;
+          updateVersionOverlay.removeAttribute("aria-busy");
+          updateVersionStatus.textContent = err.message || String(err);
+          updateVersionStatus.classList.add("tg-error");
+          showToast(err.message || String(err), "error");
+          submit.focus();
+        });
+      });
+    }
+    form.appendChild(foot);
+    updateVersionBody.appendChild(form);
+    (focus || form.querySelector(".tg-chosen:not(:disabled)") || form.querySelector("button:not(:disabled)") || updateVersionClose).focus();
+  }
+
   if (btnInstall) {
     btnInstall.addEventListener("click", function (e) {
       var autostart = chkAutostart ? chkAutostart.checked : true;
@@ -11574,7 +11876,8 @@
 
   var PANEL_IDS = [
     "panel-overview", "panel-chat", "panel-ai",
-    "panel-store", "panel-scheduler", "panel-bot", "panel-tunnel", "panel-profile", "panel-access", "panel-update", "panel-settings"
+    "panel-tunnel", "panel-nostr", "panel-store", "panel-escrow",
+    "panel-scheduler", "panel-bot", "panel-profile", "panel-access", "panel-update", "panel-settings"
   ];
   var sideLinks = Array.prototype.slice.call(document.querySelectorAll("#sidenav a"));
 
@@ -11582,9 +11885,7 @@
      links and settings shortcuts keep working and open the right tab. */
   var PANEL_ALIASES = {
     "panel-stream": { panel: "panel-chat", tab: "stream" },
-    "panel-chat-relay": { panel: "panel-chat", tab: "rooms" },
-    "panel-escrow": { panel: "panel-store", tab: "escrow" },
-    "panel-nostr": { panel: "panel-store", tab: "nostr" }
+    "panel-chat-relay": { panel: "panel-chat", tab: "rooms" }
   };
 
   function panelFromHash() {
@@ -11632,6 +11933,7 @@
       if (on) a.setAttribute("aria-current", "page");
       else a.removeAttribute("aria-current");
     });
+    if (id === "panel-escrow") pollEscrow().catch(function (err) { showToast(err.message || String(err), "error"); });
     if (nostrVisible()) pollNostr();
   }
 
@@ -11740,10 +12042,6 @@
             heightTimer = setTimeout(fallback, 260);
           }
         }
-        if (panel.id === "panel-store" && name === "escrow") {
-          pollEscrow().catch(function (err) { showToast(err.message || String(err), "error"); });
-        }
-        if (panel.id === "panel-store" && name === "nostr" && nostrVisible()) pollNostr();
         if (panel.id === "panel-ai" && name === "sharing" && panel.classList.contains("active")) aiRefreshModels(false);
         try { localStorage.setItem(storeKey, name); } catch (e) { /* ignore */ }
       }

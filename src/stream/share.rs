@@ -88,6 +88,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
 use crate::daemon::AppState;
+use crate::net::RoomUse;
 
 use super::native::NativeCapture;
 use super::rtp_out::{self, H264Rtp};
@@ -127,7 +128,7 @@ impl ShareCapture {
         max_width: u32,
         rtsp: Arc<RtspServer>,
     ) -> Result<Self> {
-        crate::net::ensure_started(state, room.clone())
+        crate::net::ensure_started(state, RoomUse::Stream, room.clone())
             .await
             .context("share: joining room")?;
 

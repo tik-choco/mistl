@@ -101,6 +101,7 @@ use tokio::sync::{Mutex, OnceCell};
 use tracing::debug;
 
 use crate::daemon::AppState;
+use crate::net::RoomUse;
 
 use super::persist;
 
@@ -400,7 +401,7 @@ async fn ensure_rooms_joined(
         if already_joined {
             continue;
         }
-        crate::net::ensure_started(state, room.clone())
+        crate::net::ensure_started(state, RoomUse::Bot, room.clone())
             .await
             .with_context(|| format!("bot: joining global-articles room {room:?}"))?;
         hub.joined_rooms.lock().await.insert(room.clone());
@@ -682,7 +683,7 @@ async fn ensure_chat_room_joined(
     if already_joined {
         return Ok(());
     }
-    crate::net::ensure_started(state, room.to_string())
+    crate::net::ensure_started(state, RoomUse::Bot, room.to_string())
         .await
         .with_context(|| format!("bot: joining chat-room source room {room:?}"))?;
     hub.joined_rooms.lock().await.insert(room.to_string());

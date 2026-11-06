@@ -23,6 +23,7 @@ use super::interest;
 use super::{Fresh, InterestSource, Origin, Relay, now_secs};
 use crate::consensus::{ConsensusRole, Plane, RelayConsensus};
 use crate::daemon::AppState;
+use crate::net::RoomUse;
 
 const TAG: &str = "mistl-nostr-v1";
 const MAX_WIRE_BYTES: usize = 60_000;
@@ -1480,7 +1481,7 @@ impl Mesh {
             if joined.contains(&room) {
                 continue;
             }
-            match crate::net::ensure_started(state, room.clone()).await {
+            match crate::net::ensure_started(state, RoomUse::Nostr, room.clone()).await {
                 Ok(_) => {
                     match RelayConsensus::start_plane(state, room.clone(), Plane::Nostr).await {
                         Ok(instance) => {
@@ -1571,7 +1572,7 @@ impl Mesh {
             consensus.shutdown().await;
         }
         for room in &self.inner.rooms {
-            if let Err(error) = crate::net::leave_room(room).await {
+            if let Err(error) = crate::net::leave_room(RoomUse::Nostr, room).await {
                 debug!(%room, %error, "nostr: could not leave mesh room");
             }
         }

@@ -32,11 +32,12 @@ tools.
 | **Storage** | Content-addressed store (CIDv1, 1 MiB chunks), compatible with [tc-storage](https://github.com/tik-choco/tc-storage) |
 | **Screen share** | Serve your screen, or a [tc-chat](https://github.com/tik-choco/tc-chat) share, as RTSP for the VRChat video player |
 | **Chat relay** | Stays in tc-chat rooms and replays signed history to late joiners |
+| **Distributed vault** | Keeps other apps' encrypted checkpoints replicated across peers (tc-escrow v1, `mistl escrow`) ([details](docs/escrow.md)) |
 | **Nostr relay** | Local `ws://` Nostr relay with clustered replication and optional TLS and upstream relays ([setup](docs/configuration.md#nostr-relay)) |
 | **Tunnel** | TCP/UDP port forwarding through NAT, with per-connection approval |
 | **AI network** | Share LLMs with peers ([mistai](https://github.com/tik-choco-lab/mistai) protocol), and a local OpenAI-compatible API |
 | **Agent** | `mistl agent`: a terminal AI assistant that can operate mistl and your workspace |
-| **Dashboard** | Everything above from the browser, in English and 日本語 |
+| **Dashboard** | Everything above from the browser, in English, 日本語 and 中文, with a live network topology and a tunnel node graph |
 
 ## Install
 
@@ -50,7 +51,8 @@ Download the binary for your platform from
 | macOS | `mistl-v<version>-aarch64-apple-darwin.tar.gz` / `x86_64-…` |
 
 `mistl install` copies it to a per-user location and enables start at login.
-`mistl update` keeps it current.
+`mistl update` keeps it current; `mistl update list` and
+`mistl update install <version>` pick a specific release, including an older one.
 
 ## Quick start
 
@@ -80,7 +82,9 @@ options and approval behavior.
 
 | Topic | |
 | --- | --- |
-| [CLI reference](docs/cli.md) | Every command, VRChat relay, chat relay, escrow, agent |
+| [CLI reference](docs/cli.md) | Every command, VRChat relay, chat relay, distributed vault, updates, agent |
+| [Distributed vault](docs/escrow.md) | Encrypted checkpoint escrow and replication |
+| [Tunnel node graph](docs/tunnel-graph.md) | Dashboard links, port forwards, proposal rules |
 | [Configuration](docs/configuration.md) | `config.toml` keys and where data lives |
 | [AI configuration](docs/ai-config.md) | Providers, rooms and the local API |
 | [Identity](docs/identity.md) | Profile document and DID delegation |

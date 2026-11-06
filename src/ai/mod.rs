@@ -41,6 +41,7 @@ use tokio::sync::{Mutex, OnceCell};
 use tracing::{debug, info, warn};
 
 use crate::daemon::AppState;
+use crate::net::RoomUse;
 
 use api_server::ApiServer;
 use consumer::Consumer;
@@ -517,7 +518,8 @@ impl AiService {
         if let Some(session) = self.rooms.read().expect("ai rooms lock").get(room).cloned() {
             return Ok(session);
         }
-        let transport = crate::net::ensure_started(&self.state, room.to_string()).await?;
+        let transport =
+            crate::net::ensure_started(&self.state, RoomUse::Ai, room.to_string()).await?;
         let (tx, mut rx) =
             tokio::sync::mpsc::channel::<(String, ProtocolMessage)>(SEND_QUEUE_CAPACITY);
         let send_room = room.to_string();
@@ -647,7 +649,7 @@ impl AiService {
                 session.consumer.reject_all("AI room disabled or removed");
                 session.voice.reject_all();
                 session.oai.reject_all();
-                crate::net::leave_room(&room).await?;
+                crate::net::leave_room(RoomUse::Ai, &room).await?;
             }
         }
         for room in wanted {

@@ -14,6 +14,7 @@ mod transfer;
 
 use crate::config::EscrowConfig;
 use crate::daemon::AppState;
+use crate::net::RoomUse;
 use admission::{Admission, Class};
 use anyhow::{Context, Result, bail};
 use protocol::{Delete, Error, Head, MAX_MESSAGE, hex_string};
@@ -555,7 +556,7 @@ async fn start(state: &Arc<AppState>) -> Result<()> {
         mesh.start();
     }
     for room in &service.cfg.rooms {
-        match crate::net::ensure_started(state, room.clone()).await {
+        match crate::net::ensure_started(state, RoomUse::Escrow, room.clone()).await {
             Ok(_) => {
                 service.joined.lock().unwrap().insert(room.clone());
                 if let Some(mesh) = service.mesh(room) {

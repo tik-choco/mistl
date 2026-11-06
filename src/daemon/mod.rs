@@ -689,9 +689,18 @@ pub async fn dispatch_as(
 ) -> Result<Value> {
     authorize(caller, cmd, &args)?;
     // An explicit `update.apply` skips the default-repo check inside the
-    // updater, so a remote session must not be able to apply from a
-    // non-default `update.repo`.
+    // updater. Remote sessions must not select a version (which may downgrade)
+    // or apply from a non-default `update.repo`.
     if caller == (Caller::Http { remote: true }) && cmd == "update.apply" {
+        if args
+            .get("version")
+            .and_then(Value::as_str)
+            .is_some_and(|version| !version.is_empty())
+        {
+            bail!(
+                "`update.apply` with a version is available only locally (CLI or a loopback dashboard session)"
+            );
+        }
         let repo = state.config().update.repo;
         let repo = repo.trim();
         if !repo.is_empty() && !repo.eq_ignore_ascii_case(crate::update::REPO_DEFAULT) {
@@ -1228,5 +1237,40 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains(MSG), "{err}");
+    }
+
+    #[tokio::test]
+    async fn update_apply_version_is_local_only() {
+        let dir =
+            std::env::temp_dir().join(format!("mistl-update-guard-{:016x}", rand::random::<u64>()));
+        let mut state = AppState::for_test();
+        Arc::get_mut(&mut state).unwrap().network = crate::network::NetworkControl::load(&dir);
+        assert!(!state.network.permitted());
+        let message = "`update.apply` with a version is available only locally (CLI or a loopback dashboard session)";
+        for version in ["1.2.3", "v1.2.3-beta.1", "invalid", " "] {
+            let err = dispatch_as(REMOTE, "update.apply", json!({"version": version}), &state)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert_eq!(err, message);
+            for caller in [LOCAL, Caller::Ipc, Caller::Internal] {
+                // Test state is offline: local calls pass the guard but stop
+                // before any GitHub request or executable replacement.
+                let err = dispatch_as(caller, "update.apply", json!({"version": version}), &state)
+                    .await
+                    .unwrap_err()
+                    .to_string();
+                assert!(err.contains("external connections are OFF"), "{err}");
+            }
+        }
+        for args in [json!({}), json!({"version": null}), json!({"version": ""})] {
+            let err = dispatch_as(REMOTE, "update.apply", args, &state)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("external connections are OFF"), "{err}");
+        }
+        std::fs::remove_file(dir.join("network-state.json")).unwrap();
+        std::fs::remove_dir(dir).unwrap();
     }
 }

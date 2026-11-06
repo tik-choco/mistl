@@ -13,11 +13,9 @@
 //! one service's [`leave_room`] call kicking another out of a room they
 //! both happen to use.
 //!
-//! Most callers (ai, chat_relay, stream relay) join once at service start and
-//! hold their room for the process lifetime, never calling [`leave_room`].
-//! Storage is the exception: it re-resolves its configured rooms on every
-//! command and calls [`leave_room`]/[`ensure_started`] to reconcile live,
-//! so `storage.room_ids` can change without a daemon restart.
+//! Each hold is attributed to a feature. Features can hold the same room,
+//! and a feature can hold it multiple times; each release affects only that
+//! feature's count.
 //!
 //! Modules coexist on the wire by shape: each handler parses inbound bytes
 //! against its own schema and silently ignores what it can't parse
@@ -92,13 +90,78 @@ pub struct Transport {
     pub room: String,
 }
 
+/// The feature holding a reference to a joined room.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum RoomUse {
+    Ai,
+    ChatRelay,
+    Storage,
+    Escrow,
+    Nostr,
+    Tunnel,
+    Stream,
+    Bot,
+    Pairing,
+}
+
+impl RoomUse {
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Ai => "ai",
+            Self::ChatRelay => "chat_relay",
+            Self::Storage => "storage",
+            Self::Escrow => "escrow",
+            Self::Nostr => "nostr",
+            Self::Tunnel => "tunnel",
+            Self::Stream => "stream",
+            Self::Bot => "bot",
+            Self::Pairing => "pairing",
+        }
+    }
+}
+
+/// Counts are always positive; an empty map means the room has no holders.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct RoomHolds {
+    counts: HashMap<RoomUse, usize>,
+}
+
+impl RoomHolds {
+    fn acquire(&mut self, use_: RoomUse) {
+        *self.counts.entry(use_).or_default() += 1;
+    }
+
+    fn is_last(&self, use_: RoomUse) -> bool {
+        self.counts.len() == 1 && self.counts.get(&use_) == Some(&1)
+    }
+
+    fn release(&mut self, use_: RoomUse) {
+        if let Some(count) = self.counts.get_mut(&use_) {
+            *count -= 1;
+            if *count == 0 {
+                self.counts.remove(&use_);
+            }
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.counts.is_empty()
+    }
+
+    fn feature_ids(&self) -> Vec<&'static str> {
+        let mut features: Vec<_> = self.counts.keys().map(|use_| use_.id()).collect();
+        features.sort_unstable();
+        features
+    }
+}
+
 static ENGINE: OnceCell<Arc<Engine>> = OnceCell::const_new();
-/// Rooms joined so far this process, refcounted by number of callers
-/// holding them (so [`leave_room`] only actually leaves once the last
-/// holder releases it). Guarded by an async mutex (rather than
+/// Rooms joined so far this process, refcounted by feature and caller (so
+/// [`leave_room`] only actually leaves once the last holder releases it).
+/// Guarded by an async mutex (rather than
 /// `std::sync::RwLock`) because the check-then-join/leave-then-update
 /// sequences in [`ensure_started`]/[`leave_room`] span an `.await`.
-static ROOMS: LazyLock<Mutex<HashMap<String, usize>>> =
+static ROOMS: LazyLock<Mutex<HashMap<String, RoomHolds>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static HANDLERS: RwLock<Vec<EventHandler>> = RwLock::new(Vec::new());
 
@@ -125,13 +188,15 @@ pub fn set_media_consumer(
 ///
 /// The one-time engine setup (identity load, mistlib init, media-track and
 /// raw-handler registration) happens on the very first call across the
-/// whole process, regardless of which room it names. Every call -- first or
-/// not -- then joins `room` if this process hasn't joined it yet. Joining a
-/// room already joined by a different caller (e.g. ai and the chat relay
-/// sharing one room) is a no-op; joining a genuinely new room is legal and
-/// additive, so ai, chat_relay, and the stream relay can each sit in their own
-/// room at the same time.
-pub async fn ensure_started(state: &Arc<AppState>, room: String) -> Result<Arc<Transport>> {
+/// whole process, regardless of which room it names. Every successful call
+/// acquires a reference for `use_`; the first reference to a room also joins
+/// it in mistlib. Further references, including from other features, share the
+/// existing session. Different rooms can be held at the same time.
+pub async fn ensure_started(
+    state: &Arc<AppState>,
+    use_: RoomUse,
+    room: String,
+) -> Result<Arc<Transport>> {
     state.network.require_online()?;
     let engine = ENGINE
         .get_or_try_init(|| async { start_engine(state).await })
@@ -139,8 +204,7 @@ pub async fn ensure_started(state: &Arc<AppState>, room: String) -> Result<Arc<T
 
     {
         let mut rooms = ROOMS.lock().await;
-        let count = rooms.get(&room).copied().unwrap_or(0);
-        if count == 0 {
+        if !rooms.contains_key(&room) {
             let to_join = room.clone();
             tokio::task::spawn_blocking(move || mistlib::app::join_room(to_join))
                 .await
@@ -155,7 +219,7 @@ pub async fn ensure_started(state: &Arc<AppState>, room: String) -> Result<Arc<T
             })
             .await?;
         }
-        rooms.insert(room.clone(), count + 1);
+        rooms.entry(room.clone()).or_default().acquire(use_);
     }
 
     Ok(Arc::new(Transport {
@@ -178,32 +242,35 @@ where
     .with_context(|| format!("net: joining room {room:?} timed out"))
 }
 
-/// Release this process's interest in `room`, taken out by an earlier
+/// Release one reference to `room` held by `use_`, acquired by an earlier
 /// [`ensure_started`] call. Only actually leaves the room (via
 /// `mistlib::app::leave_room_id`) once every holder has released it --
 /// refcounted so independent services sharing a room (e.g. ai and the chat
-/// relay pointed at the same room) don't kick each other out. A no-op
-/// if this process never joined `room`, or already fully released it.
-pub async fn leave_room(room: &str) -> Result<()> {
+/// relay pointed at the same room) don't kick each other out. A no-op if
+/// `use_` holds no references to the room.
+pub async fn leave_room(use_: RoomUse, room: &str) -> Result<()> {
     let mut rooms = ROOMS.lock().await;
-    let Some(&count) = rooms.get(room) else {
-        return Ok(());
+    let last = match rooms.get(room) {
+        Some(holds) if holds.counts.contains_key(&use_) => holds.is_last(use_),
+        _ => return Ok(()),
     };
-    if count > 1 {
-        rooms.insert(room.to_string(), count - 1);
-        return Ok(());
+    if last {
+        // Keep the reference if the native leave fails.
+        let to_leave = room.to_string();
+        tokio::task::spawn_blocking(move || mistlib::app::leave_room_id(to_leave))
+            .await
+            .context("net: leaving room")?;
     }
-    // Last holder: actually leave before dropping our bookkeeping, so a
-    // failed leave (e.g. the blocking task panics) leaves `room` still
-    // marked held rather than silently forgotten.
-    let to_leave = room.to_string();
-    tokio::task::spawn_blocking(move || mistlib::app::leave_room_id(to_leave))
-        .await
-        .context("net: leaving room")?;
-    rooms.remove(room);
-    // Verifications and activity are per room; drop both once we've left.
-    peer_auth::forget_room(room);
-    forget_room_activity(room);
+    rooms
+        .get_mut(room)
+        .expect("room held under lock")
+        .release(use_);
+    if last {
+        rooms.remove(room);
+        // Verifications and activity are per room; drop both once we've left.
+        peer_auth::forget_room(room);
+        forget_room_activity(room);
+    }
     Ok(())
 }
 
@@ -545,10 +612,27 @@ pub async fn joined_rooms() -> Vec<String> {
     let rooms = ROOMS.lock().await;
     let mut list: Vec<String> = rooms
         .iter()
-        .filter(|&(_, &count)| count > 0)
+        .filter(|(_, holds)| !holds.is_empty())
         .map(|(room, _)| room.clone())
         .collect();
     list.sort();
+    list
+}
+
+/// Rooms currently held by this process and their sorted, unique feature ids.
+/// Both the room list and the feature lists are sorted for deterministic output.
+pub async fn room_uses() -> Vec<(String, Vec<&'static str>)> {
+    let rooms = ROOMS.lock().await;
+    room_uses_snapshot(&rooms)
+}
+
+fn room_uses_snapshot(rooms: &HashMap<String, RoomHolds>) -> Vec<(String, Vec<&'static str>)> {
+    let mut list: Vec<_> = rooms
+        .iter()
+        .filter(|(_, holds)| !holds.is_empty())
+        .map(|(room, holds)| (room.clone(), holds.feature_ids()))
+        .collect();
+    list.sort_unstable_by(|a, b| a.0.cmp(&b.0));
     list
 }
 
@@ -634,6 +718,97 @@ pub async fn send_broadcast(room: &str, bytes: Vec<u8>) -> Result<()> {
     .map_err(|err| anyhow::anyhow!("net: broadcast in room {room:?} failed: {err}"))?;
     record_tx(room, "", len);
     Ok(())
+}
+
+#[cfg(test)]
+mod room_tests {
+    use super::*;
+
+    #[test]
+    fn shared_room_stays_held_until_the_last_feature_leaves() {
+        let mut holds = RoomHolds::default();
+        holds.acquire(RoomUse::Ai);
+        holds.acquire(RoomUse::Storage);
+        assert!(!holds.is_last(RoomUse::Ai));
+        assert!(!holds.is_last(RoomUse::Storage));
+
+        holds.release(RoomUse::Ai);
+        assert_eq!(holds.feature_ids(), vec!["storage"]);
+        assert!(!holds.is_empty());
+        assert!(holds.is_last(RoomUse::Storage));
+
+        holds.release(RoomUse::Storage);
+        assert!(holds.is_empty());
+    }
+
+    #[test]
+    fn releasing_an_unheld_feature_does_not_affect_other_holders() {
+        let mut holds = RoomHolds::default();
+        holds.acquire(RoomUse::Storage);
+        assert!(!holds.is_last(RoomUse::Ai));
+
+        holds.release(RoomUse::Ai);
+        assert_eq!(holds.counts.get(&RoomUse::Storage), Some(&1));
+        assert!(holds.is_last(RoomUse::Storage));
+
+        holds.release(RoomUse::Storage);
+        holds.release(RoomUse::Ai);
+        assert!(holds.is_empty());
+    }
+
+    #[test]
+    fn multiple_holds_by_the_same_feature_are_counted_individually() {
+        let mut holds = RoomHolds::default();
+        holds.acquire(RoomUse::Ai);
+        holds.acquire(RoomUse::Ai);
+        assert_eq!(holds.feature_ids(), vec!["ai"]);
+        assert!(!holds.is_last(RoomUse::Ai));
+
+        holds.release(RoomUse::Ai);
+        assert!(holds.is_last(RoomUse::Ai));
+        holds.release(RoomUse::Ai);
+        assert!(holds.is_empty());
+    }
+
+    #[test]
+    fn room_uses_are_sorted_and_list_each_feature_only_once() {
+        let mut rooms = HashMap::new();
+        let mut first = RoomHolds::default();
+        first.acquire(RoomUse::Storage);
+        first.acquire(RoomUse::Ai);
+        first.acquire(RoomUse::Storage);
+        let mut second = RoomHolds::default();
+        second.acquire(RoomUse::Tunnel);
+        rooms.insert("z-room".to_string(), second);
+        rooms.insert("a-room".to_string(), first);
+        rooms.insert("empty".to_string(), RoomHolds::default());
+
+        assert_eq!(
+            room_uses_snapshot(&rooms),
+            vec![
+                ("a-room".to_string(), vec!["ai", "storage"]),
+                ("z-room".to_string(), vec!["tunnel"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn feature_ids_are_stable() {
+        let cases = [
+            (RoomUse::Ai, "ai"),
+            (RoomUse::ChatRelay, "chat_relay"),
+            (RoomUse::Storage, "storage"),
+            (RoomUse::Escrow, "escrow"),
+            (RoomUse::Nostr, "nostr"),
+            (RoomUse::Tunnel, "tunnel"),
+            (RoomUse::Stream, "stream"),
+            (RoomUse::Bot, "bot"),
+            (RoomUse::Pairing, "pairing"),
+        ];
+        for (use_, id) in cases {
+            assert_eq!(use_.id(), id);
+        }
+    }
 }
 
 #[cfg(test)]

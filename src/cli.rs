@@ -166,10 +166,26 @@ pub enum Command {
 pub enum UpdateAction {
     /// Check GitHub for a newer release (this is the default)
     Check,
-    /// Download, verify (sha256), and install the latest release
+    /// List recent releases, including prereleases
+    List {
+        /// Number of releases to request (clamped to 1..=50)
+        #[arg(long, default_value_t = 20)]
+        limit: u64,
+    },
+    /// Download, verify (sha256), and install a release (latest by default)
     Apply {
+        /// Install this version, including older releases and prereleases
+        #[arg(long)]
+        version: Option<String>,
         /// Restart the daemon now so the update takes effect immediately
         /// (otherwise it applies on the next daemon start)
+        #[arg(long)]
+        restart: bool,
+    },
+    /// Download, verify (sha256), and install a specific release
+    Install {
+        version: String,
+        /// Restart the daemon now so the update takes effect immediately
         #[arg(long)]
         restart: bool,
     },
@@ -2004,11 +2020,31 @@ pub fn dispatch(cli: Cli) -> Result<()> {
                 }
                 Ok(())
             }
-            UpdateAction::Apply { restart } => {
-                let response = request("update.apply", json!({ "restart": restart }))?;
-                println!("{}", serde_json::to_string_pretty(&response)?);
+            UpdateAction::List { limit } => {
+                let response = request("update.releases", json!({ "limit": limit }))?;
+                println!("{:<32} {:<10} NOTES", "VERSION", "DATE");
+                if let Some(releases) = response.get("releases").and_then(Value::as_array) {
+                    for release in releases {
+                        let mut version = release["version"].as_str().unwrap_or("?").to_string();
+                        if release["current"].as_bool() == Some(true) {
+                            version.push_str(" * current");
+                        }
+                        if release["prerelease"].as_bool() == Some(true) {
+                            version.push_str(" (pre)");
+                        }
+                        if release["asset_available"].as_bool() == Some(false) {
+                            version.push_str(" (no binary)");
+                        }
+                        let date = release["published_at"].as_str().unwrap_or("-");
+                        let date = date.split('T').next().unwrap_or("-");
+                        let notes = release["notes_url"].as_str().unwrap_or("");
+                        println!("{version:<32} {date:<10} {notes}");
+                    }
+                }
                 Ok(())
             }
+            UpdateAction::Apply { version, restart } => update_apply_cli(version, restart),
+            UpdateAction::Install { version, restart } => update_apply_cli(Some(version), restart),
             UpdateAction::Status => client_call("update.status", json!({})),
         },
         Command::Install {
@@ -2054,6 +2090,78 @@ pub fn dispatch(cli: Cli) -> Result<()> {
                 Ok(())
             }
         },
+    }
+}
+
+fn update_apply_cli(version: Option<String>, restart: bool) -> Result<()> {
+    let explicit = version
+        .as_deref()
+        .is_some_and(|version| !version.is_empty());
+    let response = request(
+        "update.apply",
+        json!({ "version": version, "restart": restart }),
+    )?;
+    println!("{}", serde_json::to_string_pretty(&response)?);
+    if explicit
+        && response["downgrade"].as_bool() == Some(true)
+        && response["auto_apply"].as_bool() == Some(true)
+    {
+        println!(
+            "Note: auto-update is on and will move to the newest release at the next check. Turn it off with `mistl config set update.auto_apply false`."
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod update_cli_tests {
+    use super::*;
+
+    #[test]
+    fn update_list_parses_default_and_explicit_limits() {
+        for (args, expected) in [
+            (vec!["mistl", "update", "list"], 20),
+            (vec!["mistl", "update", "list", "--limit", "5"], 5),
+        ] {
+            let parsed = Cli::try_parse_from(args).unwrap();
+            assert!(matches!(parsed.command,
+                Some(Command::Update { action: Some(UpdateAction::List { limit }) }) if limit == expected));
+        }
+        assert!(Cli::try_parse_from(["mistl", "update", "list", "--limit", "invalid"]).is_err());
+    }
+
+    #[test]
+    fn update_apply_and_install_parse_versions_and_restart() {
+        for restart in [false, true] {
+            for version in [None, Some("v1.2.3-beta.1")] {
+                let mut args = vec!["mistl", "update", "apply"];
+                if let Some(version) = version {
+                    args.extend(["--version", version]);
+                }
+                if restart {
+                    args.push("--restart");
+                }
+                let parsed = Cli::try_parse_from(args).unwrap();
+                assert!(matches!(parsed.command,
+                    Some(Command::Update { action: Some(UpdateAction::Apply { version: actual, restart: flag }) })
+                    if actual.as_deref() == version && flag == restart));
+            }
+            let mut args = vec!["mistl", "update", "install", "1.0.0"];
+            if restart {
+                args.push("--restart");
+            }
+            let parsed = Cli::try_parse_from(args).unwrap();
+            assert!(matches!(parsed.command,
+                Some(Command::Update { action: Some(UpdateAction::Install { version, restart: flag }) })
+                if version == "1.0.0" && flag == restart));
+        }
+        assert!(Cli::try_parse_from(["mistl", "update", "install"]).is_err());
+        assert!(Cli::try_parse_from(["mistl", "update", "apply", "--version"]).is_err());
+        let parsed = Cli::try_parse_from(["mistl", "update"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Some(Command::Update { action: None })
+        ));
     }
 }
 
