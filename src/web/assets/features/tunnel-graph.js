@@ -22,19 +22,22 @@
       typeConnect:'相手が公開したサービスに接続', typeConnectHelp:'相手がすでに公開しているサービスを、このノードのポートで受けます。',
       typeServe:'このノードのサービスを公開', typeServeHelp:'このノードで動いているサービスを、ルームの相手が使えるようにします。',
       askPeer:'どのノードへ転送しますか？', noPeers:'ルームに相手のノードがいません。',
-      askRemote:'相手側のどのアドレスへ転送しますか？', remoteHint:'相手のノードから見たアドレスです（例: SSH なら 127.0.0.1:22）。',
-      askLocal:'このノードのどのアドレスで受けますか？', localHint:'ここに接続すると、通信が相手側へ転送されます。',
+      askRemote:'相手側のどのアドレスへ転送しますか？', remoteHint:'相手のノードから見たアドレスです（例: SSH なら 127.0.0.1:22）。ポート番号だけ（22 や :22）なら 127.0.0.1 として扱います。',
+      askLocal:'このノードのどのアドレスで受けますか？', localHint:'ここに接続すると、通信が相手側へ転送されます。ポート番号だけでも入力できます。',
       askService:'どのサービスに接続しますか？', noService:'公開されているサービスがありません。先に相手のノードでサービスを公開してください。',
-      askServe:'公開するサービスのアドレスは？', serveHint:'このノードで待ち受けているサービスです（例: Web サーバーなら 127.0.0.1:8080）。',
+      askServe:'公開するサービスのアドレスは？', serveHint:'このノードで待ち受けているサービスです（例: Web サーバーなら 127.0.0.1:8080 または :8080）。',
       askConfirm:'この内容で追加しますか？', published:'ルームに公開', sendProposal:'提案を送る',
       proposeNote:'相手が承認すると転送が始まります。', proposeSent:'相手に提案しました。相手が受け入れると転送が始まります。',
-      badAddr:'「ホスト:ポート」の形式で入力してください（例: 127.0.0.1:8080）。', proto:'プロトコル',
+      badAddr:'「ホスト:ポート」かポート番号を入力してください（例: 127.0.0.1:8080、:8080）。', proto:'プロトコル',
       portBusy:'このアドレスは他のプログラムが使用中です。別のポートを指定してください。', portUnusable:'このアドレスでは待ち受けできません', useSuggestion:'{addr} を使う',
       waitAccept:'{peer} の承認待ち', waitApprove:'{peer} の接続承認待ち', deniedBy:'{peer} が接続を拒否しました',
       cancel:'提案を取り消す', cancelled:'提案を取り消しました。', proposalWire:'承認待ち', toPeer:'→ {peer}（{addr}）',
       nDenied:'{peer} が提案を断りました（{target}）。', nTimeout:'{peer} から応答がなく、提案がタイムアウトしました（{target}）。',
       nPeerLeft:'{peer} が応答する前に退出しました（{target}）。', nFailed:'提案が失敗しました（{target}）: {detail}',
       nAccepted:'{peer} が承認しました。{local} への接続が {target} へ転送されます。', nAddFailed:'{peer} は承認しましたが、このノードでポートを開けませんでした: {detail}',
+      useTitle:'このノードからつなぐ', useService:'{proto} {addr} に接続', useServiceHelp:'相手が公開しているサービスです。',
+      usePort:'相手のポートを指定してつなぐ', usePortHelp:'例: 相手の SSH (127.0.0.1:22) をこのノードのポートで使う。相手の承認が必要です。',
+      ourForwards:'このノードとの転送', peerForwards:'相手ノード上の転送', addRemote:'＋ 相手ノードに転送を追加', toNode:'→ {peer}',
     },
     en: {
       self:'This node', fit:'Fit', maximize:'Maximize', restore:'Restore', legacy:'Graph unsupported or waiting for state',
@@ -57,19 +60,22 @@
       typeConnect:'Connect to a service a peer published', typeConnectHelp:'Receive a service the peer already published on a port of this node.',
       typeServe:'Publish a service on this node', typeServeHelp:'Let peers in the room use a service running on this node.',
       askPeer:'Which node should receive the traffic?', noPeers:'There are no other nodes in the room.',
-      askRemote:'Which address on the peer?', remoteHint:'As seen from the peer (for SSH, 127.0.0.1:22).',
-      askLocal:'Which address on this node should receive?', localHint:'Connections to this address are forwarded to the peer.',
+      askRemote:'Which address on the peer?', remoteHint:'As seen from the peer (for SSH, 127.0.0.1:22). A bare port (22 or :22) means 127.0.0.1.',
+      askLocal:'Which address on this node should receive?', localHint:'Connections to this address are forwarded to the peer. A bare port is fine.',
       askService:'Which service do you want to connect to?', noService:'No services are published. Publish a service on the peer first.',
-      askServe:'What is the address of the service?', serveHint:'A service listening on this node (for a web server, 127.0.0.1:8080).',
+      askServe:'What is the address of the service?', serveHint:'A service listening on this node (for a web server, 127.0.0.1:8080 or :8080).',
       askConfirm:'Add this forward?', published:'Published to the room', sendProposal:'Send proposal',
       proposeNote:'The forward starts once the peer accepts.', proposeSent:'Proposal sent. The forward starts once the peer accepts.',
-      badAddr:'Enter host:port (for example 127.0.0.1:8080).', proto:'Protocol',
+      badAddr:'Enter host:port or a port (for example 127.0.0.1:8080 or :8080).', proto:'Protocol',
       portBusy:'Another program is using this address. Choose a different port.', portUnusable:'Cannot listen on this address', useSuggestion:'Use {addr}',
       waitAccept:'Waiting for {peer} to accept', waitApprove:'Waiting for {peer} to approve the connection', deniedBy:'{peer} denied the connection',
       cancel:'Cancel proposal', cancelled:'Proposal cancelled.', proposalWire:'Waiting for approval', toPeer:'→ {peer} ({addr})',
       nDenied:'{peer} denied your proposal for {target}.', nTimeout:'{peer} did not answer your proposal for {target} (timed out).',
       nPeerLeft:'{peer} left before answering your proposal for {target}.', nFailed:'Proposal for {target} failed: {detail}',
       nAccepted:'{peer} accepted. Connections to {local} are now forwarded to {target}.', nAddFailed:'{peer} accepted, but this node could not open the port: {detail}',
+      useTitle:'Connect from this node', useService:'Connect to {proto} {addr}', useServiceHelp:'A service the peer published.',
+      usePort:'Connect to a port on this peer', usePortHelp:'For example, use the peer\'s SSH (127.0.0.1:22) through a port on this node. The peer must accept.',
+      ourForwards:'Forwards with this node', peerForwards:'Forwards on the peer', addRemote:'+ Add a forward on the peer', toNode:'→ {peer}',
     },
     // Only the strings added after the first release; the rest fall back to English.
     zh: {
@@ -79,9 +85,14 @@
       nDenied:'{peer} 拒绝了你的提议（{target}）。', nTimeout:'{peer} 未回应，提议已超时（{target}）。',
       nPeerLeft:'{peer} 在回应之前已离开（{target}）。', nFailed:'提议失败（{target}）：{detail}',
       nAccepted:'{peer} 已接受。到 {local} 的连接将转发到 {target}。', nAddFailed:'{peer} 已接受，但本节点无法打开端口：{detail}',
+      useTitle:'从本节点连接', useService:'连接到 {proto} {addr}', useServiceHelp:'对方发布的服务。',
+      usePort:'连接到对方的端口', usePortHelp:'例如：通过本节点的端口使用对方的 SSH (127.0.0.1:22)。需要对方接受。',
+      ourForwards:'与本节点之间的转发', peerForwards:'对方节点上的转发', addRemote:'+ 在对方节点添加转发', toNode:'→ {peer}',
     }
   };
   const ADDR = /^\S+:\d{1,5}$/;
+  // A bare port ("22" or ":22") is shorthand for loopback.
+  const fullAddr = value => { value=String(value||'').trim(); return /^:?\d{1,5}$/.test(value)?'127.0.0.1:'+value.replace(/^:/,''):value; };
   let instances = 0;
 
   function create(options) {
@@ -248,43 +259,72 @@
       pane.dataset.nodeId=model.id;
       pane.append(el('p','tg-full-id',model.id));
       detailSignature=nodeSignature(model);
+      // A peer opens on what this node can do with it: its published
+      // services and "use a port on this peer". Editing the peer's own
+      // forwards stays below and needs the peer's permission.
+      if(!model.self) showPeerUse(pane,model);
       if(model.node) {
         const list = el('div','tg-forwards');
         const outgoing = model.node.outgoing || [];
-        if (!model.node.forwards.length && !outgoing.length) list.append(el('p','tg-empty',t('empty')));
+        if (model.self && !model.node.forwards.length && !outgoing.length) list.append(el('p','tg-empty',t('empty')));
         // Proposals this node sent that the peer has not answered yet.
         outgoing.forEach(o => list.append(outgoingRow(o)));
-        model.node.forwards.forEach(f => {
-          const row = el('div','tg-forward'), text = el('div','tg-forward-text');
-          text.append(el('span','tg-proto',String(f.proto || '').toUpperCase()),el('span','',f.direction === 'serve' ? ' ↑ ' : ' ↓ '),el('span','',f.addr));
-          if (f.direction === 'connect') { const dest = el('small','',f.target); dest.title=f.target; text.append(dest); }
-          if (f.awaiting_approval) text.append(pill('tg-wait','⏳ '+fmt('waitApprove',{peer:peerLabel(f.approval_peer_id||'')}),f.approval_peer_id));
-          else if (f.denied_at_ms) text.append(pill('tg-denied','✕ '+fmt('deniedBy',{peer:peerLabel(f.approval_peer_id||'')}),f.approval_peer_id));
-          if (f.state === 'error') text.append(el('small','tg-error', t('error') + ': ' + f.error));
-          if (model.self) { const stats = el('small','tg-stats'); stats.textContent = statsText(f); text.append(stats); statsEls.set(statKey(f), stats); }
-          row.append(text);
-          const doRemove = () => {
-            if (!(options.confirm || root.confirm)(t('removeConfirm').replace('{target}', () => f.target))) return;
-            if (f.graph_managed) perform(() => command(model,{type:'remove_forward',target:f.target}));
-            else perform(() => options.api('tunnel.forward.remove',{target:f.target}));
-          };
-          if (model.self) {
-            const remove = button('×','tg-remove',doRemove);
-            remove.title=t('remove'); remove.setAttribute('aria-label',t('remove')+' '+f.addr); row.append(remove);
-          } else if (f.graph_managed) {
-            const remove = button('×','tg-remove',doRemove);
-            remove.title=t('remove'); remove.setAttribute('aria-label',t('remove')+' '+f.addr); remove.disabled=!can(model,'remove_forwards'); row.append(remove);
-          } else row.title=t('legacyForward');
-          list.append(row);
-        });
-        pane.append(list);
+        model.node.forwards.forEach(f => list.append(forwardRow(model,f)));
+        if (!model.self && model.node.forwards.length) pane.append(el('h4','tg-section',t('peerForwards')));
+        if (list.childNodes.length) pane.append(list);
         const foot=el('div','tg-dialog-foot');
-        if(can(model,'add_forwards'))foot.append(button(t('add'),'tg-add',()=>showForward(modelById(model.id)||model)));
+        if(can(model,'add_forwards'))foot.append(button(t(model.self?'add':'addRemote'),'tg-add',()=>showForward(modelById(model.id)||model)));
         foot.append(button(t('connect'),'tg-link',()=>{closeModal();choose(model.id);}));
         if(model.self)foot.append(button(t('settings'),'tg-gear',()=>showSettings(modelById(model.id)||model)));
         pane.append(foot);
       } else pane.append(el('p','tg-empty',t('legacy')));
       markSource();focusFirst();
+    }
+    // What this node can do with a peer: forwards already between the two,
+    // one-click entries for the peer's published services, and a proposal
+    // for any port on the peer (works with legacy peers too).
+    function showPeerUse(pane,peer) {
+      const self=models.find(m=>m.self);
+      if(!self?.node)return;
+      const ours=el('div','tg-forwards');
+      (self.node.outgoing||[]).filter(o=>o.peer_id===peer.id).forEach(o=>ours.append(outgoingRow(o)));
+      self.node.forwards.filter(f=>f.direction==='connect'&&f.target.endsWith('@'+peer.id)).forEach(f=>ours.append(forwardRow(self,f)));
+      if(ours.childNodes.length)pane.append(el('h4','tg-section',t('ourForwards')),ours);
+      pane.append(el('h4','tg-section',t('useTitle')));
+      const uses=el('div','tg-uses');
+      servicesFor(self).filter(sv=>sv.node===peer.id).forEach(sv=>{
+        const b=choice(fmt('useService',{proto:String(sv.proto||'').toUpperCase(),addr:sv.addr}),t('useServiceHelp'),sv.target,false,
+          ()=>showForward(self,{type:'connect',service:sv,proto:sv.proto,local:suggestLocal(sv.addr),fixed:peer.id}),true);
+        b.classList.add('tg-use-service');uses.append(b);
+      });
+      const b=choice(t('usePort'),t('usePortHelp'),'propose',false,()=>showForward(self,{type:'propose',peer:peer.id,fixed:peer.id}));
+      b.classList.add('tg-use-port');uses.append(b);
+      pane.append(uses);
+    }
+    // Default local listener: the remote port on loopback (privileged ports
+    // shifted by 10000); the port check offers a free one when it is taken.
+    function suggestLocal(addr) { const m=String(addr||'').match(/:(\d{1,5})$/),port=m?Number(m[1]):8080; return '127.0.0.1:'+(port&&port<1024?port+10000:port); }
+    function forwardRow(model,f) {
+      const row = el('div','tg-forward'), text = el('div','tg-forward-text');
+      text.append(el('span','tg-proto',String(f.proto || '').toUpperCase()),el('span','',f.direction === 'serve' ? ' ↑ ' : ' ↓ '),el('span','',f.addr));
+      if (f.direction === 'connect') { const dest = el('small','',f.target); dest.title=f.target; text.append(dest); }
+      if (f.awaiting_approval) text.append(pill('tg-wait','⏳ '+fmt('waitApprove',{peer:peerLabel(f.approval_peer_id||'')}),f.approval_peer_id));
+      else if (f.denied_at_ms) text.append(pill('tg-denied','✕ '+fmt('deniedBy',{peer:peerLabel(f.approval_peer_id||'')}),f.approval_peer_id));
+      if (f.state === 'error') text.append(el('small','tg-error', t('error') + ': ' + f.error));
+      if (model.self) { const stats = el('small','tg-stats'); stats.textContent = statsText(f); text.append(stats); statsEls.set(statKey(f), stats); }
+      row.append(text);
+      const doRemove = () => {
+        if (!(options.confirm || root.confirm)(t('removeConfirm').replace('{target}', () => f.target))) return;
+        if (f.graph_managed) perform(() => command(model,{type:'remove_forward',target:f.target}));
+        else perform(() => options.api('tunnel.forward.remove',{target:f.target}));
+      };
+      if (model.self || f.graph_managed) {
+        const remove = button('×','tg-remove',doRemove);
+        remove.title=t('remove'); remove.setAttribute('aria-label',t('remove')+' '+f.addr);
+        if (!model.self) remove.disabled=!can(model,'remove_forwards');
+        row.append(remove);
+      } else row.title=t('legacyForward');
+      return row;
     }
     function nodeSignature(model) {
       return JSON.stringify([model.id,model.node?{...model.node,forwards:model.node.forwards.map(({active_conns,bytes_in,bytes_out,peers,...f})=>f)}:null,peerName(model.id),lang()]);
@@ -440,9 +480,10 @@
 
     // ---- port-forward wizard: one question per step ----
     function wizardSteps(w) {
-      const steps=['type'];
-      if (w.type==='propose') { if (peersFor(w.model).length!==1) steps.push('peer'); steps.push('remote','local'); }
-      if (w.type==='connect') steps.push('service','local');
+      // A preset from a peer's dialog already answers "what" and "with whom".
+      const steps=w.fixed?[]:['type'];
+      if (w.type==='propose') { if (!w.fixed&&peersFor(w.model).length!==1) steps.push('peer'); steps.push('remote','local'); }
+      if (w.type==='connect') { if (!w.fixed) steps.push('service'); steps.push('local'); }
       if (w.type==='serve') steps.push('serve');
       if (w.type) steps.push('confirm');
       return steps;
@@ -455,8 +496,8 @@
       }));
       return out;
     }
-    function showForward(model) {
-      wizard={model,type:'',peer:'',service:null,proto:'tcp',remote:'',local:'127.0.0.1:8080',addr:'127.0.0.1:8080',index:0};
+    function showForward(model,preset) {
+      wizard={model,type:'',peer:'',service:null,proto:'tcp',remote:'',local:'127.0.0.1:8080',addr:'127.0.0.1:8080',index:0,fixed:'',...preset};
       renderStep();
     }
     function go(delta) { wizard.index=Math.max(0,wizard.index+delta); renderStep(); }
@@ -480,6 +521,7 @@
       const w=wizard,model=w.model,steps=wizardSteps(w),step=steps[w.index];
       const pane=modal(t('addTitle'));pane.dataset.step=step;
       if (!model.self) pane.append(el('p','tg-dialog-node',peerText(model.id)));
+      else if (w.fixed) pane.append(el('p','tg-dialog-node',fmt('toNode',{peer:peerText(w.fixed)})));
       if (w.type) pane.append(el('p','tg-step',t('step').replace('{n}',w.index+1).replace('{total}',steps.length)));
       const form=el('form','tg-wizard');form.noValidate=true;pane.append(form);
       const ask=key=>form.append(el('h4','tg-question',t(key)));
@@ -507,7 +549,7 @@
         const key={remote:'remote',local:'local',serve:'addr'}[step];
         ask({remote:'askRemote',local:'askLocal',serve:'askServe'}[step]);
         input=addrInput(w[key],step==='remote'?'127.0.0.1:22':'127.0.0.1:8080');input.setAttribute('aria-label',t({remote:'askRemote',local:'askLocal',serve:'askServe'}[step]));
-        input.addEventListener('input',()=>{w[key]=input.value;});
+        input.addEventListener('input',()=>{w[key]=input.value;if(step==='local')w.localEdited=true;});
         form.append(input);
         if (step!=='local') form.append(protoSwitch(w));
         form.append(el('p','tg-help',t({remote:'remoteHint',local:'localHint',serve:'serveHint'}[step])));
@@ -515,9 +557,10 @@
         // while typing and keep Next disabled for a busy address.
         const portCheck=step==='local'?checkLocalPort(w,input,form,()=>nextButton):null;
         onNext=async()=>{
-          const value=input.value.trim();
+          const value=fullAddr(input.value);input.value=value;
           if (!ADDR.test(value)) { dialogStatus.textContent=t('badAddr');dialogStatus.classList.add('tg-error');input.setAttribute('aria-invalid','true');input.focus();return; }
           if (portCheck&&!(await portCheck())) { input.focus();return; }
+          if (step==='remote'&&!w.localEdited) w.local=suggestLocal(value);
           w[key]=value;go(1);
         };
       } else if (step==='confirm') {
@@ -532,6 +575,7 @@
         onNext=()=>submitForward(w);
       }
       if (w.index>0) foot.append(button(t('back'),'tg-back',()=>go(-1)));
+      else if (w.fixed) foot.append(button(t('back'),'tg-back',()=>showNode(modelById(w.fixed))));
       if (onNext) { nextButton=el('button','primary',submitText);nextButton.type='submit';foot.append(nextButton); }
       form.append(foot);
       form.addEventListener('submit',e=>{e.preventDefault();if(onNext&&!busy)onNext();});
@@ -544,7 +588,7 @@
       const note=el('div','tg-port-note');note.setAttribute('role','status');form.append(note);
       let seq=0,timer=null,lastOk=true;
       const check=async()=>{
-        const value=input.value.trim(),mine=++seq;
+        const value=fullAddr(input.value),mine=++seq;
         if (!ADDR.test(value)) { note.replaceChildren();input.removeAttribute('aria-invalid');if(getNext())getNext().disabled=false;return true; }
         let result;
         try { result=await options.api('tunnel.port.check',{proto:w.proto,addr:value}); } catch (_) { return true; }

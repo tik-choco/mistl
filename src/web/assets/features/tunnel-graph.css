@@ -82,6 +82,9 @@
 .tg-choice small { font-size:11.5px;line-height:1.55;color:var(--text-dim,#909bad);overflow-wrap:anywhere; }
 .tg-choice.tg-chosen { border-color:var(--accent,#74d8ba);background:var(--accent-dim,#74d8ba22); }
 .tg-mono { font-family:var(--mono,monospace); }
+.tg-section { margin:14px 0 6px;font-size:11px;font-weight:600;letter-spacing:.04em;color:var(--text-dim,#909bad); }
+.tg-uses { display:flex;flex-direction:column;gap:8px;margin-bottom:8px; }
+.tg-use-port { border-style:dashed; }
 .tg-seg { display:inline-flex;align-self:flex-start;border:1px solid var(--panel-border,#303747);border-radius:8px;overflow:hidden; }
 .tg-seg label { position:relative;cursor:pointer; }
 .tg-seg input { position:absolute;opacity:0;pointer-events:none; }

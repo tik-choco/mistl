@@ -585,11 +585,17 @@
     svg.addEventListener("wheel", function (event) {
       event.preventDefault(); zoom(scale * Math.exp(-event.deltaY * (event.deltaMode === 1 ? 0.04 : 0.002)), point(event));
     }, { passive: false });
+    function capture(id) { try { svg.setPointerCapture(id); } catch (_) { /* pointer already gone */ } }
     svg.addEventListener("pointerdown", function (event) {
       if (event.button !== 0) return;
+      // A mouse has one pointer; drop any entry whose pointerup was missed.
+      if (event.pointerType === "mouse") pointers.clear();
       var p = point(event); pointers.set(event.pointerId, p);
-      svg.setPointerCapture(event.pointerId);
+      // Capture only once a gesture starts (drag or pinch): Chromium sends
+      // the click of a captured pointer to the svg, so capturing on press
+      // would stop plain clicks from ever reaching a node.
       if (pointers.size === 2) {
+        pointers.forEach(function (_, id) { capture(id); });
         var pair = Array.from(pointers.values());
         pinch = { distance: Math.hypot(pair[1].x - pair[0].x, pair[1].y - pair[0].y), scale: scale };
         drag = null; return;
@@ -609,7 +615,7 @@
         suppressUntil = now() + 400; return;
       }
       if (!drag) return;
-      if (Math.hypot(p.x - drag.start.x, p.y - drag.start.y) > 4) drag.moved = true;
+      if (!drag.moved && Math.hypot(p.x - drag.start.x, p.y - drag.start.y) > 4) { drag.moved = true; capture(event.pointerId); }
       if (!drag.moved) return;
       hidePreview();
       if (drag.node) {

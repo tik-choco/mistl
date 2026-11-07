@@ -115,6 +115,22 @@ assert.equal(modal().hidden,true,'Escape closes the wizard');
 panel('peer-a').querySelector('.tg-add').click();
 assert.deepEqual([...modal().querySelectorAll('.tg-choice')].map(b=>b.dataset.value),['serve','connect'],'remote nodes cannot propose');
 modal().querySelector('.modal-close').click();assert.equal(modal().hidden,true);
+// A peer's dialog leads with what this node can do with that peer.
+panel('peer-a');
+assert.deepEqual([...modal().querySelectorAll('.tg-uses .tg-choice')].map(b=>b.dataset.value),['service@peer-a','propose'],'peer dialog offers its published services and a port proposal');
+modal().querySelector('.tg-use-service').click();
+assert.equal(step(),'local','a published service skips the type and service steps');
+assert.equal(modal().querySelector('input[type=text]').value,'127.0.0.1:3000','the local port defaults to the service port');
+modal().querySelector('.tg-back').click();
+assert.equal(modal().querySelector('.tg-dialog-body').dataset.nodeId,'peer-a','back on the first step returns to the peer dialog');
+modal().querySelector('.tg-use-port').click();
+assert.equal(step(),'remote','proposing to a peer skips the type and peer steps');
+modal().querySelector('input[type=text]').value=':22';submitStep();await flush();
+assert.equal(step(),'local','a bare :port is accepted');assert.equal(modal().querySelector('input[type=text]').value,'127.0.0.1:10022');
+modal().querySelector('input[type=text]').value='10022';
+submitStep();await flush();assert.equal(step(),'confirm');submitStep();await flush();
+assert.deepEqual(calls.at(-1),{cmd:'tunnel.forward.propose',args:{proto:'tcp',local:'127.0.0.1:10022',remote:'127.0.0.1:22',peer_id:'peer-a'}});
+assert.equal(modal().hidden,true,'the dialog closes after sending the proposal');
 // Node settings: switches in a modal, permissions one level deeper.
 panel('self').querySelector('.tg-gear').click();
 const broadcastSwitch=modal().querySelector('[role=switch]');broadcastSwitch.checked=true;broadcastSwitch.dispatchEvent(new window.Event('change'));await flush();
@@ -169,7 +185,7 @@ assert.equal(step(document),'local');await flush();submitStep(document);await fl
 assert.equal(step(document),'confirm');
 assert.ok(pModal.querySelector('.tg-flow').textContent.includes(longPeerId),'confirm shows the full peer id, never truncated');
 submitStep(document);await flush();
-assert.deepEqual(proposeCalls.at(-1),{cmd:'tunnel.forward.propose',args:{proto:'tcp',local:'127.0.0.1:8080',remote:'127.0.0.1:22',peer_id:longPeerId}});
+assert.deepEqual(proposeCalls.at(-1),{cmd:'tunnel.forward.propose',args:{proto:'tcp',local:'127.0.0.1:10022',remote:'127.0.0.1:22',peer_id:longPeerId}},'the local port follows the remote one (privileged ports +10000)');
 assert.equal(proposeHost.querySelector('.tg-message').textContent,'ok-from-server','server-provided message is shown on success');
 assert.equal(pModal.hidden,true,'dialog closes after a successful proposal');
 proposeHost.remove();
