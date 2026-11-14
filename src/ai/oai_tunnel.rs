@@ -371,47 +371,62 @@ impl TunnelProvider {
         } else {
             None
         };
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(TIMEOUT)
-            .build()?;
-        let url = format!("{}{path}", target.base_url.trim_end_matches('/'));
-        let mut request = client.request(reqwest::Method::from_bytes(method.as_bytes())?, url);
-        if !target.api_key.trim().is_empty() {
-            request = request.bearer_auth(target.api_key);
-        }
-        if let Some(payload) = payload {
-            request = request
-                .header(reqwest::header::CONTENT_TYPE, "application/json")
-                .body(payload);
-        }
-        let mut response = request.send().await?;
-        let status = response.status().as_u16();
-        let content_type = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("application/octet-stream")
-            .to_string();
-        if response
-            .content_length()
-            .is_some_and(|n| n > MAX_BYTES as u64)
-        {
+        forward(&target.base_url, &target.api_key, &method, &path, payload).await
+    }
+}
+
+/// Sends one buffered request to an OpenAI-compatible upstream and reads the
+/// reply (status, content type, body) under the tunnel's size cap.
+pub(super) async fn forward(
+    base_url: &str,
+    api_key: &str,
+    method: &str,
+    path: &str,
+    payload: Option<Vec<u8>>,
+) -> Result<TunnelResponse> {
+    // `no_proxy()`: upstreams are usually loopback (Ollama/llama.cpp), and a
+    // proxy from the environment would break those requests.
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(TIMEOUT)
+        .build()?;
+    let url = format!("{}{path}", base_url.trim_end_matches('/'));
+    let mut request = client.request(reqwest::Method::from_bytes(method.as_bytes())?, url);
+    if !api_key.trim().is_empty() {
+        request = request.bearer_auth(api_key);
+    }
+    if let Some(payload) = payload {
+        request = request
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(payload);
+    }
+    let mut response = request.send().await?;
+    let status = response.status().as_u16();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    if response
+        .content_length()
+        .is_some_and(|n| n > MAX_BYTES as u64)
+    {
+        bail!("request_too_large");
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if body.len().saturating_add(chunk.len()) > MAX_BYTES {
             bail!("request_too_large");
         }
-        let mut body = Vec::new();
-        while let Some(chunk) = response.chunk().await? {
-            if body.len().saturating_add(chunk.len()) > MAX_BYTES {
-                bail!("request_too_large");
-            }
-            body.extend_from_slice(&chunk);
-        }
-        Ok(TunnelResponse {
-            status,
-            content_type,
-            body,
-        })
+        body.extend_from_slice(&chunk);
     }
+    Ok(TunnelResponse {
+        status,
+        content_type,
+        body,
+    })
 }
 
 pub(super) struct TunnelResponse {

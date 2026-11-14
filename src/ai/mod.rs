@@ -734,6 +734,38 @@ impl AiService {
         .await
     }
 
+    /// Unscoped `POST /v1/systemone`: resolves `model` the way chat does,
+    /// then relays the body (only `model` rewritten) to that HTTP provider's
+    /// `/systemone`, or over the Room provider's tunnel.
+    async fn decide(self: Arc<Self>, raw: Vec<u8>) -> Result<oai_tunnel::TunnelResponse> {
+        let requested: Value = serde_json::from_slice(&raw).context("invalid decision body")?;
+        let config = self.state.effective_config();
+        let reference = resolve_api_ref(
+            &config.ai,
+            requested.get("model").and_then(Value::as_str),
+            &self.live_models(),
+        )?;
+        let resolved = crate::config::resolve_ref(&config.ai, Some(&reference))
+            .context("ai: model reference is unavailable; check ai.providers and ai.default_ref")?;
+        let body = oai_tunnel::rewrite_object(&raw, &[("model", json!(resolved.model))], &[])?;
+        if let Some(room) = resolved.base_url.strip_prefix("mist-network://") {
+            let routes = self
+                .clone()
+                .api_room(room.to_string())
+                .await?
+                .context("ai: room is not an enabled Room provider")?;
+            return (routes.decision)(body).await;
+        }
+        oai_tunnel::forward(
+            &resolved.base_url,
+            &resolved.api_key,
+            "POST",
+            "/systemone",
+            Some(body),
+        )
+        .await
+    }
+
     fn live_models(&self) -> HashMap<String, Vec<String>> {
         self.rooms
             .read()
@@ -1868,6 +1900,11 @@ async fn serve_start(service: &Arc<AiService>, state: &Arc<AppState>) -> Result<
         })
     };
 
+    let decision: api_server::DecisionFn = {
+        let service = service.clone();
+        Arc::new(move |raw| Box::pin(service.clone().decide(raw)))
+    };
+
     let api_listen = state.effective_config().ai.api_listen;
     let rooms: api_server::RoomsFn = {
         let service = service.clone();
@@ -1883,6 +1920,7 @@ async fn serve_start(service: &Arc<AiService>, state: &Arc<AppState>) -> Result<
         models_fn,
         tts_fn,
         stt_fn,
+        Some(decision),
         Some(rooms),
         Some(origins),
     )
@@ -2017,6 +2055,7 @@ mod tests {
             Arc::new(Vec::new),
             tts,
             stt,
+            None,
             Some(rooms),
             None,
         )
@@ -2638,6 +2677,7 @@ mod tests {
             Arc::new(Vec::new),
             tts,
             stt,
+            None,
             Some(rooms),
             None,
         )
@@ -3705,6 +3745,68 @@ mod tests {
             }
         });
         format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn unscoped_decisions_reach_the_http_providers_systemone() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0; 4096];
+            loop {
+                let n = socket.read(&mut buf).await.unwrap();
+                assert!(n > 0);
+                request.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&request).to_string();
+                if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                    let len: usize = head
+                        .lines()
+                        .find_map(|l| {
+                            l.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().parse().unwrap())
+                        })
+                        .unwrap();
+                    if body.len() >= len {
+                        tx.send((head.lines().next().unwrap().to_string(), body.to_string()))
+                            .unwrap();
+                        break;
+                    }
+                }
+            }
+            let response = r#"{"answers":{"q":{"type":"noul","noul":0.5}}}"#;
+            socket
+                .write_all(ok_json(response).as_bytes())
+                .await
+                .unwrap();
+        });
+        let state = AppState::for_test();
+        let mut config = state.config();
+        config.ai = sample_config();
+        config.ai.providers[0].base_url = format!("http://{addr}/v1");
+        state.set_config(config);
+        let service = Arc::new(AiService {
+            state,
+            rooms: RwLock::new(HashMap::new()),
+            on_demand: RwLock::new(HashSet::new()),
+            sync: Mutex::new(()),
+            api_server: Mutex::new(None),
+        });
+        let raw = br#"{"state":"s","questions":{"q":{"type":"choice","criteria":{"zebra":null,"apple":null}}}}"#;
+        let response = service.decide(raw.to_vec()).await.unwrap();
+        assert_eq!(response.status, 200);
+        assert!(String::from_utf8(response.body).unwrap().contains("0.5"));
+        let (line, body) = rx.await.unwrap();
+        assert_eq!(line, "POST /v1/systemone HTTP/1.1");
+        // No model: the default reference fills it in; nested order is kept.
+        assert_eq!(
+            body,
+            r#"{"state":"s","questions":{"q":{"type":"choice","criteria":{"zebra":null,"apple":null}}},"model":"raw"}"#
+        );
     }
 
     fn ok_json(body: &str) -> String {

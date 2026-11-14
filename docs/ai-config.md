@@ -239,7 +239,12 @@ Image `content` parts on a room-scoped chat route select a peer advertising
 SSE adaptation once that response completes. Text-only chat still uses
 `llm_request`. Local `/rooms/{room}/embeddings` and tunnel consumers for arbitrary
 paths are not exposed; mistai consumers can call all four provider tunnel paths.
-The unscoped `/v1/systemone` returns 404: decisions are room-scoped only.
+The unscoped `POST /v1/systemone` takes the same decision body and resolves its
+`model` like chat completions (omitted: `ai.default_ref`). An HTTP provider
+receives it at `<base_url>/systemone` with only `model` rewritten; a Room
+provider relays it over that room's `oai` tunnel. Upstream status and body are
+returned as-is, so a model that is not a decision model surfaces the upstream's
+own error. Both decision routes honour `mst_` tokens like chat.
 
 ### API errors
 

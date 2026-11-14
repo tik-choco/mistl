@@ -47,11 +47,13 @@
 //!   Multipart rather than a raw body because the point of this server is
 //!   that an unmodified OpenAI client can be pointed at it, and every such
 //!   client sends this endpoint that way.
-//! - `POST /v1/rooms/<room>/systemone` -> a System One decision request
-//!   (`{model?, state, questions, images?, keep_alive?}`, as Ollama's
-//!   `/v1/systemone`), relayed unchanged over the room's oai tunnel; the
-//!   provider's upstream status and JSON body come back as-is. Room-scoped
-//!   only: the unscoped `/v1/systemone` answers `404`.
+//! - `POST /v1/systemone` / `POST /v1/rooms/<room>/systemone` -> a System
+//!   One decision request (`{model?, state, questions, images?,
+//!   keep_alive?}`, as Ollama's `/v1/systemone`), relayed unchanged to the
+//!   upstream: unscoped, the provider `model` resolves to (an HTTP
+//!   provider's `<base_url>/systemone`, or a Room provider's tunnel);
+//!   room-scoped, over that room's oai tunnel. The upstream status and JSON
+//!   body come back as-is.
 //! - Unresolvable explicit models -> `404` with OpenAI `model_not_found`.
 //! - Upstream/backend errors: before any deltas were streamed -> `502` with
 //!   `{"error":{"message":...}}` carrying a generic message (the detail is
@@ -108,7 +110,7 @@ pub(super) type OaiFn = Arc<
         + Sync,
 >;
 
-/// Room decision relay. Takes the client's raw JSON body so nested key order
+/// Decision relay. Takes the client's raw JSON body so nested key order
 /// (meaningful for `choice` criteria) reaches the upstream unchanged.
 pub(super) type DecisionFn = Arc<
     dyn Fn(
@@ -195,15 +197,18 @@ impl ApiServer {
         tts_call: TtsFn,
         stt_call: SttFn,
     ) -> Result<Arc<ApiServer>> {
-        Self::start_with_rooms(listen, call, models, tts_call, stt_call, None, None).await
+        Self::start_with_rooms(listen, call, models, tts_call, stt_call, None, None, None).await
     }
 
+    /// `decision` serves the unscoped `/v1/systemone` (`None`: 404).
+    #[allow(clippy::too_many_arguments)]
     pub async fn start_with_rooms(
         listen: &str,
         call: LlmCallFn,
         models: ModelsFn,
         tts_call: TtsFn,
         stt_call: SttFn,
+        decision: Option<DecisionFn>,
         rooms: Option<RoomsFn>,
         origins: Option<OriginsFn>,
     ) -> Result<Arc<ApiServer>> {
@@ -240,14 +245,19 @@ impl ApiServer {
                 let models = models.clone();
                 let tts_call = tts_call.clone();
                 let stt_call = stt_call.clone();
+                let decision = decision.clone();
                 let rooms = rooms.clone();
                 let origins = origins.clone();
                 let handle = tokio::spawn(async move {
                     let _permit = permit;
-                    if let Err(error) =
-                        handle_connection(socket, call, models, tts_call, stt_call, rooms, origins)
-                            .await
-                    {
+                    let local = LocalRoutes {
+                        call,
+                        models,
+                        tts_call,
+                        stt_call,
+                        decision,
+                    };
+                    if let Err(error) = handle_connection(socket, local, rooms, origins).await {
                         warn!(%error, "api_server connection ended with error");
                     }
                 });
@@ -892,12 +902,18 @@ async fn write_backend_failure(stream: &mut TcpStream, error: &anyhow::Error) {
     }
 }
 
-async fn handle_connection(
-    mut stream: TcpStream,
+/// Handlers for the unscoped `/v1/...` routes.
+struct LocalRoutes {
     call: LlmCallFn,
     models: ModelsFn,
     tts_call: TtsFn,
     stt_call: SttFn,
+    decision: Option<DecisionFn>,
+}
+
+async fn handle_connection(
+    mut stream: TcpStream,
+    local: LocalRoutes,
     rooms: Option<RoomsFn>,
     origins: Option<OriginsFn>,
 ) -> Result<()> {
@@ -960,24 +976,17 @@ async fn handle_connection(
                 let _ = write_preflight(&mut stream, &head).await;
                 return Ok(());
             }
-            route_request(
-                stream, head, leftover, call, models, tts_call, stt_call, rooms,
-            )
-            .await
+            route_request(stream, head, leftover, local, rooms).await
         })
         .await
 }
 
 /// Routes a request that passed [`check_request_guards`].
-#[allow(clippy::too_many_arguments)]
 async fn route_request(
     mut stream: TcpStream,
     head: RequestHead,
     leftover: Vec<u8>,
-    call: LlmCallFn,
-    models: ModelsFn,
-    tts_call: TtsFn,
-    stt_call: SttFn,
+    local: LocalRoutes,
     rooms: Option<RoomsFn>,
 ) -> Result<()> {
     let is_post = head.method.eq_ignore_ascii_case("POST");
@@ -1025,7 +1034,14 @@ async fn route_request(
             Some(routes.decision),
         )
     } else {
-        (call, models, tts_call, stt_call, None, None)
+        (
+            local.call,
+            local.models,
+            local.tts_call,
+            local.stt_call,
+            None,
+            local.decision,
+        )
     };
 
     let body: Vec<u8> = if is_post {
@@ -1119,7 +1135,13 @@ async fn route_request(
         )
         .await?;
     } else if is_post && path == "/v1/systemone" {
-        handle_decision(&mut stream, &body, decision.as_ref()).await?;
+        handle_decision(
+            &mut stream,
+            &body,
+            decision.as_ref(),
+            head.header("authorization"),
+        )
+        .await?;
     } else {
         let _ = write_error(&mut stream, 404, "Not Found", "not found").await;
     }
@@ -1469,20 +1491,21 @@ async fn write_tunnel_response(
     Ok(())
 }
 
-/// `POST /v1/rooms/<room>/systemone`: checks the envelope (an object with a
-/// `state` and a non-empty `questions` object), then relays it over the
-/// room's oai tunnel. Question semantics are left to the upstream server.
+/// `POST /v1/systemone` (scoped or not): checks the envelope (an object
+/// with a `state` and a non-empty `questions` object) and the token, then
+/// relays it. Question semantics are left to the upstream server.
 async fn handle_decision(
     stream: &mut TcpStream,
     body: &[u8],
     decision: Option<&DecisionFn>,
+    authorization: Option<&str>,
 ) -> Result<()> {
     let Some(decision) = decision else {
         write_error(
             stream,
             404,
             "Not Found",
-            "decision requests need a room-scoped route: /v1/rooms/<room>/systemone",
+            "decision requests are not available",
         )
         .await?;
         return Ok(());
@@ -1518,6 +1541,16 @@ async fn handle_decision(
         .await?;
         return Ok(());
     }
+    let model = req.get("model").and_then(Value::as_str);
+    let authorized = match crate::authz::authorize_api(authorization, model) {
+        Ok(authorized) => authorized,
+        Err(denied) => {
+            write_denied(stream, denied).await?;
+            return Ok(());
+        }
+    };
+    let mut usage = ApiUsage::new(authorized);
+    usage.started = true;
     match decision(body.to_vec()).await {
         Ok(response) => write_tunnel_response(stream, &response).await,
         Err(err) => {
@@ -1907,6 +1940,8 @@ mod tests {
     }
 
     const CHAT_BODY: &str = r#"{"model":"m1","messages":[{"role":"user","content":"hi"}]}"#;
+    const DECISION_BODY: &str =
+        r#"{"model":"m1","state":"s","questions":{"q":{"type":"noul","instructions":"?"}}}"#;
     const AUDIO_BODY: &str = "--b\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nm1\r\n--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.wav\"\r\nContent-Type: audio/wav\r\n\r\naudio\r\n--b--\r\n";
 
     #[tokio::test]
@@ -1928,6 +1963,7 @@ mod tests {
                     "audio/transcriptions",
                     Some(("multipart/form-data; boundary=b", AUDIO_BODY)),
                 ),
+                ("systemone", Some(("application/json", DECISION_BODY))),
             ] {
                 let path = format!("{prefix}/{endpoint}");
                 for credential in [None, Some(unknown_token.as_str())] {
@@ -1935,11 +1971,12 @@ mod tests {
                     assert_denied(&raw, 401, "unauthorized");
                 }
                 let raw = token_request(&server, &path, Some(&token), body).await;
-                assert_eq!(status_code(&split_response(&raw).0), 200, "{path}");
+                let expected = if path == "/v1/systemone" { 404 } else { 200 };
+                assert_eq!(status_code(&split_response(&raw).0), expected, "{path}");
             }
         }
-        assert_eq!(seen.lock().unwrap().len(), 2);
-        assert_eq!(token_usage()["requests"], 6);
+        assert_eq!(seen.lock().unwrap().len(), 4);
+        assert_eq!(token_usage()["requests"], 8);
     }
 
     #[tokio::test]
@@ -2158,6 +2195,20 @@ mod tests {
                 .push(json!({"route":"default","effort":options.reasoning_effort}));
             Box::pin(async { Ok("default".to_string().into()) })
         });
+        let local_seen = seen.clone();
+        let local_decision: DecisionFn = Arc::new(move |body: Vec<u8>| {
+            local_seen
+                .lock()
+                .unwrap()
+                .push(json!({"route":"local-decision","raw":String::from_utf8(body).unwrap()}));
+            Box::pin(async {
+                Ok(super::super::oai_tunnel::TunnelResponse {
+                    status: 404,
+                    content_type: "application/json".into(),
+                    body: br#"{"error":"not a decision model"}"#.to_vec(),
+                })
+            })
+        });
         let records = seen.clone();
         let rooms: RoomsFn = Arc::new(move |room| {
             let records = records.clone();
@@ -2235,6 +2286,7 @@ mod tests {
             fake_models(),
             fake_tts(),
             fake_stt(),
+            Some(local_decision),
             Some(rooms),
             None,
         )
@@ -2274,9 +2326,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn room_decision_requests_are_relayed_over_the_tunnel() {
+    async fn decision_requests_are_relayed_verbatim() {
+        let _authz = authz_test().await;
         let (server, seen) = room_test_server().await;
-        let request = json!({"model":"nimble","state":{"text":"hi"},"questions":{"q":{"type":"noul","instructions":"?"}}});
         let ordered = r#"{"model":"nimble","state":"s","questions":{"q":{"type":"choice","instructions":"?","criteria":{"zebra":null,"apple":null}}}}"#;
         let raw = send_request(server.addr(), &format!("POST /v1/rooms/team%2Fone/systemone HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{ordered}", ordered.len())).await;
         let (head, body) = split_response(&raw);
@@ -2297,8 +2349,22 @@ mod tests {
             let raw = post_json(&server, "/v1/rooms/team%2Fone/systemone", bad.clone()).await;
             assert_eq!(status_code(&split_response(&raw).0), 400, "{bad}");
         }
-        let raw = post_json(&server, "/v1/systemone", request).await;
-        assert_eq!(status_code(&split_response(&raw).0), 404);
+        // Unscoped requests take the local resolver; the upstream status and
+        // body come back unchanged.
+        let raw = send_request(server.addr(), &format!("POST /v1/systemone HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{ordered}", ordered.len())).await;
+        let (head, body) = split_response(&raw);
+        assert_eq!(status_code(&head), 404);
+        assert_eq!(body, br#"{"error":"not a decision model"}"#);
+        let sent = seen.lock().unwrap().last().unwrap().clone();
+        assert_eq!(sent["route"], "local-decision");
+        assert_eq!(sent["raw"], ordered);
+        let raw = post_json(
+            &server,
+            "/v1/systemone",
+            json!({"state":"x","questions":{}}),
+        )
+        .await;
+        assert_eq!(status_code(&split_response(&raw).0), 400);
         server.stop();
     }
 
@@ -3110,6 +3176,7 @@ mod tests {
             fake_models(),
             fake_tts(),
             fake_stt(),
+            None,
             None,
             Some(Arc::new(move || allowed.clone())),
         )
