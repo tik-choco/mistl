@@ -378,6 +378,23 @@ fn quote_word(w: &str) -> String {
 pub struct MistlRunner {
     prefix: Vec<OsString>,
     timeout: Duration,
+    /// For commands that wait on an upstream model (see [`long_running`]).
+    long_timeout: Duration,
+}
+
+/// Commands that wait on an upstream model (chat, speech, transcription, 3D
+/// generation or download) and routinely outlast the normal mistl timeout.
+fn long_running(args: &[String]) -> bool {
+    let words: Vec<&str> = args
+        .iter()
+        .map(String::as_str)
+        .filter(|a| !a.starts_with('-'))
+        .take(3)
+        .collect();
+    matches!(
+        words.as_slice(),
+        ["ai", "chat" | "speech" | "transcribe", ..] | ["ai", "3d", "generate" | "get"]
+    )
 }
 
 impl MistlRunner {
@@ -395,6 +412,9 @@ impl MistlRunner {
         Self {
             prefix,
             timeout: Duration::from_secs(cfg.mistl_timeout_secs.max(1)),
+            long_timeout: Duration::from_secs(
+                cfg.command_timeout_secs.max(cfg.mistl_timeout_secs).max(1),
+            ),
         }
     }
 
@@ -446,7 +466,12 @@ impl MistlRunner {
             Invocation::Run(a) => a.clone(),
             Invocation::Help(p) => p.iter().cloned().chain(["--help".to_string()]).collect(),
         };
-        self.exec(&args, self.timeout, cancel, on_output).await
+        let timeout = if long_running(&args) {
+            self.long_timeout
+        } else {
+            self.timeout
+        };
+        self.exec(&args, timeout, cancel, on_output).await
     }
 
     pub async fn serve_start(&self, cancel: &CancellationToken) -> Result<String> {
@@ -664,6 +689,23 @@ mod tests {
         assert!(parse_call("nope", "{}").is_err());
         assert!(parse_call("mistl", "{bad").is_err());
         assert!(parse_call("mistl", r#"{"args":[{"a":1}]}"#).is_err());
+    }
+
+    #[test]
+    fn media_commands_get_the_long_timeout() {
+        let args = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
+        for long in [
+            "ai chat hi",
+            "ai speech --text hi -o a.wav",
+            "ai transcribe a.wav",
+            "ai 3d generate --image a.png --model m",
+            "ai 3d get gen3d_1 -o a.glb",
+        ] {
+            assert!(long_running(&args(long)), "{long}");
+        }
+        for short in ["ai status", "ai 3d status gen3d_1", "ai 3d ls", "store ls"] {
+            assert!(!long_running(&args(short)), "{short}");
+        }
     }
 
     #[test]

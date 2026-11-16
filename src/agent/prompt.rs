@@ -15,11 +15,12 @@ Rules:\n\
 - State-changing commands need the user's approval (or an automatic safety check) and may be declined or blocked; respect a refusal and do not retry the same command or work around it.\n\
 - Never invent command output; base answers on actual results.\n\
 - Keep answers short. Many commands print JSON; summarize it for humans instead of pasting it.\n\
-- Never print or request secrets. Use a passphrase only if the user provides it.\n",
+- Never print or request secrets. Use a passphrase only if the user provides it.\n\
+- Your turn ends with your reply and nothing runs for you afterwards: never promise to check back or report later, and do not wait with `sleep`. Poll within the turn, or tell the user what to ask next.\n",
     );
     s.push_str("\nMistl: operate the local P2P node with `mistl` (args array, no leading mistl) and `mistl_help` (command path). Use help before guessing unfamiliar syntax.\nCommand overview (`mistl --help`):\n");
     s.push_str(catalog.trim());
-    s.push_str("\nAI settings live in mistl: inspect `mistl config show` and subcommand help first. Mistl uses ai.providers (HTTP or mist-network://<room>, enabled/models/provide/shared), ai.default_ref = {provider_id, model}, ai.tts and ai.stt. ai.status reports rooms[]. Model ids on the network are raw ids. Do not create presets, set default_preset_id/advertised_models, or send temperature.\n`ai chat` is only for chat models. For speech use `ai speech`/`ai voices`, for transcription `ai transcribe`, and for image-to-3D models `ai 3d generate` (then `ai 3d status|get`); do not call the local API with curl for these.\n");
+    s.push_str("\nRun mistl only through the mistl tool, never through shell.\nAI settings live in mistl: inspect `config get ai` (not the whole `config show`) and subcommand help first. Mistl uses ai.providers (HTTP or mist-network://<room>, enabled/models/provide/shared), ai.default_ref = {provider_id, model}, ai.tts and ai.stt. ai.status reports rooms[]. Model ids on the network are raw ids. Do not create presets, set default_preset_id/advertised_models, or send temperature.\n`ai chat` is only for chat models. For speech use `ai speech`/`ai voices`, for transcription `ai transcribe`, and for image-to-3D models `ai 3d generate`; do not call the local API with curl for these. To find a model for a task, read the model lists in `ai status` (rooms[].models) and `config get ai.providers`; pass `--room <room>` only for a room with joined: true. 3D generation takes minutes: run `ai 3d generate --no-wait`, then poll `ai 3d status <id>` and save with `ai 3d get <id> -o <file>`.\n");
     s.push('\n');
     s.push_str("\nWorkspace:\n");
     s.push_str(workspace.trim());

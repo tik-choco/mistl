@@ -263,18 +263,15 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         " mistl agent ",
         Style::default().fg(Color::Black).bg(Color::Cyan),
     )];
-    if app.approval != ApprovalMode::Ask {
-        spans.push(Span::styled(
-            format!(" {} ", app.approval.as_str()),
-            Style::default()
-                .fg(Color::Black)
-                .bg(if app.approval == ApprovalMode::Yolo {
-                    Color::Yellow
-                } else {
-                    Color::Blue
-                }),
-        ));
-    }
+    // Always shown: auto is the default, so ask is the mode worth noticing.
+    spans.push(Span::styled(
+        format!(" {} ", app.approval.as_str()),
+        Style::default().fg(Color::Black).bg(match app.approval {
+            ApprovalMode::Ask => Color::Gray,
+            ApprovalMode::Auto => Color::Blue,
+            ApprovalMode::Yolo => Color::Yellow,
+        }),
+    ));
     let workspace = app
         .workspace
         .root
@@ -283,8 +280,9 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         .next()
         .unwrap_or_default();
     if !workspace.is_empty() {
-        // Leave room for the recipe status even with a long directory name.
-        let name_width = (area.width as usize).saturating_sub(28).max(4);
+        // Leave room for the approval badge and recipe status even with a
+        // long directory name.
+        let name_width = (area.width as usize).saturating_sub(34).max(4);
         spans.push(Span::raw(format!(
             " {} ",
             truncate_text(workspace, name_width)
@@ -877,6 +875,7 @@ mod tests {
             app.on_agent_event(AgentEvent::ApprovalModeChanged(mode));
             let (text, _) = render(&mut app, 120, 12);
             let header = text.lines().next().unwrap();
+            assert_eq!(header.contains(" ask "), mode == ApprovalMode::Ask);
             assert_eq!(header.contains(" auto "), mode == ApprovalMode::Auto);
             assert_eq!(header.contains(" yolo "), mode == ApprovalMode::Yolo);
         }

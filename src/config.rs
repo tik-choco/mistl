@@ -1250,10 +1250,11 @@ fn url_origin(url: &str) -> String {
     )
 }
 
-/// Masks a webhook URL for `config.show`: userinfo becomes `***@` and a
-/// query string becomes `?***`. A URL with neither is returned unchanged
-/// (nothing secret to hide), so the mask is deterministic and
-/// [`substitute_masked_webhook_secrets`] can recognise a round-tripped one.
+/// Masks a webhook URL for `config.show`: userinfo becomes `***@`, path
+/// segments of at least 16 characters become `***`, and a query or fragment
+/// becomes `?***`. A URL with nothing to mask is returned unchanged, so the
+/// mask is deterministic and [`substitute_masked_webhook_secrets`] can
+/// recognise a round-tripped one.
 pub fn mask_webhook_url(url: &str) -> String {
     let (scheme, rest) = match url.split_once("://") {
         Some((scheme, rest)) => (format!("{scheme}://"), rest),
@@ -1269,9 +1270,17 @@ pub fn mask_webhook_url(url: &str) -> String {
         Some(i) => (&tail[..i], true),
         None => (tail, false),
     };
-    if !userinfo && !query {
-        return url.to_string();
-    }
+    let path = path
+        .split('/')
+        .map(|segment| {
+            if segment.chars().count() >= 16 {
+                MASK
+            } else {
+                segment
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/");
     format!(
         "{scheme}{}{host}{path}{}",
         if userinfo { "***@" } else { "" },
@@ -1281,8 +1290,9 @@ pub fn mask_webhook_url(url: &str) -> String {
 
 /// `config.show` support: masks secrets inside `bot.pipelines[].sinks[]`
 /// webhook sinks -- every non-empty header value becomes `"***"` and the
-/// URL's userinfo/query is hidden (see [`mask_webhook_url`]). Empty header
-/// values stay as-is so a client can tell "set" from "not set".
+/// URL's userinfo, long path segments, query and fragment are hidden (see
+/// [`mask_webhook_url`]). Empty header values stay as-is so a client can tell
+/// "set" from "not set".
 pub fn mask_bot_webhook_secrets(value: &mut serde_json::Value) {
     let Some(pipelines) = value["bot"]["pipelines"].as_array_mut() else {
         return;
@@ -1313,7 +1323,8 @@ pub fn mask_bot_webhook_secrets(value: &mut serde_json::Value) {
 /// [`substitute_masked_provider_keys`]: a webhook sink whose `url` equals the
 /// masked form of the current sink's URL (same pipeline id, same sink
 /// index) gets the real URL back, and a header value of `"***"` gets the
-/// real value of the same-named header of that sink. A mask with nothing to
+/// real value of the same-named header of that sink. URL masks include
+/// userinfo, path segments and query placeholders. A mask with nothing to
 /// substitute from is an error -- the placeholder is never stored.
 fn substitute_masked_webhook_secrets(
     config: &Config,
@@ -1341,11 +1352,23 @@ fn substitute_masked_webhook_secrets(
                 _ => None,
             });
             if let Some(submitted) = sink.get("url").and_then(serde_json::Value::as_str) {
+                let rest = submitted
+                    .split_once("://")
+                    .map_or(submitted, |(_, rest)| rest);
+                let path_start = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+                let path = rest[path_start..]
+                    .split(['?', '#'])
+                    .next()
+                    .unwrap_or_default();
+                let masked_path = path.split('/').any(|segment| segment == MASK);
                 match current_sink {
                     Some((real, _)) if submitted == mask_webhook_url(real) => {
                         sink["url"] = serde_json::Value::String(real.clone());
                     }
-                    _ if submitted.contains("?***") || submitted.contains("***@") => {
+                    _ if submitted.contains("?***")
+                        || submitted.contains("***@")
+                        || masked_path =>
+                    {
                         anyhow::bail!(
                             "bot.pipelines: masked webhook url for pipeline {pid:?} sink {index} has nothing to restore it from (re-enter the real url)"
                         );
@@ -3027,7 +3050,7 @@ mod tests {
     }
 
     #[test]
-    fn mask_webhook_url_hides_userinfo_and_query_only() {
+    fn mask_webhook_url_hides_userinfo_query_and_long_path_segments() {
         assert_eq!(
             mask_webhook_url("https://h.example/p"),
             "https://h.example/p"
@@ -3043,6 +3066,36 @@ mod tests {
         assert_eq!(
             mask_webhook_url("https://u@h.example"),
             "https://***@h.example"
+        );
+        assert_eq!(
+            mask_webhook_url(
+                "https://discord.com/api/webhooks/1234567890123456789/abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdef"
+            ),
+            "https://discord.com/api/webhooks/***/***"
+        );
+        assert_eq!(
+            mask_webhook_url(
+                "https://hooks.slack.com/services/T0000/B0000/abcdefghijklmnopqrstuvwx"
+            ),
+            "https://hooks.slack.com/services/T0000/B0000/***"
+        );
+        assert_eq!(
+            mask_webhook_url(
+                "https://long-hostname.example/123456789012345/1234567890123456//end/?key=x"
+            ),
+            "https://long-hostname.example/123456789012345/***//end/?***"
+        );
+        assert_eq!(
+            mask_webhook_url("https://user:pw@h.example/1234567890123456?token=x#f"),
+            "https://***@h.example/***?***"
+        );
+        assert_eq!(
+            mask_webhook_url("https://h.example/éééééééé/éééééééééééééééé#fragment"),
+            "https://h.example/éééééééé/***?***"
+        );
+        assert_eq!(
+            mask_webhook_url("h.example/1234567890123456"),
+            "h.example/***"
         );
     }
 
@@ -3080,6 +3133,67 @@ mod tests {
                 assert_eq!(headers[0].value, "Bearer SECRET");
             }
             other => panic!("expected webhook, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_by_path_bot_pipelines_restores_masked_webhook_path() {
+        let url = "https://discord.com/api/webhooks/1234567890123456789/abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdef";
+        let mut config = Config::default();
+        config.bot.pipelines.push(webhook_pipeline(url, &[]));
+
+        let mut shown = serde_json::to_value(&config).unwrap();
+        mask_bot_webhook_secrets(&mut shown);
+        assert_eq!(
+            shown["bot"]["pipelines"][0]["sinks"][1]["url"],
+            "https://discord.com/api/webhooks/***/***"
+        );
+        let pipelines = shown["bot"]["pipelines"].clone();
+        let updated = set_by_path(&config, "bot.pipelines", pipelines.clone()).unwrap();
+        match &updated.bot.pipelines[0].sinks[1] {
+            SinkConfig::Webhook { url: restored, .. } => assert_eq!(restored, url),
+            other => panic!("expected webhook, got {other:?}"),
+        }
+
+        let mut new_pipeline = pipelines[0].clone();
+        new_pipeline["id"] = json!("new-pipeline");
+        let err = set_by_path(&config, "bot.pipelines", json!([new_pipeline])).unwrap_err();
+        assert!(err.to_string().contains("nothing to restore"), "{err}");
+
+        let mut changed_url = pipelines[0].clone();
+        changed_url["sinks"][1]["url"] = json!("https://discord.com/api/webhooks/***/***/messages");
+        let err = set_by_path(&config, "bot.pipelines", json!([changed_url])).unwrap_err();
+        assert!(err.to_string().contains("nothing to restore"), "{err}");
+    }
+
+    #[test]
+    fn set_by_path_rejects_only_complete_masked_webhook_path_segments() {
+        let config = Config::default();
+        for url in [
+            "https://h.example/***",
+            "https://h.example/***/next",
+            "https://h.example/path/***?keep=1",
+            "https://h.example/path/***#fragment",
+            "h.example/***",
+        ] {
+            let value = serde_json::to_value(vec![webhook_pipeline(url, &[])]).unwrap();
+            let err = set_by_path(&config, "bot.pipelines", value).unwrap_err();
+            assert!(
+                err.to_string().contains("nothing to restore"),
+                "{url}: {err}"
+            );
+        }
+        for url in [
+            "https://h.example/a***",
+            "https://h.example/****",
+            "https://h.example/path?next=/***",
+            "https://h.example/path#/***",
+        ] {
+            let value = serde_json::to_value(vec![webhook_pipeline(url, &[])]).unwrap();
+            assert!(
+                set_by_path(&config, "bot.pipelines", value).is_ok(),
+                "{url}"
+            );
         }
     }
 

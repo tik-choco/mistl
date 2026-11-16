@@ -40,8 +40,8 @@ impl Default for Config {
             mistl_timeout_secs: 60,
             just_bin: "just".into(),
             command_timeout_secs: 600,
-            max_steps: 12,
-            approval: ApprovalMode::Ask,
+            max_steps: 30,
+            approval: ApprovalMode::Auto,
             safety_model: None,
             safety_api: SafetyApi::Auto,
         }

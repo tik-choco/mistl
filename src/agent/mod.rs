@@ -32,7 +32,7 @@ pub struct AgentArgs {
     /// Run state-changing tools without asking
     #[arg(long, short = 'y')]
     yes: bool,
-    /// Approval mode: ask, auto, or yolo
+    /// Approval mode: ask, auto (default), or yolo
     #[arg(long, value_parser = parse_approval_mode)]
     approval: Option<ApprovalMode>,
     /// Model for the auto-mode safety check (default: the agent's model)
@@ -223,7 +223,7 @@ mod tests {
 
     #[test]
     fn approval_flags_validate_alias_and_model() {
-        assert_eq!(approval_mode(false, None).unwrap(), ApprovalMode::Ask);
+        assert_eq!(approval_mode(false, None).unwrap(), ApprovalMode::Auto);
         for mode in [ApprovalMode::Ask, ApprovalMode::Auto, ApprovalMode::Yolo] {
             let args = Cli::try_parse_from([
                 "agent",

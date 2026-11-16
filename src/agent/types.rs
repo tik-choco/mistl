@@ -123,11 +123,12 @@ pub enum Safety {
 /// How state-changing (`Safety::Mutating`) tool calls are approved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ApprovalMode {
-    /// Ask the user for every state-changing call (default).
-    #[default]
+    /// Ask the user for every state-changing call.
     Ask,
     /// An independent safety guard (`crate::agent::safety`) decides: allow,
-    /// deny (returned to the model), or fall back to asking the user.
+    /// deny (returned to the model), or fall back to asking the user
+    /// (default).
+    #[default]
     Auto,
     /// Run every state-changing call without asking (`--yes`).
     Yolo,

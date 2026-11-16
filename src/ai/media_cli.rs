@@ -70,10 +70,10 @@ pub enum ThreeDAction {
         /// 3D model to request
         #[arg(short, long)]
         model: String,
-        /// Save the completed asset to this file
+        /// Save the completed asset to this file (ignored with --no-wait)
         #[arg(short, long)]
         output: Option<PathBuf>,
-        /// Additional upstream parameter (key=value; may be repeated)
+        /// Additional upstream parameter (key=value; may be repeated; background defaults to true)
         #[arg(long)]
         param: Vec<String>,
         /// Return the submitted job without waiting for completion
@@ -174,7 +174,7 @@ fn validate_action(action: &Action) -> Result<()> {
                 bail!("timeout must be greater than zero");
             }
             generation_params(param, *no_wait)?;
-            if let Some(path) = output {
+            if !*no_wait && let Some(path) = output {
                 check_output(path, *force)?;
             }
         }
@@ -265,12 +265,11 @@ fn parse_params(params: &[String]) -> Result<Vec<(String, Value)>> {
 
 fn generation_params(params: &[String], no_wait: bool) -> Result<Vec<(String, Value)>> {
     let mut params = parse_params(params)?;
-    if no_wait {
-        match params.iter().find(|(key, _)| key == "background") {
-            None => params.push(("background".into(), json!(true))),
-            Some((_, Value::Bool(true))) => {}
-            Some(_) => bail!("--no-wait requires background=true"),
-        }
+    match params.iter().find(|(key, _)| key == "background") {
+        None => params.push(("background".into(), json!(true))),
+        Some((_, Value::Bool(true))) => {}
+        Some(_) if no_wait => bail!("--no-wait requires background=true"),
+        Some(_) => {}
     }
     Ok(params)
 }
@@ -541,6 +540,11 @@ async fn run_3d(client: &reqwest::Client, listen: &str, action: ThreeDAction) ->
             room,
             force,
         } => {
+            if no_wait && output.is_some() {
+                eprintln!(
+                    "note: --output is ignored with --no-wait; use `mistl ai 3d get <id> -o <file>` when the job completes"
+                );
+            }
             let base = room_prefix(listen, room.as_deref())?;
             let image = file_part(&image).await?;
             let params = generation_params(&param, no_wait)?;
@@ -576,12 +580,13 @@ async fn run_3d(client: &reqwest::Client, listen: &str, action: ThreeDAction) ->
             })
             .await
             .map_err(|_| anyhow!("3D generation timed out after {timeout} seconds"))??;
-            if job_status(&result)? == JobStatus::Completed {
-                if let Some(path) = output {
-                    let route = generation_path(job_id(&result)?)?;
-                    let response = client.get(format!("{base}{route}/content")).send().await?;
-                    write_response(response, &path, force).await?;
-                }
+            if !no_wait
+                && job_status(&result)? == JobStatus::Completed
+                && let Some(path) = output
+            {
+                let route = generation_path(job_id(&result)?)?;
+                let response = client.get(format!("{base}{route}/content")).send().await?;
+                write_response(response, &path, force).await?;
             }
             println!("{result}");
         }
@@ -756,17 +761,27 @@ mod tests {
                 parse_params(&bad.into_iter().map(str::to_string).collect::<Vec<_>>()).is_err()
             );
         }
+        for no_wait in [false, true] {
+            assert_eq!(
+                generation_params(&[], no_wait).unwrap(),
+                vec![("background".into(), json!(true))]
+            );
+            assert_eq!(
+                generation_params(&["background=true".into()], no_wait).unwrap(),
+                vec![("background".into(), json!(true))]
+            );
+        }
         assert_eq!(
-            generation_params(&[], true).unwrap(),
-            vec![("background".into(), json!(true))]
+            generation_params(&["background=false".into()], false).unwrap(),
+            vec![("background".into(), json!(false))]
         );
         assert_eq!(
-            generation_params(&["background=true".into()], true)
-                .unwrap()
-                .len(),
-            1
+            generation_params(&["background=custom".into()], false).unwrap(),
+            vec![("background".into(), json!("custom"))]
         );
-        assert!(generation_params(&["background=false".into()], true).is_err());
+        for value in ["false", "0", "custom"] {
+            assert!(generation_params(&[format!("background={value}")], true).is_err());
+        }
     }
 
     #[test]
@@ -905,6 +920,11 @@ mod tests {
             (
                 200,
                 "application/json",
+                format!(r#"{{"id":"{ID}","status":"running"}}"#).into_bytes(),
+            ),
+            (
+                200,
+                "application/json",
                 format!(r#"{{"id":"{ID}","status":"completed","data":[{{"url":"/content"}}]}}"#)
                     .into_bytes(),
             ),
@@ -916,9 +936,9 @@ mod tests {
                 image: image.clone(),
                 model: "3d-model".into(),
                 output: Some(output.clone()),
-                param: vec!["seed=42".into(), "background=true".into()],
+                param: vec!["seed=42".into()],
                 no_wait: false,
-                timeout: 10,
+                timeout: 15,
                 room: Some("team/one".into()),
                 force: false,
             }),
@@ -937,21 +957,57 @@ mod tests {
             "3d-model",
             "name=\"seed\"",
             "42",
-            "name=\"background\"",
-            "true",
+            "name=\"background\"\r\n\r\ntrue\r\n",
         ] {
             assert!(post.contains(text), "missing {text:?}: {post}");
         }
-        assert!(
-            String::from_utf8_lossy(&requests[1])
-                .starts_with(&format!("GET /v1/rooms/team%2Fone/3d/generations/{ID} "))
-        );
-        assert!(String::from_utf8_lossy(&requests[2]).starts_with(&format!(
+        assert_eq!(post.matches("name=\"background\"").count(), 1);
+        for request in &requests[1..=2] {
+            assert!(
+                String::from_utf8_lossy(request)
+                    .starts_with(&format!("GET /v1/rooms/team%2Fone/3d/generations/{ID} "))
+            );
+        }
+        assert!(String::from_utf8_lossy(&requests[3]).starts_with(&format!(
             "GET /v1/rooms/team%2Fone/3d/generations/{ID}/content "
         )));
         assert_eq!(tokio::fs::read(&output).await.unwrap(), b"GLB bytes");
         tokio::fs::remove_file(image).await.unwrap();
         tokio::fs::remove_file(output).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn explicit_background_false_is_passed_through() {
+        let image = temp_path("png");
+        tokio::fs::write(&image, b"PNG").await.unwrap();
+        let (listen, server) = mock(vec![(
+            200,
+            "application/json",
+            br#"{"id":"gen3d_0123456789abcdef0123456789abcdef","status":"completed"}"#.to_vec(),
+        )])
+        .await;
+        run_async(
+            Action::ThreeD(ThreeDAction::Generate {
+                image: image.clone(),
+                model: "3d-model".into(),
+                output: None,
+                param: vec!["background=false".into()],
+                no_wait: false,
+                timeout: 10,
+                room: None,
+                force: false,
+            }),
+            &listen,
+        )
+        .await
+        .unwrap();
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let post = String::from_utf8_lossy(&requests[0]);
+        assert!(post.starts_with("POST /v1/3d/generations "));
+        assert!(post.contains("name=\"background\"\r\n\r\nfalse\r\n"));
+        assert_eq!(post.matches("name=\"background\"").count(), 1);
+        tokio::fs::remove_file(image).await.unwrap();
     }
 
     #[tokio::test]
@@ -1000,10 +1056,39 @@ mod tests {
         let requests = server.await.unwrap();
         assert_eq!(requests.len(), 1);
         let request = String::from_utf8_lossy(&requests[0]);
-        assert!(request.contains("name=\"background\""));
-        assert!(request.contains("\r\n\r\ntrue\r\n"));
+        assert!(request.contains("name=\"background\"\r\n\r\ntrue\r\n"));
         assert!(!output.exists());
         tokio::fs::remove_file(image).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn no_wait_ignores_output_even_when_the_job_is_already_completed() {
+        let image = temp_path("png");
+        let output = temp_path("glb");
+        tokio::fs::write(&image, b"PNG").await.unwrap();
+        tokio::fs::write(&output, b"original").await.unwrap();
+        let (listen, server) = mock(vec![(
+            200,
+            "application/json",
+            br#"{"id":"gen3d_0123456789abcdef0123456789abcdef","status":"completed"}"#.to_vec(),
+        )])
+        .await;
+        let action = Action::ThreeD(ThreeDAction::Generate {
+            image: image.clone(),
+            model: "3d-model".into(),
+            output: Some(output.clone()),
+            param: vec![],
+            no_wait: true,
+            timeout: 10,
+            room: None,
+            force: false,
+        });
+        validate_action(&action).unwrap();
+        run_async(action, &listen).await.unwrap();
+        assert_eq!(server.await.unwrap().len(), 1);
+        assert_eq!(tokio::fs::read(&output).await.unwrap(), b"original");
+        tokio::fs::remove_file(image).await.unwrap();
+        tokio::fs::remove_file(output).await.unwrap();
     }
 
     #[tokio::test]

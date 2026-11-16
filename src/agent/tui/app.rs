@@ -1749,6 +1749,7 @@ mod tests {
     #[test]
     fn approval_answers_exactly_once_and_queues() {
         let mut a = App::new(&info());
+        a.approval = ApprovalMode::Ask;
         let (t1, mut r1) = oneshot::channel();
         let (t2, mut r2) = oneshot::channel();
         a.on_agent_event(AgentEvent::ApprovalRequest {
@@ -2127,6 +2128,7 @@ mod tests {
     #[test]
     fn approval_cycles_and_slash_updates_mode_without_changing_input() {
         let mut app = App::new(&info());
+        app.approval = ApprovalMode::Ask;
         app.input.set("draft");
         for mode in [ApprovalMode::Auto, ApprovalMode::Yolo, ApprovalMode::Ask] {
             app.on_key(key(

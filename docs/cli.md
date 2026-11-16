@@ -174,7 +174,7 @@ $ mistl agent --list-models                 # list model ids from the local API
 
 Flags: `-p` / `--prompt` runs without the TUI; `-m` / `--model` selects a model;
 `--reasoning-effort` overrides effort for this session; `--approval
-ask|auto|yolo` selects the approval mode (`-y` / `--yes` = yolo).
+ask|auto|yolo` selects the approval mode (default: auto; `-y` / `--yes` = yolo).
 `--tool-mode native|prompt` selects OpenAI tools or fenced tool blocks
 (default: native, with automatic fallback when the provider reports tools
 unsupported).
@@ -182,9 +182,9 @@ unsupported).
 Read-only queries run directly. What happens to state-changing tools depends on
 the approval mode (Shift+Tab or `/approval` switches it in the TUI):
 
-- `ask` (default): each one asks for `y` (yes), `n` (no), or `a` (always: switch
+- `ask`: each one asks for `y` (yes), `n` (no), or `a` (always: switch
   to yolo for this session).
-- `auto`: an independent safety check decides. Fixed rules come first: clearly
+- `auto` (default): an independent safety check decides. Fixed rules come first: clearly
   read-only commands (`ls`, `git status`, `cargo test`, ...) run, and high-risk
   actions (recursive deletes, `git push`/publishing, download-and-execute,
   privilege or persistence changes, secret files, writes outside the workspace,
