@@ -219,7 +219,8 @@ $ curl http://127.0.0.1:6478/v1/rooms/team-room/chat/completions \
 Room providers also advertise `oai` when a usable HTTP target exists. The
 mistai-compatible `oai_request` / `oai_response` / `oai_error` tunnel allows only
 `POST /chat/completions`, `GET /models`, `POST /embeddings` and `POST /systemone`
-(decision models, e.g. an Ollama upstream). It resolves the
+(decision models, e.g. an Ollama upstream), plus the 3D generation paths described
+under the tc-ai-api passthrough below. It resolves the
 model against that room's shared refs with the same rules as LLM requests,
 including `model_not_shared`, first-match ordering and empty-model defaults.
 Only the resolved provider's API key is used. Temperature is removed and chat
@@ -245,6 +246,52 @@ receives it at `<base_url>/systemone` with only `model` rewritten; a Room
 provider relays it over that room's `oai` tunnel. Upstream status and body are
 returned as-is, so a model that is not a decision model surfaces the upstream's
 own error. Both decision routes honour `mst_` tokens like chat.
+
+### tc-ai-api passthrough (speech, voices, 3D generation, status)
+
+mistl does not generate audio or 3D models itself. A tc-ai-api gateway (or any
+server with the same API) is registered as an ordinary HTTP provider, e.g.
+`base_url = "http://localhost:8087/v1"`, and its endpoints become reachable
+through the local API and, when its models are shared, across rooms:
+
+| Method | Route (relative to the base) | Behavior |
+| --- | --- | --- |
+| POST | `/audio/speech` | Unknown top-level fields (`keep_alive`, vendor-specific options, `stream_format`, ...) are passed through to an HTTP TTS provider; `voice` may be omitted. Over a room only the wire v1 fields are carried |
+| GET | `/audio/voices`, `/voices` (also root `/voices`) | The `ai.tts` provider's catalog as returned upstream; a Room synthesizes it from advertised voices |
+| POST | `/3d/generations` | JSON, or multipart converted to JSON (the `image` part becomes a data URL). `model` is required (400 `missing_required_parameter` otherwise); mistl has no built-in default model |
+| GET | `/3d/generations` | Jobs this daemon created (per route), newest first |
+| GET, DELETE | `/3d/generations/{id}` | Job status / delete |
+| GET | `/3d/generations/{id}/content` | The artifact, fetched in 8 MiB range windows and streamed as one 200 response (client `Range` is ignored) |
+| GET | `/models/{id}` | One entry of `GET /models` |
+
+All 3D routes also exist under `/rooms/{room}/...`, and `/rooms/{room}/audio/voices`.
+Returned `data[].url` values point back at the local API route that
+served the job, so clients never see the provider's own address. A synchronous
+`response_format: "b64_json"` request is fetched as a URL and re-encoded locally
+(up to 64 MiB). Upstream statuses and error bodies are relayed as-is, including
+TTS validation errors (4xx and 503) that previously became 502.
+
+Unscoped requests resolve `model` like chat; follow-up requests for a job id go
+to the provider or room that created it. Ids this daemon did not create (or
+forgot after a restart) return 404. Over a room the consumer picks a peer
+advertising `oai` with the requested model, so sharing the provider's
+3D model ids in a room's `shared` list enables 3D for its peers. The
+providing peer binds every job id to the requesting peer: other peers get 404
+for it and the job list only shows the caller's jobs (bounded, 25 h). The tunnel
+gains these 3D paths (`GET`/`POST`/`DELETE`, `?range=start-end` on content
+only); the four mistai paths are unchanged. Synchronous generations get a
+35-minute deadline, content windows 5 minutes. Requests over a room are limited
+by the tunnel's 18 MiB body cap; locally the 3D body caps follow the upstream
+(about 26.8 MiB JSON, 20 MiB + 128 KiB multipart).
+
+Lifecycle routes sit at the API root and only reach local HTTP providers
+(never peers). Each provider's origin is its `base_url` without `/v1`:
+
+- `GET /health` — `{"status":"ok","backends":{"<provider id>":"ok"|"unreachable"}}`.
+- `GET /api/ps` — every provider's loaded models, `backend` prefixed with the provider id.
+
+TTS upstream requests now allow 600 seconds (cold model loads and GPU queueing)
+and input up to 10 000 characters.
 
 ### API errors
 

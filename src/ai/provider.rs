@@ -2002,7 +2002,7 @@ mod tests {
         let provider = Provider::new_with_voice(
             send,
             call,
-            vec!["gpt-4o".into(), "gpt-4o-mini".into()],
+            vec!["chat-model".into(), "chat-model-mini".into()],
             None,
             None,
             vec![],
@@ -2010,7 +2010,7 @@ mod tests {
         assert_eq!(
             provider.hello(),
             ProtocolMessage::ProviderHello {
-                models: Some(vec!["gpt-4o".into(), "gpt-4o-mini".into()]),
+                models: Some(vec!["chat-model".into(), "chat-model-mini".into()]),
                 services: Some(vec!["chat".into(), "tools".into()]),
                 voices: None,
             }
@@ -2089,7 +2089,7 @@ mod tests {
                     tool_choice: None,
                     id: "req1".into(),
                     messages: messages(),
-                    model: Some("gpt-4o".into()),
+                    model: Some("chat-model".into()),
                 },
             )
             .await;
@@ -2099,7 +2099,7 @@ mod tests {
         let entry = &logs[0];
         assert_eq!(entry.id, "req1");
         assert_eq!(entry.from, "consumer1");
-        assert_eq!(entry.model.as_deref(), Some("gpt-4o"));
+        assert_eq!(entry.model.as_deref(), Some("chat-model"));
         assert_eq!(entry.status, "done");
         assert_eq!(entry.char_count, 2);
         assert!(entry.detail.is_none());
@@ -2325,7 +2325,7 @@ mod tests {
         ResolvedModel {
             base_url: "http://upstream.invalid/v1".to_string(),
             api_key: "sk-test".to_string(),
-            model: "gpt-4o".to_string(),
+            model: "chat-model".to_string(),
             reasoning_effort: None,
             voice: None,
             lang_voices: HashMap::new(),
@@ -2344,11 +2344,11 @@ mod tests {
         let (send, _sent) = fake_send();
         let call = fake_call_success(vec!["from-default-call"], "from-default-call");
         let mut advertised = HashMap::new();
-        advertised.insert("gpt-4o".to_string(), sample_resolved_model());
+        advertised.insert("chat-model".to_string(), sample_resolved_model());
         let provider = Provider::new(
             send,
             call,
-            vec!["gpt-4o".into()],
+            vec!["chat-model".into()],
             advertised,
             None,
             None,
@@ -2359,7 +2359,7 @@ mod tests {
             .call_upstream(
                 messages(),
                 ToolOptions::default(),
-                Some("gpt-4o".to_string()),
+                Some("chat-model".to_string()),
                 None,
             )
             .await;
@@ -2379,11 +2379,11 @@ mod tests {
         let (send, _sent) = fake_send();
         let call = fake_call_success(vec!["x"], "x");
         let mut advertised = HashMap::new();
-        advertised.insert("gpt-4o".to_string(), sample_resolved_model());
+        advertised.insert("chat-model".to_string(), sample_resolved_model());
         let provider = Provider::new(
             send,
             call,
-            vec!["gpt-4o".into()],
+            vec!["chat-model".into()],
             advertised,
             None,
             None,
@@ -2407,11 +2407,11 @@ mod tests {
         let (send, _sent) = fake_send();
         let call = fake_call_success(vec![], "");
         let mut advertised = HashMap::new();
-        advertised.insert("gpt-4o".to_string(), sample_resolved_model());
+        advertised.insert("chat-model".to_string(), sample_resolved_model());
         let provider = Provider::new(
             send,
             call,
-            vec!["gpt-4o".into()],
+            vec!["chat-model".into()],
             advertised,
             None,
             None,
@@ -2446,18 +2446,18 @@ mod tests {
         let (send, _sent) = fake_send();
         let call = fake_call_success(vec![], "");
         let mut advertised = HashMap::new();
-        advertised.insert("gpt-4o".to_string(), sample_resolved_model());
+        advertised.insert("chat-model".to_string(), sample_resolved_model());
         let provider = Provider::new(
             send,
             call,
-            vec!["gpt-4o".into()],
+            vec!["chat-model".into()],
             advertised,
             None,
             None,
             vec![],
         );
-        match provider.resolve_llm_call(&Some("gpt-4o".to_string())) {
-            LlmCallResolution::Resolved(resolved) => assert_eq!(resolved.model, "gpt-4o"),
+        match provider.resolve_llm_call(&Some("chat-model".to_string())) {
+            LlmCallResolution::Resolved(resolved) => assert_eq!(resolved.model, "chat-model"),
             _ => panic!("expected Resolved"),
         }
     }
@@ -2467,11 +2467,11 @@ mod tests {
         let (send, _sent) = fake_send();
         let call = fake_call_success(vec![], "");
         let mut advertised = HashMap::new();
-        advertised.insert("gpt-4o".to_string(), sample_resolved_model());
+        advertised.insert("chat-model".to_string(), sample_resolved_model());
         let provider = Provider::new(
             send,
             call,
-            vec!["gpt-4o".into()],
+            vec!["chat-model".into()],
             advertised,
             None,
             None,
@@ -2491,11 +2491,11 @@ mod tests {
         // before reaching either the default closure or any upstream call.
         let call = fake_call_error("default closure must not be used for a rejected model");
         let mut advertised = HashMap::new();
-        advertised.insert("gpt-4o".to_string(), sample_resolved_model());
+        advertised.insert("chat-model".to_string(), sample_resolved_model());
         let provider = Provider::new(
             send,
             call,
-            vec!["gpt-4o".into()],
+            vec!["chat-model".into()],
             advertised,
             None,
             None,
@@ -2601,7 +2601,7 @@ mod tests {
             fake_call_error("default closure must not be used for a resolved advertised model");
         let mut advertised = HashMap::new();
         advertised.insert(
-            "gpt-4o".to_string(),
+            "chat-model".to_string(),
             ResolvedModel {
                 base_url: format!("http://{addr}"),
                 api_key: "sk-resolved".to_string(),
@@ -2614,7 +2614,7 @@ mod tests {
         let provider = Provider::new(
             send,
             call,
-            vec!["gpt-4o".into()],
+            vec!["chat-model".into()],
             advertised,
             None,
             None,
@@ -2631,7 +2631,7 @@ mod tests {
                     tool_choice: None,
                     id: "req1".into(),
                     messages: messages(),
-                    model: Some("gpt-4o".into()),
+                    model: Some("chat-model".into()),
                 },
             )
             .await;
@@ -3018,7 +3018,7 @@ mod tests {
                     data: engine.encode(b"hello "),
                     last: false,
                     mime: "audio/wav".into(),
-                    model: Some("whisper-1".into()),
+                    model: Some("stt-model".into()),
                     file_name: Some("clip.wav".into()),
                 },
             )
@@ -3048,7 +3048,7 @@ mod tests {
         let (audio, mime, model, file_name) = captured.lock().unwrap().clone().unwrap();
         assert_eq!(audio, b"hello world");
         assert_eq!(mime, "audio/wav");
-        assert_eq!(model.as_deref(), Some("whisper-1"));
+        assert_eq!(model.as_deref(), Some("stt-model"));
         assert_eq!(file_name.as_deref(), Some("clip.wav"));
 
         let sent = sent.lock().unwrap();

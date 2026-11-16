@@ -83,7 +83,7 @@ impl std::fmt::Display for UpstreamHttpError {
 impl std::error::Error for UpstreamHttpError {}
 
 /// Builds a fresh client for one call. `no_proxy()` matters here: upstreams
-/// are typically local (Ollama/llama.cpp on 127.0.0.1) and this machine may
+/// are typically local (e.g. Ollama on 127.0.0.1) and this machine may
 /// have proxy env vars set that would otherwise break loopback requests.
 fn build_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
@@ -1081,15 +1081,17 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_models_happy_path_filters_invalid_ids() {
-        let body =
-            r#"{"data":[{"id":"gpt-4"},{"id":""},{"id":123},{"notid":"x"},{"id":"gpt-3.5"}]}"#;
+        let body = r#"{"data":[{"id":"chat-model-a"},{"id":""},{"id":123},{"notid":"x"},{"id":"chat-model-b"}]}"#;
         let (base_url, server) = mock_server(json_response(200, "OK", body), Duration::ZERO).await;
 
         let config = cfg(base_url, None, None);
         let models = fetch_models(&config)
             .await
             .expect("fetch_models should succeed");
-        assert_eq!(models, vec!["gpt-4".to_string(), "gpt-3.5".to_string()]);
+        assert_eq!(
+            models,
+            vec!["chat-model-a".to_string(), "chat-model-b".to_string()]
+        );
 
         server.await.unwrap();
     }

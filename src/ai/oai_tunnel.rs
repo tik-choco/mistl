@@ -16,12 +16,23 @@ use crate::config::ResolvedModel;
 
 pub(super) const CHUNK_SIZE: usize = 12 * 1024;
 pub(super) const MAX_BASE64_CHARS: usize = 24 * 1024 * 1024;
-const MAX_BYTES: usize = MAX_BASE64_CHARS / 4 * 3;
+/// Decoded body cap for one tunnel request or response (18 MiB).
+pub(super) const MAX_BYTES: usize = MAX_BASE64_CHARS / 4 * 3;
+/// tc-ai-api passthrough: deadline for a synchronous (`background` not
+/// `true`) `POST /3d/generations`, above the upstream's 30-minute JOB_TIMEOUT.
+pub(super) const GEN3D_SYNC_TIMEOUT: Duration = Duration::from_secs(35 * 60);
+/// Deadline for one `/3d/generations/<id>/content` range window.
+pub(super) const CONTENT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+/// Size of one content range window fetched through a relay.
+pub(super) const CONTENT_WINDOW: u64 = 8 * 1024 * 1024;
 const MAX_BUFFERS: usize = 32;
 const MAX_PER_PEER: usize = 4;
 const MAX_TOTAL_CHARS: usize = 48 * 1024 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_SEQ: u64 = (MAX_BASE64_CHARS / CHUNK_SIZE) as u64;
+const MAX_JOB_BINDINGS: usize = 1024;
+const MAX_JOBS_PER_PEER: usize = 64;
+const JOB_TTL: Duration = Duration::from_secs(25 * 60 * 60);
 
 /// Rewrites top-level members of a JSON object body without re-serializing
 /// the rest: `set` replaces a member in place (or appends it), `remove`
@@ -153,11 +164,82 @@ impl Assembly {
 
 type Resolver = Arc<dyn Fn(&str, &Value) -> Result<Option<ResolvedModel>> + Send + Sync>;
 
+struct JobBinding {
+    peer: String,
+    target: ResolvedModel,
+    at: Instant,
+}
+
+#[derive(Default)]
+struct JobBindings(HashMap<String, JobBinding>);
+
+impl JobBindings {
+    fn prune(&mut self) {
+        self.prune_at(Instant::now());
+    }
+
+    fn prune_at(&mut self, now: Instant) {
+        self.0
+            .retain(|_, binding| now.duration_since(binding.at) < JOB_TTL);
+    }
+
+    fn bind(&mut self, id: String, peer: &str, target: ResolvedModel) {
+        self.prune();
+        // A colliding upstream id must never transfer ownership to another peer.
+        if self.0.get(&id).is_some_and(|b| b.peer != peer) {
+            return;
+        }
+        self.0.remove(&id);
+        if self.0.values().filter(|b| b.peer == peer).count() >= MAX_JOBS_PER_PEER {
+            self.evict_oldest(Some(peer));
+        }
+        if self.0.len() >= MAX_JOB_BINDINGS {
+            self.evict_oldest(None);
+        }
+        self.0.insert(
+            id,
+            JobBinding {
+                peer: peer.to_string(),
+                target,
+                at: Instant::now(),
+            },
+        );
+    }
+
+    fn evict_oldest(&mut self, peer: Option<&str>) {
+        let oldest = self
+            .0
+            .iter()
+            .filter(|(_, b)| peer.is_none_or(|peer| b.peer == peer))
+            .min_by_key(|(_, b)| b.at)
+            .map(|(id, _)| id.clone());
+        if let Some(id) = oldest {
+            self.0.remove(&id);
+        }
+    }
+
+    fn target(&mut self, id: &str, peer: &str) -> Option<ResolvedModel> {
+        self.prune();
+        self.0
+            .get(id)
+            .filter(|b| b.peer == peer)
+            .map(|b| b.target.clone())
+    }
+
+    fn remove(&mut self, id: &str, peer: &str) {
+        self.prune();
+        if self.0.get(id).is_some_and(|b| b.peer == peer) {
+            self.0.remove(id);
+        }
+    }
+}
+
 pub(super) struct TunnelProvider {
     send: SendFn,
     resolve: Resolver,
     pending: Mutex<HashMap<(String, String), (Instant, Assembly)>>,
     jobs: JobLimiter,
+    bindings: Mutex<JobBindings>,
 }
 
 impl TunnelProvider {
@@ -167,6 +249,7 @@ impl TunnelProvider {
             resolve,
             pending: Mutex::new(HashMap::new()),
             jobs: JobLimiter::new(8),
+            bindings: Mutex::new(JobBindings::default()),
         })
     }
 
@@ -292,7 +375,21 @@ impl TunnelProvider {
             return Ok(());
         };
         let authorized = ready.authorized.clone().expect("authorized OAI assembly");
-        let result = tokio::time::timeout(TIMEOUT, self.dispatch(ready)).await;
+        let path = ready.path.clone();
+        let method = ready.method.clone();
+        let content_type = ready.content_type.clone();
+        let result = match ready.decode() {
+            Ok(bytes) => {
+                let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+                let deadline = relay_deadline(&method, &path, &body);
+                tokio::time::timeout(
+                    deadline,
+                    self.dispatch(from, &method, &path, &content_type, &bytes),
+                )
+                .await
+            }
+            Err(err) => Ok(Err(err)),
+        };
         authorized.record(1, 0);
         match result {
             Ok(Ok(response)) => {
@@ -339,40 +436,270 @@ impl TunnelProvider {
         Ok(())
     }
 
-    async fn dispatch(&self, assembly: Assembly) -> Result<TunnelResponse> {
-        let path = assembly.path.clone();
-        let method = assembly.method.clone();
+    async fn dispatch(
+        &self,
+        from: &str,
+        method: &str,
+        path: &str,
+        content_type: &str,
+        bytes: &[u8],
+    ) -> Result<TunnelResponse> {
+        let (path, range) = split_range(path)?;
+        let job_path = generation_path(&path);
         if !matches!(
             path.as_str(),
-            "/chat/completions" | "/models" | "/embeddings" | "/systemone"
-        ) {
+            "/chat/completions" | "/models" | "/embeddings" | "/systemone" | "/3d/generations"
+        ) && job_path.is_none()
+        {
+            if path.starts_with("/3d/generations/") {
+                return Ok(generation_not_found());
+            }
             bail!("unsupported_path");
         }
-        if (path == "/models" && method != "GET") || (path != "/models" && method != "POST") {
+        let allowed = match (path.as_str(), job_path) {
+            ("/models", _) => method == "GET",
+            ("/3d/generations", _) => matches!(method, "GET" | "POST"),
+            (_, Some((_, true))) => method == "GET",
+            (_, Some((_, false))) => matches!(method, "GET" | "DELETE"),
+            _ => method == "POST",
+        };
+        if !allowed {
             bail!("request_rejected");
         }
-        let content_type = assembly.content_type.clone();
-        let bytes = assembly.decode()?;
+        if let Some((id, content)) = job_path {
+            let target = self
+                .bindings
+                .lock()
+                .expect("oai bindings lock")
+                .target(id, from);
+            let Some(target) = target else {
+                return Ok(generation_not_found());
+            };
+            let mut response = forward_with(
+                &target.base_url,
+                &target.api_key,
+                method,
+                &path,
+                None,
+                range,
+                relay_deadline(method, &path, &Value::Null),
+            )
+            .await?;
+            if response.status == 404
+                || (method == "DELETE" && (200..300).contains(&response.status))
+            {
+                self.bindings
+                    .lock()
+                    .expect("oai bindings lock")
+                    .remove(id, from);
+            }
+            if !content {
+                relativize_response(&mut response)?;
+            }
+            return Ok(response);
+        }
+        if path == "/3d/generations" && method == "GET" {
+            return self.list_generations(from).await;
+        }
         let body: Value = if bytes.is_empty() {
             Value::Null
         } else {
             if !content_type.to_ascii_lowercase().contains("json") {
                 bail!("request_rejected");
             }
-            serde_json::from_slice(&bytes).map_err(|_| anyhow::anyhow!("request_rejected"))?
+            serde_json::from_slice(bytes).map_err(|_| anyhow::anyhow!("request_rejected"))?
         };
+        let generation = path == "/3d/generations";
+        if generation {
+            let object = body.as_object().context("request_rejected")?;
+            // No built-in default: routing needs an explicit model id.
+            if object
+                .get("model")
+                .and_then(Value::as_str)
+                .is_none_or(|m| m.trim().is_empty())
+            {
+                return Ok(missing_model());
+            }
+        }
         let target = (self.resolve)(&path, &body)?.context("unsupported_path")?;
         let payload = if method == "POST" {
             let mut set = vec![("model", Value::String(target.model.clone()))];
             if path == "/chat/completions" {
                 set.push(("stream", Value::Bool(false)));
             }
-            Some(rewrite_object(&bytes, &set, &["temperature"])?)
+            Some(rewrite_object(
+                bytes,
+                &set,
+                if generation { &[] } else { &["temperature"] },
+            )?)
         } else {
             None
         };
-        forward(&target.base_url, &target.api_key, &method, &path, payload).await
+        if !generation {
+            return forward(&target.base_url, &target.api_key, method, &path, payload).await;
+        }
+        let mut response = forward_with(
+            &target.base_url,
+            &target.api_key,
+            method,
+            &path,
+            payload,
+            None,
+            relay_deadline(method, &path, &body),
+        )
+        .await?;
+        if matches!(response.status, 200 | 202)
+            && let Ok(job) = serde_json::from_slice::<Value>(&response.body)
+            && let Some(id) = job
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| valid_job_id(id))
+        {
+            self.bindings
+                .lock()
+                .expect("oai bindings lock")
+                .bind(id.to_string(), from, target);
+        }
+        relativize_response(&mut response)?;
+        Ok(response)
     }
+
+    async fn list_generations(&self, from: &str) -> Result<TunnelResponse> {
+        let mut targets = Vec::new();
+        {
+            let mut bindings = self.bindings.lock().expect("oai bindings lock");
+            bindings.prune();
+            for binding in bindings.0.values().filter(|b| b.peer == from) {
+                if !targets
+                    .iter()
+                    .any(|t: &ResolvedModel| same_target(t, &binding.target))
+                {
+                    targets.push(binding.target.clone());
+                }
+            }
+        }
+        let mut jobs = Vec::new();
+        let mut size = 0usize;
+        for target in targets {
+            let Ok(response) = forward(
+                &target.base_url,
+                &target.api_key,
+                "GET",
+                "/3d/generations",
+                None,
+            )
+            .await
+            else {
+                continue;
+            };
+            if !(200..300).contains(&response.status) {
+                continue;
+            }
+            let Ok(mut body) = serde_json::from_slice::<Value>(&response.body) else {
+                continue;
+            };
+            relativize_job_urls(&mut body);
+            let Some(data) = body.get_mut("data").and_then(Value::as_array_mut) else {
+                continue;
+            };
+            let mut bindings = self.bindings.lock().expect("oai bindings lock");
+            bindings.prune();
+            for job in data.drain(..) {
+                let Some(id) = job.get("id").and_then(Value::as_str) else {
+                    continue;
+                };
+                if !bindings
+                    .0
+                    .get(id)
+                    .is_some_and(|b| b.peer == from && same_target(&b.target, &target))
+                    || jobs.iter().any(|j: &Value| j["id"].as_str() == Some(id))
+                {
+                    continue;
+                }
+                size = size.saturating_add(serde_json::to_vec(&job)?.len());
+                if size > MAX_BYTES {
+                    bail!("request_too_large");
+                }
+                jobs.push(job);
+            }
+        }
+        jobs.sort_by(|a, b| {
+            b["created"]
+                .as_u64()
+                .unwrap_or(0)
+                .cmp(&a["created"].as_u64().unwrap_or(0))
+        });
+        json_response(200, serde_json::json!({"object":"list", "data":jobs}))
+    }
+}
+
+fn same_target(a: &ResolvedModel, b: &ResolvedModel) -> bool {
+    a.base_url == b.base_url && a.api_key == b.api_key
+}
+
+fn valid_job_id(id: &str) -> bool {
+    id.strip_prefix("gen3d_").is_some_and(|hex| {
+        hex.len() == 32
+            && hex
+                .bytes()
+                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+    })
+}
+
+fn generation_path(path: &str) -> Option<(&str, bool)> {
+    let suffix = path.strip_prefix("/3d/generations/")?;
+    let (id, content) = match suffix.strip_suffix("/content") {
+        Some(id) => (id, true),
+        None => (suffix, false),
+    };
+    valid_job_id(id).then_some((id, content))
+}
+
+fn json_response(status: u16, body: Value) -> Result<TunnelResponse> {
+    let body = serde_json::to_vec(&body)?;
+    if body.len() > MAX_BYTES {
+        bail!("request_too_large");
+    }
+    Ok(TunnelResponse {
+        status,
+        content_type: "application/json".into(),
+        body,
+    })
+}
+
+/// 400 for a `POST /3d/generations` without a model id.
+pub(super) fn missing_model() -> TunnelResponse {
+    json_response(
+        400,
+        serde_json::json!({"error": {
+            "message":"`model` is required", "type":"invalid_request_error",
+            "code":"missing_required_parameter", "param":"model"
+        }}),
+    )
+    .expect("small error response")
+}
+
+fn generation_not_found() -> TunnelResponse {
+    json_response(
+        404,
+        serde_json::json!({"error": {
+            "message":"generation not found", "type":"invalid_request_error",
+            "code":"not_found", "param":"id"
+        }}),
+    )
+    .expect("small error response")
+}
+
+fn relativize_response(response: &mut TunnelResponse) -> Result<()> {
+    if let Ok(mut body) = serde_json::from_slice::<Value>(&response.body) {
+        relativize_job_urls(&mut body);
+        let bytes = serde_json::to_vec(&body)?;
+        if bytes.len() > MAX_BYTES {
+            bail!("request_too_large");
+        }
+        response.body = bytes;
+    }
+    Ok(())
 }
 
 /// Sends one buffered request to an OpenAI-compatible upstream and reads the
@@ -384,19 +711,39 @@ pub(super) async fn forward(
     path: &str,
     payload: Option<Vec<u8>>,
 ) -> Result<TunnelResponse> {
-    // `no_proxy()`: upstreams are usually loopback (Ollama/llama.cpp), and a
+    forward_with(base_url, api_key, method, path, payload, None, TIMEOUT).await
+}
+
+/// [`forward`] with an explicit `Range: bytes=start-end` header and deadline.
+/// `path` has no query string.
+pub(super) async fn forward_with(
+    base_url: &str,
+    api_key: &str,
+    method: &str,
+    path: &str,
+    payload: Option<Vec<u8>>,
+    range: Option<(u64, u64)>,
+    timeout: Duration,
+) -> Result<TunnelResponse> {
+    // `no_proxy()`: upstreams are usually loopback (e.g. Ollama), and a
     // proxy from the environment would break those requests.
     let client = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(TIMEOUT)
+        .timeout(timeout)
         .build()?;
     let url = format!("{}{path}", base_url.trim_end_matches('/'));
     let mut request = client.request(reqwest::Method::from_bytes(method.as_bytes())?, url);
     if !api_key.trim().is_empty() {
         request = request.bearer_auth(api_key);
     }
-    if let Some(payload) = payload {
+    if let Some((start, end)) = range {
+        request = request.header(reqwest::header::RANGE, format!("bytes={start}-{end}"));
+    }
+    // Request bodies are bounded by their source: tunnel reassembly caps
+    // peer bodies at MAX_BYTES, the local API caps its own (3D JSON can
+    // legitimately exceed MAX_BYTES on an HTTP-direct route).
+    if let Some(payload) = payload.filter(|_| method == "POST") {
         request = request
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(payload);
@@ -427,6 +774,77 @@ pub(super) async fn forward(
         content_type,
         body,
     })
+}
+
+/// Deadline for one tc-ai-api passthrough request. `path` may carry the
+/// `?range=` query; `body` is the parsed JSON body (`Value::Null` if none).
+pub(super) fn relay_deadline(method: &str, path: &str, body: &Value) -> Duration {
+    let path = path.split('?').next().unwrap_or(path);
+    if method == "POST" && path == "/3d/generations" && body["background"] != true {
+        GEN3D_SYNC_TIMEOUT
+    } else if generation_path(path).is_some_and(|(_, content)| content) {
+        CONTENT_TIMEOUT
+    } else {
+        TIMEOUT
+    }
+}
+
+/// Splits `/3d/generations/<id>/content?range=<start>-<end>` into the bare
+/// path and the inclusive byte range. Any other query is rejected.
+pub(super) fn split_range(path: &str) -> Result<(String, Option<(u64, u64)>)> {
+    let Some((path, query)) = path.split_once('?') else {
+        return Ok((path.to_string(), None));
+    };
+    if !generation_path(path).is_some_and(|(_, content)| content) {
+        bail!("request_rejected");
+    }
+    let (start, end) = query
+        .strip_prefix("range=")
+        .and_then(|range| range.split_once('-'))
+        .context("request_rejected")?;
+    let decimal = |s: &str| -> Result<u64> {
+        if s.is_empty() || !s.bytes().all(|c| c.is_ascii_digit()) {
+            bail!("request_rejected");
+        }
+        s.parse().context("request_rejected")
+    };
+    let start = decimal(start)?;
+    let end = decimal(end)?;
+    if end < start || end - start >= CONTENT_WINDOW {
+        bail!("request_rejected");
+    }
+    Ok((path.to_string(), Some((start, end))))
+}
+
+/// Rewrites every 3D job's `data[].url` (in a job, a sync response or a
+/// `{"object":"list","data":[job...]}` list) to the host-free relative form
+/// `/3d/generations/<id>/content`, so no upstream address leaks.
+pub(super) fn relativize_job_urls(body: &mut Value) {
+    if body["object"] == "list" {
+        if let Some(jobs) = body.get_mut("data").and_then(Value::as_array_mut) {
+            for job in jobs {
+                relativize_job_urls(job);
+            }
+        }
+        return;
+    }
+    let Some(id) = body
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| valid_job_id(id))
+    else {
+        return;
+    };
+    let url = format!("/3d/generations/{id}/content");
+    if let Some(data) = body.get_mut("data").and_then(Value::as_array_mut) {
+        for entry in data {
+            if let Some(object) = entry.as_object_mut()
+                && let Some(value) = object.get_mut("url")
+            {
+                *value = Value::String(url.clone());
+            }
+        }
+    }
 }
 
 pub(super) struct TunnelResponse {
@@ -507,6 +925,25 @@ impl TunnelConsumer {
         body: &[u8],
         timeout: Duration,
     ) -> Result<TunnelResponse> {
+        let method = if path == "/models" { "GET" } else { "POST" };
+        self.request_method(peer, method, path, body, timeout.min(TIMEOUT))
+            .await
+    }
+
+    /// Like [`Self::request`] with an explicit method (`GET`/`POST`/`DELETE`)
+    /// for the tc-ai-api passthrough paths; GET/DELETE send an empty body.
+    pub async fn request_method(
+        &self,
+        peer: &str,
+        method: &str,
+        path: &str,
+        body: &[u8],
+        timeout: Duration,
+    ) -> Result<TunnelResponse> {
+        if !matches!(method, "GET" | "POST" | "DELETE") {
+            bail!("request_rejected");
+        }
+        let body = if method == "POST" { body } else { &[] };
         if body.len() > MAX_BYTES {
             bail!("OAI request too large");
         }
@@ -535,14 +972,13 @@ impl TunnelConsumer {
                     last: seq + 1 == count,
                     data,
                     path: (seq == 0).then(|| path.to_string()),
-                    method: (seq == 0)
-                        .then(|| if path == "/models" { "GET" } else { "POST" }.into()),
+                    method: (seq == 0).then(|| method.to_string()),
                     content_type: (seq == 0).then(|| "application/json".into()),
                 },
             );
             tokio::task::yield_now().await;
         }
-        tokio::time::timeout(timeout.min(TIMEOUT), async {
+        tokio::time::timeout(timeout.min(GEN3D_SYNC_TIMEOUT), async {
             let mut assembly = Assembly::default();
             let mut status = 200;
             let mut content_type = "application/json".to_string();
@@ -612,6 +1048,643 @@ mod tests {
             method: None,
             content_type: None,
         }
+    }
+
+    const JOB_A: &str = "gen3d_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const JOB_B: &str = "gen3d_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const JOB_C: &str = "gen3d_cccccccccccccccccccccccccccccccc";
+
+    fn fixture_job(id: &str, created: u64) -> Value {
+        json!({"id":id, "created":created, "data":[{
+            "url":format!("http://localhost:8087/v1/3d/generations/{id}/content"),
+            "format":"glb"
+        }]})
+    }
+
+    fn json_body(response: &TunnelResponse) -> Value {
+        serde_json::from_slice(&response.body).unwrap()
+    }
+
+    type RecordedRequests = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
+
+    async fn mock_upstream(
+        replies: Vec<(u16, &'static str, Vec<u8>)>,
+    ) -> (ResolvedModel, RecordedRequests, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let copy = recorded.clone();
+        let server = tokio::spawn(async move {
+            for (status, content_type, body) in replies {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut raw = Vec::new();
+                let header_end = loop {
+                    let mut buf = [0; 4096];
+                    let n = socket.read(&mut buf).await.unwrap();
+                    assert!(n > 0);
+                    raw.extend_from_slice(&buf[..n]);
+                    if let Some(end) = raw.windows(4).position(|s| s == b"\r\n\r\n") {
+                        break end + 4;
+                    }
+                };
+                let headers = String::from_utf8(raw[..header_end].to_vec()).unwrap();
+                let length: usize = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|s| s.trim().parse().unwrap())
+                    })
+                    .unwrap_or(0);
+                while raw.len() < header_end + length {
+                    let mut buf = [0; 4096];
+                    let n = socket.read(&mut buf).await.unwrap();
+                    assert!(n > 0);
+                    raw.extend_from_slice(&buf[..n]);
+                }
+                copy.lock()
+                    .unwrap()
+                    .push((headers, raw[header_end..].to_vec()));
+                socket.write_all(format!(
+                    "HTTP/1.1 {status} Fixture\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()
+                ).as_bytes()).await.unwrap();
+                socket.write_all(&body).await.unwrap();
+            }
+        });
+        (
+            ResolvedModel {
+                base_url: format!("http://{addr}/v1"),
+                api_key: "fixture-key".into(),
+                model: "served-3d".into(),
+                reasoning_effort: None,
+                voice: None,
+                lang_voices: HashMap::new(),
+            },
+            recorded,
+            server,
+        )
+    }
+
+    #[test]
+    fn range_queries_are_strict_and_bounded() {
+        let path = format!("/3d/generations/{JOB_A}/content");
+        assert_eq!(split_range(&path).unwrap(), (path.clone(), None));
+        assert_eq!(split_range("/models").unwrap(), ("/models".into(), None));
+        for (start, end) in [(0, 9), (0, CONTENT_WINDOW - 1), (u64::MAX, u64::MAX)] {
+            assert_eq!(
+                split_range(&format!("{path}?range={start}-{end}")).unwrap(),
+                (path.clone(), Some((start, end)))
+            );
+        }
+        for query in [
+            "",
+            "range=",
+            "range=0-",
+            "range=-9",
+            "range=9-0",
+            "range=+0-9",
+            "range=0-+9",
+            "range=0-9&x=y",
+            "range=0-9?x=y",
+            "range=0-9-10",
+            "Range=0-9",
+            "range=0-18446744073709551616",
+            "range=0-8388608",
+            "range= 0-9",
+            "range=０-9",
+        ] {
+            assert_eq!(
+                split_range(&format!("{path}?{query}"))
+                    .unwrap_err()
+                    .to_string(),
+                "request_rejected"
+            );
+        }
+        for path in [
+            "/models",
+            "/3d/generations",
+            "/3d/generations/invalid/content",
+            "/3d/generations/gen3d_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/content",
+        ] {
+            assert!(split_range(&format!("{path}?range=0-9")).is_err());
+        }
+    }
+
+    #[test]
+    fn relay_deadlines_distinguish_sync_background_and_content() {
+        for body in [
+            json!({}),
+            json!({"background":false}),
+            json!({"background":"true"}),
+        ] {
+            assert_eq!(
+                relay_deadline("POST", "/3d/generations", &body),
+                GEN3D_SYNC_TIMEOUT
+            );
+        }
+        assert_eq!(
+            relay_deadline("POST", "/3d/generations", &json!({"background":true})),
+            TIMEOUT
+        );
+        assert_eq!(
+            relay_deadline(
+                "GET",
+                &format!("/3d/generations/{JOB_A}/content?range=0-9"),
+                &Value::Null
+            ),
+            CONTENT_TIMEOUT
+        );
+        assert_eq!(
+            relay_deadline("GET", "/3d/generations", &Value::Null),
+            TIMEOUT
+        );
+        assert_eq!(
+            relay_deadline("POST", "/chat/completions", &Value::Null),
+            TIMEOUT
+        );
+    }
+
+    #[test]
+    fn job_urls_are_relativized_in_jobs_sync_results_and_lists() {
+        let relative = format!("/3d/generations/{JOB_A}/content");
+        let mut job = fixture_job(JOB_A, 1);
+        job["data"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"b64_json":"AA=="}));
+        relativize_job_urls(&mut job);
+        assert_eq!(job["data"][0]["url"], relative);
+        assert_eq!(job["data"][1], json!({"b64_json":"AA=="}));
+        let mut sync = json!({"id":JOB_A, "data":[{"url":"upstream"},{"url":null}], "seed":42});
+        relativize_job_urls(&mut sync);
+        assert_eq!(sync["data"][0]["url"], relative);
+        assert_eq!(sync["data"][1]["url"], relative);
+        assert_eq!(sync["seed"], 42);
+        let invalid = fixture_job("gen3d_invalid", 3);
+        let mut list = json!({"object":"list", "data":[fixture_job(JOB_A, 1), invalid.clone()]});
+        relativize_job_urls(&mut list);
+        assert_eq!(list["data"][0]["data"][0]["url"], relative);
+        assert_eq!(list["data"][1], invalid);
+        for mut shape in [
+            Value::Null,
+            json!([]),
+            json!({"data":[{"url":"unchanged"}]}),
+            invalid,
+        ] {
+            let original = shape.clone();
+            relativize_job_urls(&mut shape);
+            assert_eq!(shape, original);
+        }
+    }
+
+    #[tokio::test]
+    async fn generation_jobs_bind_to_sender_forward_ranges_filter_lists_and_unbind() {
+        let reply = |status, body: Value| {
+            (
+                status,
+                "application/json",
+                serde_json::to_vec(&body).unwrap(),
+            )
+        };
+        let (target, recorded, server) = mock_upstream(vec![
+            reply(202, fixture_job(JOB_A, 10)),
+            reply(200, fixture_job(JOB_B, 30)),
+            reply(202, fixture_job(JOB_C, 20)),
+            reply(200, fixture_job(JOB_A, 10)),
+            (206, "model/gltf-binary", b"0123456789".to_vec()),
+            reply(200, json!({"object":"list", "data":[fixture_job(JOB_B, 30),
+                fixture_job(JOB_A, 10), fixture_job(JOB_C, 20), fixture_job("gen3d_ffffffffffffffffffffffffffffffff", 40)]})),
+            (204, "application/json", Vec::new()),
+            reply(404, json!({"error":{"message":"gone"}})),
+        ]).await;
+        let (send, _) = capture();
+        let resolved = Arc::new(Mutex::new(Vec::new()));
+        let copy = resolved.clone();
+        let provider = TunnelProvider::new(
+            send,
+            Arc::new(move |path, body| {
+                assert_eq!(path, "/3d/generations");
+                copy.lock().unwrap().push(body.clone());
+                Ok(Some(target.clone()))
+            }),
+        );
+        for (peer, body, id) in [
+            (
+                "a",
+                br#"{"model":"3d-model","temperature":0.7,"parameters":{"z":1,"a":2}}"#.as_slice(),
+                JOB_A,
+            ),
+            (
+                "b",
+                br#"{"model":"3d-model","background":true}"#.as_slice(),
+                JOB_B,
+            ),
+            (
+                "a",
+                br#"{"model":"3d-model","image":"data:image/png;base64,AA=="}"#.as_slice(),
+                JOB_C,
+            ),
+        ] {
+            let response = provider
+                .dispatch(peer, "POST", "/3d/generations", "application/json", body)
+                .await
+                .unwrap();
+            assert_eq!(
+                json_body(&response)["data"][0]["url"],
+                format!("/3d/generations/{id}/content")
+            );
+        }
+        assert!(
+            resolved
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|v| v["model"] == "3d-model")
+        );
+        let path = format!("/3d/generations/{JOB_A}");
+        for peer in ["b", "attacker"] {
+            let response = provider
+                .dispatch(peer, "GET", &path, "", b"")
+                .await
+                .unwrap();
+            assert_eq!(response.status, 404);
+            assert_eq!(json_body(&response)["error"]["code"], "not_found");
+        }
+        assert_eq!(recorded.lock().unwrap().len(), 3);
+        provider.drop_peer("a");
+        let response = provider.dispatch("a", "GET", &path, "", b"").await.unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            json_body(&response)["data"][0]["url"],
+            format!("{path}/content")
+        );
+        let response = provider
+            .dispatch("a", "GET", &format!("{path}/content?range=0-9"), "", b"")
+            .await
+            .unwrap();
+        assert_eq!(response.status, 206);
+        assert_eq!(response.content_type, "model/gltf-binary");
+        assert_eq!(response.body, b"0123456789");
+        let response = provider
+            .dispatch("a", "GET", "/3d/generations", "", b"")
+            .await
+            .unwrap();
+        let list = json_body(&response);
+        assert_eq!(list["data"].as_array().unwrap().len(), 2);
+        assert_eq!(list["data"][0]["id"], JOB_C);
+        assert_eq!(list["data"][1]["id"], JOB_A);
+        assert_eq!(
+            list["data"][0]["data"][0]["url"],
+            format!("/3d/generations/{JOB_C}/content")
+        );
+        assert_eq!(
+            provider
+                .dispatch("a", "DELETE", &path, "", b"ignored")
+                .await
+                .unwrap()
+                .status,
+            204
+        );
+        assert_eq!(
+            provider
+                .dispatch("a", "GET", &path, "", b"")
+                .await
+                .unwrap()
+                .status,
+            404
+        );
+        assert_eq!(
+            provider
+                .dispatch("a", "GET", &format!("/3d/generations/{JOB_C}"), "", b"")
+                .await
+                .unwrap()
+                .status,
+            404
+        );
+        let empty = provider
+            .dispatch("a", "GET", "/3d/generations", "", b"")
+            .await
+            .unwrap();
+        assert_eq!(json_body(&empty), json!({"object":"list", "data":[]}));
+        server.await.unwrap();
+        let requests = recorded.lock().unwrap();
+        assert_eq!(requests.len(), 8);
+        for (_, body) in &requests[..3] {
+            assert_eq!(
+                serde_json::from_slice::<Value>(body).unwrap()["model"],
+                "served-3d"
+            );
+        }
+        let first = String::from_utf8_lossy(&requests[0].1);
+        assert!(first.contains(r#""temperature":0.7"#));
+        assert!(first.contains(r#""parameters":{"z":1,"a":2}"#));
+        assert!(
+            requests[4]
+                .0
+                .starts_with(&format!("GET /v1{path}/content HTTP/1.1"))
+        );
+        assert!(
+            requests[4]
+                .0
+                .to_ascii_lowercase()
+                .contains("range: bytes=0-9\r\n")
+        );
+        assert!(
+            requests[6]
+                .0
+                .starts_with(&format!("DELETE /v1{path} HTTP/1.1"))
+        );
+        assert!(requests[6].1.is_empty());
+    }
+
+    #[tokio::test]
+    async fn generation_lists_merge_distinct_targets_and_skip_failures() {
+        let (target_a, calls_a, server_a) = mock_upstream(vec![(200, "application/json", serde_json::to_vec(
+            &json!({"object":"list", "data":[fixture_job(JOB_A, 1), fixture_job(JOB_A, 1), fixture_job(JOB_B, 2)]})
+        ).unwrap())]).await;
+        let (target_b, calls_b, server_b) = mock_upstream(vec![(
+            200,
+            "application/json",
+            serde_json::to_vec(&json!({"object":"list", "data":[fixture_job(JOB_B, 2)]})).unwrap(),
+        )])
+        .await;
+        let (target_c, _, server_c) =
+            mock_upstream(vec![(503, "application/json", b"{}".to_vec())]).await;
+        let (target_d, _, server_d) =
+            mock_upstream(vec![(200, "text/plain", b"not JSON".to_vec())]).await;
+        let (send, _) = capture();
+        let provider =
+            TunnelProvider::new(send, Arc::new(|_, _| panic!("list must use bound targets")));
+        {
+            let mut bindings = provider.bindings.lock().unwrap();
+            bindings.bind(JOB_A.into(), "a", target_a.clone());
+            // Different models at the same upstream still require only one list call.
+            let mut another_model = target_a;
+            another_model.model = "another-model".into();
+            bindings.bind(
+                "gen3d_11111111111111111111111111111111".into(),
+                "a",
+                another_model,
+            );
+            bindings.bind(JOB_B.into(), "a", target_b);
+            bindings.bind(JOB_C.into(), "a", target_c);
+            bindings.bind(
+                "gen3d_22222222222222222222222222222222".into(),
+                "a",
+                target_d,
+            );
+        }
+        let response = provider
+            .dispatch("a", "GET", "/3d/generations", "", b"")
+            .await
+            .unwrap();
+        let body = json_body(&response);
+        assert_eq!(body["data"].as_array().unwrap().len(), 2);
+        assert_eq!(body["data"][0]["id"], JOB_B);
+        assert_eq!(body["data"][1]["id"], JOB_A);
+        for server in [server_a, server_b, server_c, server_d] {
+            server.await.unwrap();
+        }
+        assert_eq!(calls_a.lock().unwrap().len(), 1);
+        assert_eq!(calls_b.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn generation_validation_rejects_methods_bodies_and_unknown_jobs() {
+        let (send, _) = capture();
+        let provider =
+            TunnelProvider::new(send, Arc::new(|_, _| panic!("invalid request resolved")));
+        for (method, path, content_type, body) in [
+            ("DELETE", "/3d/generations".to_string(), "", b"".as_slice()),
+            (
+                "POST",
+                format!("/3d/generations/{JOB_A}"),
+                "application/json",
+                b"{}".as_slice(),
+            ),
+            (
+                "DELETE",
+                format!("/3d/generations/{JOB_A}/content"),
+                "",
+                b"".as_slice(),
+            ),
+            (
+                "POST",
+                "/3d/generations".to_string(),
+                "application/json",
+                b"[]".as_slice(),
+            ),
+            (
+                "POST",
+                "/3d/generations".to_string(),
+                "application/json",
+                b"null".as_slice(),
+            ),
+            (
+                "POST",
+                "/3d/generations".to_string(),
+                "application/json",
+                b"".as_slice(),
+            ),
+            (
+                "POST",
+                "/3d/generations".to_string(),
+                "text/plain",
+                b"{}".as_slice(),
+            ),
+        ] {
+            let error = provider
+                .dispatch("a", method, &path, content_type, body)
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(error.to_string(), "request_rejected");
+        }
+        for path in [
+            format!("/3d/generations/{JOB_A}"),
+            "/3d/generations/invalid".into(),
+        ] {
+            assert_eq!(
+                provider
+                    .dispatch("a", "GET", &path, "", b"")
+                    .await
+                    .unwrap()
+                    .status,
+                404
+            );
+        }
+        assert_eq!(
+            provider
+                .dispatch("a", "GET", "/admin", "", b"")
+                .await
+                .err()
+                .unwrap()
+                .to_string(),
+            "unsupported_path"
+        );
+    }
+
+    #[test]
+    fn job_bindings_are_bounded_expire_and_cannot_change_owner() {
+        let target = ResolvedModel {
+            base_url: "http://localhost:8087/v1".into(),
+            api_key: String::new(),
+            model: "3d-model".into(),
+            reasoning_effort: None,
+            voice: None,
+            lang_voices: HashMap::new(),
+        };
+        let mut bindings = JobBindings::default();
+        for n in 0..MAX_JOBS_PER_PEER {
+            bindings.bind(format!("gen3d_{n:032x}"), "a", target.clone());
+        }
+        let oldest = "gen3d_00000000000000000000000000000000";
+        bindings.0.get_mut(oldest).unwrap().at = Instant::now() - Duration::from_secs(10);
+        bindings.bind(JOB_A.into(), "a", target.clone());
+        assert_eq!(bindings.0.len(), MAX_JOBS_PER_PEER);
+        assert!(!bindings.0.contains_key(oldest));
+        bindings.bind(JOB_A.into(), "attacker", target.clone());
+        assert!(bindings.target(JOB_A, "attacker").is_none());
+        assert!(bindings.target(JOB_A, "a").is_some());
+        bindings.remove(JOB_A, "attacker");
+        assert!(bindings.target(JOB_A, "a").is_some());
+        bindings.prune_at(Instant::now() + JOB_TTL);
+        assert!(bindings.target(JOB_A, "a").is_none());
+        bindings.0.clear();
+        for n in 0..MAX_JOB_BINDINGS {
+            bindings.bind(
+                format!("gen3d_{n:032x}"),
+                &format!("peer{n}"),
+                target.clone(),
+            );
+        }
+        bindings.0.get_mut(oldest).unwrap().at = Instant::now() - Duration::from_secs(10);
+        bindings.bind(JOB_B.into(), "new", target);
+        assert_eq!(bindings.0.len(), MAX_JOB_BINDINGS);
+        assert!(!bindings.0.contains_key(oldest));
+    }
+
+    #[tokio::test]
+    async fn consumer_explicit_methods_only_put_metadata_on_seq_zero() {
+        for method in ["GET", "POST", "DELETE"] {
+            let (send, sent) = capture();
+            let consumer = TunnelConsumer::new(send);
+            let copy = consumer.clone();
+            let body = vec![b'x'; CHUNK_SIZE];
+            let expected = if method == "POST" {
+                body.clone()
+            } else {
+                Vec::new()
+            };
+            let path = format!("/3d/generations/{JOB_A}/content?range=0-9");
+            let requested_path = path.clone();
+            let task = tokio::spawn(async move {
+                copy.request_method(
+                    "provider",
+                    method,
+                    &requested_path,
+                    &body,
+                    GEN3D_SYNC_TIMEOUT * 2,
+                )
+                .await
+            });
+            let count = chunks(&expected).len();
+            let messages = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if sent.lock().unwrap().len() == count {
+                        break sent.lock().unwrap().clone();
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let mut encoded = String::new();
+            let mut request_id = String::new();
+            for (n, (peer, message)) in messages.into_iter().enumerate() {
+                let ProtocolMessage::OaiRequest {
+                    id,
+                    seq,
+                    last,
+                    data,
+                    path: p,
+                    method: m,
+                    content_type,
+                } = message
+                else {
+                    panic!("request");
+                };
+                assert_eq!(peer, "provider");
+                assert_eq!(seq, n as u64);
+                assert_eq!(last, n + 1 == count);
+                assert_eq!(m.as_deref(), (n == 0).then_some(method));
+                assert_eq!(p.as_deref(), (n == 0).then_some(path.as_str()));
+                assert_eq!(
+                    content_type.as_deref(),
+                    (n == 0).then_some("application/json")
+                );
+                request_id = id;
+                encoded.push_str(&data);
+            }
+            assert_eq!(
+                base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .unwrap(),
+                expected
+            );
+            consumer.handle_message(
+                "provider",
+                &ProtocolMessage::OaiResponse {
+                    id: request_id,
+                    seq: 0,
+                    last: true,
+                    data: String::new(),
+                    status: Some(204),
+                    content_type: None,
+                },
+            );
+            assert_eq!(task.await.unwrap().unwrap().status, 204);
+            assert!(consumer.pending.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn consumer_explicit_deadline_allows_long_waits_and_caps_at_sync_limit() {
+        let (send, sent) = capture();
+        let consumer = TunnelConsumer::new(send);
+        let copy = consumer.clone();
+        let task = tokio::spawn(async move {
+            copy.request_method(
+                "provider",
+                "POST",
+                "/3d/generations",
+                b"{}",
+                GEN3D_SYNC_TIMEOUT * 2,
+            )
+            .await
+        });
+        while sent.lock().unwrap().is_empty() {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(TIMEOUT + Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert!(!task.is_finished());
+        tokio::time::advance(GEN3D_SYNC_TIMEOUT - TIMEOUT).await;
+        assert!(task.await.unwrap().is_err());
+        assert!(consumer.pending.lock().unwrap().is_empty());
+
+        sent.lock().unwrap().clear();
+        let copy = consumer.clone();
+        let task = tokio::spawn(async move {
+            copy.request("provider", "/chat/completions", b"{}", GEN3D_SYNC_TIMEOUT)
+                .await
+        });
+        while sent.lock().unwrap().is_empty() {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(TIMEOUT + Duration::from_secs(1)).await;
+        assert!(task.await.unwrap().is_err());
+        assert!(consumer.pending.lock().unwrap().is_empty());
     }
 
     #[test]

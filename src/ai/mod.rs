@@ -23,6 +23,7 @@ pub(crate) mod openai;
 pub(crate) mod protocol;
 mod provide_state;
 mod provider;
+mod relay;
 mod serve_state;
 mod stt;
 pub mod tts;
@@ -132,6 +133,8 @@ const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 const VOICE_CATALOG_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct AiRoom {
+    relay_jobs: relay::Jobs<String>,
+    relay_voices: RwLock<HashMap<String, Vec<String>>>,
     cache_lock: std::sync::Mutex<()>,
     room: String,
     node_id: String,
@@ -145,6 +148,7 @@ struct AiRoom {
 }
 
 struct AiService {
+    relay_jobs: relay::Jobs<relay::Route>,
     state: Arc<AppState>,
     rooms: RwLock<HashMap<String, Arc<AiRoom>>>,
     on_demand: RwLock<HashSet<String>>,
@@ -164,6 +168,7 @@ async fn ensure_started(state: &Arc<AppState>) -> Result<Arc<AiService>> {
                 on_demand: RwLock::new(HashSet::new()),
                 sync: Mutex::new(()),
                 api_server: Mutex::new(None),
+                relay_jobs: Default::default(),
             });
             let weak = Arc::downgrade(&service);
             let rt = tokio::runtime::Handle::current();
@@ -277,6 +282,9 @@ impl AiService {
                     return;
                 };
                 let catalog_changed = session.consumer.handle_message(from, &msg);
+                if catalog_changed {
+                    session.record_relay_voices(from, &msg);
+                }
                 session.voice.handle_message(from, &msg);
                 session.oai.handle_message(from, &msg);
                 let Ok(permit) = session.handlers.clone().try_acquire_owned() else {
@@ -311,6 +319,11 @@ impl AiService {
             }
             crate::net::EVENT_PEER_DISCONNECTED => {
                 session.consumer.on_peer_disconnected(from);
+                session
+                    .relay_voices
+                    .write()
+                    .expect("relay voices lock")
+                    .remove(from);
                 session.voice.on_peer_left(from);
                 session.oai.drop_peer(from);
                 if let Some(provider) = session.local_provider() {
@@ -441,6 +454,7 @@ impl AiService {
             })
         };
         let state = self.state.clone();
+        let relay_session = session.clone();
         let oai: api_server::OaiFn = Arc::new(move |mut body| {
             let session = session.clone();
             let effort = room_api_effort(
@@ -487,6 +501,9 @@ impl AiService {
                     .await
             })
         });
+        // tc-ai-api passthrough (3D jobs, voice catalog) over this room.
+        let relay: api_server::RelayFn =
+            Arc::new(move |request| Box::pin(relay_session.clone().relay(request)));
         Ok(Some(api_server::RoomRoutes {
             call,
             models,
@@ -494,6 +511,7 @@ impl AiService {
             stt,
             oai,
             decision,
+            relay,
         }))
     }
 
@@ -538,6 +556,8 @@ impl AiService {
             }
         });
         let session = Arc::new(AiRoom {
+            relay_jobs: Default::default(),
+            relay_voices: Default::default(),
             cache_lock: std::sync::Mutex::new(()),
             room: transport.room.clone(),
             node_id: transport.node_id.clone(),
@@ -764,6 +784,14 @@ impl AiService {
             Some(body),
         )
         .await
+    }
+
+    /// Unscoped tc-ai-api passthrough routes (see [`api_server::RelayRequest`]).
+    async fn relay(
+        self: Arc<Self>,
+        request: api_server::RelayRequest,
+    ) -> Result<oai_tunnel::TunnelResponse> {
+        self.relay_request(request).await
     }
 
     fn live_models(&self) -> HashMap<String, Vec<String>> {
@@ -1397,6 +1425,11 @@ pub fn apply_trusted_providers(state: &Arc<AppState>) {
     if let Some(service) = SERVICE.get() {
         for session in service.rooms.read().expect("ai rooms lock").values() {
             session
+                .relay_voices
+                .write()
+                .expect("relay voices lock")
+                .clear();
+            session
                 .consumer
                 .set_trusted_providers(state.effective_config().ai.trusted_providers.clone());
         }
@@ -1485,6 +1518,7 @@ async fn build_provider(
                 input: text,
                 format: options.response_format,
                 speed: options.speed.or(default_speed),
+                extra: Default::default(),
             };
             Box::pin(async move { tts::synthesize(&provider, req).await })
         });
@@ -1905,6 +1939,11 @@ async fn serve_start(service: &Arc<AiService>, state: &Arc<AppState>) -> Result<
         Arc::new(move |raw| Box::pin(service.clone().decide(raw)))
     };
 
+    let relay: api_server::RelayFn = {
+        let service = service.clone();
+        Arc::new(move |request| Box::pin(service.clone().relay(request)))
+    };
+
     let api_listen = state.effective_config().ai.api_listen;
     let rooms: api_server::RoomsFn = {
         let service = service.clone();
@@ -1921,6 +1960,7 @@ async fn serve_start(service: &Arc<AiService>, state: &Arc<AppState>) -> Result<
         tts_fn,
         stt_fn,
         Some(decision),
+        Some(relay),
         Some(rooms),
         Some(origins),
     )
@@ -2028,6 +2068,7 @@ mod tests {
             on_demand: RwLock::new(HashSet::new()),
             sync: Mutex::new(()),
             api_server: Mutex::new(None),
+            relay_jobs: Default::default(),
         });
         let chat_service = service.clone();
         let call: LlmCallFn = Arc::new(move |messages, tools, model, tx| {
@@ -2055,6 +2096,7 @@ mod tests {
             Arc::new(Vec::new),
             tts,
             stt,
+            None,
             None,
             Some(rooms),
             None,
@@ -2196,6 +2238,7 @@ mod tests {
                             on_demand: RwLock::new(HashSet::new()),
                             sync: Mutex::new(()),
                             api_server: Mutex::new(None),
+                            relay_jobs: Default::default(),
                         };
                         let audio = service
                             .synthesize(
@@ -2206,6 +2249,7 @@ mod tests {
                                     input: "hi".into(),
                                     speed: requested,
                                     format: Some("opus".into()),
+                                    extra: Default::default(),
                                 },
                                 None,
                             )
@@ -2643,6 +2687,7 @@ mod tests {
             on_demand: RwLock::new(HashSet::new()),
             sync: Mutex::new(()),
             api_server: Mutex::new(None),
+            relay_jobs: Default::default(),
         });
         let chat_service = service.clone();
         let call: LlmCallFn = Arc::new(move |m, t, model, tx| {
@@ -2677,6 +2722,7 @@ mod tests {
             Arc::new(Vec::new),
             tts,
             stt,
+            None,
             None,
             Some(rooms),
             None,
@@ -2874,6 +2920,7 @@ mod tests {
             on_demand: RwLock::new(HashSet::new()),
             sync: Mutex::new(()),
             api_server: Mutex::new(None),
+            relay_jobs: Default::default(),
         });
         service.reconcile(false).await.unwrap();
         let first = session.local_provider().unwrap();
@@ -2944,6 +2991,7 @@ mod tests {
             on_demand: RwLock::new(HashSet::new()),
             sync: Mutex::new(()),
             api_server: Mutex::new(None),
+            relay_jobs: Default::default(),
         });
         service.reconcile(true).await.unwrap();
         assert_eq!(
@@ -3029,6 +3077,8 @@ mod tests {
 
     fn test_session_with_send(room: &str, send: SendFn) -> Arc<AiRoom> {
         Arc::new(AiRoom {
+            relay_jobs: Default::default(),
+            relay_voices: Default::default(),
             cache_lock: std::sync::Mutex::new(()),
             room: room.into(),
             node_id: "node".into(),
@@ -3070,6 +3120,7 @@ mod tests {
             on_demand: RwLock::new(HashSet::new()),
             sync: Mutex::new(()),
             api_server: Mutex::new(None),
+            relay_jobs: Default::default(),
         });
         crate::authz::test_command("authz.deny.add", json!({"service":"ai", "subject":peer}))
             .unwrap();
@@ -3145,6 +3196,7 @@ mod tests {
                 on_demand: RwLock::new(HashSet::new()),
                 sync: Mutex::new(()),
                 api_server: Mutex::new(None),
+                relay_jobs: Default::default(),
             });
             service.reconcile(true).await.unwrap();
             let rt = tokio::runtime::Handle::current();
@@ -3262,6 +3314,7 @@ mod tests {
             on_demand: RwLock::new(HashSet::new()),
             sync: Mutex::new(()),
             api_server: Mutex::new(None),
+            relay_jobs: Default::default(),
         };
         let hello = |models| ProtocolMessage::ProviderHello {
             models: Some(models),
@@ -3702,11 +3755,11 @@ mod tests {
 
     #[test]
     fn resolve_voice_call_model_honors_a_matching_request_model() {
-        let model = resolve_voice_call_model(Some("irodori-tts".to_string()), "irodori-tts", "tts");
-        assert_eq!(model, "irodori-tts");
+        let model = resolve_voice_call_model(Some("tts-model".to_string()), "tts-model", "tts");
+        assert_eq!(model, "tts-model");
 
-        let model = resolve_voice_call_model(Some("whisper-1".to_string()), "whisper-1", "stt");
-        assert_eq!(model, "whisper-1");
+        let model = resolve_voice_call_model(Some("stt-model".to_string()), "stt-model", "stt");
+        assert_eq!(model, "stt-model");
     }
 
     #[test]
@@ -3714,15 +3767,15 @@ mod tests {
         // The regression this guards: a consumer selecting an advertised ad
         // card can echo back its *label* (e.g. "TTS") as `model` rather than
         // a real upstream model id -- that must never be forwarded as-is.
-        let model = resolve_voice_call_model(Some("TTS".to_string()), "irodori-tts", "tts");
-        assert_eq!(model, "irodori-tts");
-        let model = resolve_voice_call_model(None, "irodori-tts", "tts");
-        assert_eq!(model, "irodori-tts");
+        let model = resolve_voice_call_model(Some("TTS".to_string()), "tts-model", "tts");
+        assert_eq!(model, "tts-model");
+        let model = resolve_voice_call_model(None, "tts-model", "tts");
+        assert_eq!(model, "tts-model");
 
-        let model = resolve_voice_call_model(Some("STT".to_string()), "whisper-1", "stt");
-        assert_eq!(model, "whisper-1");
-        let model = resolve_voice_call_model(None, "whisper-1", "stt");
-        assert_eq!(model, "whisper-1");
+        let model = resolve_voice_call_model(Some("STT".to_string()), "stt-model", "stt");
+        assert_eq!(model, "stt-model");
+        let model = resolve_voice_call_model(None, "stt-model", "stt");
+        assert_eq!(model, "stt-model");
     }
 
     // -- resolve_advertised_voices: fallback order against a mock upstream --
@@ -3795,6 +3848,7 @@ mod tests {
             on_demand: RwLock::new(HashSet::new()),
             sync: Mutex::new(()),
             api_server: Mutex::new(None),
+            relay_jobs: Default::default(),
         });
         let raw = br#"{"state":"s","questions":{"q":{"type":"choice","criteria":{"zebra":null,"apple":null}}}}"#;
         let response = service.decide(raw.to_vec()).await.unwrap();
@@ -3831,7 +3885,7 @@ mod tests {
         crate::config::ResolvedModel {
             base_url,
             api_key: "key".to_string(),
-            model: "tts-1".to_string(),
+            model: "tts-model".to_string(),
             reasoning_effort: None,
             voice: voice.map(String::from),
             lang_voices: HashMap::new(),

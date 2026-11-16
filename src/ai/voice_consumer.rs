@@ -217,6 +217,7 @@ mod tests {
                             input: "hello".into(),
                             format: Some("opus".into()),
                             speed: Some(1.25),
+                            extra: Default::default(),
                         },
                         Some("en".into()),
                         Duration::from_secs(1),

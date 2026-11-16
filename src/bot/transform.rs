@@ -427,6 +427,7 @@ async fn synthesize_audio(
         input: text.to_string(),
         format: format.map(str::to_string),
         speed,
+        extra: Default::default(),
     };
     let audio = if provider.base_url.starts_with("mist-network://") {
         let reference = model_ref

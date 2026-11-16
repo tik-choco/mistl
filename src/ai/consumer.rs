@@ -1511,7 +1511,7 @@ mod tests {
         consumer.handle_message(
             "p1",
             &ProtocolMessage::ProviderHello {
-                models: Some(vec!["gpt-4o".into()]),
+                models: Some(vec!["chat-model".into()]),
                 services: None,
                 voices: None,
             },
@@ -1519,7 +1519,7 @@ mod tests {
 
         let info = consumer.provider().expect("should be locked in");
         assert_eq!(info.node_id, "p1");
-        assert_eq!(info.models, vec!["gpt-4o".to_string()]);
+        assert_eq!(info.models, vec!["chat-model".to_string()]);
 
         let sent = sent.lock().unwrap();
         assert!(
@@ -1537,7 +1537,7 @@ mod tests {
         consumer.handle_message(
             "p1",
             &ProtocolMessage::ProviderHello {
-                models: Some(vec!["gpt-4o".into()]),
+                models: Some(vec!["chat-model".into()]),
                 services: None,
                 voices: None,
             },
@@ -1545,7 +1545,7 @@ mod tests {
         consumer.handle_message(
             "p1",
             &ProtocolMessage::ProviderHello {
-                models: Some(vec!["gpt-4o".into(), "gpt-4o-mini".into()]),
+                models: Some(vec!["chat-model".into(), "chat-model-mini".into()]),
                 services: None,
                 voices: None,
             },
@@ -1555,7 +1555,7 @@ mod tests {
         assert_eq!(info.node_id, "p1");
         assert_eq!(
             info.models,
-            vec!["gpt-4o".to_string(), "gpt-4o-mini".to_string()]
+            vec!["chat-model".to_string(), "chat-model-mini".to_string()]
         );
 
         // Only the first hello should have triggered a consumer_hello reply.
@@ -1576,7 +1576,7 @@ mod tests {
         consumer.handle_message(
             "p1",
             &ProtocolMessage::ProviderHello {
-                models: Some(vec!["gpt-4o".into()]),
+                models: Some(vec!["chat-model".into()]),
                 services: Some(vec!["chat".into(), "tts".into()]),
                 voices: Some(vec!["alloy".into()]),
             },
@@ -1641,7 +1641,7 @@ mod tests {
         consumer.handle_message(
             "chat-provider",
             &ProtocolMessage::ProviderHello {
-                models: Some(vec!["gpt-4o".into()]),
+                models: Some(vec!["chat-model".into()]),
                 services: Some(vec!["chat".into()]),
                 voices: None,
             },

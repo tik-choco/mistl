@@ -54,7 +54,7 @@ The local OpenAI-compatible API (`ai.api_listen`) accepts `mst_...` bearer
 tokens:
 
 ```
-mistl authz token create laptop --model gpt-4o-mini --max-requests 500 --period day --ttl 30d
+mistl authz token create laptop --model chat-model-mini --max-requests 500 --period day --ttl 30d
 mistl authz api require-token on       # refuse requests without a live token
 mistl authz token revoke <id>
 ```

@@ -54,6 +54,12 @@
 //!   provider's `<base_url>/systemone`, or a Room provider's tunnel);
 //!   room-scoped, over that room's oai tunnel. The upstream status and JSON
 //!   body come back as-is.
+//! - 3D generation jobs (`/v1/3d/generations`), voice catalogs
+//!   (`/v1/audio/voices`, `/v1/voices`), and model details (`/v1/models/<id>`)
+//!   are also available under `/v1/rooms/<room>`. Job content is downloaded
+//!   in bounded windows; synchronous `b64_json` results are capped at 64 MiB.
+//! - Unscoped lifecycle routes `/api/ps`, `/health`, and the
+//!   root `/voices` alias use the injected local relay.
 //! - Unresolvable explicit models -> `404` with OpenAI `model_not_found`.
 //! - Upstream/backend errors: before any deltas were streamed -> `502` with
 //!   `{"error":{"message":...}}` carrying a generic message (the detail is
@@ -80,8 +86,9 @@
 //!
 //! Read the request line + headers (case-insensitive names) up to a sane
 //! cap, then exactly `Content-Length` body bytes (411 if missing on POST;
-//! 413 over 10 MiB). `Connection: close` semantics -- serve one request
-//! per connection, then close. Tolerate both `\r\n` and `\n`.
+//! route-specific caps for JSON, audio and 3D uploads). `Connection: close`
+//! semantics -- serve one request per connection, then close. Tolerate both
+//! `\r\n` and `\n`.
 
 use std::io;
 use std::net::SocketAddr;
@@ -89,6 +96,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use base64::Engine;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -121,6 +129,28 @@ pub(super) type DecisionFn = Arc<
         + Sync,
 >;
 
+/// One request for the tc-ai-api passthrough routes (3D generation jobs,
+/// voice catalog, lifecycle). `path` is relative to the `/v1` base
+/// (`/3d/generations/<id>/content?range=0-8388607`, `/audio/voices`) except
+/// the root lifecycle paths (`/api/ps`, `/health`), which are
+/// passed as-is. `body` is JSON when present.
+pub(super) struct RelayRequest {
+    pub method: String,
+    pub path: String,
+    pub body: Option<Vec<u8>>,
+}
+
+/// Relays a [`RelayRequest`]; the reply is the upstream status, content type
+/// and body, buffered (content downloads are fetched in range windows).
+pub(super) type RelayFn = Arc<
+    dyn Fn(
+            RelayRequest,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<super::oai_tunnel::TunnelResponse>> + Send>,
+        > + Send
+        + Sync,
+>;
+
 pub(super) struct RoomRoutes {
     pub call: LlmCallFn,
     pub models: ModelsFn,
@@ -129,6 +159,8 @@ pub(super) struct RoomRoutes {
     pub oai: OaiFn,
     /// `POST /systemone` over the room's oai tunnel.
     pub decision: DecisionFn,
+    /// 3D generation jobs and the voice catalog over the room.
+    pub relay: RelayFn,
 }
 
 /// Extra browser origins allowed to call the API (`ai.api_allowed_origins`).
@@ -149,6 +181,9 @@ const MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
 /// Body size cap for the JSON endpoints (chat / speech).
 const MAX_JSON_BODY_BYTES: usize = 2 * 1024 * 1024;
+const MAX_GEN3D_MULTIPART_BYTES: usize = 20 * 1024 * 1024 + 128 * 1024;
+const MAX_GEN3D_JSON_BYTES: usize = 20 * 1024 * 1024 / 3 * 4 + 128 * 1024;
+const MAX_GEN3D_B64_BYTES: u64 = 64 * 1024 * 1024;
 /// Deadline for receiving the complete request head (slowloris guard).
 const HEAD_READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// Max idle gap between body reads.
@@ -197,10 +232,14 @@ impl ApiServer {
         tts_call: TtsFn,
         stt_call: SttFn,
     ) -> Result<Arc<ApiServer>> {
-        Self::start_with_rooms(listen, call, models, tts_call, stt_call, None, None, None).await
+        Self::start_with_rooms(
+            listen, call, models, tts_call, stt_call, None, None, None, None,
+        )
+        .await
     }
 
-    /// `decision` serves the unscoped `/v1/systemone` (`None`: 404).
+    /// `decision` serves the unscoped `/v1/systemone` (`None`: 404);
+    /// `relay` the unscoped tc-ai-api passthrough routes (`None`: 404).
     #[allow(clippy::too_many_arguments)]
     pub async fn start_with_rooms(
         listen: &str,
@@ -209,6 +248,7 @@ impl ApiServer {
         tts_call: TtsFn,
         stt_call: SttFn,
         decision: Option<DecisionFn>,
+        relay: Option<RelayFn>,
         rooms: Option<RoomsFn>,
         origins: Option<OriginsFn>,
     ) -> Result<Arc<ApiServer>> {
@@ -246,6 +286,7 @@ impl ApiServer {
                 let tts_call = tts_call.clone();
                 let stt_call = stt_call.clone();
                 let decision = decision.clone();
+                let relay = relay.clone();
                 let rooms = rooms.clone();
                 let origins = origins.clone();
                 let handle = tokio::spawn(async move {
@@ -256,6 +297,7 @@ impl ApiServer {
                         tts_call,
                         stt_call,
                         decision,
+                        relay,
                     };
                     if let Err(error) = handle_connection(socket, local, rooms, origins).await {
                         warn!(%error, "api_server connection ended with error");
@@ -567,7 +609,7 @@ async fn write_preflight(stream: &mut TcpStream, head: &RequestHead) -> io::Resu
         .header("access-control-request-private-network")
         .is_some_and(|v| v.trim().eq_ignore_ascii_case("true"));
     let response = format!(
-        "HTTP/1.1 204 No Content\r\n{}Access-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: {}\r\nAccess-Control-Max-Age: {CORS_MAX_AGE_SECS}\r\n{}Content-Length: 0\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 204 No Content\r\n{}Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS\r\nAccess-Control-Allow-Headers: {}\r\nAccess-Control-Max-Age: {CORS_MAX_AGE_SECS}\r\n{}Content-Length: 0\r\nConnection: close\r\n\r\n",
         cors_headers(),
         cors_allow_headers(head),
         if private_network {
@@ -609,7 +651,7 @@ async fn write_json_response_with_headers(
 
 /// What local clients see for any upstream/backend failure. The real error
 /// (which can embed the upstream URL, a token in a query string, or response
-/// bodies) goes to the log only.
+/// bodies) goes to the log only, except actionable TTS client/503 errors.
 const BACKEND_ERROR_MESSAGE: &str = "upstream backend error (see the mistl daemon log)";
 
 async fn write_error(
@@ -886,7 +928,20 @@ fn tool_calls_stream_delta(calls: &Value) -> Value {
 /// Writes the error for a failed backend call before any response bytes
 /// were committed: 404 `model_not_found`, 400 `tools_unsupported`, else 502.
 async fn write_backend_failure(stream: &mut TcpStream, error: &anyhow::Error) {
-    if let Some(error) = error.downcast_ref::<ModelNotFound>() {
+    if let Some(upstream) = error
+        .downcast_ref::<super::openai::UpstreamHttpError>()
+        .filter(|e| e.label == "TTS API" && ((400..500).contains(&e.status) || e.status == 503))
+    {
+        let body = serde_json::from_str::<Value>(&upstream.detail)
+            .ok()
+            .filter(|v| v.get("error").is_some())
+            .unwrap_or_else(|| {
+                json!({"error": {
+                    "message": upstream.detail, "type": "invalid_request_error"
+                }})
+            });
+        let _ = write_json_response(stream, upstream.status, "Upstream Error", &body).await;
+    } else if let Some(error) = error.downcast_ref::<ModelNotFound>() {
         let body = json!({"error": {
             "message": error.to_string(),
             "type": "invalid_request_error",
@@ -909,6 +964,7 @@ struct LocalRoutes {
     tts_call: TtsFn,
     stt_call: SttFn,
     decision: Option<DecisionFn>,
+    relay: Option<RelayFn>,
 }
 
 async fn handle_connection(
@@ -992,7 +1048,16 @@ async fn route_request(
     let is_post = head.method.eq_ignore_ascii_case("POST");
     let is_get = head.method.eq_ignore_ascii_case("GET");
     let mut path = head.path.split('?').next().unwrap_or("").to_string();
-    let (call, models, tts_call, stt_call, oai, decision) = if path.starts_with("/v1/rooms/") {
+    let scoped = path.starts_with("/v1/rooms/");
+    let url_base = if scoped {
+        format!(
+            "/v1/rooms/{}",
+            path[10..].split('/').next().unwrap_or_default()
+        )
+    } else {
+        "/v1".to_string()
+    };
+    let (call, models, tts_call, stt_call, oai, decision, relay) = if scoped {
         let Some((room, endpoint)) = room_route(&path) else {
             write_error(&mut stream, 404, "Not Found", "invalid room route").await?;
             return Ok(());
@@ -1032,6 +1097,7 @@ async fn route_request(
             routes.stt,
             Some(routes.oai),
             Some(routes.decision),
+            Some(routes.relay),
         )
     } else {
         (
@@ -1041,6 +1107,7 @@ async fn route_request(
             local.stt_call,
             None,
             local.decision,
+            local.relay,
         )
     };
 
@@ -1066,8 +1133,15 @@ async fn route_request(
             }
         };
         let is_transcription = path == "/v1/audio/transcriptions";
+        let is_gen3d = path == "/v1/3d/generations";
+        let is_multipart =
+            multipart_boundary(head.header("content-type").unwrap_or_default()).is_some();
         let body_cap = if is_transcription {
             MAX_BODY_BYTES
+        } else if is_gen3d && is_multipart {
+            MAX_GEN3D_MULTIPART_BYTES
+        } else if is_gen3d {
+            MAX_GEN3D_JSON_BYTES
         } else {
             MAX_JSON_BODY_BYTES
         };
@@ -1081,7 +1155,10 @@ async fn route_request(
             .await;
             return Ok(());
         }
-        if !is_transcription && !content_type_is_json(head.header("content-type")) {
+        if !(is_transcription
+            || is_gen3d && is_multipart
+            || content_type_is_json(head.header("content-type")))
+        {
             let _ = write_error(
                 &mut stream,
                 415,
@@ -1113,6 +1190,43 @@ async fn route_request(
         };
         let body = models_response(&models, allowed.as_deref());
         let _ = write_json_response(&mut stream, 200, "OK", &body).await;
+    } else if is_get && path.starts_with("/v1/models/") {
+        if let Err(denied) = crate::authz::authorize_api(head.header("authorization"), None) {
+            write_denied(&mut stream, denied).await?;
+            return Ok(());
+        }
+        let allowed = match crate::authz::api_model_filter(head.header("authorization")) {
+            Ok(allowed) => allowed,
+            Err(denied) => {
+                write_denied(&mut stream, denied).await?;
+                return Ok(());
+            }
+        };
+        let id = percent_decode(&path[11..]);
+        let list = models_response(&models, allowed.as_deref());
+        let model = list["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| id.as_deref().is_some_and(|id| m["id"].as_str() == Some(id)));
+        if let Some(model) = model {
+            write_json_response(&mut stream, 200, "OK", model).await?;
+        } else {
+            write_json_response(&mut stream, 404, "Not Found", &json!({"error": {
+                "message": "Model not found", "type": "invalid_request_error", "code": "model_not_found"
+            }})).await?;
+        }
+    } else if relay_path(&head.method, &path).is_some() {
+        handle_relay(
+            &mut stream,
+            &head,
+            &path,
+            body,
+            relay.as_ref(),
+            scoped,
+            &url_base,
+        )
+        .await?;
     } else if is_post && path == "/v1/chat/completions" {
         handle_chat_completions_with_oai(
             &mut stream,
@@ -1155,10 +1269,27 @@ fn room_route(path: &str) -> Option<(String, String)> {
     let (encoded, endpoint) = rest.split_once('/')?;
     if !matches!(
         endpoint,
-        "models" | "chat/completions" | "audio/speech" | "audio/transcriptions" | "systemone"
-    ) {
+        "models"
+            | "chat/completions"
+            | "audio/speech"
+            | "audio/transcriptions"
+            | "systemone"
+            | "audio/voices"
+            | "voices"
+            | "3d/generations"
+    ) && !endpoint.starts_with("models/")
+        && !endpoint.starts_with("3d/generations/")
+    {
         return None;
     }
+    let room = percent_decode(encoded)?;
+    if room.is_empty() {
+        return None;
+    }
+    Some((room, endpoint.into()))
+}
+
+fn percent_decode(encoded: &str) -> Option<String> {
     let mut decoded = Vec::new();
     let mut bytes = encoded.bytes();
     while let Some(b) = bytes.next() {
@@ -1170,11 +1301,346 @@ fn room_route(path: &str) -> Option<(String, String)> {
             decoded.push(b);
         }
     }
-    let room = String::from_utf8(decoded).ok()?;
-    if room.is_empty() {
-        return None;
+    String::from_utf8(decoded).ok()
+}
+
+fn relay_path<'a>(method: &str, path: &'a str) -> Option<&'a str> {
+    match (method.to_ascii_uppercase().as_str(), path) {
+        ("GET", "/v1/audio/voices" | "/v1/voices" | "/voices") => Some("/audio/voices"),
+        ("GET", "/api/ps" | "/health") => Some(path),
+        ("GET" | "POST", "/v1/3d/generations") => Some("/3d/generations"),
+        ("GET" | "DELETE", p) if p.starts_with("/v1/3d/generations/") => Some(&p[3..]),
+        _ => None,
     }
-    Some((room, endpoint.into()))
+}
+
+fn valid_generation_id(id: &str) -> bool {
+    id.strip_prefix("gen3d_").is_some_and(|hex| {
+        hex.len() == 32
+            && hex
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
+}
+
+fn generation_content_path(url: &str) -> Option<String> {
+    let (_, tail) = url.rsplit_once("/3d/generations/")?;
+    let id = tail.strip_suffix("/content")?;
+    valid_generation_id(id).then(|| format!("/3d/generations/{id}/content"))
+}
+
+/// Rewrite only job data, including jobs nested in the list response.
+fn rewrite_job_urls(value: &mut Value, base: &str) {
+    if let Some(data) = value.get_mut("data").and_then(Value::as_array_mut) {
+        for item in data {
+            if let Some(path) = item
+                .get("url")
+                .and_then(Value::as_str)
+                .and_then(generation_content_path)
+            {
+                item["url"] = json!(format!("{base}{path}"));
+            }
+            rewrite_job_urls(item, base);
+        }
+    }
+}
+
+fn gen3d_multipart(body: &[u8], boundary: &str) -> std::result::Result<Vec<u8>, &'static str> {
+    let mut object = serde_json::Map::new();
+    for part in parse_multipart(body, boundary) {
+        if object.contains_key(&part.name) {
+            return Err("duplicate multipart field");
+        }
+        let value = if part.name == "image" {
+            let mime = if part.content_type.is_empty() {
+                "image/png"
+            } else {
+                &part.content_type
+            };
+            json!(format!(
+                "data:{mime};base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(&part.bytes)
+            ))
+        } else {
+            if part.bytes.len() > 64 * 1024 {
+                return Err("multipart field too large");
+            }
+            let text = std::str::from_utf8(&part.bytes).map_err(|_| "invalid multipart text")?;
+            if matches!(
+                part.name.as_str(),
+                "keep_alive" | "model" | "output_format" | "response_format" | "user"
+            ) {
+                json!(text)
+            } else {
+                serde_json::from_str::<Value>(text)
+                    .ok()
+                    .filter(|v| v.is_number() || v.is_boolean())
+                    .unwrap_or_else(|| json!(text))
+            }
+        };
+        object.insert(part.name, value);
+    }
+    if !object.contains_key("image") {
+        return Err("image is required");
+    }
+    Ok(serde_json::to_vec(&object).expect("JSON object"))
+}
+
+async fn relay_get(relay: &RelayFn, path: String) -> Result<super::oai_tunnel::TunnelResponse> {
+    relay(RelayRequest {
+        method: "GET".into(),
+        path,
+        body: None,
+    })
+    .await
+}
+
+async fn content_window(relay: &RelayFn, path: &str, start: u64, bytes: u64) -> Result<Vec<u8>> {
+    let end = start
+        .saturating_add(super::oai_tunnel::CONTENT_WINDOW)
+        .min(bytes)
+        - 1;
+    let response = relay_get(relay, format!("{path}?range={start}-{end}")).await?;
+    anyhow::ensure!(
+        response.status == 206 || (response.status == 200 && start == 0 && end == bytes - 1),
+        "invalid content window status"
+    );
+    anyhow::ensure!(
+        response.body.len() as u64 == end - start + 1,
+        "invalid content window length"
+    );
+    Ok(response.body)
+}
+
+async fn serve_generation_content(
+    stream: &mut TcpStream,
+    relay: &RelayFn,
+    path: &str,
+) -> Result<()> {
+    let job_path = path.strip_suffix("/content").expect("content route");
+    let response = match relay_get(relay, job_path.to_string()).await {
+        Ok(response) => response,
+        Err(err) => {
+            write_backend_failure(stream, &err).await;
+            return Ok(());
+        }
+    };
+    if response.status != 200 {
+        return write_tunnel_response(stream, &response).await;
+    }
+    let job: Value = serde_json::from_slice(&response.body).unwrap_or(Value::Null);
+    let bytes = job["data"][0]["bytes"].as_u64().unwrap_or(0);
+    if job["status"] != "completed" || bytes == 0 {
+        return match relay_get(relay, path.to_string()).await {
+            Ok(response) => write_tunnel_response(stream, &response).await,
+            Err(err) => {
+                write_backend_failure(stream, &err).await;
+                Ok(())
+            }
+        };
+    }
+    let (format, mime) = match job["data"][0]["format"].as_str() {
+        Some("glb") => ("glb", "model/gltf-binary"),
+        Some("obj") => ("obj", "model/obj"),
+        Some("stl") => ("stl", "model/stl"),
+        Some("3mf") => ("3mf", "model/3mf"),
+        Some("dae") => ("dae", "model/vnd.collada+xml"),
+        _ => ("ply", "application/octet-stream"),
+    };
+    let id = job_path.rsplit('/').next().unwrap();
+    stream.write_all(format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {bytes}\r\nContent-Disposition: attachment; filename=\"{id}.{format}\"\r\n{}Connection: close\r\n\r\n", cors_headers()
+    ).as_bytes()).await?;
+    let mut start = 0;
+    while start < bytes {
+        // Errors after committing the headers close the socket, never append JSON.
+        let window = content_window(relay, path, start, bytes).await?;
+        stream.write_all(&window).await?;
+        start += window.len() as u64;
+    }
+    Ok(())
+}
+
+async fn inline_generation_content(relay: &RelayFn, job: &mut Value) -> Result<()> {
+    let id = job
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| valid_generation_id(id))
+        .map(str::to_string);
+    let data = job
+        .get_mut("data")
+        .and_then(Value::as_array_mut)
+        .context("missing generation data")?;
+    let total = data.iter().try_fold(0u64, |total, item| {
+        total.checked_add(item["bytes"].as_u64()?)
+    });
+    anyhow::ensure!(
+        total.is_some_and(|n| n <= MAX_GEN3D_B64_BYTES),
+        "generation content too large or size unknown; use response_format=url"
+    );
+    for item in data {
+        let path = item
+            .get("url")
+            .and_then(Value::as_str)
+            .and_then(generation_content_path)
+            .or_else(|| {
+                id.as_ref()
+                    .map(|id| format!("/3d/generations/{id}/content"))
+            })
+            .context("missing generation content URL")?;
+        let bytes = item["bytes"].as_u64().unwrap();
+        let mut content = Vec::with_capacity(bytes as usize);
+        while (content.len() as u64) < bytes {
+            content.extend(content_window(relay, &path, content.len() as u64, bytes).await?);
+        }
+        let object = item.as_object_mut().context("invalid generation data")?;
+        object.remove("url");
+        object.insert(
+            "b64_json".into(),
+            json!(base64::engine::general_purpose::STANDARD.encode(content)),
+        );
+    }
+    Ok(())
+}
+
+async fn handle_relay(
+    stream: &mut TcpStream,
+    head: &RequestHead,
+    path: &str,
+    mut body: Vec<u8>,
+    relay: Option<&RelayFn>,
+    scoped: bool,
+    url_base: &str,
+) -> Result<()> {
+    let method = head.method.to_ascii_uppercase();
+    let path = relay_path(&method, path).expect("relay route");
+    let gen3d_post = method == "POST" && path == "/3d/generations";
+    let req = if method == "POST" {
+        if gen3d_post
+            && let Some(boundary) =
+                multipart_boundary(head.header("content-type").unwrap_or_default())
+        {
+            body = match gen3d_multipart(&body, &boundary) {
+                Ok(body) => body,
+                Err(message) => {
+                    write_error(stream, 400, "Bad Request", message).await?;
+                    return Ok(());
+                }
+            };
+        }
+        match serde_json::from_slice::<Value>(&body) {
+            Ok(value @ Value::Object(_)) => Some(value),
+            _ => {
+                write_error(
+                    stream,
+                    400,
+                    "Bad Request",
+                    "request body must be a JSON object",
+                )
+                .await?;
+                return Ok(());
+            }
+        }
+    } else {
+        None
+    };
+    let model = req
+        .as_ref()
+        .and_then(|v| v.get("model"))
+        .and_then(Value::as_str)
+        .filter(|m| !m.trim().is_empty());
+    let authorized = match crate::authz::authorize_api(head.header("authorization"), model) {
+        Ok(authorized) => authorized,
+        Err(denied) => {
+            write_denied(stream, denied).await?;
+            return Ok(());
+        }
+    };
+    // Authenticate first; then require an explicit model (no built-in default).
+    if gen3d_post && model.is_none() {
+        return write_tunnel_response(stream, &super::oai_tunnel::missing_model()).await;
+    }
+    if let Some(tail) = path.strip_prefix("/3d/generations/") {
+        let id = tail.strip_suffix("/content").unwrap_or(tail);
+        if !valid_generation_id(id) || (method == "DELETE" && tail.ends_with("/content")) {
+            write_json_response(stream, 404, "Not Found", &json!({"error": {
+                "message": "generation not found", "type": "invalid_request_error", "code": "not_found", "param": "id"
+            }})).await?;
+            return Ok(());
+        }
+    }
+    let Some(relay) = relay else {
+        write_error(stream, 404, "Not Found", "not found").await?;
+        return Ok(());
+    };
+    if scoped && body.len() > super::oai_tunnel::MAX_BYTES {
+        write_error(
+            stream,
+            413,
+            "Payload Too Large",
+            "request body too large for room relay",
+        )
+        .await?;
+        return Ok(());
+    }
+    let b64 = gen3d_post
+        && req
+            .as_ref()
+            .is_some_and(|v| v["response_format"] == "b64_json" && v["background"] != true);
+    if b64 {
+        body = super::oai_tunnel::rewrite_object(&body, &[("response_format", json!("url"))], &[])?;
+    }
+    let mut usage = ApiUsage::new(authorized);
+    usage.started = method == "POST";
+    if method == "GET" && path.ends_with("/content") {
+        return serve_generation_content(stream, relay, path).await;
+    }
+    let response = relay(RelayRequest {
+        method: method.clone(),
+        path: path.to_string(),
+        body: (!body.is_empty()).then_some(body),
+    })
+    .await;
+    match response {
+        Ok(mut response) => {
+            if path.starts_with("/3d/generations") && method != "DELETE" {
+                if let Ok(mut value) = serde_json::from_slice::<Value>(&response.body) {
+                    if b64
+                        && response.status == 200
+                        && let Err(err) = inline_generation_content(relay, &mut value).await
+                    {
+                        warn!("api_server: inline generation content failed: {err:#}");
+                        write_json_response(stream, 502, "Bad Gateway", &json!({"error": {
+                                "message": "could not inline generation content; use response_format=url", "type": "server_error"
+                            }})).await?;
+                        return Ok(());
+                    }
+                    rewrite_job_urls(
+                        &mut value,
+                        &format!(
+                            "http://{}{url_base}",
+                            head.header("host").unwrap_or_default()
+                        ),
+                    );
+                    response.body = serde_json::to_vec(&value)?;
+                } else if b64 && response.status == 200 {
+                    write_error(
+                        stream,
+                        502,
+                        "Bad Gateway",
+                        "invalid generation response; use response_format=url",
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            }
+            write_tunnel_response(stream, &response).await
+        }
+        Err(err) => {
+            write_backend_failure(stream, &err).await;
+            Ok(())
+        }
+    }
 }
 
 /// `POST /v1/audio/speech`: OpenAI's shape -- `{model, input, voice,
@@ -1230,6 +1696,18 @@ async fn handle_audio_speech(
             .get("speed")
             .and_then(Value::as_f64)
             .filter(|v| crate::config::valid_tts_speed(*v)),
+        extra: req
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(k, _)| {
+                !matches!(
+                    k.as_str(),
+                    "model" | "input" | "voice" | "response_format" | "speed" | "lang"
+                )
+            })
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
     };
 
     // `lang` is a mistl extension, not part of OpenAI's schema: it is the
@@ -1866,6 +2344,916 @@ fn vision_request(body: &[u8]) -> std::result::Result<Option<(Value, Vec<u8>)>, 
 
 #[cfg(test)]
 mod tests {
+    use super::super::oai_tunnel::TunnelResponse;
+
+    const GENERATION_ID: &str = "gen3d_0123456789abcdef0123456789abcdef";
+
+    fn relay_response(status: u16, body: Value) -> TunnelResponse {
+        TunnelResponse {
+            status,
+            content_type: "application/json".into(),
+            body: serde_json::to_vec(&body).unwrap(),
+        }
+    }
+
+    fn recording_relay(
+        reply: impl Fn(&RelayRequest) -> TunnelResponse + Send + Sync + 'static,
+    ) -> (RelayFn, Arc<Mutex<Vec<RelayRequest>>>) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let records = seen.clone();
+        let relay: RelayFn = Arc::new(move |request| {
+            let response = reply(&request);
+            records.lock().unwrap().push(request);
+            Box::pin(async { Ok(response) })
+        });
+        (relay, seen)
+    }
+
+    async fn relay_test_server(relay: RelayFn) -> Arc<ApiServer> {
+        let room_relay = relay.clone();
+        let rooms: RoomsFn = Arc::new(move |room| {
+            assert_eq!(room, "team/one");
+            let relay = room_relay.clone();
+            Box::pin(async move {
+                Ok(Some(RoomRoutes {
+                    call: fake_call_ok(),
+                    models: Arc::new(|| vec!["org/model".into()]),
+                    tts: fake_tts(),
+                    stt: fake_stt(),
+                    oai: Arc::new(|_| Box::pin(async { anyhow::bail!("unused") })),
+                    decision: Arc::new(|_| Box::pin(async { anyhow::bail!("unused") })),
+                    relay,
+                }))
+            })
+        });
+        ApiServer::start_with_rooms(
+            "127.0.0.1:0",
+            fake_call_ok(),
+            Arc::new(|| vec!["m1".into(), "org/model".into()]),
+            fake_tts(),
+            fake_stt(),
+            None,
+            Some(relay),
+            Some(rooms),
+            None,
+        )
+        .await
+        .unwrap()
+    }
+
+    async fn relay_request(
+        server: &ApiServer,
+        method: &str,
+        path: &str,
+        content_type: &str,
+        body: Option<&str>,
+    ) -> Vec<u8> {
+        let headers = body
+            .map(|body| {
+                format!(
+                    "Content-Type: {content_type}\r\nContent-Length: {}\r\n",
+                    body.len()
+                )
+            })
+            .unwrap_or_default();
+        send_request(
+            server.addr(),
+            &format!(
+                "{method} {path} HTTP/1.1\r\nHost: localhost:6478\r\n{headers}\r\n{}",
+                body.unwrap_or_default()
+            ),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn tcai_routes_relay_methods_and_paths() {
+        let _authz = authz_test().await;
+        let (relay, seen) = recording_relay(|_| relay_response(202, json!({"ok":true})));
+        let server = relay_test_server(relay).await;
+        for prefix in ["/v1", "/v1/rooms/team%2Fone"] {
+            for (method, suffix, expected, body) in [
+                (
+                    "GET",
+                    "audio/voices".to_string(),
+                    "/audio/voices".to_string(),
+                    None,
+                ),
+                (
+                    "GET",
+                    "voices".to_string(),
+                    "/audio/voices".to_string(),
+                    None,
+                ),
+                (
+                    "GET",
+                    "3d/generations".to_string(),
+                    "/3d/generations".to_string(),
+                    None,
+                ),
+                (
+                    "POST",
+                    "3d/generations".to_string(),
+                    "/3d/generations".to_string(),
+                    Some(r#"{"model":"3d-model"}"#),
+                ),
+                (
+                    "GET",
+                    format!("3d/generations/{GENERATION_ID}"),
+                    format!("/3d/generations/{GENERATION_ID}"),
+                    None,
+                ),
+                (
+                    "DELETE",
+                    format!("3d/generations/{GENERATION_ID}"),
+                    format!("/3d/generations/{GENERATION_ID}"),
+                    None,
+                ),
+            ] {
+                let raw = relay_request(
+                    &server,
+                    method,
+                    &format!("{prefix}/{suffix}"),
+                    "application/json",
+                    body,
+                )
+                .await;
+                assert_eq!(status_code(&split_response(&raw).0), 202);
+                let records = seen.lock().unwrap();
+                let sent = records.last().unwrap();
+                assert_eq!(sent.method, method);
+                assert_eq!(sent.path, expected);
+                assert_eq!(sent.body.as_deref(), body.map(str::as_bytes));
+            }
+        }
+        for (method, path, expected) in [
+            ("GET", "/voices", "/audio/voices"),
+            ("GET", "/api/ps", "/api/ps"),
+            ("GET", "/health", "/health"),
+        ] {
+            let raw = relay_request(&server, method, path, "", None).await;
+            assert_eq!(status_code(&split_response(&raw).0), 202);
+            let records = seen.lock().unwrap();
+            assert_eq!(records.last().unwrap().path, expected);
+            assert!(records.last().unwrap().body.is_none());
+        }
+        // Model unloading is not exposed.
+        let raw = relay_request(
+            &server,
+            "POST",
+            "/api/unload",
+            "application/json",
+            Some("{}"),
+        )
+        .await;
+        assert_eq!(status_code(&split_response(&raw).0), 404);
+        for path in ["/v1/rooms/team%2Fone/health", "/v1/rooms/team%2Fone/api/ps"] {
+            let raw = relay_request(&server, "GET", path, "", None).await;
+            assert_eq!(status_code(&split_response(&raw).0), 404);
+        }
+        server.stop();
+    }
+
+    #[tokio::test]
+    async fn tcai_invalid_generation_ids_and_absent_relay_are_404() {
+        let _authz = authz_test().await;
+        let (relay, seen) = recording_relay(|_| panic!("invalid ids must not reach relay"));
+        let server = relay_test_server(relay).await;
+        for prefix in ["/v1", "/v1/rooms/team%2Fone"] {
+            for id in [
+                "gen3d_0123456789abcdef0123456789abcdeF",
+                "gen3d_0",
+                "",
+                "../job",
+                "%67en3d_0123456789abcdef0123456789abcdef",
+            ] {
+                for (method, suffix) in [("GET", ""), ("DELETE", ""), ("GET", "/content")] {
+                    let raw = relay_request(
+                        &server,
+                        method,
+                        &format!("{prefix}/3d/generations/{id}{suffix}"),
+                        "",
+                        None,
+                    )
+                    .await;
+                    let (head, body) = split_response(&raw);
+                    assert_eq!(status_code(&head), 404);
+                    let error: Value = serde_json::from_slice(body).unwrap();
+                    assert_eq!(error["error"]["message"], "generation not found");
+                    assert_eq!(error["error"]["code"], "not_found");
+                    assert_eq!(error["error"]["param"], "id");
+                }
+            }
+        }
+        assert!(seen.lock().unwrap().is_empty());
+        server.stop();
+        let server = start_test_server(fake_call_ok(), fake_models()).await;
+        let raw = relay_request(&server, "GET", "/v1/voices", "", None).await;
+        assert_eq!(status_code(&split_response(&raw).0), 404);
+        server.stop();
+    }
+
+    fn gen3d_form(fields: &[(&str, &str)]) -> String {
+        let mut body = "--b\r\nContent-Disposition: form-data; name=\"image\"; filename=\"x.png\"\r\nContent-Type: image/png\r\n\r\nPNG\r\n".to_string();
+        for (name, value) in fields {
+            body.push_str(&format!(
+                "--b\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
+            ));
+        }
+        body.push_str("--b--\r\n");
+        body
+    }
+
+    #[tokio::test]
+    async fn tcai_multipart_converts_image_and_literals_and_rejects_duplicates() {
+        let _authz = authz_test().await;
+        let (relay, seen) = recording_relay(|_| relay_response(200, json!({})));
+        let server = relay_test_server(relay).await;
+        let content_type = "multipart/form-data; boundary=b";
+        for prefix in ["/v1", "/v1/rooms/team%2Fone"] {
+            for remove in ["auto", "true", "false"] {
+                let body = gen3d_form(&[
+                    ("seed", "12"),
+                    ("strength", "0.5"),
+                    ("background", "true"),
+                    ("model", "42"),
+                    ("keep_alive", "120"),
+                    ("output_format", "glb"),
+                    ("response_format", "url"),
+                    ("user", "false"),
+                    ("other", "hello"),
+                    ("remove_background", remove),
+                ]);
+                let raw = relay_request(
+                    &server,
+                    "POST",
+                    &format!("{prefix}/3d/generations"),
+                    content_type,
+                    Some(&body),
+                )
+                .await;
+                assert_eq!(status_code(&split_response(&raw).0), 200);
+                let records = seen.lock().unwrap();
+                let value: Value =
+                    serde_json::from_slice(records.last().unwrap().body.as_ref().unwrap()).unwrap();
+                assert_eq!(value["image"], "data:image/png;base64,UE5H");
+                assert_eq!(value["seed"], 12);
+                assert_eq!(value["strength"], 0.5);
+                assert_eq!(value["background"], true);
+                assert_eq!(value["model"], "42");
+                assert_eq!(value["keep_alive"], "120");
+                assert_eq!(value["user"], "false");
+                assert_eq!(value["other"], "hello");
+                assert_eq!(
+                    value["remove_background"],
+                    match remove {
+                        "true" => json!(true),
+                        "false" => json!(false),
+                        _ => json!("auto"),
+                    }
+                );
+            }
+        }
+        for body in [
+            gen3d_form(&[("seed", "1"), ("seed", "2")]),
+            gen3d_form(&[("image", "again")]),
+            gen3d_form(&[("user", &"x".repeat(64 * 1024 + 1))]),
+            "--b--\r\n".into(),
+        ] {
+            let raw = relay_request(
+                &server,
+                "POST",
+                "/v1/3d/generations",
+                content_type,
+                Some(&body),
+            )
+            .await;
+            assert_eq!(status_code(&split_response(&raw).0), 400);
+        }
+        let body = gen3d_form(&[("model", "3d-model")]).replace("Content-Type: image/png\r\n", "");
+        let raw = relay_request(
+            &server,
+            "POST",
+            "/v1/3d/generations",
+            content_type,
+            Some(&body),
+        )
+        .await;
+        assert_eq!(status_code(&split_response(&raw).0), 200);
+        let records = seen.lock().unwrap();
+        let value: Value =
+            serde_json::from_slice(records.last().unwrap().body.as_ref().unwrap()).unwrap();
+        assert_eq!(value["image"], "data:image/png;base64,UE5H");
+        server.stop();
+    }
+
+    #[tokio::test]
+    async fn tcai_jobs_rewrite_urls_with_host_and_encoded_room() {
+        let _authz = authz_test().await;
+        let (relay, _) = recording_relay(|request| {
+            let job = json!({"id":GENERATION_ID,"data":[{"url":format!("http://upstream:8087/v1/3d/generations/{GENERATION_ID}/content")},
+                {"url":format!("/3d/generations/{GENERATION_ID}/content")} ]});
+            relay_response(
+                200,
+                if request.path == "/3d/generations" && request.method == "GET" {
+                    json!({"data":[job]})
+                } else {
+                    job
+                },
+            )
+        });
+        let server = relay_test_server(relay).await;
+        for prefix in ["/v1", "/v1/rooms/team%2Fone"] {
+            for (method, suffix, body) in [
+                (
+                    "POST",
+                    "3d/generations".to_string(),
+                    Some(r#"{"model":"3d-model"}"#),
+                ),
+                ("GET", format!("3d/generations/{GENERATION_ID}"), None),
+                ("GET", "3d/generations".to_string(), None),
+            ] {
+                let raw = relay_request(
+                    &server,
+                    method,
+                    &format!("{prefix}/{suffix}"),
+                    "application/json",
+                    body,
+                )
+                .await;
+                let (head, body) = split_response(&raw);
+                assert_eq!(status_code(&head), 200);
+                let value: Value = serde_json::from_slice(body).unwrap();
+                let data = if method == "GET" && suffix == "3d/generations" {
+                    &value["data"][0]["data"]
+                } else {
+                    &value["data"]
+                };
+                for item in data.as_array().unwrap() {
+                    assert_eq!(
+                        item["url"],
+                        format!(
+                            "http://localhost:6478{prefix}/3d/generations/{GENERATION_ID}/content"
+                        )
+                    );
+                }
+            }
+        }
+        server.stop();
+    }
+
+    #[tokio::test]
+    async fn tcai_b64_json_uses_windows_and_caps_memory() {
+        let _authz = authz_test().await;
+        let (relay, seen) = recording_relay(|request| {
+            if request.path.contains("/content?") {
+                return TunnelResponse {
+                    status: 206,
+                    content_type: "model/gltf-binary".into(),
+                    body: b"GLB".to_vec(),
+                };
+            }
+            let body: Value = serde_json::from_slice(request.body.as_ref().unwrap()).unwrap();
+            let bytes = if body["user"] == "large" {
+                MAX_GEN3D_B64_BYTES + 1
+            } else {
+                3
+            };
+            relay_response(
+                200,
+                json!({"id":GENERATION_ID,"status":"completed","data":[{"format":"glb","bytes":bytes,
+                "url":format!("/3d/generations/{GENERATION_ID}/content")}]}),
+            )
+        });
+        let server = relay_test_server(relay).await;
+        for prefix in ["/v1", "/v1/rooms/team%2Fone"] {
+            let raw = relay_request(
+                &server,
+                "POST",
+                &format!("{prefix}/3d/generations"),
+                "application/json",
+                Some(r#"{"model":"3d-model","response_format":"b64_json","nested":{"z":1,"a":2}}"#),
+            )
+            .await;
+            let (head, body) = split_response(&raw);
+            assert_eq!(status_code(&head), 200);
+            let job: Value = serde_json::from_slice(body).unwrap();
+            assert_eq!(job["data"][0]["b64_json"], "R0xC");
+            assert!(job["data"][0].get("url").is_none());
+            let records = seen.lock().unwrap();
+            assert_eq!(
+                records[records.len() - 2].body.as_deref().unwrap(),
+                br#"{"model":"3d-model","response_format":"url","nested":{"z":1,"a":2}}"#
+            );
+            assert_eq!(
+                records.last().unwrap().path,
+                format!("/3d/generations/{GENERATION_ID}/content?range=0-2")
+            );
+        }
+        let count = seen.lock().unwrap().len();
+        let raw = relay_request(
+            &server,
+            "POST",
+            "/v1/3d/generations",
+            "application/json",
+            Some(r#"{"model":"3d-model","response_format":"b64_json","user":"large"}"#),
+        )
+        .await;
+        let (head, body) = split_response(&raw);
+        assert_eq!(status_code(&head), 502);
+        assert!(String::from_utf8_lossy(body).contains("response_format=url"));
+        assert_eq!(seen.lock().unwrap().len(), count + 1);
+        let raw = relay_request(
+            &server,
+            "POST",
+            "/v1/3d/generations",
+            "application/json",
+            Some(r#"{"model":"3d-model","response_format":"b64_json","background":true}"#),
+        )
+        .await;
+        assert_eq!(status_code(&split_response(&raw).0), 200);
+        let records = seen.lock().unwrap();
+        let sent: Value =
+            serde_json::from_slice(records.last().unwrap().body.as_ref().unwrap()).unwrap();
+        assert_eq!(sent["response_format"], "b64_json");
+        server.stop();
+    }
+
+    #[tokio::test]
+    async fn tcai_content_streams_two_windows_and_ignores_client_range() {
+        let _authz = authz_test().await;
+        let window = super::super::oai_tunnel::CONTENT_WINDOW;
+        let (relay, seen) = recording_relay(move |request| {
+            if request.path.contains("/content?") {
+                let first = request.path.ends_with(&format!("range=0-{}", window - 1));
+                return TunnelResponse {
+                    status: 206,
+                    content_type: "application/octet-stream".into(),
+                    body: vec![if first { 1 } else { 2 }; if first { window as usize } else { 3 }],
+                };
+            }
+            relay_response(
+                200,
+                json!({"status":"completed","data":[{"format":"glb","bytes":window+3}]}),
+            )
+        });
+        let server = relay_test_server(relay).await;
+        for prefix in ["/v1", "/v1/rooms/team%2Fone"] {
+            let raw = send_request(server.addr(), &format!("GET {prefix}/3d/generations/{GENERATION_ID}/content HTTP/1.1\r\nHost: localhost\r\nRange: bytes=1-2\r\n\r\n")).await;
+            let (head, body) = split_response(&raw);
+            assert_eq!(status_code(&head), 200);
+            assert!(head_has(&head, "Content-Type: model/gltf-binary"));
+            assert!(head_has(&head, &format!("Content-Length: {}", window + 3)));
+            assert!(head_has(
+                &head,
+                &format!("Content-Disposition: attachment; filename=\"{GENERATION_ID}.glb\"")
+            ));
+            assert_eq!(body.len() as u64, window + 3);
+            assert!(body[..window as usize].iter().all(|b| *b == 1));
+            assert_eq!(&body[window as usize..], &[2, 2, 2]);
+            let records = seen.lock().unwrap();
+            assert_eq!(
+                records[records.len() - 3].path,
+                format!("/3d/generations/{GENERATION_ID}")
+            );
+            assert_eq!(
+                records[records.len() - 2].path,
+                format!(
+                    "/3d/generations/{GENERATION_ID}/content?range=0-{}",
+                    window - 1
+                )
+            );
+            assert_eq!(
+                records.last().unwrap().path,
+                format!(
+                    "/3d/generations/{GENERATION_ID}/content?range={window}-{}",
+                    window + 2
+                )
+            );
+        }
+        server.stop();
+    }
+
+    #[tokio::test]
+    async fn tcai_content_passes_through_not_ready_and_job_errors() {
+        let _authz = authz_test().await;
+        for job in [
+            json!({"status":"running"}),
+            json!({"status":"completed","data":[{"bytes":0}]}),
+            json!({"status":"completed","data":[{}]}),
+        ] {
+            let (relay, seen) = recording_relay(move |request| {
+                if request.path.ends_with("/content") {
+                    relay_response(409, json!({"error":{"message":"not completed"}}))
+                } else {
+                    relay_response(200, job.clone())
+                }
+            });
+            let server = relay_test_server(relay).await;
+            let raw = relay_request(
+                &server,
+                "GET",
+                &format!("/v1/3d/generations/{GENERATION_ID}/content"),
+                "",
+                None,
+            )
+            .await;
+            let (head, body) = split_response(&raw);
+            assert_eq!(status_code(&head), 409);
+            assert_eq!(
+                serde_json::from_slice::<Value>(body).unwrap()["error"]["message"],
+                "not completed"
+            );
+            assert_eq!(seen.lock().unwrap().len(), 2);
+            server.stop();
+        }
+        let (relay, seen) =
+            recording_relay(|_| relay_response(404, json!({"error":{"message":"not found"}})));
+        let server = relay_test_server(relay).await;
+        let raw = relay_request(
+            &server,
+            "GET",
+            &format!("/v1/3d/generations/{GENERATION_ID}/content"),
+            "",
+            None,
+        )
+        .await;
+        assert_eq!(status_code(&split_response(&raw).0), 404);
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        server.stop();
+    }
+
+    #[tokio::test]
+    async fn tcai_content_drops_connection_on_bad_window() {
+        let _authz = authz_test().await;
+        for (status, length) in [(206, 2), (200, 3), (500, 3)] {
+            let window = super::super::oai_tunnel::CONTENT_WINDOW;
+            let (relay, seen) = recording_relay(move |request| {
+                if request.path.contains("/content?") {
+                    TunnelResponse {
+                        status,
+                        content_type: "model/obj".into(),
+                        body: vec![0; length],
+                    }
+                } else {
+                    relay_response(
+                        200,
+                        json!({"status":"completed","data":[{"bytes":window+3,"format":"obj"}]}),
+                    )
+                }
+            });
+            let server = relay_test_server(relay).await;
+            let raw = relay_request(
+                &server,
+                "GET",
+                &format!("/v1/3d/generations/{GENERATION_ID}/content"),
+                "",
+                None,
+            )
+            .await;
+            let (head, body) = split_response(&raw);
+            assert_eq!(status_code(&head), 200);
+            assert!(head_has(&head, "Content-Type: model/obj"));
+            assert!(body.is_empty());
+            assert_eq!(seen.lock().unwrap().len(), 2);
+            server.stop();
+        }
+    }
+
+    #[tokio::test]
+    async fn tcai_content_accepts_whole_file_200_and_maps_formats() {
+        let _authz = authz_test().await;
+        for (format, mime) in [
+            ("glb", "model/gltf-binary"),
+            ("obj", "model/obj"),
+            ("ply", "application/octet-stream"),
+            ("stl", "model/stl"),
+            ("3mf", "model/3mf"),
+            ("dae", "model/vnd.collada+xml"),
+        ] {
+            let (relay, seen) = recording_relay(move |request| {
+                if request.path.contains("/content?") {
+                    TunnelResponse {
+                        status: 200,
+                        content_type: "application/octet-stream".into(),
+                        body: b"3D".to_vec(),
+                    }
+                } else {
+                    relay_response(
+                        200,
+                        json!({"status":"completed","data":[{"format":format,"bytes":2}]}),
+                    )
+                }
+            });
+            let server = relay_test_server(relay).await;
+            let raw = relay_request(
+                &server,
+                "GET",
+                &format!("/v1/3d/generations/{GENERATION_ID}/content"),
+                "",
+                None,
+            )
+            .await;
+            let (head, body) = split_response(&raw);
+            assert_eq!(status_code(&head), 200);
+            assert!(head_has(&head, &format!("Content-Type: {mime}")));
+            assert!(head_has(
+                &head,
+                &format!("Content-Disposition: attachment; filename=\"{GENERATION_ID}.{format}\"")
+            ));
+            assert_eq!(body, b"3D");
+            assert_eq!(
+                seen.lock().unwrap().last().unwrap().path,
+                format!("/3d/generations/{GENERATION_ID}/content?range=0-1")
+            );
+            server.stop();
+        }
+    }
+
+    #[tokio::test]
+    async fn tcai_relay_preserves_errors_and_binary_responses() {
+        let _authz = authz_test().await;
+        let relay: RelayFn = Arc::new(|request| {
+            Box::pin(async move {
+                match request.path.as_str() {
+                    "/health" => Ok(TunnelResponse {
+                        status: 503,
+                        content_type: "application/problem+json".into(),
+                        body: br#"{"error":{"message":"unreachable"}}"#.to_vec(),
+                    }),
+                    "/api/ps" => anyhow::bail!("private backend detail"),
+                    _ => Ok(TunnelResponse {
+                        status: 200,
+                        content_type: "application/octet-stream".into(),
+                        body: vec![0, 255, 1],
+                    }),
+                }
+            })
+        });
+        let server = relay_test_server(relay).await;
+        let raw = relay_request(&server, "GET", "/health", "", None).await;
+        let (head, body) = split_response(&raw);
+        assert_eq!(status_code(&head), 503);
+        assert!(head_has(&head, "Content-Type: application/problem+json"));
+        assert_eq!(body, br#"{"error":{"message":"unreachable"}}"#);
+        let raw = relay_request(&server, "GET", "/api/ps", "", None).await;
+        let (head, body) = split_response(&raw);
+        assert_eq!(status_code(&head), 502);
+        assert_eq!(
+            serde_json::from_slice::<Value>(body).unwrap()["error"]["message"],
+            BACKEND_ERROR_MESSAGE
+        );
+        let raw = relay_request(&server, "GET", "/v1/voices", "", None).await;
+        let (head, body) = split_response(&raw);
+        assert_eq!(status_code(&head), 200);
+        assert!(head_has(&head, "Content-Type: application/octet-stream"));
+        assert_eq!(body, &[0, 255, 1]);
+        server.stop();
+    }
+
+    #[tokio::test]
+    async fn tcai_model_details_decode_ids_and_preserve_token_requirement() {
+        let _authz = authz_test().await;
+        let (relay, _) = recording_relay(|_| panic!("models must not relay"));
+        let server = relay_test_server(relay).await;
+        require_token(true);
+        let token = create_token(json!({}));
+        for prefix in ["/v1", "/v1/rooms/team%2Fone"] {
+            let path = format!("{prefix}/models/org%2Fmodel");
+            let raw = token_request(&server, &path, None, None).await;
+            assert_denied(&raw, 401, "unauthorized");
+            let raw = token_request(&server, &path, Some(&token), None).await;
+            let (head, body) = split_response(&raw);
+            assert_eq!(status_code(&head), 200);
+            assert_eq!(
+                serde_json::from_slice::<Value>(body).unwrap(),
+                json!({"id":"org/model","object":"model","owned_by":"mistl"})
+            );
+            for id in ["missing", "%FF", "%2"] {
+                let raw = token_request(
+                    &server,
+                    &format!("{prefix}/models/{id}"),
+                    Some(&token),
+                    None,
+                )
+                .await;
+                let (head, body) = split_response(&raw);
+                assert_eq!(status_code(&head), 404);
+                assert_eq!(
+                    serde_json::from_slice::<Value>(body).unwrap()["error"]["code"],
+                    "model_not_found"
+                );
+            }
+        }
+        let restricted = create_token(json!({"models":["m1"]}));
+        let raw = token_request(&server, "/v1/models/org%2Fmodel", Some(&restricted), None).await;
+        assert_denied(&raw, 403, "model_not_allowed");
+        server.stop();
+    }
+
+    #[tokio::test]
+    async fn tcai_authorization_meters_generation_and_requires_a_model() {
+        let _authz = authz_test().await;
+        let (relay, seen) = recording_relay(|_| relay_response(200, json!({})));
+        let server = relay_test_server(relay).await;
+        require_token(true);
+        for path in [
+            "/v1/voices".to_string(),
+            "/voices".into(),
+            "/api/ps".into(),
+            "/health".into(),
+            "/v1/3d/generations".into(),
+            format!("/v1/3d/generations/{GENERATION_ID}"),
+            format!("/v1/3d/generations/{GENERATION_ID}/content"),
+            "/v1/rooms/team%2Fone/voices".into(),
+        ] {
+            let raw = token_request(&server, &path, None, None).await;
+            assert_denied(&raw, 401, "unauthorized");
+        }
+        for path in ["/v1/3d/generations", "/v1/rooms/team%2Fone/3d/generations"] {
+            let raw = token_request(&server, path, None, Some(("application/json", "{}"))).await;
+            assert_denied(&raw, 401, "unauthorized");
+        }
+        let raw = relay_request(
+            &server,
+            "DELETE",
+            &format!("/v1/3d/generations/{GENERATION_ID}"),
+            "",
+            None,
+        )
+        .await;
+        assert_denied(&raw, 401, "unauthorized");
+        assert!(seen.lock().unwrap().is_empty());
+        let token = create_token(json!({"models":["3d-model"]}));
+        // No built-in default model: a model-restricted token cannot create
+        // a job without naming an allowed model, and nothing is metered.
+        for body in ["{}", r#"{"model":""}"#, r#"{"model":null}"#] {
+            let raw = token_request(
+                &server,
+                "/v1/3d/generations",
+                Some(&token),
+                Some(("application/json", body)),
+            )
+            .await;
+            assert_denied(&raw, 403, "model_not_allowed");
+        }
+        let raw = token_request(
+            &server,
+            "/v1/3d/generations",
+            Some(&token),
+            Some(("application/json", r#"{"model":"3d-model"}"#)),
+        )
+        .await;
+        assert_eq!(status_code(&split_response(&raw).0), 200);
+        assert_eq!(token_usage()["requests"], 1);
+        let raw = token_request(
+            &server,
+            "/v1/3d/generations",
+            Some(&token),
+            Some(("application/json", r#"{"model":"other"}"#)),
+        )
+        .await;
+        assert_denied(&raw, 403, "model_not_allowed");
+        assert_eq!(token_usage()["requests"], 1);
+        server.stop();
+    }
+
+    #[tokio::test]
+    async fn tcai_body_caps_and_object_validation() {
+        let _authz = authz_test().await;
+        let (relay, seen) = recording_relay(|_| relay_response(200, json!({})));
+        let server = relay_test_server(relay).await;
+        for (path, content_type, cap) in [
+            (
+                "/v1/3d/generations",
+                "application/json",
+                MAX_GEN3D_JSON_BYTES,
+            ),
+            (
+                "/v1/3d/generations",
+                "multipart/form-data; boundary=b",
+                MAX_GEN3D_MULTIPART_BYTES,
+            ),
+            ("/v1/audio/speech", "application/json", MAX_JSON_BODY_BYTES),
+        ] {
+            let raw = send_request(server.addr(), &format!("POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\r\n", cap+1)).await;
+            assert_eq!(status_code(&split_response(&raw).0), 413);
+        }
+        for body in ["null", "[]", "true", "\"text\""] {
+            let raw = relay_request(
+                &server,
+                "POST",
+                "/v1/3d/generations",
+                "application/json",
+                Some(body),
+            )
+            .await;
+            assert_eq!(status_code(&split_response(&raw).0), 400);
+        }
+        assert!(seen.lock().unwrap().is_empty());
+        let body =
+            json!({"model":"3d-model","image":"x".repeat(super::super::oai_tunnel::MAX_BYTES)})
+                .to_string();
+        let raw = relay_request(
+            &server,
+            "POST",
+            "/v1/rooms/team%2Fone/3d/generations",
+            "application/json",
+            Some(&body),
+        )
+        .await;
+        assert_eq!(status_code(&split_response(&raw).0), 413);
+        assert!(seen.lock().unwrap().is_empty());
+        let raw = relay_request(
+            &server,
+            "POST",
+            "/v1/3d/generations",
+            "application/json",
+            Some(&body),
+        )
+        .await;
+        assert_eq!(status_code(&split_response(&raw).0), 200);
+        server.stop();
+    }
+
+    #[tokio::test]
+    async fn speech_preserves_extra_fields_and_upstream_client_errors() {
+        let _authz = authz_test().await;
+        let call: TtsFn = Arc::new(|params, lang| {
+            Box::pin(async move {
+                assert_eq!(lang.as_deref(), Some("ja"));
+                assert_eq!(params.extra, json!({"keep_alive":120,"vendor_options":{"seed":42},"stream_format":"sse","future":null}).as_object().unwrap().clone());
+                Ok(tts::TtsAudio {
+                    bytes: b"speech".to_vec(),
+                    mime: "audio/mpeg".into(),
+                })
+            })
+        });
+        let server = ApiServer::start(
+            "127.0.0.1:0",
+            fake_call_ok(),
+            fake_models(),
+            call,
+            fake_stt(),
+        )
+        .await
+        .unwrap();
+        let raw = post_json(&server, "/v1/audio/speech", json!({"model":"tts-model","input":"hi","voice":"default","response_format":"mp3","speed":1,"lang":"ja",
+            "keep_alive":120,"vendor_options":{"seed":42},"stream_format":"sse","future":null})).await;
+        assert_eq!(split_response(&raw).1, b"speech");
+        server.stop();
+        for (label, status, detail, expected) in [
+            (
+                "TTS API",
+                422,
+                r#"{"error":{"message":"bad voice","code":"invalid_voice"}}"#,
+                422,
+            ),
+            ("TTS API", 503, "queued", 503),
+            ("TTS API", 400, "bad input", 400),
+            ("TTS API", 500, "private detail", 502),
+            ("other", 422, "private detail", 502),
+        ] {
+            let call: TtsFn = Arc::new(move |_, _| {
+                Box::pin(async move {
+                    Err(anyhow::Error::new(super::super::openai::UpstreamHttpError {
+                        label,
+                        status,
+                        detail: detail.into(),
+                    })
+                    .context("wrapped"))
+                })
+            });
+            let server = ApiServer::start(
+                "127.0.0.1:0",
+                fake_call_ok(),
+                fake_models(),
+                call,
+                fake_stt(),
+            )
+            .await
+            .unwrap();
+            let raw = post_json(&server, "/v1/audio/speech", json!({"input":"hi"})).await;
+            let (head, body) = split_response(&raw);
+            assert_eq!(status_code(&head), expected);
+            let value: Value = serde_json::from_slice(body).unwrap();
+            assert_eq!(
+                value["error"]["message"],
+                if expected == 502 {
+                    BACKEND_ERROR_MESSAGE
+                } else if status == 422 {
+                    "bad voice"
+                } else {
+                    detail
+                }
+            );
+            if status == 422 && label == "TTS API" {
+                assert_eq!(value["error"]["code"], "invalid_voice");
+            }
+            server.stop();
+        }
+    }
+
     struct AuthzTestGuard {
         _lock: tokio::sync::MutexGuard<'static, ()>,
     }
@@ -2277,6 +3665,7 @@ mod tests {
                     stt,
                     oai,
                     decision,
+                    relay: Arc::new(|_| Box::pin(async { anyhow::bail!("not used") })),
                 }))
             })
         });
@@ -2287,6 +3676,7 @@ mod tests {
             fake_tts(),
             fake_stt(),
             Some(local_decision),
+            None,
             Some(rooms),
             None,
         )
@@ -2596,7 +3986,7 @@ mod tests {
             "--B\r\n",
             "Content-Disposition: form-data; name=\"model\"\r\n",
             "\r\n",
-            "whisper-1\r\n",
+            "stt-model\r\n",
             "--B--\r\n",
         )
         .as_bytes();
@@ -2615,7 +4005,7 @@ mod tests {
             .iter()
             .find(|p| p.name == "model")
             .expect("model part");
-        assert_eq!(model.bytes, b"whisper-1");
+        assert_eq!(model.bytes, b"stt-model");
     }
 
     /// Binary audio must survive verbatim — including bytes that look like
@@ -2639,7 +4029,7 @@ mod tests {
     async fn audio_speech_returns_the_synthesized_bytes() {
         let _authz = authz_test().await;
         let server = start_test_server(fake_call_ok(), fake_models()).await;
-        let payload = json!({"model": "tts-1", "voice": "alloy", "input": "hi"}).to_string();
+        let payload = json!({"model": "tts-model", "voice": "alloy", "input": "hi"}).to_string();
         let raw = send_request(
             server.addr(),
             &format!(
@@ -2664,7 +4054,7 @@ mod tests {
     async fn audio_speech_rejects_a_request_with_no_input() {
         let _authz = authz_test().await;
         let server = start_test_server(fake_call_ok(), fake_models()).await;
-        let payload = json!({"model": "tts-1", "input": "   "}).to_string();
+        let payload = json!({"model": "tts-model", "input": "   "}).to_string();
         let raw = send_request(
             server.addr(),
             &format!(
@@ -2693,7 +4083,7 @@ mod tests {
             "--B\r\n",
             "Content-Disposition: form-data; name=\"model\"\r\n",
             "\r\n",
-            "whisper-1\r\n",
+            "stt-model\r\n",
             "--B--\r\n",
         );
         let raw = send_request(
@@ -2710,7 +4100,7 @@ mod tests {
         let json: Value = serde_json::from_slice(payload).expect("json body");
         // fake_stt echoes model|filename|bytes, so this asserts all three
         // survived the parse in one go.
-        assert_eq!(json["text"], "whisper-1|clip.wav|RIFF");
+        assert_eq!(json["text"], "stt-model|clip.wav|RIFF");
     }
 
     #[tokio::test]
@@ -3178,6 +4568,7 @@ mod tests {
             fake_stt(),
             None,
             None,
+            None,
             Some(Arc::new(move || allowed.clone())),
         )
         .await
@@ -3205,7 +4596,7 @@ mod tests {
         for line in [
             "Access-Control-Allow-Origin: https://app.example.com",
             "Vary: Origin",
-            "Access-Control-Allow-Methods: GET, POST, OPTIONS",
+            "Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS",
             "Access-Control-Allow-Headers: authorization, x-stainless-os",
             "Access-Control-Allow-Private-Network: true",
         ] {

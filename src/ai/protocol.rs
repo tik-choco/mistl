@@ -65,8 +65,8 @@
 //! wire bytes:
 //!
 //! ```text
-//! {"v":1,"type":"provider_hello","models":["gpt-4o"]}
-//! {"v":1,"type":"llm_request","id":"a1","messages":[{"role":"user","content":"hi"}],"model":"gpt-4o"}
+//! {"v":1,"type":"provider_hello","models":["chat-model"]}
+//! {"v":1,"type":"llm_request","id":"a1","messages":[{"role":"user","content":"hi"}],"model":"chat-model"}
 //! {"v":1,"type":"llm_response_chunk","id":"a1","delta":"Hello","seq":0}
 //! ```
 
@@ -939,14 +939,14 @@ mod tests {
     #[test]
     fn encode_provider_hello_with_models() {
         let bytes = encode(&ProtocolMessage::ProviderHello {
-            models: Some(vec!["gpt-4o".to_string()]),
+            models: Some(vec!["chat-model".to_string()]),
             services: None,
             voices: None,
         });
         let v = parsed(&bytes);
         assert_eq!(v["v"], json!(1));
         assert_eq!(v["type"], json!("provider_hello"));
-        assert_eq!(v["models"], json!(["gpt-4o"]));
+        assert_eq!(v["models"], json!(["chat-model"]));
         assert_eq!(
             keys(&bytes),
             BTreeSet::from(["v".into(), "type".into(), "models".into()])
@@ -1020,7 +1020,7 @@ mod tests {
                 role: "user".into(),
                 content: "hi".into(),
             }],
-            model: Some("gpt-4o".into()),
+            model: Some("chat-model".into()),
         });
         assert_eq!(
             keys(&bytes),
@@ -1230,7 +1230,7 @@ mod tests {
             data: "AAAA".into(),
             last: false,
             mime: "audio/wav".into(),
-            model: Some("whisper".into()),
+            model: Some("stt-model".into()),
             file_name: Some("clip.wav".into()),
         });
         assert_eq!(
@@ -1324,11 +1324,11 @@ mod tests {
 
     #[test]
     fn decode_doc_example_provider_hello() {
-        let bytes = br#"{"v":1,"type":"provider_hello","models":["gpt-4o"]}"#;
+        let bytes = br#"{"v":1,"type":"provider_hello","models":["chat-model"]}"#;
         assert_eq!(
             decode(bytes),
             Some(ProtocolMessage::ProviderHello {
-                models: Some(vec!["gpt-4o".to_string()]),
+                models: Some(vec!["chat-model".to_string()]),
                 services: None,
                 voices: None,
             })
@@ -1338,11 +1338,11 @@ mod tests {
     #[test]
     fn decode_provider_hello_with_services() {
         let bytes =
-            br#"{"v":1,"type":"provider_hello","models":["gpt-4o"],"services":["chat","tts"]}"#;
+            br#"{"v":1,"type":"provider_hello","models":["chat-model"],"services":["chat","tts"]}"#;
         assert_eq!(
             decode(bytes),
             Some(ProtocolMessage::ProviderHello {
-                models: Some(vec!["gpt-4o".to_string()]),
+                models: Some(vec!["chat-model".to_string()]),
                 services: Some(vec!["chat".to_string(), "tts".to_string()]),
                 voices: None,
             })
@@ -1364,7 +1364,7 @@ mod tests {
 
     #[test]
     fn decode_doc_example_llm_request() {
-        let bytes = br#"{"v":1,"type":"llm_request","id":"a1","messages":[{"role":"user","content":"hi"}],"model":"gpt-4o"}"#;
+        let bytes = br#"{"v":1,"type":"llm_request","id":"a1","messages":[{"role":"user","content":"hi"}],"model":"chat-model"}"#;
         assert_eq!(
             decode(bytes),
             Some(ProtocolMessage::LlmRequest {
@@ -1378,7 +1378,7 @@ mod tests {
                     role: "user".into(),
                     content: "hi".into()
                 }],
-                model: Some("gpt-4o".into()),
+                model: Some("chat-model".into()),
             })
         );
     }
@@ -1520,7 +1520,7 @@ mod tests {
                     content: "reply".into(),
                 },
             ],
-            model: Some("gpt-4o".into()),
+            model: Some("chat-model".into()),
         });
         assert_roundtrip(ProtocolMessage::LlmRequest {
             reasoning_effort: None,
@@ -1571,7 +1571,7 @@ mod tests {
         assert_roundtrip(ProtocolMessage::TtsRequest {
             id: "id1".into(),
             text: "speak this".into(),
-            model: Some("tts-1".into()),
+            model: Some("tts-model".into()),
             voice: Some("alloy".into()),
             lang: Some("en-US".into()),
             speed: None,
@@ -1599,7 +1599,7 @@ mod tests {
             data: "AAAA".into(),
             last: true,
             mime: "audio/wav".into(),
-            model: Some("whisper-1".into()),
+            model: Some("stt-model".into()),
             file_name: Some("input.wav".into()),
         });
         assert_roundtrip(ProtocolMessage::SttRequest {
@@ -1729,11 +1729,12 @@ mod tests {
         // `models` follows the same element-wise filtering rule as
         // `services`: non-string *and* empty-string elements are dropped,
         // not just non-string ones.
-        let bytes = br#"{"v":1,"type":"provider_hello","models":["gpt-4o",42,null,"","claude"]}"#;
+        let bytes =
+            br#"{"v":1,"type":"provider_hello","models":["chat-model",42,null,"","other-model"]}"#;
         assert_eq!(
             decode(bytes),
             Some(ProtocolMessage::ProviderHello {
-                models: Some(vec!["gpt-4o".to_string(), "claude".to_string()]),
+                models: Some(vec!["chat-model".to_string(), "other-model".to_string()]),
                 services: None,
                 voices: None,
             })
@@ -1966,14 +1967,14 @@ mod tests {
 
     #[test]
     fn old_message_without_tool_fields_decodes_identically() {
-        let old = br#"{"v":1,"type":"llm_request","id":"a1","messages":[{"role":"user","content":"hi"}],"model":"gpt-4o"}"#;
+        let old = br#"{"v":1,"type":"llm_request","id":"a1","messages":[{"role":"user","content":"hi"}],"model":"chat-model"}"#;
         assert_eq!(
             decode(old),
             Some(ProtocolMessage::LlmRequest {
                 reasoning_effort: None,
                 id: "a1".into(),
                 messages: vec![ChatMessage::new("user", "hi")],
-                model: Some("gpt-4o".into()),
+                model: Some("chat-model".into()),
                 tools: None,
                 tool_choice: None,
             })
@@ -1995,7 +1996,7 @@ mod tests {
             reasoning_effort: None,
             id: "a1".into(),
             messages: vec![ChatMessage::new("user", "hi")],
-            model: Some("gpt-4o".into()),
+            model: Some("chat-model".into()),
             tools: None,
             tool_choice: None,
         });
@@ -2005,7 +2006,7 @@ mod tests {
         assert_eq!(
             value,
             serde_json::json!({"v":1,"type":"llm_request","id":"a1",
-                "messages":[{"role":"user","content":"hi"}],"model":"gpt-4o"})
+                "messages":[{"role":"user","content":"hi"}],"model":"chat-model"})
         );
         let done = String::from_utf8(encode(&ProtocolMessage::LlmResponseDone {
             id: "a1".into(),

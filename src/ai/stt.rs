@@ -32,7 +32,7 @@ use crate::config::AiProviderConfig;
 /// upstream model to transcribe with.
 #[derive(Debug, Clone)]
 pub struct SttParams {
-    /// Upstream STT model id (e.g. "whisper-1").
+    /// Upstream STT model id (e.g. "stt-model").
     pub model: String,
     /// Raw audio bytes (already base64-decoded and reassembled from the
     /// wire's chunked `stt_request`).
@@ -150,7 +150,7 @@ mod tests {
 
     fn params(audio: &[u8]) -> SttParams {
         SttParams {
-            model: "whisper-1".to_string(),
+            model: "stt-model".to_string(),
             audio: audio.to_vec(),
             mime: "audio/wav".to_string(),
             file_name: None,

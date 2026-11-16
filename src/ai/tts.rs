@@ -20,9 +20,9 @@
 //! - The response body is treated as opaque audio bytes (no SSE/JSON
 //!   parsing -- OpenAI's `/audio/speech` returns the raw audio, not JSON).
 //!
-//! Long input is *not* chunked here: OpenAI's documented `/audio/speech`
-//! input limit is 4096 characters, and `synthesize` simply errors when
-//! `req.input` exceeds that. Splitting long articles into multiple
+//! Long input is not chunked here: `synthesize` accepts up to 10000
+//! characters and leaves tighter backend limits to the upstream.
+//! Splitting long articles into multiple
 //! synthesis calls (and stitching the resulting audio) is left to the
 //! caller -- tracked as a Wave 2 concern for the `tts` transform, not
 //! solved here.
@@ -32,15 +32,15 @@ use serde_json::{Value, json};
 
 use crate::config::AiProviderConfig;
 
-/// OpenAI's documented input character limit for `/v1/audio/speech`.
-pub const MAX_INPUT_CHARS: usize = 4096;
+/// Local input character limit; upstreams may impose a tighter limit.
+pub const MAX_INPUT_CHARS: usize = 10000;
 
 /// One text-to-speech request.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TtsParams {
-    /// Upstream TTS model id (e.g. "tts-1", "gpt-4o-mini-tts").
+    /// Upstream TTS model id (e.g. "tts-model", "speech-model").
     pub model: String,
-    /// Voice id (upstream-specific, e.g. "alloy").
+    /// Voice id (upstream-specific, e.g. "alloy"); empty is omitted.
     pub voice: String,
     /// Text to synthesize. Must be non-empty and at most
     /// [`MAX_INPUT_CHARS`] characters.
@@ -50,6 +50,10 @@ pub struct TtsParams {
     pub format: Option<String>,
     /// Playback speed multiplier; omitted from the request when `None`.
     pub speed: Option<f64>,
+    /// Other top-level request fields passed through verbatim to an HTTP
+    /// upstream (tc-ai-api `keep_alive`, vendor-specific options, `stream_format`, ...).
+    /// Never carried over the wire (`tts_request` is fixed by mistai v1).
+    pub extra: serde_json::Map<String, Value>,
 }
 
 /// Synthesized audio, ready for `store.put` CID'ing by the caller (see the
@@ -80,7 +84,7 @@ fn build_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .no_proxy()
         .connect_timeout(std::time::Duration::from_secs(10))
-        .timeout(std::time::Duration::from_secs(120))
+        .timeout(std::time::Duration::from_secs(600))
         .build()
         .context("ai: building TTS upstream HTTP client")
 }
@@ -91,9 +95,6 @@ fn build_client() -> Result<reqwest::Client> {
 fn validate(req: &TtsParams) -> Result<String> {
     if req.model.trim().is_empty() {
         bail!("ai: tts requires a model");
-    }
-    if req.voice.trim().is_empty() {
-        bail!("ai: tts requires a voice");
     }
     if req.input.is_empty() {
         bail!("ai: tts input must not be empty");
@@ -112,7 +113,12 @@ fn validate(req: &TtsParams) -> Result<String> {
     {
         bail!("ai: tts speed must be a finite number between 0.25 and 4.0");
     }
-    Ok(req.format.as_deref().unwrap_or("mp3").to_string())
+    Ok(req
+        .format
+        .as_deref()
+        .or_else(|| req.extra.get("response_format").and_then(Value::as_str))
+        .unwrap_or("mp3")
+        .to_string())
 }
 
 /// Builds the JSON request body sent to `/audio/speech`. Pure (no I/O) so
@@ -121,9 +127,24 @@ fn build_body(req: &TtsParams, format: &str) -> Value {
     let mut body = json!({
         "model": req.model,
         "input": req.input,
-        "voice": req.voice,
         "response_format": format,
     });
+    if !req.voice.is_empty() {
+        body["voice"] = json!(req.voice);
+    }
+    for (key, value) in &req.extra {
+        if !matches!(
+            key.as_str(),
+            "model" | "input" | "voice" | "response_format" | "speed"
+        ) {
+            body[key] = value.clone();
+        }
+    }
+    if req.format.is_none()
+        && let Some(value) = req.extra.get("response_format")
+    {
+        body["response_format"] = value.clone();
+    }
     if let Some(speed) = req.speed {
         body["speed"] = json!(speed);
     }
@@ -212,11 +233,12 @@ mod tests {
 
     fn params(input: &str) -> TtsParams {
         TtsParams {
-            model: "tts-1".to_string(),
+            model: "tts-model".to_string(),
             voice: "alloy".to_string(),
             input: input.to_string(),
             format: None,
             speed: None,
+            extra: Default::default(),
         }
     }
 
@@ -246,7 +268,7 @@ mod tests {
         let err = validate(&params(&long_input)).expect_err("over-limit input should error");
         let msg = err.to_string();
         assert!(
-            msg.contains("4096"),
+            msg.contains("10000"),
             "error should mention the limit: {msg}"
         );
     }
@@ -265,14 +287,43 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_blank_model_or_voice() {
+    fn validate_rejects_blank_model_and_accepts_empty_voice() {
         let mut req = params("hello");
         req.model = "  ".to_string();
         assert!(validate(&req).is_err());
 
         let mut req = params("hello");
         req.voice = "".to_string();
-        assert!(validate(&req).is_err());
+        let format = validate(&req).unwrap();
+        assert!(build_body(&req, &format).get("voice").is_none());
+    }
+
+    #[test]
+    fn extras_preserve_known_fields_and_pass_through_extensions() {
+        let mut req = params("hello");
+        req.extra = json!({"model":"other", "input":"other", "voice":"other", "speed":2,
+            "response_format":"wav", "keep_alive":"10m", "vendor_options":{"seed":7}, "stream_format":"sse"})
+            .as_object().unwrap().clone();
+        let body = build_body(&req, &validate(&req).unwrap());
+        assert_eq!(body["model"], "tts-model");
+        assert_eq!(body["input"], "hello");
+        assert_eq!(body["voice"], "alloy");
+        assert!(body.get("speed").is_none());
+        assert_eq!(body["response_format"], "wav");
+        assert_eq!(body["vendor_options"]["seed"], 7);
+        assert_eq!(body["keep_alive"], "10m");
+        assert_eq!(body["stream_format"], "sse");
+        req.voice.clear();
+        assert!(
+            build_body(&req, &validate(&req).unwrap())
+                .get("voice")
+                .is_none()
+        );
+        req.format = Some("opus".into());
+        assert_eq!(
+            build_body(&req, &validate(&req).unwrap())["response_format"],
+            "opus"
+        );
     }
 
     #[test]
@@ -280,7 +331,7 @@ mod tests {
         let mut req = params("read this aloud");
         let format = validate(&req).unwrap();
         let body = build_body(&req, &format);
-        assert_eq!(body["model"], json!("tts-1"));
+        assert_eq!(body["model"], json!("tts-model"));
         assert_eq!(body["voice"], json!("alloy"));
         assert_eq!(body["input"], json!("read this aloud"));
         assert_eq!(body["response_format"], json!("mp3"));
