@@ -419,6 +419,7 @@ impl Agent {
         let text = self.pending_shell.prepend(text);
         self.messages.push(Message::user(text));
 
+        let mut repeats = RepeatGuard::default();
         for _ in 0..self.cfg.max_steps {
             let turn = loop {
                 let specs = if self.mode == ToolMode::Native {
@@ -472,8 +473,17 @@ impl Agent {
 
             // (call id, title, output); stops early if the turn is cancelled.
             let mut results: Vec<(String, String, ToolOutput)> = Vec::new();
+            let mut stuck = false;
             for call in &calls {
-                let (title, out) = self.run_call(call, token).await;
+                let (title, mut out) = self.run_call(call, token).await;
+                match repeats.check(&title, &out.text) {
+                    Repeat::New => {}
+                    Repeat::Warn(n) => out.text.push_str(&format!(
+                        "
+[agent: this exact call returned this exact result {n} times in a row. Do not repeat it in this turn: use a command that waits (for 3D jobs, `ai 3d wait <id>`), or report the current state to the user.]"
+                    )),
+                    Repeat::Stop => stuck = true,
+                }
                 results.push((call.id.clone(), title, out));
                 if token.is_cancelled() {
                     break;
@@ -502,6 +512,12 @@ impl Agent {
 
             if token.is_cancelled() {
                 self.send(AgentEvent::Info("cancelled".into()));
+                return;
+            }
+            if stuck {
+                self.send(AgentEvent::Info(
+                    "stopped: the agent kept repeating a call that returned the same result; send another message to continue".into(),
+                ));
                 return;
             }
         }
@@ -654,6 +670,46 @@ impl Agent {
                 }
                 .into(),
             )),
+        }
+    }
+}
+
+/// Consecutive identical tool results (same call title and output) within one
+/// turn, e.g. a model polling a job status in a tight loop.
+#[derive(Default)]
+struct RepeatGuard {
+    last: Option<(String, String)>,
+    count: usize,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Repeat {
+    New,
+    /// The n-th identical result in a row: tell the model to stop.
+    Warn(usize),
+    /// Still repeating after the warning: end the turn.
+    Stop,
+}
+
+impl RepeatGuard {
+    const WARN_AT: usize = 3;
+    const STOP_AT: usize = 6;
+
+    fn check(&mut self, title: &str, output: &str) -> Repeat {
+        let same = self
+            .last
+            .as_ref()
+            .is_some_and(|(t, o)| t == title && o == output);
+        if same {
+            self.count += 1;
+        } else {
+            self.last = Some((title.to_string(), output.to_string()));
+            self.count = 1;
+        }
+        match self.count {
+            n if n >= Self::STOP_AT => Repeat::Stop,
+            n if n >= Self::WARN_AT => Repeat::Warn(n),
+            _ => Repeat::New,
         }
     }
 }
@@ -900,6 +956,22 @@ mod tests {
         assert_eq!(agent.user_requests, ["  original request  "]);
         agent.clear();
         assert!(agent.user_requests.is_empty());
+    }
+
+    #[test]
+    fn repeat_guard_warns_then_stops_on_identical_results() {
+        let mut guard = RepeatGuard::default();
+        assert_eq!(guard.check("status", "in_progress"), Repeat::New);
+        assert_eq!(guard.check("status", "in_progress"), Repeat::New);
+        assert_eq!(guard.check("status", "in_progress"), Repeat::Warn(3));
+        // A different result resets the streak.
+        assert_eq!(guard.check("status", "completed"), Repeat::New);
+        assert_eq!(guard.check("other", "completed"), Repeat::New);
+        for _ in 0..4 {
+            guard.check("status", "x");
+        }
+        assert_eq!(guard.check("status", "x"), Repeat::Warn(5));
+        assert_eq!(guard.check("status", "x"), Repeat::Stop);
     }
 
     #[test]

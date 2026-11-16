@@ -24,6 +24,8 @@ use crate::agent::types::{
 pub const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 /// Ticks (~100ms each) a footer hint stays visible.
 const HINT_TICKS: u64 = 30;
+/// A second Ctrl+C within this many ticks (100 ms each) quits.
+const QUIT_CONFIRM_TICKS: u64 = 20;
 const MAX_LIVE_OUTPUT: usize = 64 * 1024;
 
 pub const EFFORTS: [&str; 7] = [
@@ -222,6 +224,8 @@ pub struct App {
     pub approvals: VecDeque<PendingApproval>,
     pub tick: u64,
     pub quit: bool,
+    /// Tick of an idle Ctrl+C that armed quitting; a second one quits.
+    quit_armed: Option<u64>,
     pub events_closed: bool,
     pub hint: Option<(String, u64)>,
     history: Vec<String>,
@@ -249,7 +253,7 @@ Keys:
   Ctrl+O           expand/collapse tool output
   Up/Down          input history (single-line input)
   Ctrl+U           clear input
-  Ctrl+C           cancel turn / quit
+  Ctrl+C           cancel turn / copy selection / clear input; twice to quit
   Ctrl+D           quit (empty input)
   /                command completions: Up/Down select, Tab complete,
                    Enter run (or complete a partial command), Esc hide
@@ -302,6 +306,7 @@ impl App {
             approvals: VecDeque::new(),
             tick: 0,
             quit: false,
+            quit_armed: None,
             events_closed: false,
             hint: None,
             history: Vec::new(),
@@ -917,6 +922,31 @@ impl App {
         }
     }
 
+    /// Ctrl+C never quits on a single press: it cancels a running turn,
+    /// copies a selection, clears the input, and only then arms quitting so
+    /// that a second press within [`QUIT_CONFIRM_TICKS`] exits.
+    fn on_ctrl_c(&mut self) {
+        if self.busy || self.fetching {
+            self.effects.push(Effect::CancelTurn);
+        } else if self.selection.is_some() {
+            let text = self.selected_text();
+            self.clear_selection();
+            if !text.is_empty() {
+                self.effects.push(Effect::Copy(text));
+            }
+        } else if !self.input.is_empty() {
+            self.input.clear();
+        } else if self
+            .quit_armed
+            .is_some_and(|t| self.tick.wrapping_sub(t) <= QUIT_CONFIRM_TICKS)
+        {
+            self.quit = true;
+        } else {
+            self.quit_armed = Some(self.tick);
+            self.set_hint("Press Ctrl+C again to quit (or /quit).");
+        }
+    }
+
     fn on_input_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
@@ -924,13 +954,7 @@ impl App {
         let page = self.last_height.saturating_sub(1).max(1);
 
         match key.code {
-            KeyCode::Char('c') if ctrl => {
-                if self.busy || self.fetching {
-                    self.effects.push(Effect::CancelTurn);
-                } else {
-                    self.quit = true;
-                }
-            }
+            KeyCode::Char('c') if ctrl => self.on_ctrl_c(),
             KeyCode::Char('d') if ctrl => {
                 if self.input.is_empty() {
                     self.quit = true;
@@ -1622,6 +1646,32 @@ mod tests {
         press(&mut app, KeyCode::Esc);
         assert!(app.take_effects().is_empty());
         assert!(!app.modal_open());
+    }
+
+    #[test]
+    fn ctrl_c_clears_input_then_needs_a_second_press_to_quit() {
+        let ctrl_c = |app: &mut App| {
+            app.on_key(key(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL,
+                KeyEventKind::Press,
+            ))
+        };
+        let mut app = App::new(&info());
+        app.input.set("draft");
+        ctrl_c(&mut app);
+        assert!(app.input.is_empty() && !app.quit);
+        ctrl_c(&mut app);
+        assert!(!app.quit);
+        assert!(app.hint.as_ref().is_some_and(|(h, _)| h.contains("again")));
+        // The confirmation window expires.
+        for _ in 0..=QUIT_CONFIRM_TICKS {
+            app.on_tick();
+        }
+        ctrl_c(&mut app);
+        assert!(!app.quit);
+        ctrl_c(&mut app);
+        assert!(app.quit);
     }
 
     #[test]

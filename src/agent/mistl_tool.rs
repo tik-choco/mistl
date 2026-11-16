@@ -393,7 +393,7 @@ fn long_running(args: &[String]) -> bool {
         .collect();
     matches!(
         words.as_slice(),
-        ["ai", "chat" | "speech" | "transcribe", ..] | ["ai", "3d", "generate" | "get"]
+        ["ai", "chat" | "speech" | "transcribe", ..] | ["ai", "3d", "generate" | "get" | "wait"]
     )
 }
 
@@ -700,6 +700,7 @@ mod tests {
             "ai transcribe a.wav",
             "ai 3d generate --image a.png --model m",
             "ai 3d get gen3d_1 -o a.glb",
+            "ai 3d wait gen3d_1 --timeout 300",
         ] {
             assert!(long_running(&args(long)), "{long}");
         }

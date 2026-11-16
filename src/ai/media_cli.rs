@@ -1,6 +1,7 @@
 //! CLI client for the local AI API's audio and 3D routes.
 
 use std::collections::HashSet;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -103,6 +104,23 @@ pub enum ThreeDAction {
         #[arg(long)]
         room: Option<String>,
     },
+    /// Wait for a 3D generation job to finish (and optionally save it)
+    Wait {
+        /// Generation id
+        id: String,
+        /// Save the completed asset to this file
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Maximum waiting time in seconds
+        #[arg(long, default_value_t = 300)]
+        timeout: u64,
+        /// Route through this room
+        #[arg(long)]
+        room: Option<String>,
+        /// Replace an existing output file
+        #[arg(long)]
+        force: bool,
+    },
     /// Download a completed 3D asset
     Get {
         /// Generation id
@@ -180,6 +198,19 @@ fn validate_action(action: &Action) -> Result<()> {
         }
         Action::ThreeD(ThreeDAction::Get { output, force, .. }) => {
             check_output(output, *force)?;
+        }
+        Action::ThreeD(ThreeDAction::Wait {
+            output,
+            timeout,
+            force,
+            ..
+        }) => {
+            if *timeout == 0 {
+                bail!("timeout must be greater than zero");
+            }
+            if let Some(path) = output {
+                check_output(path, *force)?;
+            }
         }
         _ => {}
     }
@@ -529,6 +560,43 @@ async fn run_async(action: Action, listen: &str) -> Result<()> {
 }
 
 async fn run_3d(client: &reqwest::Client, listen: &str, action: ThreeDAction) -> Result<()> {
+    run_3d_with_output(
+        client,
+        listen,
+        action,
+        &mut std::io::stdout(),
+        &mut std::io::stderr(),
+    )
+    .await
+}
+
+async fn poll_3d_job(
+    client: &reqwest::Client,
+    base: &str,
+    path: &str,
+    job: &mut Value,
+) -> Result<()> {
+    let mut delay = Duration::from_secs(2);
+    loop {
+        match job_status(job)? {
+            JobStatus::Completed => return Ok(()),
+            JobStatus::Failed(reason) => bail!("3D generation failed: {reason}"),
+            JobStatus::Pending => {
+                tokio::time::sleep(delay).await;
+                *job = response_json(client.get(format!("{base}{path}")).send().await?).await?;
+                delay = (delay * 2).min(Duration::from_secs(10));
+            }
+        }
+    }
+}
+
+async fn run_3d_with_output(
+    client: &reqwest::Client,
+    listen: &str,
+    action: ThreeDAction,
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+) -> Result<()> {
     match action {
         ThreeDAction::Generate {
             image,
@@ -541,9 +609,10 @@ async fn run_3d(client: &reqwest::Client, listen: &str, action: ThreeDAction) ->
             force,
         } => {
             if no_wait && output.is_some() {
-                eprintln!(
+                writeln!(
+                    stderr,
                     "note: --output is ignored with --no-wait; use `mistl ai 3d get <id> -o <file>` when the job completes"
-                );
+                )?;
             }
             let base = room_prefix(listen, room.as_deref())?;
             let image = file_part(&image).await?;
@@ -561,20 +630,13 @@ async fn run_3d(client: &reqwest::Client, listen: &str, action: ThreeDAction) ->
                         .await?,
                 )
                 .await?;
-                let mut delay = Duration::from_secs(2);
-                loop {
-                    match job_status(&job)? {
-                        JobStatus::Completed => break,
-                        JobStatus::Failed(reason) => bail!("3D generation failed: {reason}"),
-                        JobStatus::Pending if no_wait => break,
-                        JobStatus::Pending => {
-                            let path = generation_path(job_id(&job)?)?;
-                            tokio::time::sleep(delay).await;
-                            job = response_json(client.get(format!("{base}{path}")).send().await?)
-                                .await?;
-                            delay = (delay * 2).min(Duration::from_secs(10));
-                        }
+                match job_status(&job)? {
+                    JobStatus::Failed(reason) => bail!("3D generation failed: {reason}"),
+                    JobStatus::Pending if !no_wait => {
+                        let path = generation_path(job_id(&job)?)?;
+                        poll_3d_job(client, &base, &path, &mut job).await?;
                     }
+                    _ => {}
                 }
                 Ok::<_, anyhow::Error>(job)
             })
@@ -588,22 +650,65 @@ async fn run_3d(client: &reqwest::Client, listen: &str, action: ThreeDAction) ->
                 let response = client.get(format!("{base}{route}/content")).send().await?;
                 write_response(response, &path, force).await?;
             }
-            println!("{result}");
+            writeln!(stdout, "{result}")?;
         }
         ThreeDAction::Ls { room } => {
             let base = room_prefix(listen, room.as_deref())?;
-            println!(
+            writeln!(
+                stdout,
                 "{}",
                 response_json(client.get(format!("{base}/3d/generations")).send().await?).await?
-            );
+            )?;
         }
         ThreeDAction::Status { id, room } => {
             let base = room_prefix(listen, room.as_deref())?;
             let path = generation_path(&id)?;
-            println!(
+            writeln!(
+                stdout,
                 "{}",
                 response_json(client.get(format!("{base}{path}")).send().await?).await?
-            );
+            )?;
+        }
+        ThreeDAction::Wait {
+            id,
+            output,
+            timeout,
+            room,
+            force,
+        } => {
+            let base = room_prefix(listen, room.as_deref())?;
+            let path = generation_path(&id)?;
+            let deadline = tokio::time::Instant::now()
+                .checked_add(Duration::from_secs(timeout))
+                .ok_or_else(|| anyhow!("3D wait timeout is too large"))?;
+            let mut latest = None;
+            let completed = match tokio::time::timeout_at(deadline, async {
+                latest =
+                    Some(response_json(client.get(format!("{base}{path}")).send().await?).await?);
+                poll_3d_job(client, &base, &path, latest.as_mut().unwrap()).await
+            })
+            .await
+            {
+                Ok(result) => {
+                    result?;
+                    true
+                }
+                Err(_) if latest.is_some() => false,
+                Err(_) => bail!("timed out after {timeout}s before receiving 3D job status"),
+            };
+            let job = latest.expect("a completed or pending wait has a job");
+            if completed && let Some(output) = output {
+                let response = client.get(format!("{base}{path}/content")).send().await?;
+                write_response(response, &output, force).await?;
+            }
+            writeln!(stdout, "{job}")?;
+            if !completed {
+                let status = job["status"].as_str().unwrap_or("pending");
+                writeln!(
+                    stderr,
+                    "note: job {id} is still {status} after {timeout}s; run `mistl ai 3d wait {id}` again"
+                )?;
+            }
         }
         ThreeDAction::Get {
             id,
@@ -614,15 +719,20 @@ async fn run_3d(client: &reqwest::Client, listen: &str, action: ThreeDAction) ->
             let base = room_prefix(listen, room.as_deref())?;
             let path = generation_path(&id)?;
             let response = client.get(format!("{base}{path}/content")).send().await?;
-            println!("{}", write_response(response, &output, force).await?);
+            writeln!(
+                stdout,
+                "{}",
+                write_response(response, &output, force).await?
+            )?;
         }
         ThreeDAction::Rm { id, room } => {
             let base = room_prefix(listen, room.as_deref())?;
             let path = generation_path(&id)?;
-            println!(
+            writeln!(
+                stdout,
                 "{}",
                 response_json(client.delete(format!("{base}{path}")).send().await?).await?
-            );
+            )?;
         }
     }
     Ok(())
@@ -842,12 +952,291 @@ mod tests {
             vec!["mistl", "ai", "3d", "ls", "--room", "r"],
             vec!["mistl", "ai", "3d", "status", "id", "--room", "r"],
             vec![
+                "mistl",
+                "ai",
+                "3d",
+                "wait",
+                "id",
+                "-o",
+                "x.glb",
+                "--timeout",
+                "30",
+                "--room",
+                "r",
+                "--force",
+            ],
+            vec![
                 "mistl", "ai", "3d", "get", "id", "-o", "x.glb", "--room", "r", "--force",
             ],
             vec!["mistl", "ai", "3d", "rm", "id", "--room", "r"],
         ] {
             assert!(crate::cli::Cli::try_parse_from(&args).is_ok(), "{args:?}");
         }
+    }
+
+    #[test]
+    fn wait_validates_timeout_and_output_before_starting_the_api() {
+        let id = "gen3d_0123456789abcdef0123456789abcdef";
+        let action = Action::ThreeD(ThreeDAction::Wait {
+            id: id.into(),
+            output: None,
+            timeout: 0,
+            room: None,
+            force: false,
+        });
+        let error = run(action, || panic!("must not start API")).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("timeout must be greater than zero")
+        );
+
+        let path = temp_path("glb");
+        std::fs::write(&path, b"original").unwrap();
+        let action = Action::ThreeD(ThreeDAction::Wait {
+            id: id.into(),
+            output: Some(path.clone()),
+            timeout: 1,
+            room: None,
+            force: false,
+        });
+        assert!(run(action, || panic!("must not start API")).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"original");
+        let action = Action::ThreeD(ThreeDAction::Wait {
+            id: id.into(),
+            output: Some(path.clone()),
+            timeout: 1,
+            room: None,
+            force: true,
+        });
+        validate_action(&action).unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn wait_completes_and_downloads_to_the_requested_room() {
+        const ID: &str = "gen3d_0123456789abcdef0123456789abcdef";
+        let output = temp_path("glb");
+        let (listen, server) = mock(vec![
+            (
+                200,
+                "application/json",
+                format!(r#"{{"id":"{ID}","status":"in_progress"}}"#).into_bytes(),
+            ),
+            (
+                200,
+                "application/json",
+                format!(r#"{{"id":"{ID}","status":"completed"}}"#).into_bytes(),
+            ),
+            (200, "model/gltf-binary", b"GLB bytes".to_vec()),
+        ])
+        .await;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        run_3d_with_output(
+            &reqwest::Client::builder().no_proxy().build().unwrap(),
+            &listen,
+            ThreeDAction::Wait {
+                id: ID.into(),
+                output: Some(output.clone()),
+                timeout: 8,
+                room: Some("team/one".into()),
+                force: false,
+            },
+            &mut stdout,
+            &mut stderr,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&stdout).unwrap()["status"],
+            "completed"
+        );
+        assert!(stderr.is_empty());
+        assert_eq!(tokio::fs::read(&output).await.unwrap(), b"GLB bytes");
+        let requests = server.await.unwrap();
+        let job_route = format!("GET /v1/rooms/team%2Fone/3d/generations/{ID}");
+        for request in &requests[..2] {
+            assert!(String::from_utf8_lossy(request).starts_with(&format!("{job_route} ")));
+        }
+        assert!(
+            String::from_utf8_lossy(&requests[2]).starts_with(&format!("{job_route}/content "))
+        );
+        tokio::fs::remove_file(output).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn wait_timeout_prints_the_latest_pending_job_and_succeeds() {
+        const ID: &str = "gen3d_0123456789abcdef0123456789abcdef";
+        let output = temp_path("glb");
+        let (listen, server) = mock(vec![
+            (
+                200,
+                "application/json",
+                format!(r#"{{"id":"{ID}","status":"queued"}}"#).into_bytes(),
+            ),
+            (
+                200,
+                "application/json",
+                format!(r#"{{"id":"{ID}","status":"in_progress"}}"#).into_bytes(),
+            ),
+        ])
+        .await;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        tokio::time::timeout(
+            Duration::from_secs(8),
+            run_3d_with_output(
+                &reqwest::Client::builder().no_proxy().build().unwrap(),
+                &listen,
+                ThreeDAction::Wait {
+                    id: ID.into(),
+                    output: Some(output.clone()),
+                    timeout: 3,
+                    room: None,
+                    force: false,
+                },
+                &mut stdout,
+                &mut stderr,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&stdout).unwrap()["status"],
+            "in_progress"
+        );
+        assert_eq!(
+            String::from_utf8(stderr).unwrap(),
+            format!(
+                "note: job {ID} is still in_progress after 3s; run `mistl ai 3d wait {ID}` again\n"
+            )
+        );
+        assert!(!output.exists());
+        assert_eq!(server.await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn wait_returns_the_failure_reason() {
+        const ID: &str = "gen3d_0123456789abcdef0123456789abcdef";
+        let (listen, server) = mock(vec![(
+            200,
+            "application/json",
+            br#"{"status":"failed","error":{"message":"out of memory"}}"#.to_vec(),
+        )])
+        .await;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let error = run_3d_with_output(
+            &reqwest::Client::builder().no_proxy().build().unwrap(),
+            &listen,
+            ThreeDAction::Wait {
+                id: ID.into(),
+                output: None,
+                timeout: 3,
+                room: None,
+                force: false,
+            },
+            &mut stdout,
+            &mut stderr,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), "3D generation failed: out of memory");
+        assert!(stdout.is_empty());
+        assert!(stderr.is_empty());
+        assert_eq!(server.await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn wait_timeout_covers_a_stalled_status_request() {
+        const ID: &str = "gen3d_0123456789abcdef0123456789abcdef";
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listen = listener.local_addr().unwrap().to_string();
+        let server = tokio::spawn(async move {
+            let (mut first, _) = listener.accept().await.unwrap();
+            let mut buffer = [0; 4096];
+            first.read(&mut buffer).await.unwrap();
+            let body = format!(r#"{{"id":"{ID}","status":"running"}}"#);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            first.write_all(response.as_bytes()).await.unwrap();
+            let (mut second, _) = listener.accept().await.unwrap();
+            second.read(&mut buffer).await.unwrap();
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        tokio::time::timeout(
+            Duration::from_secs(8),
+            run_3d_with_output(
+                &reqwest::Client::builder().no_proxy().build().unwrap(),
+                &listen,
+                ThreeDAction::Wait {
+                    id: ID.into(),
+                    output: None,
+                    timeout: 3,
+                    room: None,
+                    force: false,
+                },
+                &mut stdout,
+                &mut stderr,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&stdout).unwrap()["status"],
+            "running"
+        );
+        assert!(
+            String::from_utf8(stderr)
+                .unwrap()
+                .contains("still running after 3s")
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn wait_fails_if_no_status_arrives_before_the_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listen = listener.local_addr().unwrap().to_string();
+        let server = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_3d_with_output(
+                &reqwest::Client::builder().no_proxy().build().unwrap(),
+                &listen,
+                ThreeDAction::Wait {
+                    id: "gen3d_0123456789abcdef0123456789abcdef".into(),
+                    output: None,
+                    timeout: 1,
+                    room: None,
+                    force: false,
+                },
+                &mut stdout,
+                &mut stderr,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "timed out after 1s before receiving 3D job status"
+        );
+        assert!(stdout.is_empty());
+        assert!(stderr.is_empty());
+        server.abort();
     }
 
     #[tokio::test]

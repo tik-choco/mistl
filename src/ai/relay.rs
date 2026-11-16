@@ -312,11 +312,17 @@ impl AiService {
         }
         let jobs = self.relay_jobs.snapshot();
         if path == "/3d/generations" {
-            let mut routes: Vec<_> = jobs
-                .into_values()
-                .collect::<HashSet<_>>()
-                .into_iter()
-                .collect();
+            let mut routes: HashSet<_> = jobs.into_values().collect();
+            {
+                let rooms = self.rooms.read().expect("ai rooms lock");
+                routes.extend(
+                    rooms
+                        .iter()
+                        .filter(|(_, session)| !session.relay_jobs.snapshot().is_empty())
+                        .map(|(room, _)| Route::Room { room: room.clone() }),
+                );
+            }
+            let mut routes: Vec<_> = routes.into_iter().collect();
             // Stable order also makes duplicate ids resolve consistently.
             routes.sort_by_key(|route| format!("{route:?}"));
             let replies = join_all(routes.into_iter().map(|route| {
@@ -336,7 +342,17 @@ impl AiService {
         }
         let id = job_id(&path).expect("validated job path");
         // Jobs this daemon did not create (or forgot on restart) are unknown.
-        let Some(route) = jobs.get(id).cloned() else {
+        let route = jobs.get(id).cloned().or_else(|| {
+            let rooms = self.rooms.read().expect("ai rooms lock");
+            rooms.iter().find_map(|(room, session)| {
+                session
+                    .relay_jobs
+                    .snapshot()
+                    .contains_key(id)
+                    .then(|| Route::Room { room: room.clone() })
+            })
+        });
+        let Some(route) = route else {
             return Ok(not_found());
         };
         self.forward_route(route, request).await
@@ -975,6 +991,168 @@ mod tests {
             )["data"],
             json!([])
         );
+    }
+
+    #[tokio::test]
+    async fn unscoped_jobs_find_room_creations_and_respect_room_enablement() {
+        use base64::Engine as _;
+
+        let _guard = crate::authz::TEST_LOCK.lock().await;
+        let service = service(vec![AiProviderConfig {
+            id: "room".into(),
+            base_url: "mist-network://test".into(),
+            ..Default::default()
+        }]);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let send: super::super::SendFn = Arc::new(move |peer, message| {
+            tx.send((peer.to_string(), message)).unwrap();
+        });
+        let room = Arc::new(AiRoom {
+            relay_jobs: Default::default(),
+            relay_voices: Default::default(),
+            cache_lock: Mutex::new(()),
+            room: "test".into(),
+            node_id: "node".into(),
+            consumer: super::super::Consumer::new(send.clone()),
+            voice: super::super::voice_consumer::VoiceConsumer::new(send.clone()),
+            oai: oai_tunnel::TunnelConsumer::new(send.clone()),
+            send,
+            provider: RwLock::new(None),
+            handlers: Arc::new(tokio::sync::Semaphore::new(64)),
+            dropped_messages: Default::default(),
+        });
+        service
+            .rooms
+            .write()
+            .unwrap()
+            .insert("test".into(), room.clone());
+        assert!(room.consumer.handle_message(
+            "provider",
+            &ProtocolMessage::ProviderHello {
+                models: Some(vec!["3d-model".into()]),
+                services: Some(vec![protocol::SERVICE_OAI.into()]),
+                voices: None,
+            },
+        ));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let recorded = requests.clone();
+        let oai = room.oai.clone();
+        let task = tokio::spawn(async move {
+            while let Some((peer, message)) = rx.recv().await {
+                let ProtocolMessage::OaiRequest {
+                    id,
+                    method,
+                    path,
+                    last,
+                    ..
+                } = message
+                else {
+                    continue;
+                };
+                assert_eq!(peer, "provider");
+                assert!(last);
+                let method = method.unwrap();
+                let path = path.unwrap();
+                let body = if method == "GET" && path == "/3d/generations" {
+                    json!({"data":[{"id":ID,"status":"completed"}]})
+                } else {
+                    json!({"id":ID,"status":"completed"})
+                };
+                let status = if method == "POST" { 202 } else { 200 };
+                recorded.lock().unwrap().push((method, path));
+                oai.handle_message(
+                    &peer,
+                    &ProtocolMessage::OaiResponse {
+                        id,
+                        seq: 0,
+                        last: true,
+                        data: base64::engine::general_purpose::STANDARD
+                            .encode(serde_json::to_vec(&body).unwrap()),
+                        status: Some(status),
+                        content_type: Some("application/json".into()),
+                    },
+                );
+            }
+        });
+        let routes = service
+            .clone()
+            .api_room("test".into())
+            .await
+            .unwrap()
+            .unwrap();
+        let response = (routes.relay)(request(
+            "POST",
+            "/3d/generations",
+            Some(json!({"model":"3d-model","image":"a"})),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(response.status, 202);
+        assert!(service.relay_jobs.snapshot().is_empty());
+        assert_eq!(room.relay_jobs.snapshot().get(ID).unwrap(), "provider");
+
+        for (method, suffix) in [("GET", ""), ("GET", "/content?range=0-7"), ("DELETE", "")] {
+            let path = format!("/3d/generations/{ID}{suffix}");
+            let response = service
+                .clone()
+                .relay(request(method, &path, None))
+                .await
+                .unwrap();
+            assert_eq!(response.status, 200);
+            assert_eq!(value(response)["id"], ID);
+            assert_eq!(
+                requests.lock().unwrap().last().unwrap(),
+                &(method.into(), path)
+            );
+        }
+        for _ in 0..2 {
+            let response = service
+                .clone()
+                .relay(request("GET", "/3d/generations", None))
+                .await
+                .unwrap();
+            assert_eq!(value(response)["data"][0]["id"], ID);
+            // A route known at both levels must still be queried only once.
+            service.relay_jobs.remember(
+                &json_response(202, json!({"id":ID})),
+                Route::Room {
+                    room: "test".into(),
+                },
+            );
+        }
+        assert_eq!(requests.lock().unwrap().len(), 6);
+        for (method, suffix) in [("GET", ""), ("GET", "/content"), ("DELETE", "")] {
+            let response = service
+                .clone()
+                .relay(request(
+                    method,
+                    &format!("/3d/generations/{OTHER}{suffix}"),
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status, 404);
+        }
+
+        // Disable the API provider while the live room still remembers the job.
+        service.relay_jobs.0.lock().unwrap().clear();
+        let mut config = service.state.config();
+        config.ai.providers[0].enabled = false;
+        service.state.set_config(config);
+        assert!(
+            service
+                .clone()
+                .relay(request("GET", &format!("/3d/generations/{ID}"), None))
+                .await
+                .is_err()
+        );
+        let response = service
+            .relay(request("GET", "/3d/generations", None))
+            .await
+            .unwrap();
+        assert_eq!(value(response)["data"], json!([]));
+        assert_eq!(requests.lock().unwrap().len(), 6);
+        task.abort();
     }
 
     #[test]

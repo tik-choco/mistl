@@ -97,6 +97,7 @@ $ mistl ai transcribe audio.wav
 $ mistl ai 3d generate --image image.png -m 3d-model -o asset.glb --param seed=42
 $ mistl ai 3d ls
 $ mistl ai 3d status gen3d_0123456789abcdef0123456789abcdef
+$ mistl ai 3d wait gen3d_0123456789abcdef0123456789abcdef -o asset.glb
 $ mistl ai 3d get gen3d_0123456789abcdef0123456789abcdef -o asset.glb
 $ mistl ai 3d rm gen3d_0123456789abcdef0123456789abcdef
 $ mistl ai models
@@ -121,8 +122,13 @@ and waits up to 40 minutes by default. Use `--no-wait` to request background
 generation and return the job without polling, or `--timeout <seconds>` to
 change the wait. With `-o`, a completed asset is streamed to the specified
 file; without it, only the job JSON is printed. If `--no-wait` returns a pending
-job, download it later with `ai 3d get`. `ai speech`, `ai 3d generate -o` and
-`ai 3d get` require `--force` to replace an existing file. Uploads are limited
+job, use `ai 3d wait <id>` to wait up to 5 minutes by default, or set
+`--timeout <seconds>`. Add `-o <file>` to download the asset when it completes.
+If the wait times out while the job is pending, it prints the latest job JSON
+and exits successfully; run the command again to continue waiting. If no status
+arrives before the timeout, it returns an error instead. You can also download a
+completed job with `ai 3d get`. `ai speech`, `ai 3d generate -o`, `ai 3d wait -o`
+and `ai 3d get` require `--force` to replace an existing file. Uploads are limited
 to 20 MiB; transcription has a 10 MiB multipart body limit, including form
 overhead. Room relay limits can reduce the usable 3D image size after encoding.
 
@@ -265,7 +271,7 @@ terminal supports bypassing mouse capture (including Windows Terminal).
 | `Shift+Tab` | Cycle approval mode ask → auto → yolo |
 | `F2` | Toggle mouse capture (for selecting text) |
 | `Ctrl+O` | Expand/collapse tool output |
-| `Ctrl+C` | Cancel, or quit when idle |
+| `Ctrl+C` | Cancel the turn, copy the selection, or clear the input; press twice to quit |
 
 ### Sharing a tc-chat screen into VRChat
 
