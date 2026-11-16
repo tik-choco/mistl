@@ -98,6 +98,16 @@ never register automatically.
 per-user install, restarting the installed daemon if it was running. Self-update
 keeps that build until a newer release is published.
 
+`just install-ssh <alias>... [--start] [--release] [mistl install args]` does the
+same on other machines, addressed by ssh config alias. It probes each host's
+OS/arch; x86_64 Linux hosts are built through WSL on Windows (same requirements
+as `just release-linux`, output in `target/install-linux`), and targets this
+machine can't build (e.g. aarch64, macOS) get the newest GitHub release binary
+(prereleases included), checked against its `SHA256SUMS.txt`. `--release`
+uses a release binary for every host. The installed daemon is restarted if it was running; `--start` also
+starts it when it was not, since login autostart does not apply to headless
+servers.
+
 ## Verification
 
 ```console

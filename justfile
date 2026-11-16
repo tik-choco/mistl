@@ -92,6 +92,16 @@ release: fetch-mistlib fetch-mistlib-consensus
 install *args: _ensure-mistlib _ensure-mistlib-consensus
     node scripts/install.mjs {{args}}
 
+# Same as `install`, on other machines over SSH by ssh config alias:
+#   just install-ssh tc2 ki2-exp-1 [--start] [--release] [--no-autostart]
+# x86_64 Linux hosts are built through WSL (see release-linux); targets this
+# machine can't build get the newest GitHub release (betas included).
+# --start also starts a daemon that was not running; --release always uses a
+# release binary.
+# Install mistl on other machines over SSH (by ssh config alias)
+install-ssh +args: _ensure-mistlib _ensure-mistlib-consensus
+    node scripts/install-ssh.mjs {{args}}
+
 # Validate the current dependency checkout without updating it.
 verify: _ensure-mistlib _ensure-mistlib-consensus fmt-check lint test test-fetch-safety
 
