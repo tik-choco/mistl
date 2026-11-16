@@ -120,6 +120,47 @@ pub enum Safety {
     Blocked(String),
 }
 
+/// How state-changing (`Safety::Mutating`) tool calls are approved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ApprovalMode {
+    /// Ask the user for every state-changing call (default).
+    #[default]
+    Ask,
+    /// An independent safety guard (`crate::agent::safety`) decides: allow,
+    /// deny (returned to the model), or fall back to asking the user.
+    Auto,
+    /// Run every state-changing call without asking (`--yes`).
+    Yolo,
+}
+
+impl ApprovalMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::Auto => "auto",
+            Self::Yolo => "yolo",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "ask" => Some(Self::Ask),
+            "auto" => Some(Self::Auto),
+            "yolo" => Some(Self::Yolo),
+            _ => None,
+        }
+    }
+
+    /// Shift+Tab order: ask -> auto -> yolo -> ask.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Ask => Self::Auto,
+            Self::Auto => Self::Yolo,
+            Self::Yolo => Self::Ask,
+        }
+    }
+}
+
 /// Outcome of running one tool.
 #[derive(Debug, Clone)]
 pub struct ToolOutput {
@@ -160,6 +201,17 @@ pub enum AgentEvent {
         reason: String,
         reply: oneshot::Sender<Approval>,
     },
+    /// Auto mode decided a state-changing call without asking the user.
+    /// `allowed: false` means the call was refused and the refusal was
+    /// returned to the model.
+    AutoReview {
+        title: String,
+        allowed: bool,
+        reason: String,
+    },
+    /// The effective approval mode changed (slash command, Shift+Tab,
+    /// "always" answer, or auto mode pausing itself after repeated denials).
+    ApprovalModeChanged(ApprovalMode),
     /// Non-fatal notice (e.g. step limit reached).
     Info(String),
     /// The effective tool mode changed for this session.
@@ -193,6 +245,8 @@ pub enum UserCommand {
     SetEffort(Option<String>),
     /// List the model ids of mistl's local API (`GET /v1/models`).
     ListModels,
+    /// Session-only approval mode.
+    SetApprovalMode(ApprovalMode),
     Mistl(MistlOp),
     /// `!<command>` typed by the user: run it in the workspace shell without
     /// approval, stream it as a tool entry (ToolStart/ToolOutput/ToolEnd, then

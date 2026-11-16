@@ -5,6 +5,7 @@ mod llm;
 mod mistl_tool;
 mod process;
 mod prompt;
+mod safety;
 mod session;
 mod tools;
 mod tui;
@@ -15,7 +16,7 @@ use std::io::Write;
 
 use anyhow::Result;
 
-use crate::agent::types::{AgentEvent, Approval, ToolMode, UserCommand};
+use crate::agent::types::{AgentEvent, Approval, ApprovalMode, ToolMode, UserCommand};
 
 #[derive(clap::Args)]
 pub struct AgentArgs {
@@ -31,8 +32,17 @@ pub struct AgentArgs {
     /// Run state-changing tools without asking
     #[arg(long, short = 'y')]
     yes: bool,
+    /// Approval mode: ask, auto, or yolo
+    #[arg(long, value_parser = parse_approval_mode)]
+    approval: Option<ApprovalMode>,
+    /// Model for the auto-mode safety check (default: the agent's model)
+    #[arg(long)]
+    safety_model: Option<String>,
+    /// Safety-check API: auto (probe the decision API, else chat), chat, or decision
+    #[arg(long, value_parser = parse_safety_api)]
+    safety_api: Option<safety::SafetyApi>,
     /// Non-interactive: answer one prompt on stdout and exit (no TUI).
-    /// State-changing commands are refused unless --yes is given.
+    /// State-changing commands need auto approval or --yes.
     #[arg(long, short = 'p')]
     prompt: Option<String>,
     /// Print model ids from mistl's local API and exit
@@ -48,6 +58,25 @@ fn parse_tool_mode(s: &str) -> Result<ToolMode, String> {
     }
 }
 
+fn parse_approval_mode(s: &str) -> Result<ApprovalMode, String> {
+    ApprovalMode::parse(s).ok_or_else(|| "expected `ask`, `auto`, or `yolo`".into())
+}
+
+fn parse_safety_api(s: &str) -> Result<safety::SafetyApi, String> {
+    safety::SafetyApi::parse(s).ok_or_else(|| "expected `auto`, `chat`, or `decision`".into())
+}
+
+fn approval_mode(yes: bool, explicit: Option<ApprovalMode>) -> Result<ApprovalMode> {
+    if yes && explicit.is_some_and(|m| m != ApprovalMode::Yolo) {
+        anyhow::bail!("--yes conflicts with --approval ask or auto");
+    }
+    Ok(if yes {
+        ApprovalMode::Yolo
+    } else {
+        explicit.unwrap_or_default()
+    })
+}
+
 pub fn run(args: AgentArgs) -> Result<()> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -61,7 +90,9 @@ async fn run_async(cli: AgentArgs) -> Result<()> {
         model: cli.model.unwrap_or_default(),
         tool_mode: cli.tool_mode.unwrap_or(defaults.tool_mode),
         reasoning_effort: config::normalize_effort(cli.reasoning_effort),
-        auto_approve: cli.yes,
+        approval: approval_mode(cli.yes, cli.approval)?,
+        safety_model: cli.safety_model,
+        safety_api: cli.safety_api.unwrap_or_default(),
         ..defaults
     };
 
@@ -126,9 +157,18 @@ async fn headless(cfg: config::Config, ws: workspace::Workspace, prompt: String)
                     first_line(&output)
                 );
             }
-            AgentEvent::ApprovalRequest { title, reply, .. } => {
-                // auto_approve never reaches here; refuse without a terminal.
-                eprintln!("[refused] {title} (needs approval; re-run with --yes)");
+            AgentEvent::ApprovalRequest {
+                title,
+                reason,
+                reply,
+            } => {
+                // Auto mode only asks for what it will not allow by itself.
+                let hint = if reason.starts_with("auto mode:") {
+                    "run it yourself or re-run with --yes"
+                } else {
+                    "re-run with --approval auto or --yes"
+                };
+                eprintln!("[refused] {title} — {reason} (needs approval; {hint})");
                 let _ = reply.send(Approval::No);
             }
             AgentEvent::Info(m) => eprintln!("[info] {m}"),
@@ -144,6 +184,19 @@ async fn headless(cfg: config::Config, ws: workspace::Workspace, prompt: String)
                 failed = true;
             }
             AgentEvent::Models { .. } => {}
+            AgentEvent::AutoReview {
+                title,
+                allowed,
+                reason,
+            } => {
+                eprintln!(
+                    "[auto] {}: {title} — {reason}",
+                    if allowed { "allowed" } else { "denied" }
+                );
+            }
+            AgentEvent::ApprovalModeChanged(mode) => {
+                eprintln!("[info] approval: {}", mode.as_str())
+            }
             AgentEvent::TurnDone => break,
         }
     }
@@ -155,4 +208,51 @@ async fn headless(cfg: config::Config, ws: workspace::Workspace, prompt: String)
 
 fn first_line(s: &str) -> &str {
     s.lines().next().unwrap_or("")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Cli {
+        #[command(flatten)]
+        agent: AgentArgs,
+    }
+
+    #[test]
+    fn approval_flags_validate_alias_and_model() {
+        assert_eq!(approval_mode(false, None).unwrap(), ApprovalMode::Ask);
+        for mode in [ApprovalMode::Ask, ApprovalMode::Auto, ApprovalMode::Yolo] {
+            let args = Cli::try_parse_from([
+                "agent",
+                "--approval",
+                mode.as_str(),
+                "--safety-model",
+                "safety-model",
+            ])
+            .unwrap()
+            .agent;
+            assert_eq!(approval_mode(args.yes, args.approval).unwrap(), mode);
+            assert_eq!(args.safety_model.as_deref(), Some("safety-model"));
+        }
+        assert!(Cli::try_parse_from(["agent", "--approval", "invalid"]).is_err());
+        for alias in ["-y", "--yes"] {
+            let args = Cli::try_parse_from(["agent", alias]).unwrap().agent;
+            assert_eq!(
+                approval_mode(args.yes, args.approval).unwrap(),
+                ApprovalMode::Yolo
+            );
+            assert!(approval_mode(true, Some(ApprovalMode::Ask)).is_err());
+            assert!(approval_mode(true, Some(ApprovalMode::Auto)).is_err());
+            let args = Cli::try_parse_from(["agent", alias, "--approval", "yolo"])
+                .unwrap()
+                .agent;
+            assert_eq!(
+                approval_mode(args.yes, args.approval).unwrap(),
+                ApprovalMode::Yolo
+            );
+        }
+    }
 }

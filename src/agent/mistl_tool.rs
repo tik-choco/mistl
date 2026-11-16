@@ -208,6 +208,9 @@ const READ_ONLY: &[&[&str]] = &[
     &["ai", "status"],
     &["ai", "models"],
     &["ai", "chat"],
+    &["ai", "voices"],
+    &["ai", "3d", "ls"],
+    &["ai", "3d", "status"],
     &["sched", "ls"],
     &["sched", "logs"],
     &["sched", "next"],
@@ -704,6 +707,30 @@ mod tests {
             Safety::ReadOnly
         );
         assert_eq!(classify(&run(&["ai", "chat", "hi"])), Safety::ReadOnly);
+        for args in [
+            vec!["ai", "voices", "--room", "team"],
+            vec!["ai", "3d", "ls", "--room", "team"],
+            vec!["ai", "3d", "status", "gen3d_id"],
+        ] {
+            assert_eq!(classify(&run(&args)), Safety::ReadOnly, "{args:?}");
+        }
+        for args in [
+            vec!["ai", "speech", "hi", "-o", "speech.wav"],
+            vec!["ai", "transcribe", "audio.wav"],
+            vec![
+                "ai",
+                "3d",
+                "generate",
+                "--image",
+                "image.png",
+                "-m",
+                "3d-model",
+            ],
+            vec!["ai", "3d", "get", "gen3d_id", "-o", "asset.glb"],
+            vec!["ai", "3d", "rm", "gen3d_id"],
+        ] {
+            assert_eq!(classify(&run(&args)), Safety::Mutating, "{args:?}");
+        }
         assert_eq!(
             classify(&run(&["chat", "log", "room1", "-l", "5"])),
             Safety::ReadOnly

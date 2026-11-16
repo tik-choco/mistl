@@ -12,10 +12,11 @@ use crate::agent::config::{self, Config};
 use crate::agent::llm::{LlmClient, is_tools_unsupported};
 use crate::agent::mistl_tool;
 use crate::agent::prompt;
+use crate::agent::safety::{Guard, ReviewRequest, Verdict};
 use crate::agent::tools::{self, Toolbox};
 use crate::agent::types::{
-    AgentEvent, Approval, Message, MistlOp, Role, Safety, ToolCall, ToolMode, ToolOutput,
-    UserCommand,
+    AgentEvent, Approval, ApprovalMode, Message, MistlOp, Role, Safety, ToolCall, ToolMode,
+    ToolOutput, UserCommand,
 };
 use crate::agent::workspace::Workspace;
 
@@ -42,7 +43,9 @@ struct Agent {
     messages: Vec<Message>,
     mode: ToolMode,
     catalog: String,
-    auto_approve: bool,
+    approval: ApprovalMode,
+    guard: Guard,
+    user_requests: Vec<String>,
     endpoint_ready: bool,
     tx: mpsc::UnboundedSender<AgentEvent>,
     model_catalog: Option<CachedModels>,
@@ -101,6 +104,7 @@ fn prompt_history(messages: &[Message]) -> Vec<Message> {
             } else {
                 !first.starts_with("error:")
                     && !first.starts_with("refused:")
+                    && !first.starts_with("blocked by auto mode:")
                     && first != "cancelled"
                     && first != "the user declined to run this command"
             };
@@ -169,12 +173,20 @@ pub fn spawn(cfg: Config, workspace: Workspace) -> Result<AgentHandle> {
         messages: Vec::new(),
         mode: cfg.tool_mode,
         catalog: String::new(),
-        auto_approve: cfg.auto_approve,
+        approval: cfg.approval,
+        guard: Guard::new(
+            cfg.safety_model
+                .clone()
+                .unwrap_or_else(|| cfg.model.clone()),
+            cfg.reasoning_effort.clone(),
+        ),
+        user_requests: Vec::new(),
         endpoint_ready: false,
         tx: ev_tx,
         model_catalog: None,
         cfg,
     };
+    agent.guard.set_api(agent.cfg.safety_api);
     let cancel_slot = cancel.clone();
     tokio::spawn(async move {
         while let Some(cmd) = cmd_rx.recv().await {
@@ -190,12 +202,16 @@ pub fn spawn(cfg: Config, workspace: Workspace) -> Result<AgentHandle> {
                 UserCommand::SetModel(m) => {
                     agent.cfg.model = m.clone();
                     agent.llm.set_model(m.clone());
+                    if agent.cfg.safety_model.is_none() {
+                        agent.guard.set_model(m.clone());
+                    }
                     agent.send(AgentEvent::Info(format!("model: {m}")));
                 }
                 UserCommand::SetEffort(e) => {
                     let e = config::normalize_effort(e);
                     agent.cfg.reasoning_effort = e.clone();
                     agent.llm.set_reasoning_effort(e.clone());
+                    agent.guard.set_reasoning_effort(e.clone());
                     agent.send(AgentEvent::Info(format!(
                         "reasoning effort: {}",
                         e.as_deref().unwrap_or("default")
@@ -210,6 +226,7 @@ pub fn spawn(cfg: Config, workspace: Workspace) -> Result<AgentHandle> {
                     agent.shell(command, &token).await;
                     agent.send(AgentEvent::TurnDone);
                 }
+                UserCommand::SetApprovalMode(mode) => agent.set_approval_mode(mode),
             }
         }
         agent.toolbox.processes.stop_all();
@@ -242,6 +259,14 @@ impl Agent {
     fn clear(&mut self) {
         self.messages.truncate(1);
         self.pending_shell.clear();
+        self.user_requests.clear();
+        self.guard.reset();
+    }
+
+    fn set_approval_mode(&mut self, mode: ApprovalMode) {
+        self.approval = mode;
+        self.guard.reset();
+        self.send(AgentEvent::ApprovalModeChanged(mode));
     }
 
     async fn shell(&mut self, command: String, token: &CancellationToken) {
@@ -287,6 +312,7 @@ impl Agent {
         let listen = self.toolbox.mistl.serve_start(token).await?;
         let url = format!("http://{listen}/v1");
         self.send(AgentEvent::Info(format!("AI network: via mistl ({url})")));
+        self.guard.set_base_url(url.clone());
         self.llm.set_base_url(url);
         self.endpoint_ready = true;
         Ok(())
@@ -370,6 +396,11 @@ impl Agent {
     }
 
     async fn turn(&mut self, text: String, token: &CancellationToken) {
+        // The guard reads only the newest few; keep a small bounded tail.
+        if self.user_requests.len() >= 32 {
+            self.user_requests.remove(0);
+        }
+        self.user_requests.push(text.clone());
         if let Err(e) = self.ensure_endpoint(token).await {
             self.report(e);
             return;
@@ -496,35 +527,8 @@ impl Agent {
             }
         };
         let title = tools::title(&inv);
-        match tools::classify(&inv, &self.toolbox.workspace) {
-            Safety::ReadOnly => {}
-            Safety::Blocked(r) => return (title, fail(format!("refused: {r}"))),
-            Safety::Mutating => {
-                if !self.auto_approve {
-                    let (reply, rx) = oneshot::channel();
-                    self.send(AgentEvent::ApprovalRequest {
-                        title: title.clone(),
-                        reason: tools::approval_reason(&inv).into(),
-                        reply,
-                    });
-                    let answer = tokio::select! {
-                        _ = token.cancelled() => Approval::No,
-                        a = rx => a.unwrap_or(Approval::No),
-                    };
-                    match answer {
-                        Approval::Yes => {}
-                        Approval::Always => self.auto_approve = true,
-                        Approval::No => {
-                            let text = if token.is_cancelled() {
-                                "cancelled"
-                            } else {
-                                "the user declined to run this command"
-                            };
-                            return (title, fail(text.into()));
-                        }
-                    }
-                }
-            }
+        if let Err(output) = self.approve_call(&inv, &title, token).await {
+            return (title, output);
         }
         self.send(AgentEvent::ToolStart {
             id: call.id.clone(),
@@ -545,6 +549,112 @@ impl Agent {
             output: out.text.clone(),
         });
         (title, out)
+    }
+
+    async fn approve_call(
+        &mut self,
+        inv: &tools::Invocation,
+        title: &str,
+        token: &CancellationToken,
+    ) -> std::result::Result<(), ToolOutput> {
+        let fail = |text: String| ToolOutput {
+            text: tools::redact_output(&text),
+            ok: false,
+        };
+        if token.is_cancelled() {
+            return Err(fail("cancelled".into()));
+        }
+        match tools::classify(inv, &self.toolbox.workspace) {
+            Safety::ReadOnly => return Ok(()),
+            Safety::Blocked(reason) => return Err(fail(format!("refused: {reason}"))),
+            Safety::Mutating => {}
+        }
+        let mut reason = tools::approval_reason(inv).to_string();
+        match self.approval {
+            ApprovalMode::Yolo => return Ok(()),
+            ApprovalMode::Ask => {}
+            ApprovalMode::Auto => {
+                let backend = self.guard.backend();
+                let verdict = self
+                    .guard
+                    .review(
+                        ReviewRequest {
+                            inv,
+                            title,
+                            user_requests: &self.user_requests,
+                            workspace: &self.toolbox.workspace,
+                        },
+                        token,
+                    )
+                    .await;
+                if let Some(now) = self.guard.backend()
+                    && backend != Some(now)
+                {
+                    self.send(AgentEvent::Info(format!(
+                        "auto mode: safety check uses the {now} API"
+                    )));
+                }
+                if self.guard.paused() {
+                    self.approval = ApprovalMode::Ask;
+                    self.send(AgentEvent::ApprovalModeChanged(ApprovalMode::Ask));
+                    self.send(AgentEvent::Info(
+                        "auto mode paused after repeated denials; /approval auto to resume".into(),
+                    ));
+                }
+                if token.is_cancelled() {
+                    return Err(fail("cancelled".into()));
+                }
+                match verdict {
+                    Verdict::Allow(reason) => {
+                        self.send(AgentEvent::AutoReview {
+                            title: title.into(),
+                            allowed: true,
+                            reason,
+                        });
+                        return Ok(());
+                    }
+                    Verdict::Deny(reason) => {
+                        self.send(AgentEvent::AutoReview {
+                            title: title.into(),
+                            allowed: false,
+                            reason: reason.clone(),
+                        });
+                        return Err(fail(format!(
+                            "blocked by auto mode: {reason}. Do not retry this or work around it; choose a safer approach or ask the user to run it."
+                        )));
+                    }
+                    Verdict::Ask(r) => reason = format!("auto mode: {r}"),
+                }
+            }
+        }
+        let (reply, rx) = oneshot::channel();
+        self.send(AgentEvent::ApprovalRequest {
+            title: title.into(),
+            reason,
+            reply,
+        });
+        let answer = tokio::select! {
+            _ = token.cancelled() => Approval::No,
+            a = rx => a.unwrap_or(Approval::No),
+        };
+        if token.is_cancelled() {
+            return Err(fail("cancelled".into()));
+        }
+        match answer {
+            Approval::Yes => Ok(()),
+            Approval::Always => {
+                self.set_approval_mode(ApprovalMode::Yolo);
+                Ok(())
+            }
+            Approval::No => Err(fail(
+                if token.is_cancelled() {
+                    "cancelled"
+                } else {
+                    "the user declined to run this command"
+                }
+                .into(),
+            )),
+        }
     }
 }
 
@@ -570,6 +680,226 @@ mod tests {
                 arguments: arguments.into(),
             },
         }
+    }
+
+    fn test_agent(approval: ApprovalMode) -> (Agent, mpsc::UnboundedReceiver<AgentEvent>) {
+        let cfg = Config {
+            approval,
+            ..Config::default()
+        };
+        let (tx, events) = mpsc::unbounded_channel();
+        (
+            Agent {
+                llm: LlmClient::new(&cfg),
+                guard: {
+                    // The mock reviewer speaks chat completions only.
+                    let mut guard = Guard::new("safety-model".into(), None);
+                    guard.set_api(crate::agent::safety::SafetyApi::Chat);
+                    guard
+                },
+                user_requests: Vec::new(),
+                toolbox: Toolbox::new(&cfg, workspace()),
+                workspace_prompt: String::new(),
+                pending_shell: PendingShell::default(),
+                shell_sequence: 1,
+                messages: Vec::new(),
+                mode: cfg.tool_mode,
+                catalog: String::new(),
+                approval,
+                endpoint_ready: false,
+                tx,
+                model_catalog: None,
+                cfg,
+            },
+            events,
+        )
+    }
+
+    async fn review_endpoint(
+        decisions: Vec<&'static str>,
+    ) -> (String, tokio::task::JoinHandle<Vec<serde_json::Value>>) {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for decision in decisions {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut socket = BufReader::new(socket);
+                let mut line = String::new();
+                socket.read_line(&mut line).await.unwrap();
+                assert!(line.starts_with("POST /v1/chat/completions "));
+                let mut length = 0;
+                loop {
+                    line.clear();
+                    socket.read_line(&mut line).await.unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        length = value.trim().parse::<usize>().unwrap();
+                    }
+                }
+                let mut body = vec![0; length];
+                socket.read_exact(&mut body).await.unwrap();
+                requests.push(serde_json::from_slice(&body).unwrap());
+                let content =
+                    serde_json::json!({"decision": decision, "reason": "reviewed request"})
+                        .to_string();
+                let body = serde_json::json!({"choices":[{"message":{"role":"assistant","content":content}}]}).to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket
+                    .get_mut()
+                    .write_all(response.as_bytes())
+                    .await
+                    .unwrap();
+            }
+            requests
+        });
+        (url, task)
+    }
+
+    #[tokio::test]
+    async fn auto_deny_never_runs_and_pauses_after_repeated_denials() {
+        let (mut agent, mut events) = test_agent(ApprovalMode::Auto);
+        let (url, server) = review_endpoint(vec!["deny"; 3]).await;
+        agent.guard.set_base_url(url);
+        agent
+            .user_requests
+            .push("  run the project checks  ".into());
+        let call = call("denied", "shell", r#"{"command":"project-check"}"#);
+        for i in 0..3 {
+            let token = CancellationToken::new();
+            let (_, result) =
+                tokio::time::timeout(Duration::from_secs(5), agent.run_call(&call, &token))
+                    .await
+                    .unwrap();
+            assert!(!result.ok);
+            assert_eq!(
+                result.text,
+                "blocked by auto mode: reviewed request. Do not retry this or work around it; choose a safer approach or ask the user to run it."
+            );
+            if i == 2 {
+                assert!(matches!(
+                    events.try_recv().unwrap(),
+                    AgentEvent::ApprovalModeChanged(ApprovalMode::Ask)
+                ));
+                assert!(
+                    matches!(events.try_recv().unwrap(), AgentEvent::Info(s) if s.contains("paused after repeated denials"))
+                );
+            }
+            assert!(
+                matches!(events.try_recv().unwrap(), AgentEvent::AutoReview { allowed: false, title, reason }
+                if title == "$ project-check" && reason == "reviewed request")
+            );
+            assert!(events.try_recv().is_err());
+        }
+        assert_eq!(agent.approval, ApprovalMode::Ask);
+        assert!(agent.guard.paused());
+        agent.set_approval_mode(ApprovalMode::Auto);
+        assert!(!agent.guard.paused());
+        for request in server.await.unwrap() {
+            assert_eq!(request["model"], "safety-model");
+            let input: serde_json::Value =
+                serde_json::from_str(request["messages"][1]["content"].as_str().unwrap()).unwrap();
+            assert_eq!(
+                input["user_requests"],
+                serde_json::json!(["  run the project checks  "])
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn auto_ask_uses_normal_approval_and_always_switches_to_yolo() {
+        let (mut agent, mut events) = test_agent(ApprovalMode::Auto);
+        // Deterministic policy asks before any model call.
+        let inv = tools::parse_call("shell", r#"{"command":"git push"}"#).unwrap();
+        let token = CancellationToken::new();
+        let approve = agent.approve_call(&inv, "$ git push", &token);
+        let answer = async {
+            let AgentEvent::ApprovalRequest { reason, reply, .. } = events.recv().await.unwrap()
+            else {
+                panic!("expected approval")
+            };
+            assert!(reason.starts_with("auto mode:"));
+            reply.send(Approval::Always).unwrap();
+        };
+        let (result, ()) = tokio::join!(approve, answer);
+        assert!(result.is_ok());
+        assert_eq!(agent.approval, ApprovalMode::Yolo);
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            AgentEvent::ApprovalModeChanged(ApprovalMode::Yolo)
+        ));
+    }
+
+    #[tokio::test]
+    async fn auto_allow_and_yolo_run_without_approval_request() {
+        for mode in [ApprovalMode::Auto, ApprovalMode::Yolo] {
+            let (mut agent, mut events) = test_agent(mode);
+            // A policy-allowed stop reaches dispatch even for an unknown process.
+            let (_, result) = agent
+                .run_call(
+                    &call("stop", "process_stop", r#"{"id":999}"#),
+                    &CancellationToken::new(),
+                )
+                .await;
+            assert!(!result.ok);
+            if mode == ApprovalMode::Auto {
+                assert!(matches!(
+                    events.try_recv().unwrap(),
+                    AgentEvent::AutoReview { allowed: true, .. }
+                ));
+            }
+            assert!(matches!(
+                events.try_recv().unwrap(),
+                AgentEvent::ToolStart { .. }
+            ));
+            assert!(matches!(
+                events.try_recv().unwrap(),
+                AgentEvent::ToolEnd { .. }
+            ));
+            assert!(events.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn set_approval_command_emits_changed_event() {
+        let mut handle = spawn(Config::default(), workspace()).unwrap();
+        handle
+            .commands
+            .send(UserCommand::SetApprovalMode(ApprovalMode::Auto))
+            .unwrap();
+        assert!(matches!(
+            handle.events.recv().await.unwrap(),
+            AgentEvent::ApprovalModeChanged(ApprovalMode::Auto)
+        ));
+    }
+
+    #[tokio::test]
+    async fn user_request_log_excludes_shell_context_and_tool_results_and_clear_resets_it() {
+        let (mut agent, _events) = test_agent(ApprovalMode::Ask);
+        agent
+            .shell("echo shell-only-context".into(), &CancellationToken::new())
+            .await;
+        assert!(agent.user_requests.is_empty());
+        agent
+            .messages
+            .push(Message::user("[tool results]\nnot a user request"));
+        agent
+            .messages
+            .push(Message::tool_result("tool", "tool-only-context"));
+        let token = CancellationToken::new();
+        token.cancel();
+        agent.turn("  original request  ".into(), &token).await;
+        assert_eq!(agent.user_requests, ["  original request  "]);
+        agent.clear();
+        assert!(agent.user_requests.is_empty());
     }
 
     #[test]
@@ -735,7 +1065,9 @@ mod tests {
             mode: cfg.tool_mode,
             catalog: "CATALOG".into(),
             messages: vec![Message::system("native"), Message::user("question")],
-            auto_approve: false,
+            approval: ApprovalMode::Ask,
+            guard: Guard::new(String::new(), None),
+            user_requests: Vec::new(),
             endpoint_ready: true,
             tx,
             cfg,
@@ -868,7 +1200,9 @@ mod tests {
             messages: Vec::new(),
             mode: cfg.tool_mode,
             catalog: String::new(),
-            auto_approve: false,
+            approval: ApprovalMode::Ask,
+            guard: Guard::new(String::new(), None),
+            user_requests: Vec::new(),
             endpoint_ready: true,
             tx,
             cfg,
@@ -915,7 +1249,9 @@ mod tests {
             messages: vec![Message::system("system"), Message::user("old")],
             mode: cfg.tool_mode,
             catalog: String::new(),
-            auto_approve: false,
+            approval: ApprovalMode::Ask,
+            guard: Guard::new(String::new(), None),
+            user_requests: Vec::new(),
             endpoint_ready: true,
             tx,
             cfg,
@@ -959,7 +1295,9 @@ mod tests {
             messages: Vec::new(),
             mode: cfg.tool_mode,
             catalog: String::new(),
-            auto_approve: false,
+            approval: ApprovalMode::Ask,
+            guard: Guard::new(String::new(), None),
+            user_requests: Vec::new(),
             endpoint_ready: true,
             tx,
             cfg,
@@ -1035,7 +1373,9 @@ mod tests {
             messages: Vec::new(),
             mode: cfg.tool_mode,
             catalog: String::new(),
-            auto_approve: false,
+            approval: ApprovalMode::Ask,
+            guard: Guard::new(String::new(), None),
+            user_requests: Vec::new(),
             endpoint_ready: false,
             tx,
             cfg,

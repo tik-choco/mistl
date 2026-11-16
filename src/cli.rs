@@ -937,6 +937,18 @@ pub enum AiAction {
         )]
         reasoning_effort: Option<String>,
     },
+    /// Synthesize speech and save the audio to a file
+    Speech(crate::ai::media_cli::SpeechArgs),
+    /// List available voices
+    Voices(crate::ai::media_cli::VoicesArgs),
+    /// Transcribe an audio file
+    Transcribe(crate::ai::media_cli::TranscribeArgs),
+    /// Generate and manage 3D assets
+    #[command(name = "3d")]
+    ThreeD {
+        #[command(subcommand)]
+        action: crate::ai::media_cli::ThreeDAction,
+    },
     /// Show AI network status (room, provider, API server)
     Status,
     /// List models advertised by the reachable provider
@@ -1678,6 +1690,26 @@ pub fn dispatch(cli: Cli) -> Result<()> {
                 "ai.chat",
                 json!({ "prompt": prompt, "model": model, "reasoning_effort": reasoning_effort }),
             ),
+            AiAction::Speech(args) => {
+                crate::ai::media_cli::run(crate::ai::media_cli::Action::Speech(args), || {
+                    request("ai.serve.start", json!({}))
+                })
+            }
+            AiAction::Voices(args) => {
+                crate::ai::media_cli::run(crate::ai::media_cli::Action::Voices(args), || {
+                    request("ai.serve.start", json!({}))
+                })
+            }
+            AiAction::Transcribe(args) => {
+                crate::ai::media_cli::run(crate::ai::media_cli::Action::Transcribe(args), || {
+                    request("ai.serve.start", json!({}))
+                })
+            }
+            AiAction::ThreeD { action } => {
+                crate::ai::media_cli::run(crate::ai::media_cli::Action::ThreeD(action), || {
+                    request("ai.serve.start", json!({}))
+                })
+            }
             AiAction::Status => client_call("ai.status", json!({})),
             AiAction::Models => client_call("ai.models", json!({})),
             AiAction::Provide { action } => match action {

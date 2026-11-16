@@ -4,11 +4,13 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
+};
 
-use super::app::{App, Entry, Picker, PickerKind, ToolStatus};
+use super::app::{App, Entry, Picker, PickerKind, ToolStatus, plain_text};
 use super::text::{str_width, truncate_text, wrap_text};
-use crate::agent::types::ToolMode;
+use crate::agent::types::{ApprovalMode, ToolMode};
 
 const MAX_INPUT_ROWS: usize = 6;
 const COLLAPSED_LINES: usize = 6;
@@ -96,6 +98,25 @@ pub fn build_transcript(app: &App, width: usize) -> Vec<Line<'static>> {
             out.push(Line::raw(""));
         }
         match e {
+            Entry::AutoReview {
+                title,
+                allowed,
+                reason,
+            } => {
+                let text = format!(
+                    "{}: {}",
+                    if *allowed {
+                        "✓ auto"
+                    } else {
+                        "✗ auto denied"
+                    },
+                    reason
+                );
+                out.push(Line::styled(
+                    truncate_text(&format!("{text} · {title}"), width),
+                    dim(),
+                ));
+            }
             Entry::User(t) => push_wrapped(
                 &mut out,
                 t,
@@ -189,6 +210,13 @@ pub fn build_transcript(app: &App, width: usize) -> Vec<Line<'static>> {
             }
         }
     }
+    for line in &mut out {
+        for span in &mut line.spans {
+            if span.content.chars().any(char::is_control) {
+                span.content = plain_text(&span.content).into();
+            }
+        }
+    }
     out
 }
 
@@ -235,6 +263,18 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         " mistl agent ",
         Style::default().fg(Color::Black).bg(Color::Cyan),
     )];
+    if app.approval != ApprovalMode::Ask {
+        spans.push(Span::styled(
+            format!(" {} ", app.approval.as_str()),
+            Style::default()
+                .fg(Color::Black)
+                .bg(if app.approval == ApprovalMode::Yolo {
+                    Color::Yellow
+                } else {
+                    Color::Blue
+                }),
+        ));
+    }
     let workspace = app
         .workspace
         .root
@@ -265,12 +305,6 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     ]);
     let effort = app.reasoning_effort.as_deref().unwrap_or("default");
     spans.push(Span::styled(format!("effort:{effort} "), dim()));
-    if app.auto_approve {
-        spans.push(Span::styled(
-            " auto-approve ",
-            Style::default().fg(Color::Black).bg(Color::Yellow),
-        ));
-    }
     let mut remaining = area.width as usize;
     let mut fitted = Vec::new();
     for span in spans {
@@ -285,22 +319,60 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_transcript(f: &mut Frame, app: &mut App, area: Rect) {
-    let lines = build_transcript(app, area.width as usize);
+    // Reserve one column so the scrollbar never overwrites wrapped text.
+    let text_area = Rect {
+        width: area.width.saturating_sub(1),
+        ..area
+    };
+    let lines = build_transcript(app, text_area.width as usize);
     let h = area.height as usize;
     let max_top = lines.len().saturating_sub(h);
     app.last_total = lines.len();
     app.last_height = h;
+    app.remember_transcript(text_area, lines.iter().map(Line::to_string).collect());
     let top = match app.scroll_top {
         None => max_top,
         Some(t) => t.min(max_top),
     };
+    if app.scroll_top.is_some() {
+        app.scroll_top = Some(top);
+    }
     let visible: Vec<Line> = lines.into_iter().skip(top).take(h).collect();
-    f.render_widget(Paragraph::new(visible), area);
-    if top < max_top {
-        let msg = format!(" ↓ {} more lines (End) ", max_top - top);
+    f.render_widget(Paragraph::new(visible), text_area);
+    for y in 0..text_area.height {
+        if let Some(range) = app.selection_range(top + y as usize) {
+            for x in
+                range.start.min(text_area.width as usize)..range.end.min(text_area.width as usize)
+            {
+                if let Some(cell) = f
+                    .buffer_mut()
+                    .cell_mut((text_area.x + x as u16, text_area.y + y))
+                {
+                    cell.set_style(cell.style().add_modifier(Modifier::REVERSED));
+                }
+            }
+        }
+    }
+    if max_top > 0 && area.width > 0 {
+        let mut state = ScrollbarState::new(max_top + 1)
+            .position(top)
+            .viewport_content_length(h);
+        f.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None),
+            area,
+            &mut state,
+        );
+    }
+    if top < max_top && app.selection.is_none() {
+        let msg = truncate_text(
+            &format!("↓ {} more lines · End to follow", max_top - top),
+            area.width.saturating_sub(1) as usize,
+        );
         let w = str_width(&msg) as u16;
-        if area.width > w && area.height > 0 {
-            let r = Rect::new(area.x + area.width - w, area.y + area.height - 1, w, 1);
+        if w > 0 && area.height > 0 {
+            let r = Rect::new(area.x + area.width - 1 - w, area.y + area.height - 1, w, 1);
             f.render_widget(
                 Paragraph::new(Span::styled(
                     msg,
@@ -424,7 +496,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         )
     } else if app.current_approval().is_some() {
         Line::styled(
-            " y yes  n no  a always (this session)",
+            " y yes  n no  a always (yolo)",
             Style::default().fg(Color::Yellow),
         )
     } else if app.fetching {
@@ -447,11 +519,11 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(Color::Yellow),
             ),
             Span::raw(app.busy_label()),
-            Span::styled("   Esc cancel  PgUp/PgDn scroll  Ctrl+O expand", dim()),
+            Span::styled("   Esc cancel  drag to copy  /copy  /help", dim()),
         ])
     } else {
         Line::styled(
-            " Enter send  Alt+Enter newline  PgUp/PgDn scroll  Ctrl+O expand  /help  Ctrl+C quit",
+            " Enter send  Wheel/PgUp/PgDn  drag to copy  /copy  /help",
             dim(),
         )
     };
@@ -486,7 +558,7 @@ fn draw_modal(f: &mut Frame, app: &App, area: Rect) {
         Span::styled("[n]", Style::default().fg(Color::Red)),
         Span::raw(" no  "),
         Span::styled("[a]", Style::default().fg(Color::Yellow)),
-        Span::raw(" always (this session)"),
+        Span::raw(" always (yolo)"),
     ]));
     let queued = app.approvals.len().saturating_sub(1);
     let mut block = Block::default()
@@ -637,7 +709,7 @@ mod tests {
         assert!(text.contains("/help"));
         assert!(text.contains("show keys and commands"));
         assert!(
-            text.contains("1/17"),
+            text.contains("1/28"),
             "scroll position when the list overflows"
         );
         assert!(text.contains("Tab complete"));
@@ -796,5 +868,136 @@ mod tests {
         for (width, height) in [(1, 1), (8, 3), (20, 5)] {
             render(&mut app, width, height);
         }
+    }
+
+    #[test]
+    fn approval_badge_and_auto_review_render_effective_mode() {
+        let mut app = App::new(&UiInfo::from_config(&Config::default()));
+        for mode in [ApprovalMode::Ask, ApprovalMode::Auto, ApprovalMode::Yolo] {
+            app.on_agent_event(AgentEvent::ApprovalModeChanged(mode));
+            let (text, _) = render(&mut app, 120, 12);
+            let header = text.lines().next().unwrap();
+            assert_eq!(header.contains(" auto "), mode == ApprovalMode::Auto);
+            assert_eq!(header.contains(" yolo "), mode == ApprovalMode::Yolo);
+        }
+        app.entries.clear();
+        for allowed in [true, false] {
+            app.on_agent_event(AgentEvent::AutoReview {
+                title: "$ command".into(),
+                allowed,
+                reason: "review reason".into(),
+            });
+        }
+        let lines = build_transcript(&app, 100);
+        assert_eq!(lines[0].to_string(), "✓ auto: review reason · $ command");
+        assert_eq!(
+            lines[2].to_string(),
+            "✗ auto denied: review reason · $ command"
+        );
+        assert_eq!(lines[0].style, dim());
+    }
+
+    #[test]
+    fn pinned_transcript_stays_put_and_clamps_after_shrinking_or_resize() {
+        let mut app = App::new(&UiInfo::from_config(&Config::default()));
+        app.entries = vec![Entry::Assistant {
+            text: (0..60).map(|i| format!("line-{i:02}\n")).collect(),
+            done: false,
+        }];
+        let (text, _) = render(&mut app, 80, 15);
+        assert!(!text.contains("End to follow"));
+        app.scroll_top = Some(4);
+        let (text, _) = render(&mut app, 80, 15);
+        assert!(text.contains("line-04"));
+        assert!(text.contains("↓ 47 more lines · End to follow"));
+        app.on_agent_event(AgentEvent::TextDelta("new output\n".into()));
+        let (text, _) = render(&mut app, 80, 15);
+        assert_eq!(app.scroll_top, Some(4));
+        assert!(text.contains("line-04"));
+        app.entries = vec![Entry::Info("short".into())];
+        let (text, _) = render(&mut app, 80, 15);
+        assert_eq!(app.scroll_top, Some(0));
+        assert!(!text.contains("End to follow"));
+        app.entries = vec![Entry::Info("word ".repeat(300))];
+        app.scroll_top = None;
+        render(&mut app, 20, 15);
+        app.scroll_up(1);
+        render(&mut app, 120, 15);
+        assert_eq!(
+            app.scroll_top,
+            Some(app.last_total.saturating_sub(app.last_height))
+        );
+        command(&mut app, "/clear");
+        render(&mut app, 80, 15);
+        assert_eq!(app.scroll_top, None);
+        assert_eq!(app.last_total, 0);
+    }
+
+    #[test]
+    fn scrollbar_uses_reserved_column_without_erasing_text() {
+        let mut app = App::new(&UiInfo::from_config(&Config::default()));
+        app.entries = vec![Entry::Assistant {
+            text: "123456789\n".repeat(30),
+            done: true,
+        }];
+        let (text, _) = render(&mut app, 10, 15);
+        assert!(text.contains("123456789"));
+        assert!(text.contains('█') || text.contains('║'));
+    }
+
+    #[test]
+    fn wrapped_cjk_selection_highlights_cells_and_copies_display_rows() {
+        use super::super::app::Effect;
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        let mut app = App::new(&UiInfo::from_config(&Config::default()));
+        app.entries = vec![Entry::Assistant {
+            text: "あいうえおかきくけこ\nlast".into(),
+            done: false,
+        }];
+        render(&mut app, 10, 15);
+        assert_eq!(app.last_lines, ["あいうえ", "おかきく", "けこ", "last"]);
+        let area = app.transcript_rect;
+        for (kind, column, row) in [
+            (MouseEventKind::Down(MouseButton::Left), 1, area.y),
+            (MouseEventKind::Drag(MouseButton::Left), 5, area.y + 1),
+            (MouseEventKind::Up(MouseButton::Left), 5, area.y + 1),
+        ] {
+            app.on_mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            });
+        }
+        assert!(
+            matches!(app.take_effects().as_slice(), [Effect::Copy(text)] if text == "あいうえ\nおかき")
+        );
+        let mut terminal = Terminal::new(TestBackend::new(10, 15)).unwrap();
+        let frame = terminal.draw(|f| draw(f, &mut app)).unwrap();
+        for x in 0..8 {
+            assert!(
+                frame.buffer[(x, area.y)]
+                    .modifier
+                    .contains(Modifier::REVERSED)
+            );
+        }
+        for x in 0..6 {
+            assert!(
+                frame.buffer[(x, area.y + 1)]
+                    .modifier
+                    .contains(Modifier::REVERSED)
+            );
+        }
+        assert!(
+            !frame.buffer[(6, area.y + 1)]
+                .modifier
+                .contains(Modifier::REVERSED)
+        );
+        app.on_agent_event(AgentEvent::TextDelta(" streamed\nnew".into()));
+        render(&mut app, 10, 15);
+        assert!(app.selection.is_some());
+        render(&mut app, 12, 15);
+        assert!(app.selection.is_none());
     }
 }

@@ -10,6 +10,7 @@
 mod api_server;
 mod consumer;
 pub(crate) mod external;
+pub mod media_cli;
 mod model_discovery;
 mod oai_tunnel;
 pub(crate) use model_discovery::{ModelDiscovery, spawn_http_refresh};

@@ -90,7 +90,15 @@ $ mistl update status
 $ mistl ai provide start      # turn provide on for enabled Rooms with a nonempty shared list
 $ mistl ai provide stop       # turn provide off for every Room
 $ mistl ai serve start        # local OpenAI-compatible API -> http://127.0.0.1:6478/v1
-$ mistl ai chat "hello" --model mock-echo-1
+$ mistl ai chat "hello" --model chat-model
+$ mistl ai speech "hello" -o speech.wav --format wav
+$ mistl ai voices
+$ mistl ai transcribe audio.wav
+$ mistl ai 3d generate --image image.png -m 3d-model -o asset.glb --param seed=42
+$ mistl ai 3d ls
+$ mistl ai 3d status gen3d_0123456789abcdef0123456789abcdef
+$ mistl ai 3d get gen3d_0123456789abcdef0123456789abcdef -o asset.glb
+$ mistl ai 3d rm gen3d_0123456789abcdef0123456789abcdef
 $ mistl ai models
 $ mistl ai status
 $ mistl ai external apply --owner my-app < registration.json
@@ -100,7 +108,25 @@ $ mistl ai external remove --owner my-app
 
 With `ai serve` running, OpenAI clients use the configured `ai.default_ref` or
 resolve an explicit raw model id through the enabled providers' model caches.
-HTTP providers call their endpoint directly; Room providers use the p2p network:
+HTTP providers call their endpoint directly; Room providers use the p2p network.
+
+`ai chat` is for chat models. For speech, transcription, voice catalogs and
+3D generation, use the media commands above. They start the local API as needed;
+each accepts `--room <room>` to select a Room provider. Speech uses the
+configured TTS model unless `-m` is supplied, and accepts `--voice`, `--format`
+and `--speed`. Transcription accepts `-m`.
+
+3D generation requires `-m`, accepts repeated `--param key=value` options,
+and waits up to 40 minutes by default. Use `--no-wait` to request background
+generation and return the job without polling, or `--timeout <seconds>` to
+change the wait. With `-o`, a completed asset is streamed to the specified
+file; without it, only the job JSON is printed. If `--no-wait` returns a pending
+job, download it later with `ai 3d get`. `ai speech`, `ai 3d generate -o` and
+`ai 3d get` require `--force` to replace an existing file. Uploads are limited
+to 20 MiB; transcription has a 10 MiB multipart body limit, including form
+overhead. Room relay limits can reduce the usable 3D image size after encoding.
+
+For example, a chat client can call the local API directly:
 
 ```console
 $ curl http://127.0.0.1:6478/v1/chat/completions \
@@ -147,14 +173,38 @@ $ mistl agent --list-models                 # list model ids from the local API
 ```
 
 Flags: `-p` / `--prompt` runs without the TUI; `-m` / `--model` selects a model;
-`--reasoning-effort` overrides effort for this session; `-y` / `--yes` approves
-state-changing tools automatically. `--tool-mode native|prompt` selects OpenAI
-tools or fenced tool blocks (default: native, with automatic fallback when the
-provider reports tools unsupported).
+`--reasoning-effort` overrides effort for this session; `--approval
+ask|auto|yolo` selects the approval mode (`-y` / `--yes` = yolo).
+`--tool-mode native|prompt` selects OpenAI tools or fenced tool blocks
+(default: native, with automatic fallback when the provider reports tools
+unsupported).
 
-Read-only queries run directly; state-changing tools ask for `y` (yes), `n`
-(no), or `a` (approve all for this session). Headless `-p` refuses changes unless
-`-y` is given. Interactive or never-ending mistl commands are refused.
+Read-only queries run directly. What happens to state-changing tools depends on
+the approval mode (Shift+Tab or `/approval` switches it in the TUI):
+
+- `ask` (default): each one asks for `y` (yes), `n` (no), or `a` (always: switch
+  to yolo for this session).
+- `auto`: an independent safety check decides. Fixed rules come first: clearly
+  read-only commands (`ls`, `git status`, `cargo test`, ...) run, and high-risk
+  actions (recursive deletes, `git push`/publishing, download-and-execute,
+  privilege or persistence changes, secret files, writes outside the workspace,
+  mistl key/authz/autostart changes, ...) always ask. Everything else goes to a
+  reviewer model that sees only your own messages and the proposed action —
+  never tool output or the agent's text — and allows, denies, or asks. A denial
+  is returned to the agent so it picks another approach; after 3 denials in a
+  row (or 20 in total) the session falls back to `ask`. Failures, timeouts, and
+  unreadable answers ask instead of allowing.
+- `yolo`: everything runs without asking.
+
+The reviewer model is `--safety-model <id>` (default: the agent's model,
+following `/model`). `--safety-api auto|chat|decision` chooses how it is
+called: `chat` uses chat completions with a JSON verdict; `decision` uses the
+System One decision API (`POST /v1/systemone`), scoring fixed risk questions
+(outside the request, exfiltration, security weakening, remote code →
+deny; destructive or outward-facing → ask); `auto` (default) sends one fixed
+probe without your content and uses the decision API when the model answers it,
+otherwise chat. Headless `-p` refuses anything that would ask. Interactive or
+never-ending mistl commands are refused.
 
 The startup directory is the workspace. File tools (`list_dir`, `find_files`,
 `grep`, `read_file`) inspect files within it. With `just` on PATH, the agent
@@ -170,17 +220,50 @@ without approval; its output is shared with the model on your next message.
 | `/effort [level]` | Pick or set session effort; `default` uses mistl's default |
 | `/mistl [start]` | Show instance info, or start the daemon |
 | `/just` | List workspace recipes |
+| `/approval [ask\|auto\|yolo]` | Show or set the approval mode (Shift+Tab cycles) |
+| `/mouse [on\|off]` | Toggle mouse capture (off lets the terminal select text; F2 too) |
+| `/copy [all\|tool]` | Copy the last assistant reply, whole transcript, or full latest tool output |
+| `/export [path]` | Save the whole transcript to a new file; refuse to overwrite |
 | `/clear`, `/help`, `/quit` | Clear the conversation, show help, or quit |
 
 Typing `/` opens completion: `Up` / `Down` select, `Tab` completes, `Enter`
 runs, and `Esc` hides it. `!` also completes `!just <recipe>`.
+
+Drag with the left mouse button inside the transcript to select and copy text
+on release. Selection is highlighted, works across wrapped rows and scrolling,
+and scrolls one line per drag event beyond the top or bottom edge. A click
+clears the selection; resizing the transcript width, clearing it, or rebuilding
+its rows (for example expanding tool output) clears it too. Selected display
+rows are copied with a newline between them, including soft wraps, and trailing
+spaces on each row are trimmed.
+
+`/copy` copies the full latest assistant reply, `/copy tool` copies the full
+latest tool output even when collapsed, and `/copy all` copies every entry:
+user messages prefixed with `> `, tools with their title and full output, and
+info/review lines as shown. These commands and `/export` use unwrapped plain
+text without ANSI controls. `/export` uses the same text as `/copy all`;
+relative paths are workspace-relative, and the default is
+`mistl-agent-YYYYMMDD-HHMMSS.md` in the workspace. Existing files are never
+overwritten. The footer reports the copied character count, saved path, or error.
+
+Copy tries the native helper (`clip.exe`, `pbcopy`, or on Linux `wl-copy`,
+`xclip`, then `xsel`) with a two-second deadline. For text up to 100,000 UTF-8
+bytes it also sends OSC 52 for remote/SSH terminals; terminal support and
+clipboard permission are required. If only OSC 52 is available, the footer
+reports "copied via terminal" without confirmation from the terminal.
+For native terminal selection, use F2 or `/mouse off`, or Shift+drag where the
+terminal supports bypassing mouse capture (including Windows Terminal).
 
 | Key | Action |
 | --- | --- |
 | `Enter` | Send |
 | `Alt+Enter` / `Ctrl+J` | New line |
 | `Esc` | Cancel the running turn or user shell command |
-| `PgUp` / `PgDn` | Scroll |
+| Mouse wheel, `PgUp` / `PgDn` | Scroll (Shift+wheel: page; `Ctrl/Shift+Up/Down`: line) |
+| Left drag in transcript | Select and copy on release |
+| `Ctrl+Home` / `Ctrl+End` | Jump to the top / follow the bottom |
+| `Shift+Tab` | Cycle approval mode ask → auto → yolo |
+| `F2` | Toggle mouse capture (for selecting text) |
 | `Ctrl+O` | Expand/collapse tool output |
 | `Ctrl+C` | Cancel, or quit when idle |
 

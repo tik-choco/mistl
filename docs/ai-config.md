@@ -293,6 +293,11 @@ Lifecycle routes sit at the API root and only reach local HTTP providers
 TTS upstream requests now allow 600 seconds (cold model loads and GPU queueing)
 and input up to 10 000 characters.
 
+From the CLI, use `mistl ai speech`, `mistl ai voices`, `mistl ai transcribe`
+and `mistl ai 3d` to access these routes. Add `--room <room>` to select a Room;
+3D generation requires an explicit `-m <model>`. See the
+[CLI reference](cli.md) for examples and file options.
+
 ### API errors
 
 An explicit model that cannot be resolved from an enabled provider's advertised,

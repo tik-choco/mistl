@@ -3,7 +3,8 @@
 //! `ai.*` configuration, reached through the local OpenAI-compatible API, and
 //! everything here comes from `mistl agent` flags.
 
-use crate::agent::types::ToolMode;
+use crate::agent::safety::SafetyApi;
+use crate::agent::types::{ApprovalMode, ToolMode};
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -22,8 +23,11 @@ pub struct Config {
     pub command_timeout_secs: u64,
     /// Max model round-trips per user message.
     pub max_steps: usize,
-    /// Run state-changing tools without asking.
-    pub auto_approve: bool,
+    pub approval: ApprovalMode,
+    /// Classifier model; None follows the agent's model.
+    pub safety_model: Option<String>,
+    /// Classifier API: chat completions, the decision API, or auto-detected.
+    pub safety_api: SafetyApi,
 }
 
 impl Default for Config {
@@ -37,7 +41,9 @@ impl Default for Config {
             just_bin: "just".into(),
             command_timeout_secs: 600,
             max_steps: 12,
-            auto_approve: false,
+            approval: ApprovalMode::Ask,
+            safety_model: None,
+            safety_api: SafetyApi::Auto,
         }
     }
 }
