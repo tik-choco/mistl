@@ -91,7 +91,9 @@ jobs:
         shell: bash
         run: |
           windows='{"os":"windows-latest","target":"x86_64-pc-windows-msvc"}'
-          linux='{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"}'
+          # Pinned: the binary requires the build host's glibc, so
+          # ubuntu-latest (26.04, glibc 2.43) breaks older distros.
+          linux='{"os":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu"}'
           if [ "$GITHUB_REF_TYPE" = "tag" ]; then
             extra=',{"os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu"}'
             extra="$extra"',{"os":"macos-latest","target":"aarch64-apple-darwin"}'
