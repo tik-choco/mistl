@@ -108,16 +108,16 @@ fn job_id(path: &str) -> Option<&str> {
 
 fn allowed(method: &str, path: &str) -> bool {
     match (method, path) {
-        ("POST" | "GET", "/3d/generations") | ("GET", "/audio/voices" | "/health" | "/api/ps") => {
-            true
-        }
+        ("POST", "/images/edits")
+        | ("POST" | "GET", "/3d/generations")
+        | ("GET", "/audio/voices" | "/health" | "/api/ps") => true,
         ("GET", path) => job_id(path).is_some(),
         ("DELETE", path) => !path.ends_with("/content") && job_id(path).is_some(),
         _ => false,
     }
 }
 
-/// Parses a `POST /3d/generations` body; `Err` is the 400 to return.
+/// Parses a generation or image edit body; `Err` is the 400 to return.
 /// There is no built-in default model: routing needs an explicit id.
 fn generation_body(request: &RelayRequest) -> std::result::Result<Value, TunnelResponse> {
     let body: Value = serde_json::from_slice(request.body.as_deref().unwrap_or_default())
@@ -221,12 +221,15 @@ impl AiService {
                     })
                     .context("ai: provider unavailable")?;
                 let (path, range) = oai_tunnel::split_range(&request.path)?;
+                let image_edit = request.method == "POST" && path == "/images/edits";
+                // Only the 3D deadline depends on the body; image bodies are large.
                 let body = request
                     .body
                     .as_deref()
+                    .filter(|_| !image_edit)
                     .and_then(|raw| serde_json::from_slice::<Value>(raw).ok())
                     .unwrap_or(Value::Null);
-                let response = oai_tunnel::forward_with(
+                let response = oai_tunnel::forward_capped(
                     &provider.base_url,
                     &provider.api_key,
                     &request.method,
@@ -234,9 +237,18 @@ impl AiService {
                     request.body,
                     range,
                     oai_tunnel::relay_deadline(&request.method, &path, &body),
+                    if image_edit {
+                        oai_tunnel::MAX_IMAGE_RESPONSE_BYTES
+                    } else {
+                        oai_tunnel::MAX_BYTES
+                    },
                 )
                 .await?;
-                Ok(relativize(response))
+                Ok(if image_edit {
+                    response
+                } else {
+                    relativize(response)
+                })
             }
         }
     }
@@ -307,7 +319,9 @@ impl AiService {
             body["model"] = json!(model);
             request.body = Some(serde_json::to_vec(&body)?);
             let response = self.clone().forward_route(route.clone(), request).await?;
-            self.relay_jobs.remember(&response, route);
+            if path == "/3d/generations" {
+                self.relay_jobs.remember(&response, route);
+            }
             return Ok(response);
         }
         let jobs = self.relay_jobs.snapshot();
@@ -436,7 +450,9 @@ impl AiRoom {
                     oai_tunnel::relay_deadline("POST", &path, &body),
                 )
                 .await?;
-            self.relay_jobs.remember(&response, info.node_id);
+            if path == "/3d/generations" {
+                self.relay_jobs.remember(&response, info.node_id);
+            }
             return Ok(response);
         }
         let jobs = self.relay_jobs.snapshot();
@@ -586,6 +602,21 @@ mod tests {
         id: &str,
         handler: impl Fn(&str, &str, &Value) -> (u16, Value) + Send + Sync + 'static,
     ) -> Mock {
+        mock_bytes(id, move |method, path, body| {
+            let (status, response) = handler(method, path, body);
+            (
+                status,
+                "application/json",
+                serde_json::to_vec(&response).unwrap(),
+            )
+        })
+        .await
+    }
+
+    async fn mock_bytes(
+        id: &str,
+        handler: impl Fn(&str, &str, &Value) -> (u16, &'static str, Vec<u8>) + Send + Sync + 'static,
+    ) -> Mock {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base_url = format!("http://{}/v1/", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -623,11 +654,11 @@ mod tests {
                 let path = first.next().unwrap().to_string();
                 let body = serde_json::from_slice(&bytes[headers_end..headers_end + length])
                     .unwrap_or(Value::Null);
-                let (status, response) = handler(&method, &path, &body);
+                let (status, content_type, response) = handler(&method, &path, &body);
                 recorded.lock().unwrap().push((method, path, body, headers));
-                let body = serde_json::to_vec(&response).unwrap();
+                let body = response;
                 let header = format!(
-                    "HTTP/1.1 {status} Mock\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    "HTTP/1.1 {status} Mock\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
                 );
                 socket.write_all(header.as_bytes()).await.unwrap();
@@ -670,8 +701,77 @@ mod tests {
         }
     }
 
+    fn room(send: super::super::SendFn) -> Arc<AiRoom> {
+        Arc::new(AiRoom {
+            relay_jobs: Default::default(),
+            relay_voices: Default::default(),
+            cache_lock: Mutex::new(()),
+            room: "test".into(),
+            node_id: "node".into(),
+            consumer: super::super::Consumer::new(send.clone()),
+            voice: super::super::voice_consumer::VoiceConsumer::new(send.clone()),
+            oai: oai_tunnel::TunnelConsumer::new(send.clone()),
+            send,
+            provider: RwLock::new(None),
+            handlers: Arc::new(tokio::sync::Semaphore::new(64)),
+            dropped_messages: Default::default(),
+        })
+    }
+
     fn value(response: TunnelResponse) -> Value {
         serde_json::from_slice(&response.body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn image_edits_route_to_http_preserve_large_binary_and_json_without_jobs() {
+        let image = vec![0xa5; oai_tunnel::MAX_BYTES + 1];
+        let expected = image.clone();
+        let json =
+            serde_json::to_vec_pretty(&json!({"id":ID,"data":[{"url":"unchanged"}]})).unwrap();
+        let expected_json = json.clone();
+        let mut upstream = mock_bytes("images", move |method, path, body| {
+            assert_eq!(method, "POST");
+            assert_eq!(path, "/v1/images/edits");
+            assert_eq!(body["model"], "image-model");
+            assert_eq!(body["image"], "data:image/png;base64,AA==");
+            assert_eq!(body["temperature"], 0.7);
+            if body["response_format"] == "binary" {
+                (200, "image/png", image.clone())
+            } else {
+                (200, "application/json", json.clone())
+            }
+        })
+        .await;
+        upstream.provider.models = vec!["image-model".into()];
+        let service = service(vec![upstream.provider.clone()]);
+        for (format, content_type, expected) in [
+            ("binary", "image/png", expected),
+            ("b64_json", "application/json", expected_json),
+        ] {
+            let response = service
+                .clone()
+                .relay(request(
+                    "POST",
+                    "/images/edits",
+                    Some(json!({
+                        "model":"image-model", "image":"data:image/png;base64,AA==",
+                        "response_format":format, "temperature":0.7
+                    })),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status, 200);
+            assert_eq!(response.content_type, content_type);
+            assert_eq!(response.body, expected);
+            assert!(service.relay_jobs.snapshot().is_empty());
+        }
+        let calls = upstream.requests.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().all(|(_, _, _, headers)| {
+            headers
+                .to_ascii_lowercase()
+                .contains("authorization: bearer mock-key")
+        }));
     }
 
     #[tokio::test]
@@ -887,24 +987,160 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn image_edits_use_room_model_discovery_without_recording_jobs() {
+        use base64::Engine as _;
+
+        let _guard = crate::authz::TEST_LOCK.lock().await;
+        let service = service(vec![AiProviderConfig {
+            id: "room".into(),
+            base_url: "mist-network://test".into(),
+            models: vec!["image-model".into()],
+            ..Default::default()
+        }]);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let room = room(Arc::new(move |peer, message| {
+            tx.send((peer.to_string(), message)).unwrap();
+        }));
+        service
+            .rooms
+            .write()
+            .unwrap()
+            .insert("test".into(), room.clone());
+        for (peer, service_tag, model) in [
+            ("chat-peer", protocol::SERVICE_CHAT, "image-model"),
+            ("other-peer", protocol::SERVICE_OAI, "upscale-model"),
+            ("image-peer", protocol::SERVICE_OAI, "image-model"),
+        ] {
+            assert!(room.consumer.handle_message(
+                peer,
+                &ProtocolMessage::ProviderHello {
+                    models: Some(vec![model.into()]),
+                    services: Some(vec![service_tag.into()]),
+                    voices: None,
+                }
+            ));
+        }
+        // A job-shaped fixture catches accidental registration at either hop.
+        let bytes =
+            serde_json::to_vec_pretty(&json!({"id":ID,"data":[{"url":"unchanged"}]})).unwrap();
+        let expected = bytes.clone();
+        let oai = room.oai.clone();
+        let task = tokio::spawn(async move {
+            let mut requests = 0;
+            while requests < 2 {
+                let (peer, message) = rx.recv().await.unwrap();
+                match message {
+                    ProtocolMessage::ConsumerHello => {}
+                    ProtocolMessage::OaiRequest {
+                        id,
+                        seq,
+                        last,
+                        data,
+                        method,
+                        path,
+                        ..
+                    } => {
+                        assert_eq!(peer, "image-peer");
+                        assert_eq!(seq, 0);
+                        assert!(last);
+                        assert_eq!(method.as_deref(), Some("POST"));
+                        assert_eq!(path.as_deref(), Some("/images/edits"));
+                        let body: Value = serde_json::from_slice(
+                            &base64::engine::general_purpose::STANDARD
+                                .decode(data)
+                                .unwrap(),
+                        )
+                        .unwrap();
+                        assert_eq!(body, json!({"model":"image-model","scale":2}));
+                        oai.handle_message(
+                            &peer,
+                            &ProtocolMessage::OaiResponse {
+                                id,
+                                seq: 0,
+                                last: true,
+                                data: base64::engine::general_purpose::STANDARD.encode(&bytes),
+                                status: Some(200),
+                                content_type: Some("application/json".into()),
+                            },
+                        );
+                        requests += 1;
+                    }
+                    _ => panic!("unexpected room message"),
+                }
+            }
+        });
+        let make_request = || {
+            request(
+                "POST",
+                "/images/edits",
+                Some(json!({"model":"image-model","scale":2})),
+            )
+        };
+        for response in [
+            tokio::time::timeout(Duration::from_secs(5), room.clone().relay(make_request()))
+                .await
+                .unwrap()
+                .unwrap(),
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                service.clone().relay(make_request()),
+            )
+            .await
+            .unwrap()
+            .unwrap(),
+        ] {
+            assert_eq!(response.status, 200);
+            assert_eq!(response.body, expected);
+            assert!(room.relay_jobs.snapshot().is_empty());
+            assert!(service.relay_jobs.snapshot().is_empty());
+        }
+        task.await.unwrap();
+        for path in ["/images/edits", "/3d/generations"] {
+            let result = room
+                .clone()
+                .relay(request("POST", path, Some(json!({"model":"missing"}))))
+                .await;
+            assert!(
+                result
+                    .err()
+                    .unwrap()
+                    .downcast_ref::<super::super::ModelNotFound>()
+                    .is_some()
+            );
+        }
+        for method in ["GET", "DELETE"] {
+            assert_eq!(
+                room.clone()
+                    .relay(request(method, "/images/edits", None))
+                    .await
+                    .unwrap()
+                    .status,
+                404
+            );
+        }
+        for body in [
+            json!({}),
+            json!({"model":""}),
+            json!({"model":23}),
+            json!([]),
+        ] {
+            assert_eq!(
+                room.clone()
+                    .relay(request("POST", "/images/edits", Some(body)))
+                    .await
+                    .unwrap()
+                    .status,
+                400
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn room_voices_use_accepted_advertisements_and_remove_departed_peers() {
         let _guard = crate::authz::TEST_LOCK.lock().await;
         let service = service(vec![]);
         let send: super::super::SendFn = Arc::new(|_, _| {});
-        let room = Arc::new(AiRoom {
-            relay_jobs: Default::default(),
-            relay_voices: Default::default(),
-            cache_lock: Mutex::new(()),
-            room: "test".into(),
-            node_id: "node".into(),
-            consumer: super::super::Consumer::new(send.clone()),
-            voice: super::super::voice_consumer::VoiceConsumer::new(send.clone()),
-            oai: oai_tunnel::TunnelConsumer::new(send.clone()),
-            send,
-            provider: RwLock::new(None),
-            handlers: Arc::new(tokio::sync::Semaphore::new(64)),
-            dropped_messages: Default::default(),
-        });
+        let room = room(send);
         service
             .rooms
             .write()
@@ -1007,20 +1243,7 @@ mod tests {
         let send: super::super::SendFn = Arc::new(move |peer, message| {
             tx.send((peer.to_string(), message)).unwrap();
         });
-        let room = Arc::new(AiRoom {
-            relay_jobs: Default::default(),
-            relay_voices: Default::default(),
-            cache_lock: Mutex::new(()),
-            room: "test".into(),
-            node_id: "node".into(),
-            consumer: super::super::Consumer::new(send.clone()),
-            voice: super::super::voice_consumer::VoiceConsumer::new(send.clone()),
-            oai: oai_tunnel::TunnelConsumer::new(send.clone()),
-            send,
-            provider: RwLock::new(None),
-            handlers: Arc::new(tokio::sync::Semaphore::new(64)),
-            dropped_messages: Default::default(),
-        });
+        let room = room(send);
         service
             .rooms
             .write()
@@ -1184,6 +1407,8 @@ mod tests {
             ("POST", "/api/ps"),
             ("DELETE", &format!("/3d/generations/{ID}/content")),
             ("GET", "/unexpected"),
+            ("GET", "/images/edits"),
+            ("DELETE", "/images/edits"),
         ] {
             let response = service
                 .clone()
@@ -1193,15 +1418,34 @@ mod tests {
             assert_eq!(response.status, 404);
             assert_eq!(response.content_type, "application/json");
         }
-        for body in [json!([]), json!(null), json!({"model":23})] {
-            assert_eq!(
-                service
-                    .clone()
-                    .relay(request("POST", "/3d/generations", Some(body)))
-                    .await
+        for path in ["/3d/generations", "/images/edits"] {
+            for body in [
+                json!([]),
+                json!(null),
+                json!({"model":23}),
+                json!({}),
+                json!({"model":""}),
+            ] {
+                assert_eq!(
+                    service
+                        .clone()
+                        .relay(request("POST", path, Some(body)))
+                        .await
+                        .unwrap()
+                        .status,
+                    400
+                );
+            }
+            let result = service
+                .clone()
+                .relay(request("POST", path, Some(json!({"model":"missing"}))))
+                .await;
+            assert!(
+                result
+                    .err()
                     .unwrap()
-                    .status,
-                400
+                    .downcast_ref::<super::super::ModelNotFound>()
+                    .is_some()
             );
         }
         assert_eq!(

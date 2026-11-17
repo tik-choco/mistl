@@ -58,6 +58,8 @@
 //!   (`/v1/audio/voices`, `/v1/voices`), and model details (`/v1/models/<id>`)
 //!   are also available under `/v1/rooms/<room>`. Job content is downloaded
 //!   in bounded windows; synchronous `b64_json` results are capped at 64 MiB.
+//! - `POST /v1/images/edits` (also room-scoped) relays JSON or multipart
+//!   image edits, returning the upstream JSON or image bytes unchanged.
 //! - Unscoped lifecycle routes `/api/ps`, `/health`, and the
 //!   root `/voices` alias use the injected local relay.
 //! - Unresolvable explicit models -> `404` with OpenAI `model_not_found`.
@@ -86,7 +88,7 @@
 //!
 //! Read the request line + headers (case-insensitive names) up to a sane
 //! cap, then exactly `Content-Length` body bytes (411 if missing on POST;
-//! route-specific caps for JSON, audio and 3D uploads). `Connection: close`
+//! route-specific caps for JSON, audio, 3D and image uploads). `Connection: close`
 //! semantics -- serve one request per connection, then close. Tolerate both
 //! `\r\n` and `\n`.
 
@@ -129,7 +131,7 @@ pub(super) type DecisionFn = Arc<
         + Sync,
 >;
 
-/// One request for the tc-ai-api passthrough routes (3D generation jobs,
+/// One request for the tc-ai-api passthrough routes (image edits, 3D generation jobs,
 /// voice catalog, lifecycle). `path` is relative to the `/v1` base
 /// (`/3d/generations/<id>/content?range=0-8388607`, `/audio/voices`) except
 /// the root lifecycle paths (`/api/ps`, `/health`), which are
@@ -159,7 +161,7 @@ pub(super) struct RoomRoutes {
     pub oai: OaiFn,
     /// `POST /systemone` over the room's oai tunnel.
     pub decision: DecisionFn,
-    /// 3D generation jobs and the voice catalog over the room.
+    /// Image edits, 3D generation jobs and the voice catalog over the room.
     pub relay: RelayFn,
 }
 
@@ -183,6 +185,8 @@ const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
 const MAX_JSON_BODY_BYTES: usize = 2 * 1024 * 1024;
 const MAX_GEN3D_MULTIPART_BYTES: usize = 20 * 1024 * 1024 + 128 * 1024;
 const MAX_GEN3D_JSON_BYTES: usize = 20 * 1024 * 1024 / 3 * 4 + 128 * 1024;
+const MAX_IMAGE_EDIT_MULTIPART_BYTES: usize = 32 * 1024 * 1024 + 128 * 1024;
+const MAX_IMAGE_EDIT_JSON_BYTES: usize = 32 * 1024 * 1024 / 3 * 4 + 128 * 1024;
 const MAX_GEN3D_B64_BYTES: u64 = 64 * 1024 * 1024;
 /// Deadline for receiving the complete request head (slowloris guard).
 const HEAD_READ_TIMEOUT: Duration = Duration::from_secs(10);
@@ -1134,6 +1138,7 @@ async fn route_request(
         };
         let is_transcription = path == "/v1/audio/transcriptions";
         let is_gen3d = path == "/v1/3d/generations";
+        let is_image_edit = path == "/v1/images/edits";
         let is_multipart =
             multipart_boundary(head.header("content-type").unwrap_or_default()).is_some();
         let body_cap = if is_transcription {
@@ -1142,6 +1147,10 @@ async fn route_request(
             MAX_GEN3D_MULTIPART_BYTES
         } else if is_gen3d {
             MAX_GEN3D_JSON_BYTES
+        } else if is_image_edit && is_multipart {
+            MAX_IMAGE_EDIT_MULTIPART_BYTES
+        } else if is_image_edit {
+            MAX_IMAGE_EDIT_JSON_BYTES
         } else {
             MAX_JSON_BODY_BYTES
         };
@@ -1156,7 +1165,7 @@ async fn route_request(
             return Ok(());
         }
         if !(is_transcription
-            || is_gen3d && is_multipart
+            || (is_gen3d || is_image_edit) && is_multipart
             || content_type_is_json(head.header("content-type")))
         {
             let _ = write_error(
@@ -1277,6 +1286,7 @@ fn room_route(path: &str) -> Option<(String, String)> {
             | "audio/voices"
             | "voices"
             | "3d/generations"
+            | "images/edits"
     ) && !endpoint.starts_with("models/")
         && !endpoint.starts_with("3d/generations/")
     {
@@ -1309,6 +1319,7 @@ fn relay_path<'a>(method: &str, path: &'a str) -> Option<&'a str> {
         ("GET", "/v1/audio/voices" | "/v1/voices" | "/voices") => Some("/audio/voices"),
         ("GET", "/api/ps" | "/health") => Some(path),
         ("GET" | "POST", "/v1/3d/generations") => Some("/3d/generations"),
+        ("POST", "/v1/images/edits") => Some("/images/edits"),
         ("GET" | "DELETE", p) if p.starts_with("/v1/3d/generations/") => Some(&p[3..]),
         _ => None,
     }
@@ -1345,7 +1356,11 @@ fn rewrite_job_urls(value: &mut Value, base: &str) {
     }
 }
 
-fn gen3d_multipart(body: &[u8], boundary: &str) -> std::result::Result<Vec<u8>, &'static str> {
+fn multipart_json(
+    body: &[u8],
+    boundary: &str,
+    string_fields: &[&str],
+) -> std::result::Result<Vec<u8>, &'static str> {
     let mut object = serde_json::Map::new();
     for part in parse_multipart(body, boundary) {
         if object.contains_key(&part.name) {
@@ -1369,7 +1384,8 @@ fn gen3d_multipart(body: &[u8], boundary: &str) -> std::result::Result<Vec<u8>, 
             if matches!(
                 part.name.as_str(),
                 "keep_alive" | "model" | "output_format" | "response_format" | "user"
-            ) {
+            ) || string_fields.contains(&part.name.as_str())
+            {
                 json!(text)
             } else {
                 serde_json::from_str::<Value>(text)
@@ -1574,12 +1590,18 @@ async fn handle_relay(
     let method = head.method.to_ascii_uppercase();
     let path = relay_path(&method, path).expect("relay route");
     let gen3d_post = method == "POST" && path == "/3d/generations";
+    let image_edit_post = method == "POST" && path == "/images/edits";
     let req = if method == "POST" {
-        if gen3d_post
+        if (gen3d_post || image_edit_post)
             && let Some(boundary) =
                 multipart_boundary(head.header("content-type").unwrap_or_default())
         {
-            body = match gen3d_multipart(&body, &boundary) {
+            let string_fields: &[&str] = if image_edit_post {
+                &["background"]
+            } else {
+                &[]
+            };
+            body = match multipart_json(&body, &boundary, string_fields) {
                 Ok(body) => body,
                 Err(message) => {
                     write_error(stream, 400, "Bad Request", message).await?;
@@ -1616,7 +1638,7 @@ async fn handle_relay(
         }
     };
     // Authenticate first; then require an explicit model (no built-in default).
-    if gen3d_post && model.is_none() {
+    if (gen3d_post || image_edit_post) && model.is_none() {
         return write_tunnel_response(stream, &super::oai_tunnel::missing_model()).await;
     }
     if let Some(tail) = path.strip_prefix("/3d/generations/") {
@@ -2609,6 +2631,251 @@ mod tests {
         let server = start_test_server(fake_call_ok(), fake_models()).await;
         let raw = relay_request(&server, "GET", "/v1/voices", "", None).await;
         assert_eq!(status_code(&split_response(&raw).0), 404);
+        server.stop();
+    }
+
+    #[tokio::test]
+    async fn image_edits_relay_json_and_upstream_status_and_body_unchanged() {
+        let _authz = authz_test().await;
+        for status in [200, 400, 413, 500, 502] {
+            // Preserve even job-shaped data; image edits have no job URL handling.
+            let reply = format!(
+                "{{ \"data\": [{{\"b64_json\":\"UE5H\",\"url\":\"/3d/generations/{GENERATION_ID}/content\"}}] }}"
+            );
+            let bytes = reply.as_bytes().to_vec();
+            let (relay, seen) = recording_relay(move |_| TunnelResponse {
+                status,
+                content_type: "application/json".into(),
+                body: bytes.clone(),
+            });
+            let server = relay_test_server(relay).await;
+            let request = r#"{ "model":"image-model", "image":"data:image/png;base64,UE5H", "response_format":"b64_json" }"#;
+            for prefix in ["/v1", "/v1/rooms/team%2Fone"] {
+                let raw = relay_request(
+                    &server,
+                    "POST",
+                    &format!("{prefix}/images/edits"),
+                    "application/json",
+                    Some(request),
+                )
+                .await;
+                let (head, body) = split_response(&raw);
+                assert_eq!(status_code(&head), status);
+                assert!(head_has(&head, "Content-Type: application/json"));
+                assert_eq!(body, reply.as_bytes());
+                let records = seen.lock().unwrap();
+                let sent = records.last().unwrap();
+                assert_eq!(sent.method, "POST");
+                assert_eq!(sent.path, "/images/edits");
+                assert_eq!(sent.body.as_deref(), Some(request.as_bytes()));
+            }
+            assert_eq!(seen.lock().unwrap().len(), 2);
+            server.stop();
+        }
+    }
+
+    #[tokio::test]
+    async fn image_edits_binary_reply_preserves_bytes_and_content_type() {
+        let _authz = authz_test().await;
+        let image = b"\x89PNG\r\n\x1a\n\x00\xff\x80";
+        let (relay, seen) = recording_relay(move |_| TunnelResponse {
+            status: 200,
+            content_type: "image/png".into(),
+            body: image.to_vec(),
+        });
+        let server = relay_test_server(relay).await;
+        for prefix in ["/v1", "/v1/rooms/team%2Fone"] {
+            let raw = relay_request(
+                &server,
+                "POST",
+                &format!("{prefix}/images/edits"),
+                "application/json",
+                Some(r#"{"model":"image-model","image":"UE5H","response_format":"binary"}"#),
+            )
+            .await;
+            let (head, body) = split_response(&raw);
+            assert_eq!(status_code(&head), 200);
+            assert!(head_has(&head, "Content-Type: image/png"));
+            assert_eq!(body, image);
+        }
+        assert_eq!(seen.lock().unwrap().len(), 2);
+        server.stop();
+    }
+
+    #[tokio::test]
+    async fn image_edits_multipart_preserves_field_types() {
+        let _authz = authz_test().await;
+        let (relay, seen) = recording_relay(|_| relay_response(200, json!({})));
+        let server = relay_test_server(relay).await;
+        for prefix in ["/v1", "/v1/rooms/team%2Fone"] {
+            for background in ["transparent", "true", "42"] {
+                let body = gen3d_form(&[
+                    ("model", "image-model"),
+                    ("scale", "2.5"),
+                    ("response_format", "binary"),
+                    ("output_format", "png"),
+                    ("background", background),
+                    ("keep_alive", "120"),
+                ]);
+                let raw = relay_request(
+                    &server,
+                    "POST",
+                    &format!("{prefix}/images/edits"),
+                    "multipart/form-data; boundary=b",
+                    Some(&body),
+                )
+                .await;
+                assert_eq!(status_code(&split_response(&raw).0), 200);
+                let records = seen.lock().unwrap();
+                let sent = records.last().unwrap();
+                assert_eq!(sent.method, "POST");
+                assert_eq!(sent.path, "/images/edits");
+                let value: Value = serde_json::from_slice(sent.body.as_ref().unwrap()).unwrap();
+                assert_eq!(
+                    value,
+                    json!({
+                        "image":"data:image/png;base64,UE5H", "model":"image-model",
+                        "scale":2.5, "response_format":"binary", "output_format":"png",
+                        "background":background, "keep_alive":"120"
+                    })
+                );
+            }
+        }
+        server.stop();
+    }
+
+    #[tokio::test]
+    async fn image_edits_require_a_model_after_authorization_and_meter_usage() {
+        let _authz = authz_test().await;
+        let (relay, seen) = recording_relay(|_| relay_response(200, json!({})));
+        let server = relay_test_server(relay).await;
+        for prefix in ["/v1", "/v1/rooms/team%2Fone"] {
+            let path = format!("{prefix}/images/edits");
+            for body in [
+                "{}",
+                r#"{"model":""}"#,
+                r#"{"model":"  "}"#,
+                r#"{"model":null}"#,
+            ] {
+                let raw =
+                    relay_request(&server, "POST", &path, "application/json", Some(body)).await;
+                let (head, body) = split_response(&raw);
+                assert_eq!(status_code(&head), 400);
+                assert_eq!(body, super::super::oai_tunnel::missing_model().body);
+            }
+        }
+        require_token(true);
+        let raw = token_request(
+            &server,
+            "/v1/images/edits",
+            None,
+            Some(("application/json", "{}")),
+        )
+        .await;
+        assert_denied(&raw, 401, "unauthorized");
+        let token = create_token(json!({"models":["image-model"]}));
+        for prefix in ["/v1", "/v1/rooms/team%2Fone"] {
+            let path = format!("{prefix}/images/edits");
+            for body in ["{}", r#"{"model":"other"}"#] {
+                let raw = token_request(
+                    &server,
+                    &path,
+                    Some(&token),
+                    Some(("application/json", body)),
+                )
+                .await;
+                assert_denied(&raw, 403, "model_not_allowed");
+            }
+        }
+        assert!(seen.lock().unwrap().is_empty());
+        for prefix in ["/v1", "/v1/rooms/team%2Fone"] {
+            let raw = token_request(
+                &server,
+                &format!("{prefix}/images/edits"),
+                Some(&token),
+                Some((
+                    "application/json",
+                    r#"{"model":"image-model","image":"UE5H"}"#,
+                )),
+            )
+            .await;
+            assert_eq!(status_code(&split_response(&raw).0), 200);
+        }
+        assert_eq!(token_usage()["requests"], 2);
+        server.stop();
+    }
+
+    #[tokio::test]
+    async fn image_edits_body_caps_validation_and_post_only() {
+        let _authz = authz_test().await;
+        let (relay, seen) = recording_relay(|_| relay_response(200, json!({})));
+        let server = relay_test_server(relay).await;
+        for prefix in ["/v1", "/v1/rooms/team%2Fone"] {
+            let path = format!("{prefix}/images/edits");
+            for (content_type, cap) in [
+                ("application/json", MAX_IMAGE_EDIT_JSON_BYTES),
+                (
+                    "multipart/form-data; boundary=b",
+                    MAX_IMAGE_EDIT_MULTIPART_BYTES,
+                ),
+            ] {
+                let raw = send_request(server.addr(), &format!("POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\r\n", cap + 1)).await;
+                assert_eq!(status_code(&split_response(&raw).0), 413);
+            }
+            for content_type in ["image/png", "text/plain", "multipart/form-data"] {
+                let raw = relay_request(&server, "POST", &path, content_type, Some("PNG")).await;
+                assert_eq!(status_code(&split_response(&raw).0), 415);
+            }
+            for body in ["null", "[]", "true", "\"text\"", "{"] {
+                let raw =
+                    relay_request(&server, "POST", &path, "application/json", Some(body)).await;
+                assert_eq!(status_code(&split_response(&raw).0), 400);
+            }
+            let raw = relay_request(&server, "GET", &path, "", None).await;
+            assert_eq!(status_code(&split_response(&raw).0), 404);
+        }
+        assert!(seen.lock().unwrap().is_empty());
+        // The room limit applies to the converted JSON, including base64 expansion.
+        let form = gen3d_form(&[("model", "image-model")]).replace(
+            "\r\nPNG\r\n",
+            &format!(
+                "\r\n{}\r\n",
+                "x".repeat(super::super::oai_tunnel::MAX_BYTES * 3 / 4)
+            ),
+        );
+        assert!(form.len() < super::super::oai_tunnel::MAX_BYTES);
+        let json =
+            json!({"model":"image-model", "image":"x".repeat(MAX_GEN3D_JSON_BYTES)}).to_string();
+        for (content_type, body) in [
+            ("application/json", &json),
+            ("multipart/form-data; boundary=b", &form),
+        ] {
+            let raw = relay_request(
+                &server,
+                "POST",
+                "/v1/rooms/team%2Fone/images/edits",
+                content_type,
+                Some(body),
+            )
+            .await;
+            assert_eq!(status_code(&split_response(&raw).0), 413);
+            assert!(seen.lock().unwrap().is_empty());
+        }
+        for (content_type, body) in [
+            ("application/json", &json),
+            ("multipart/form-data; boundary=b", &form),
+        ] {
+            let raw = relay_request(
+                &server,
+                "POST",
+                "/v1/images/edits",
+                content_type,
+                Some(body),
+            )
+            .await;
+            assert_eq!(status_code(&split_response(&raw).0), 200);
+        }
+        assert_eq!(seen.lock().unwrap().len(), 2);
         server.stop();
     }
 

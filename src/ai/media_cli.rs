@@ -1,4 +1,4 @@
-//! CLI client for the local AI API's audio and 3D routes.
+//! CLI client for the local AI API's audio, image and 3D routes.
 
 use std::collections::HashSet;
 use std::io::Write;
@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const MAX_UPLOAD: u64 = 20 * 1024 * 1024;
+const MAX_IMAGE_UPLOAD: u64 = 32 * 1024 * 1024;
 const MAX_TRANSCRIPTION_BODY: u64 = 10 * 1024 * 1024;
 const MAX_ERROR_BODY: usize = 64 * 1024;
 
@@ -59,6 +60,31 @@ pub struct TranscribeArgs {
     /// Route through this room
     #[arg(long)]
     room: Option<String>,
+}
+
+#[derive(Subcommand)]
+pub enum ImageAction {
+    /// Edit an image using the selected model
+    Edit {
+        /// Source image
+        #[arg(long)]
+        image: PathBuf,
+        /// Image model to request
+        #[arg(short, long)]
+        model: String,
+        /// Output image file
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Additional upstream parameter (key=value; may be repeated)
+        #[arg(long)]
+        param: Vec<String>,
+        /// Route through this room
+        #[arg(long)]
+        room: Option<String>,
+        /// Replace an existing output file
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -149,6 +175,7 @@ pub enum Action {
     Speech(SpeechArgs),
     Voices(VoicesArgs),
     Transcribe(TranscribeArgs),
+    Image(ImageAction),
     ThreeD(ThreeDAction),
 }
 
@@ -175,6 +202,19 @@ fn validate_action(action: &Action) -> Result<()> {
             if args.speed.is_some_and(|s| !s.is_finite()) {
                 bail!("speed must be a finite number");
             }
+        }
+        Action::Image(ImageAction::Edit {
+            model,
+            output,
+            param,
+            force,
+            ..
+        }) => {
+            if model.trim().is_empty() {
+                bail!("image model must not be empty");
+            }
+            image_params(param)?;
+            check_output(output, *force)?;
         }
         Action::ThreeD(ThreeDAction::Generate {
             model,
@@ -305,6 +345,14 @@ fn generation_params(params: &[String], no_wait: bool) -> Result<Vec<(String, Va
     Ok(params)
 }
 
+fn image_params(params: &[String]) -> Result<Vec<(String, Value)>> {
+    let params = parse_params(params)?;
+    if params.iter().any(|(key, _)| key == "response_format") {
+        bail!("reserved --param key \"response_format\": image edits require binary output");
+    }
+    Ok(params)
+}
+
 fn guessed_mime(path: &Path) -> &'static str {
     match path
         .extension()
@@ -329,17 +377,25 @@ fn guessed_mime(path: &Path) -> &'static str {
     }
 }
 
-async fn file_part(path: &Path) -> Result<Part> {
+async fn file_part(path: &Path, max_upload: u64) -> Result<Part> {
     let file = tokio::fs::File::open(path)
         .await
         .with_context(|| format!("opening upload {}", path.display()))?;
-    if file.metadata().await?.len() > MAX_UPLOAD {
-        bail!("upload {} exceeds the 20 MiB limit", path.display());
+    if file.metadata().await?.len() > max_upload {
+        bail!(
+            "upload {} exceeds the {} MiB limit",
+            path.display(),
+            max_upload / (1024 * 1024)
+        );
     }
     let mut bytes = Vec::new();
-    file.take(MAX_UPLOAD + 1).read_to_end(&mut bytes).await?;
-    if bytes.len() as u64 > MAX_UPLOAD {
-        bail!("upload {} exceeds the 20 MiB limit", path.display());
+    file.take(max_upload + 1).read_to_end(&mut bytes).await?;
+    if bytes.len() as u64 > max_upload {
+        bail!(
+            "upload {} exceeds the {} MiB limit",
+            path.display(),
+            max_upload / (1024 * 1024)
+        );
     }
     let filename = path
         .file_name()
@@ -555,7 +611,7 @@ async fn run_async(action: Action, listen: &str) -> Result<()> {
         }
         Action::Transcribe(args) => {
             let base = room_prefix(listen, args.room.as_deref())?;
-            let file = file_part(&args.file).await?;
+            let file = file_part(&args.file, MAX_UPLOAD).await?;
             let request = client
                 .post(format!("{base}/audio/transcriptions"))
                 .multipart(transcription_form(file, &args))
@@ -569,6 +625,26 @@ async fn run_async(action: Action, listen: &str) -> Result<()> {
                 bail!("transcription multipart body exceeds the local API's 10 MiB limit");
             }
             println!("{}", response_json(client.execute(request).await?).await?);
+        }
+        Action::Image(ImageAction::Edit {
+            image,
+            model,
+            output,
+            param,
+            room,
+            force,
+        }) => {
+            let base = room_prefix(listen, room.as_deref())?;
+            let params = image_params(&param)?;
+            let image = file_part(&image, MAX_IMAGE_UPLOAD).await?;
+            let form = generation_form(image, &model, &params).text("response_format", "binary");
+            let response = client
+                .post(format!("{base}/images/edits"))
+                .timeout(Duration::from_secs(11 * 60))
+                .multipart(form)
+                .send()
+                .await?;
+            println!("{}", write_response(response, &output, force).await?);
         }
         Action::ThreeD(action) => run_3d(&client, listen, action).await?,
     }
@@ -631,7 +707,7 @@ async fn run_3d_with_output(
                 )?;
             }
             let base = room_prefix(listen, room.as_deref())?;
-            let image = file_part(&image).await?;
+            let image = file_part(&image, MAX_UPLOAD).await?;
             let params = generation_params(&param, no_wait)?;
             let form = generation_form(image, &model, &params);
             let deadline = tokio::time::Instant::now()
@@ -772,6 +848,17 @@ mod tests {
             voice: None,
             format: None,
             speed: None,
+            room: None,
+            force: false,
+        }
+    }
+
+    fn image_edit(image: PathBuf, output: PathBuf) -> ImageAction {
+        ImageAction::Edit {
+            image,
+            model: "image-model".into(),
+            output,
+            param: vec![],
             room: None,
             force: false,
         }
@@ -947,6 +1034,115 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"original");
         assert!(check_output(&path, true).is_ok());
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn image_edit_validates_before_starting_the_api() {
+        let image = temp_path("png");
+        let output = temp_path("png");
+        std::fs::write(&output, b"original").unwrap();
+        let action = Action::Image(image_edit(image.clone(), output.clone()));
+        let error = run(action, || panic!("must not start API")).unwrap_err();
+        assert!(error.to_string().contains("output file already exists"));
+        assert_eq!(std::fs::read(&output).unwrap(), b"original");
+
+        for param in ["response_format=binary", "response_format=b64_json"] {
+            let action = Action::Image(ImageAction::Edit {
+                image: image.clone(),
+                model: "image-model".into(),
+                output: output.clone(),
+                param: vec![param.into()],
+                room: None,
+                force: true,
+            });
+            let error = run(action, || panic!("must not start API")).unwrap_err();
+            assert!(error.to_string().contains("response_format"));
+        }
+        let action = Action::Image(ImageAction::Edit {
+            image,
+            model: " ".into(),
+            output: output.clone(),
+            param: vec![],
+            room: None,
+            force: true,
+        });
+        let error = run(action, || panic!("must not start API")).unwrap_err();
+        assert!(error.to_string().contains("image model must not be empty"));
+        std::fs::remove_file(output).unwrap();
+    }
+
+    #[test]
+    fn clap_parses_image_edit_and_requires_image_model_and_output() {
+        for args in [
+            vec![
+                "mistl",
+                "ai",
+                "image",
+                "edit",
+                "-m",
+                "image-model",
+                "-o",
+                "out.png",
+            ],
+            vec![
+                "mistl", "ai", "image", "edit", "--image", "in.png", "-o", "out.png",
+            ],
+            vec![
+                "mistl",
+                "ai",
+                "image",
+                "edit",
+                "--image",
+                "in.png",
+                "-m",
+                "image-model",
+            ],
+        ] {
+            assert!(crate::cli::Cli::try_parse_from(args).is_err());
+        }
+        let parsed = crate::cli::Cli::try_parse_from([
+            "mistl",
+            "ai",
+            "image",
+            "edit",
+            "--image",
+            "in.png",
+            "-m",
+            "image-model",
+            "-o",
+            "out.webp",
+            "--param",
+            "scale=2",
+            "--param",
+            "output_format=webp",
+            "--room",
+            "team/one",
+            "--force",
+        ])
+        .unwrap();
+        let Some(crate::cli::Command::Ai {
+            action:
+                crate::cli::AiAction::Image {
+                    action:
+                        ImageAction::Edit {
+                            image,
+                            model,
+                            output,
+                            param,
+                            room,
+                            force,
+                        },
+                },
+        }) = parsed.command
+        else {
+            panic!("expected image edit command");
+        };
+        assert_eq!(image, PathBuf::from("in.png"));
+        assert_eq!(model, "image-model");
+        assert_eq!(output, PathBuf::from("out.webp"));
+        assert_eq!(param, ["scale=2", "output_format=webp"]);
+        assert_eq!(room.as_deref(), Some("team/one"));
+        assert!(force);
     }
 
     #[test]
@@ -1289,6 +1485,113 @@ mod tests {
             assert!(request.contains(text), "missing {text:?}: {request}");
         }
         tokio::fs::remove_file(path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn image_edit_posts_multipart_and_writes_binary_for_local_and_room_routes() {
+        let image = temp_path("png");
+        tokio::fs::write(&image, b"source image").await.unwrap();
+        for (room, path, force) in [
+            (None, "/v1/images/edits", false),
+            (Some("team/one"), "/v1/rooms/team%2Fone/images/edits", true),
+        ] {
+            let output = temp_path("webp");
+            if force {
+                tokio::fs::write(&output, b"original").await.unwrap();
+            }
+            let action = Action::Image(ImageAction::Edit {
+                image: image.clone(),
+                model: "image-model".into(),
+                output: output.clone(),
+                param: vec![
+                    "scale=2".into(),
+                    "background=transparent".into(),
+                    "output_format=webp".into(),
+                ],
+                room: room.map(str::to_owned),
+                force,
+            });
+            validate_action(&action).unwrap();
+            let result = b"\x89WEBP\0\xff";
+            let (listen, server) = mock(vec![(200, "image/webp", result.to_vec())]).await;
+            run_async(action, &listen).await.unwrap();
+            let requests = server.await.unwrap();
+            let request = String::from_utf8_lossy(&requests[0]);
+            assert!(request.starts_with(&format!("POST {path} ")));
+            for text in [
+                "name=\"image\"; filename=\"",
+                "image/png",
+                "source image",
+                "name=\"model\"\r\n\r\nimage-model\r\n",
+                "name=\"scale\"\r\n\r\n2\r\n",
+                "name=\"background\"\r\n\r\ntransparent\r\n",
+                "name=\"output_format\"\r\n\r\nwebp\r\n",
+                "name=\"response_format\"\r\n\r\nbinary\r\n",
+            ] {
+                assert!(request.contains(text), "missing {text:?}: {request}");
+            }
+            assert_eq!(request.matches("name=\"response_format\"").count(), 1);
+            assert_eq!(tokio::fs::read(&output).await.unwrap(), result);
+            tokio::fs::remove_file(output).await.unwrap();
+        }
+        tokio::fs::remove_file(image).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn image_edit_displays_api_error_without_replacing_output() {
+        let image = temp_path("png");
+        let output = temp_path("png");
+        tokio::fs::write(&image, b"source image").await.unwrap();
+        tokio::fs::write(&output, b"original").await.unwrap();
+        let action = Action::Image(ImageAction::Edit {
+            image: image.clone(),
+            model: "image-model".into(),
+            output: output.clone(),
+            param: vec![],
+            room: None,
+            force: true,
+        });
+        let (listen, server) = mock(vec![(
+            502,
+            "application/json",
+            br#"{"error":{"message":"image result exceeds the room relay limit","code":"response_too_large"}}"#.to_vec(),
+        )])
+        .await;
+        let error = run_async(action, &listen).await.unwrap_err().to_string();
+        assert!(error.contains("502"));
+        assert!(error.contains("image result exceeds the room relay limit"));
+        assert_eq!(tokio::fs::read(&output).await.unwrap(), b"original");
+        server.await.unwrap();
+        tokio::fs::remove_file(image).await.unwrap();
+        tokio::fs::remove_file(output).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn image_edit_accepts_32_mib_and_refuses_larger_upload_before_request() {
+        let image = temp_path("png");
+        let output = temp_path("png");
+        let file = tokio::fs::File::create(&image).await.unwrap();
+        file.set_len(MAX_IMAGE_UPLOAD).await.unwrap();
+        drop(file);
+        drop(file_part(&image, MAX_IMAGE_UPLOAD).await.unwrap());
+
+        let file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .open(&image)
+            .await
+            .unwrap();
+        file.set_len(MAX_IMAGE_UPLOAD + 1).await.unwrap();
+        drop(file);
+        let error = run_async(
+            Action::Image(image_edit(image.clone(), output.clone())),
+            "127.0.0.1:1",
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("32 MiB"));
+        assert!(!output.exists());
+        tokio::fs::remove_file(image).await.unwrap();
     }
 
     #[tokio::test]
@@ -1641,7 +1944,11 @@ mod tests {
         let file = tokio::fs::File::create(&path).await.unwrap();
         file.set_len(MAX_UPLOAD + 1).await.unwrap();
         drop(file);
-        let error = file_part(&path).await.err().unwrap().to_string();
+        let error = file_part(&path, MAX_UPLOAD)
+            .await
+            .err()
+            .unwrap()
+            .to_string();
         assert!(error.contains("20 MiB"));
         tokio::fs::remove_file(path).await.unwrap();
     }

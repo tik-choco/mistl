@@ -943,6 +943,11 @@ pub enum AiAction {
     Voices(crate::ai::media_cli::VoicesArgs),
     /// Transcribe an audio file
     Transcribe(crate::ai::media_cli::TranscribeArgs),
+    /// Edit images
+    Image {
+        #[command(subcommand)]
+        action: crate::ai::media_cli::ImageAction,
+    },
     /// Generate and manage 3D assets
     #[command(name = "3d")]
     ThreeD {
@@ -1702,6 +1707,11 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             }
             AiAction::Transcribe(args) => {
                 crate::ai::media_cli::run(crate::ai::media_cli::Action::Transcribe(args), || {
+                    request("ai.serve.start", json!({}))
+                })
+            }
+            AiAction::Image { action } => {
+                crate::ai::media_cli::run(crate::ai::media_cli::Action::Image(action), || {
                     request("ai.serve.start", json!({}))
                 })
             }

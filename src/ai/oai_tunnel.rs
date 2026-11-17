@@ -18,6 +18,9 @@ pub(super) const CHUNK_SIZE: usize = 12 * 1024;
 pub(super) const MAX_BASE64_CHARS: usize = 24 * 1024 * 1024;
 /// Decoded body cap for one tunnel request or response (18 MiB).
 pub(super) const MAX_BYTES: usize = MAX_BASE64_CHARS / 4 * 3;
+/// HTTP-direct image results may exceed the room tunnel's body cap.
+pub(super) const MAX_IMAGE_RESPONSE_BYTES: usize = 128 * 1024 * 1024;
+pub(super) const IMAGE_EDIT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// tc-ai-api passthrough: deadline for a synchronous (`background` not
 /// `true`) `POST /3d/generations`, above the upstream's 30-minute JOB_TIMEOUT.
 pub(super) const GEN3D_SYNC_TIMEOUT: Duration = Duration::from_secs(35 * 60);
@@ -449,7 +452,12 @@ impl TunnelProvider {
         let job_path = generation_path(&path);
         if !matches!(
             path.as_str(),
-            "/chat/completions" | "/models" | "/embeddings" | "/systemone" | "/3d/generations"
+            "/chat/completions"
+                | "/models"
+                | "/embeddings"
+                | "/systemone"
+                | "/3d/generations"
+                | "/images/edits"
         ) && job_path.is_none()
         {
             if path.starts_with("/3d/generations/") {
@@ -511,7 +519,8 @@ impl TunnelProvider {
             serde_json::from_slice(bytes).map_err(|_| anyhow::anyhow!("request_rejected"))?
         };
         let generation = path == "/3d/generations";
-        if generation {
+        let image_edit = path == "/images/edits";
+        if generation || image_edit {
             let object = body.as_object().context("request_rejected")?;
             // No built-in default: routing needs an explicit model id.
             if object
@@ -531,15 +540,19 @@ impl TunnelProvider {
             Some(rewrite_object(
                 bytes,
                 &set,
-                if generation { &[] } else { &["temperature"] },
+                if generation || image_edit {
+                    &[]
+                } else {
+                    &["temperature"]
+                },
             )?)
         } else {
             None
         };
-        if !generation {
+        if !generation && !image_edit {
             return forward(&target.base_url, &target.api_key, method, &path, payload).await;
         }
-        let mut response = forward_with(
+        let response = forward_with(
             &target.base_url,
             &target.api_key,
             method,
@@ -548,7 +561,20 @@ impl TunnelProvider {
             None,
             relay_deadline(method, &path, &body),
         )
-        .await?;
+        .await;
+        if image_edit {
+            return match response {
+                Err(err) if err.to_string() == "request_too_large" => json_response(
+                    502,
+                    serde_json::json!({"error": {
+                        "message":"image result exceeds the room relay limit; request a smaller scale or a compressed output_format",
+                        "type":"api_error", "code":"response_too_large"
+                    }}),
+                ),
+                response => response,
+            };
+        }
+        let mut response = response?;
         if matches!(response.status, 200 | 202)
             && let Ok(job) = serde_json::from_slice::<Value>(&response.body)
             && let Some(id) = job
@@ -668,7 +694,7 @@ fn json_response(status: u16, body: Value) -> Result<TunnelResponse> {
     })
 }
 
-/// 400 for a `POST /3d/generations` without a model id.
+/// 400 for a generation or image edit request without a model id.
 pub(super) fn missing_model() -> TunnelResponse {
     json_response(
         400,
@@ -726,6 +752,23 @@ pub(super) async fn forward_with(
     range: Option<(u64, u64)>,
     timeout: Duration,
 ) -> Result<TunnelResponse> {
+    forward_capped(
+        base_url, api_key, method, path, payload, range, timeout, MAX_BYTES,
+    )
+    .await
+}
+
+/// [`forward_with`] with an explicit response body cap.
+pub(super) async fn forward_capped(
+    base_url: &str,
+    api_key: &str,
+    method: &str,
+    path: &str,
+    payload: Option<Vec<u8>>,
+    range: Option<(u64, u64)>,
+    timeout: Duration,
+    cap: usize,
+) -> Result<TunnelResponse> {
     // `no_proxy()`: upstreams are usually loopback (e.g. Ollama), and a
     // proxy from the environment would break those requests.
     let client = reqwest::Client::builder()
@@ -757,15 +800,12 @@ pub(super) async fn forward_with(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/octet-stream")
         .to_string();
-    if response
-        .content_length()
-        .is_some_and(|n| n > MAX_BYTES as u64)
-    {
+    if response.content_length().is_some_and(|n| n > cap as u64) {
         bail!("request_too_large");
     }
     let mut body = Vec::new();
     while let Some(chunk) = response.chunk().await? {
-        if body.len().saturating_add(chunk.len()) > MAX_BYTES {
+        if body.len().saturating_add(chunk.len()) > cap {
             bail!("request_too_large");
         }
         body.extend_from_slice(&chunk);
@@ -781,7 +821,9 @@ pub(super) async fn forward_with(
 /// `?range=` query; `body` is the parsed JSON body (`Value::Null` if none).
 pub(super) fn relay_deadline(method: &str, path: &str, body: &Value) -> Duration {
     let path = path.split('?').next().unwrap_or(path);
-    if method == "POST" && path == "/3d/generations" && body["background"] != true {
+    if method == "POST" && path == "/images/edits" {
+        IMAGE_EDIT_TIMEOUT
+    } else if method == "POST" && path == "/3d/generations" && body["background"] != true {
         GEN3D_SYNC_TIMEOUT
     } else if generation_path(path).is_some_and(|(_, content)| content) {
         CONTENT_TIMEOUT
@@ -1186,6 +1228,20 @@ mod tests {
     #[test]
     fn relay_deadlines_distinguish_sync_background_and_content() {
         for body in [
+            Value::Null,
+            json!({"background":true}),
+            json!({"background":false}),
+        ] {
+            assert_eq!(
+                relay_deadline("POST", "/images/edits", &body),
+                IMAGE_EDIT_TIMEOUT
+            );
+        }
+        assert_eq!(
+            relay_deadline("GET", "/images/edits", &Value::Null),
+            TIMEOUT
+        );
+        for body in [
             json!({}),
             json!({"background":false}),
             json!({"background":"true"}),
@@ -1247,6 +1303,244 @@ mod tests {
             let original = shape.clone();
             relativize_job_urls(&mut shape);
             assert_eq!(shape, original);
+        }
+    }
+
+    #[tokio::test]
+    async fn image_edits_forward_models_and_preserve_binary_and_json_replies() {
+        let _guard = crate::authz::TEST_LOCK.lock().await;
+        let image: Vec<u8> = (0..CHUNK_SIZE * 2).map(|n| n as u8).collect();
+        // Even job-shaped JSON must stay verbatim and never create a binding.
+        let json = serde_json::to_vec_pretty(&fixture_job(JOB_A, 1)).unwrap();
+        let (mut target, recorded, server) = mock_upstream(vec![
+            (200, "image/png", image.clone()),
+            (200, "application/json", json.clone()),
+            (
+                413,
+                "application/json",
+                br#"{"error":{"message":"too big"}}"#.to_vec(),
+            ),
+        ])
+        .await;
+        target.model = "image-model".into();
+        let (send, sent) = capture();
+        let provider = TunnelProvider::new(
+            send,
+            Arc::new(move |path, body| {
+                assert_eq!(path, "/images/edits");
+                assert_eq!(body["model"], "upscale-model");
+                Ok(Some(target.clone()))
+            }),
+        );
+        let body = json!({"model":"upscale-model", "image":"data:image/png;base64,AA==",
+            "scale":2, "response_format":"binary", "output_format":"png",
+            "background":"transparent", "keep_alive":"5m", "temperature":0.7});
+        for (status, content_type, expected) in [
+            (200, "image/png", image),
+            (200, "application/json", json),
+            (
+                413,
+                "application/json",
+                br#"{"error":{"message":"too big"}}"#.to_vec(),
+            ),
+        ] {
+            sent.lock().unwrap().clear();
+            provider
+                .handle_message(
+                    "consumer",
+                    request(
+                        "image",
+                        0,
+                        true,
+                        chunks(&serde_json::to_vec(&body).unwrap()).remove(0),
+                        Some("/images/edits"),
+                    ),
+                )
+                .await;
+            let sent = sent.lock().unwrap();
+            let mut encoded = String::new();
+            let count = sent.len();
+            for (n, (peer, message)) in sent.iter().enumerate() {
+                let ProtocolMessage::OaiResponse {
+                    seq,
+                    last,
+                    data,
+                    status: actual_status,
+                    content_type: actual_type,
+                    ..
+                } = message
+                else {
+                    panic!("image response")
+                };
+                assert_eq!(peer, "consumer");
+                assert_eq!(*seq, n as u64);
+                assert_eq!(*last, n + 1 == count);
+                assert_eq!(*actual_status, (n == 0).then_some(status));
+                assert_eq!(actual_type.as_deref(), (n == 0).then_some(content_type));
+                encoded.push_str(data);
+            }
+            assert_eq!(
+                base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .unwrap(),
+                expected
+            );
+            assert!(provider.bindings.lock().unwrap().0.is_empty());
+        }
+        server.await.unwrap();
+        for (headers, bytes) in recorded.lock().unwrap().iter() {
+            assert!(headers.starts_with("POST /v1/images/edits "));
+            assert!(
+                headers
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer fixture-key")
+            );
+            let mut expected = body.clone();
+            expected["model"] = json!("image-model");
+            assert_eq!(serde_json::from_slice::<Value>(bytes).unwrap(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn image_edits_require_post_json_and_an_explicit_model() {
+        let (send, _) = capture();
+        let provider =
+            TunnelProvider::new(send, Arc::new(|_, _| panic!("invalid request resolved")));
+        for method in ["GET", "DELETE", "PUT"] {
+            assert_eq!(
+                provider
+                    .dispatch("peer", method, "/images/edits", "", b"")
+                    .await
+                    .err()
+                    .unwrap()
+                    .to_string(),
+                "request_rejected"
+            );
+        }
+        for bytes in [b"".as_slice(), b"[]", b"null", b"invalid"] {
+            assert_eq!(
+                provider
+                    .dispatch("peer", "POST", "/images/edits", "application/json", bytes)
+                    .await
+                    .err()
+                    .unwrap()
+                    .to_string(),
+                "request_rejected"
+            );
+        }
+        assert!(
+            provider
+                .dispatch(
+                    "peer",
+                    "POST",
+                    "/images/edits",
+                    "text/plain",
+                    br#"{"model":"image-model"}"#
+                )
+                .await
+                .is_err()
+        );
+        for body in [
+            json!({}),
+            json!({"model":null}),
+            json!({"model":""}),
+            json!({"model":"  "}),
+        ] {
+            let response = provider
+                .dispatch(
+                    "peer",
+                    "POST",
+                    "/images/edits",
+                    "application/json",
+                    &serde_json::to_vec(&body).unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status, 400);
+            assert_eq!(
+                json_body(&response)["error"]["code"],
+                "missing_required_parameter"
+            );
+            assert_eq!(json_body(&response)["error"]["param"], "model");
+        }
+    }
+
+    #[tokio::test]
+    async fn image_edits_oversized_results_return_json_502_with_or_without_content_length() {
+        for declared_length in [true, false] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let header_end = loop {
+                    let mut buf = [0; 4096];
+                    let n = socket.read(&mut buf).await.unwrap();
+                    assert!(n > 0);
+                    request.extend_from_slice(&buf[..n]);
+                    if let Some(end) = request.windows(4).position(|s| s == b"\r\n\r\n") {
+                        break end + 4;
+                    }
+                };
+                let request_length: usize = String::from_utf8_lossy(&request[..header_end])
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|n| n.trim().parse().unwrap())
+                    })
+                    .unwrap_or(0);
+                while request.len() < header_end + request_length {
+                    let mut buf = [0; 4096];
+                    let n = socket.read(&mut buf).await.unwrap();
+                    assert!(n > 0);
+                    request.extend_from_slice(&buf[..n]);
+                }
+                let length = if declared_length {
+                    format!("Content-Length: {}\r\n", MAX_BYTES + 1)
+                } else {
+                    String::new()
+                };
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: image/png\r\n{length}Connection: close\r\n\r\n").as_bytes()).await.unwrap();
+                if !declared_length {
+                    let _ = socket.write_all(&vec![0xff; MAX_BYTES + 1]).await;
+                }
+            });
+            let (send, _) = capture();
+            let provider = TunnelProvider::new(
+                send,
+                Arc::new(move |_, _| {
+                    Ok(Some(ResolvedModel {
+                        base_url: format!("http://{addr}/v1"),
+                        api_key: String::new(),
+                        model: "image-model".into(),
+                        reasoning_effort: None,
+                        voice: None,
+                        lang_voices: HashMap::new(),
+                    }))
+                }),
+            );
+            let response = provider
+                .dispatch(
+                    "peer",
+                    "POST",
+                    "/images/edits",
+                    "application/json",
+                    br#"{"model":"image-model"}"#,
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status, 502);
+            assert_eq!(response.content_type, "application/json");
+            assert_eq!(
+                json_body(&response),
+                json!({"error": {
+                    "message":"image result exceeds the room relay limit; request a smaller scale or a compressed output_format",
+                    "type":"api_error", "code":"response_too_large"
+                }})
+            );
+            assert!(provider.bindings.lock().unwrap().0.is_empty());
+            server.await.unwrap();
         }
     }
 

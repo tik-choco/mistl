@@ -247,10 +247,11 @@ provider relays it over that room's `oai` tunnel. Upstream status and body are
 returned as-is, so a model that is not a decision model surfaces the upstream's
 own error. Both decision routes honour `mst_` tokens like chat.
 
-### tc-ai-api passthrough (speech, voices, 3D generation, status)
+### tc-ai-api passthrough (speech, voices, image editing, 3D generation, status)
 
-mistl does not generate audio or 3D models itself. A tc-ai-api gateway (or any
-server with the same API) is registered as an ordinary HTTP provider, e.g.
+mistl does not generate audio, edit images or generate 3D models itself. A
+tc-ai-api gateway (or any server with the same API) is registered as an ordinary
+HTTP provider, e.g.
 `base_url = "http://localhost:8087/v1"`, and its endpoints become reachable
 through the local API and, when its models are shared, across rooms:
 
@@ -258,6 +259,7 @@ through the local API and, when its models are shared, across rooms:
 | --- | --- | --- |
 | POST | `/audio/speech` | Unknown top-level fields (`keep_alive`, vendor-specific options, `stream_format`, ...) are passed through to an HTTP TTS provider; `voice` may be omitted. Over a room only the wire v1 fields are carried |
 | GET | `/audio/voices`, `/voices` (also root `/voices`) | The `ai.tts` provider's catalog as returned upstream; a Room synthesizes it from advertised voices |
+| POST | `/images/edits`, `/rooms/{room}/images/edits` | JSON or multipart converted to JSON (the `image` part becomes a data URL); `model` is required |
 | POST | `/3d/generations` | JSON, or multipart converted to JSON (the `image` part becomes a data URL). `model` is required (400 `missing_required_parameter` otherwise); mistl has no built-in default model |
 | GET | `/3d/generations` | Jobs this daemon created (per route), newest first |
 | GET, DELETE | `/3d/generations/{id}` | Job status / delete |
@@ -284,6 +286,14 @@ only); the four mistai paths are unchanged. Synchronous generations get a
 by the tunnel's 18 MiB body cap; locally the 3D body caps follow the upstream
 (about 26.8 MiB JSON, 20 MiB + 128 KiB multipart).
 
+Image edits resolve the model like 3D requests; share the gateway's image model
+ids in the room to make them available to peers. The upstream status, content
+type and body are relayed verbatim (JSON `b64_json` or binary image), without
+`X-Model` or `X-Processing-Ms` headers. The local limit is 32 MiB per image and
+128 MiB per result. Room requests are limited to about 18 MiB after multipart
+conversion (413 if exceeded), and room results to 18 MiB (502
+`response_too_large` if exceeded). The deadline is 10 minutes.
+
 Lifecycle routes sit at the API root and only reach local HTTP providers
 (never peers). Each provider's origin is its `base_url` without `/v1`:
 
@@ -293,10 +303,16 @@ Lifecycle routes sit at the API root and only reach local HTTP providers
 TTS upstream requests now allow 600 seconds (cold model loads and GPU queueing)
 and input up to 10 000 characters.
 
-From the CLI, use `mistl ai speech`, `mistl ai voices`, `mistl ai transcribe`
-and `mistl ai 3d` to access these routes. Add `--room <room>` to select a Room;
-3D generation requires an explicit `-m <model>`. See the
-[CLI reference](cli.md) for examples and file options.
+From the CLI, use `mistl ai speech`, `mistl ai voices`, `mistl ai transcribe`,
+`mistl ai image edit` and `mistl ai 3d` to access these routes. Add `--room <room>`
+to select a Room; image editing and 3D generation require an explicit `-m <model>`:
+
+```console
+$ mistl ai image edit --image input.png -m image-model -o edited.webp --param output_format=webp --room my-room
+```
+
+Image editing requests binary output; use `--param key=value` for other upstream
+fields. See the [CLI reference](cli.md) for more examples and file options.
 
 ### API errors
 
