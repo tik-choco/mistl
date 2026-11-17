@@ -1395,21 +1395,67 @@ async fn relay_get(relay: &RelayFn, path: String) -> Result<super::oai_tunnel::T
     .await
 }
 
+fn content_relay_error(error: &anyhow::Error) -> anyhow::Error {
+    // reqwest errors embed the upstream URL; peer error text is untrusted.
+    // Log only the error kind, or the outermost message, sanitized and capped.
+    if let Some(request_error) = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<reqwest::Error>())
+    {
+        let kind = if request_error.is_timeout() {
+            "timed out"
+        } else if request_error.is_connect() {
+            "connection failed"
+        } else {
+            "request failed"
+        };
+        return anyhow::anyhow!("content window relay failed: HTTP {kind}");
+    }
+    let message: String = error
+        .to_string()
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(200)
+        .collect();
+    anyhow::anyhow!("content window relay failed: {message}")
+}
+
 async fn content_window(relay: &RelayFn, path: &str, start: u64, bytes: u64) -> Result<Vec<u8>> {
     let end = start
         .saturating_add(super::oai_tunnel::CONTENT_WINDOW)
         .min(bytes)
         - 1;
-    let response = relay_get(relay, format!("{path}?range={start}-{end}")).await?;
-    anyhow::ensure!(
-        response.status == 206 || (response.status == 200 && start == 0 && end == bytes - 1),
-        "invalid content window status"
-    );
-    anyhow::ensure!(
-        response.body.len() as u64 == end - start + 1,
-        "invalid content window length"
-    );
-    Ok(response.body)
+    for attempt in 1..=3 {
+        let error = match relay_get(relay, format!("{path}?range={start}-{end}")).await {
+            Err(error) => content_relay_error(&error),
+            Ok(response) if (500..600).contains(&response.status) => {
+                anyhow::anyhow!("content window returned HTTP {}", response.status)
+            }
+            Ok(response) if response.status != 206 && response.status != 200 => {
+                anyhow::bail!("invalid content window status: HTTP {}", response.status);
+            }
+            Ok(response) if response.body.len() as u64 != end - start + 1 => {
+                anyhow::anyhow!(
+                    "invalid content window length: expected {}, received {}",
+                    end - start + 1,
+                    response.body.len()
+                )
+            }
+            Ok(response) if response.status == 200 && (start != 0 || end != bytes - 1) => {
+                anyhow::bail!("invalid content window status: HTTP {}", response.status);
+            }
+            Ok(response) => return Ok(response.body),
+        };
+        if attempt == 3 {
+            return Err(error);
+        }
+        #[cfg(not(test))]
+        let delay = Duration::from_secs(attempt);
+        #[cfg(test)]
+        let delay = Duration::from_millis(attempt);
+        tokio::time::sleep(delay).await;
+    }
+    unreachable!("content window attempts are nonzero")
 }
 
 async fn serve_generation_content(
@@ -1454,7 +1500,20 @@ async fn serve_generation_content(
     let mut start = 0;
     while start < bytes {
         // Errors after committing the headers close the socket, never append JSON.
-        let window = content_window(relay, path, start, bytes).await?;
+        let window = match content_window(relay, path, start, bytes).await {
+            Ok(window) => window,
+            Err(err) => {
+                let safe_job_path = job_path
+                    .strip_prefix("/3d/generations/")
+                    .filter(|id| valid_generation_id(id))
+                    .map(|_| job_path)
+                    .unwrap_or("<invalid job path>");
+                warn!(
+                    "api_server: content download failed for {safe_job_path} at byte {start}: {err:#}"
+                );
+                return Ok(());
+            }
+        };
         stream.write_all(&window).await?;
         start += window.len() as u64;
     }
@@ -2835,6 +2894,150 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tcai_content_retries_transient_failures_for_stream_and_inline() {
+        let _authz = authz_test().await;
+        for failure in ["relay", "5xx", "length"] {
+            for inline in [false, true] {
+                let seen = Arc::new(Mutex::new(Vec::new()));
+                let records = seen.clone();
+                let relay: RelayFn = Arc::new(move |request| {
+                    let mut records = records.lock().unwrap();
+                    let window_attempt = records
+                        .iter()
+                        .filter(|path: &&String| path.contains("/content?"))
+                        .count();
+                    let is_window = request.path.contains("/content?");
+                    records.push(request.path);
+                    let response = if is_window && window_attempt == 0 {
+                        match failure {
+                            "relay" => Err(anyhow::anyhow!("simulated transport failure")),
+                            "5xx" => Ok(relay_response(502, json!({}))),
+                            "length" => Ok(TunnelResponse {
+                                status: 206,
+                                content_type: "application/octet-stream".into(),
+                                body: b"G".to_vec(),
+                            }),
+                            _ => unreachable!(),
+                        }
+                    } else if is_window {
+                        Ok(TunnelResponse {
+                            status: 206,
+                            content_type: "application/octet-stream".into(),
+                            body: b"GLB".to_vec(),
+                        })
+                    } else {
+                        Ok(relay_response(
+                            200,
+                            json!({"id":GENERATION_ID,"status":"completed","data":[{"format":"glb","bytes":3}]}),
+                        ))
+                    };
+                    Box::pin(async move { response })
+                });
+                let server = relay_test_server(relay).await;
+                let raw = if inline {
+                    relay_request(
+                        &server,
+                        "POST",
+                        "/v1/3d/generations",
+                        "application/json",
+                        Some(r#"{"model":"3d-model","response_format":"b64_json"}"#),
+                    )
+                    .await
+                } else {
+                    relay_request(
+                        &server,
+                        "GET",
+                        &format!("/v1/3d/generations/{GENERATION_ID}/content"),
+                        "",
+                        None,
+                    )
+                    .await
+                };
+                let (head, body) = split_response(&raw);
+                assert_eq!(status_code(&head), 200, "{failure}, inline={inline}");
+                if inline {
+                    let job: Value = serde_json::from_slice(body).unwrap();
+                    assert_eq!(job["data"][0]["b64_json"], "R0xC");
+                } else {
+                    assert!(head_has(&head, "Content-Length: 3"));
+                    assert_eq!(body, b"GLB");
+                }
+                let records = seen.lock().unwrap();
+                let windows: Vec<_> = records
+                    .iter()
+                    .filter(|path| path.contains("/content?"))
+                    .collect();
+                assert_eq!(windows.len(), 2);
+                assert_eq!(windows[0], windows[1]);
+                assert_eq!(
+                    windows[0],
+                    &format!("/3d/generations/{GENERATION_ID}/content?range=0-2")
+                );
+                server.stop();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn tcai_content_stops_after_three_failures_on_later_window() {
+        let _authz = authz_test().await;
+        let window = super::super::oai_tunnel::CONTENT_WINDOW;
+        let (relay, seen) = recording_relay(move |request| {
+            if request.path.ends_with(&format!("range=0-{}", window - 1)) {
+                TunnelResponse {
+                    status: 206,
+                    content_type: "application/octet-stream".into(),
+                    body: vec![7; window as usize],
+                }
+            } else if request.path.contains("/content?") {
+                relay_response(502, json!({"error":"upstream failed"}))
+            } else {
+                relay_response(
+                    200,
+                    json!({"status":"completed","data":[{"format":"glb","bytes":window+3}]}),
+                )
+            }
+        });
+        let server = relay_test_server(relay).await;
+        let raw = relay_request(
+            &server,
+            "GET",
+            &format!("/v1/3d/generations/{GENERATION_ID}/content"),
+            "",
+            None,
+        )
+        .await;
+        let (head, body) = split_response(&raw);
+        assert_eq!(status_code(&head), 200);
+        assert!(head_has(&head, &format!("Content-Length: {}", window + 3)));
+        assert_eq!(body.len() as u64, window);
+        assert!(body.iter().all(|byte| *byte == 7));
+        let records = seen.lock().unwrap();
+        assert_eq!(records.len(), 5);
+        for request in &records[2..] {
+            assert_eq!(
+                request.path,
+                format!(
+                    "/3d/generations/{GENERATION_ID}/content?range={window}-{}",
+                    window + 2
+                )
+            );
+        }
+        server.stop();
+    }
+
+    #[test]
+    fn content_relay_error_omits_untrusted_details() {
+        let error =
+            anyhow::anyhow!("secret-token https://example.invalid/private?token=secret-token")
+                .context("OAI response stalled");
+        let safe = format!("{:#}", content_relay_error(&error));
+        assert!(safe.contains("OAI response stalled"));
+        assert!(!safe.contains("secret-token"));
+        assert!(!safe.contains("https://"));
+    }
+
+    #[tokio::test]
     async fn tcai_content_passes_through_not_ready_and_job_errors() {
         let _authz = authz_test().await;
         for job in [
@@ -2886,8 +3089,15 @@ mod tests {
     #[tokio::test]
     async fn tcai_content_drops_connection_on_bad_window() {
         let _authz = authz_test().await;
-        for (status, length) in [(206, 2), (200, 3), (500, 3)] {
-            let window = super::super::oai_tunnel::CONTENT_WINDOW;
+        let window = super::super::oai_tunnel::CONTENT_WINDOW;
+        for (status, length, attempts) in [
+            (206, 2, 3),
+            (200, 3, 3),
+            (200, window as usize, 1),
+            (500, 3, 3),
+            (404, 3, 1),
+            (302, 3, 1),
+        ] {
             let (relay, seen) = recording_relay(move |request| {
                 if request.path.contains("/content?") {
                     TunnelResponse {
@@ -2915,7 +3125,7 @@ mod tests {
             assert_eq!(status_code(&head), 200);
             assert!(head_has(&head, "Content-Type: model/obj"));
             assert!(body.is_empty());
-            assert_eq!(seen.lock().unwrap().len(), 2);
+            assert_eq!(seen.lock().unwrap().len(), 1 + attempts);
             server.stop();
         }
     }

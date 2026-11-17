@@ -29,6 +29,7 @@ const MAX_BUFFERS: usize = 32;
 const MAX_PER_PEER: usize = 4;
 const MAX_TOTAL_CHARS: usize = 48 * 1024 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(120);
+const RESPONSE_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_SEQ: u64 = (MAX_BASE64_CHARS / CHUNK_SIZE) as u64;
 const MAX_JOB_BINDINGS: usize = 1024;
 const MAX_JOBS_PER_PEER: usize = 64;
@@ -953,7 +954,8 @@ impl TunnelConsumer {
             if pending.len() >= 8 {
                 bail!("Too many pending OAI requests");
             }
-            let (tx, rx) = mpsc::channel(64);
+            // Fit every sequence plus an error without requiring the receiver to poll.
+            let (tx, rx) = mpsc::channel(MAX_SEQ as usize + 2);
             pending.insert(id.clone(), (peer.to_string(), tx));
             rx
         };
@@ -982,8 +984,19 @@ impl TunnelConsumer {
             let mut assembly = Assembly::default();
             let mut status = 200;
             let mut content_type = "application/json".to_string();
+            let mut received_response = false;
             loop {
-                match rx.recv().await.context("OAI response closed")? {
+                // Synchronous generation may wait much longer for its first chunk.
+                let message = if received_response {
+                    tokio::time::timeout(RESPONSE_IDLE_TIMEOUT, rx.recv())
+                        .await
+                        .context("OAI response stalled")?
+                } else {
+                    rx.recv().await
+                }
+                .context("OAI response closed")?;
+                received_response = true;
+                match message {
                     ProtocolMessage::OaiError { message, code, .. } => {
                         bail!("{message} ({})", code.unwrap_or_default())
                     }
@@ -1646,6 +1659,98 @@ mod tests {
             assert_eq!(task.await.unwrap().unwrap().status, 204);
             assert!(consumer.pending.lock().unwrap().is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn consumer_accepts_synchronous_response_burst_before_polling() {
+        let (send, sent) = capture();
+        let consumer = TunnelConsumer::new(send);
+        let copy = consumer.clone();
+        let task = tokio::spawn(async move {
+            copy.request_method("provider", "GET", "/models", b"", CONTENT_TIMEOUT)
+                .await
+        });
+        let id = loop {
+            if let Some((_, ProtocolMessage::OaiRequest { id, .. })) = sent.lock().unwrap().first()
+            {
+                break id.clone();
+            }
+            tokio::task::yield_now().await;
+        };
+        let body = vec![b'x'; 200 * CHUNK_SIZE / 4 * 3 - 1];
+        let parts = chunks(&body);
+        assert_eq!(parts.len(), 200);
+        // This current-thread test does not yield until the entire burst is queued.
+        for (seq, data) in parts.into_iter().enumerate() {
+            consumer.handle_message(
+                "provider",
+                &ProtocolMessage::OaiResponse {
+                    id: id.clone(),
+                    seq: seq as u64,
+                    last: seq == 199,
+                    data,
+                    status: (seq == 0).then_some(206),
+                    content_type: (seq == 0).then(|| "model/gltf-binary".into()),
+                },
+            );
+        }
+        let response = task.await.unwrap().unwrap();
+        assert_eq!(response.body, body);
+        assert_eq!(response.status, 206);
+        assert_eq!(response.content_type, "model/gltf-binary");
+        assert!(consumer.pending.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn consumer_idle_timeout_starts_after_first_response_and_resets_on_chunks() {
+        let (send, sent) = capture();
+        let consumer = TunnelConsumer::new(send);
+        let copy = consumer.clone();
+        let started = tokio::time::Instant::now();
+        let task = tokio::spawn(async move {
+            copy.request_method(
+                "provider",
+                "POST",
+                "/3d/generations",
+                b"{}",
+                GEN3D_SYNC_TIMEOUT,
+            )
+            .await
+        });
+        let id = loop {
+            if let Some((_, ProtocolMessage::OaiRequest { id, .. })) = sent.lock().unwrap().first()
+            {
+                break id.clone();
+            }
+            tokio::task::yield_now().await;
+        };
+        tokio::task::yield_now().await;
+        tokio::time::advance(RESPONSE_IDLE_TIMEOUT * 2).await;
+        tokio::task::yield_now().await;
+        assert!(!task.is_finished());
+
+        for seq in 0..2 {
+            consumer.handle_message(
+                "provider",
+                &ProtocolMessage::OaiResponse {
+                    id: id.clone(),
+                    seq,
+                    last: false,
+                    data: "eHh4".into(),
+                    status: None,
+                    content_type: None,
+                },
+            );
+            tokio::task::yield_now().await;
+            tokio::time::advance(Duration::from_secs(20)).await;
+            tokio::task::yield_now().await;
+            assert!(!task.is_finished());
+        }
+        tokio::time::advance(Duration::from_secs(11)).await;
+        let error = task.await.unwrap().err().unwrap();
+        assert_eq!(error.to_string(), "OAI response stalled");
+        assert!(started.elapsed() < CONTENT_TIMEOUT);
+        assert!(consumer.pending.lock().unwrap().is_empty());
     }
 
     #[tokio::test(start_paused = true)]

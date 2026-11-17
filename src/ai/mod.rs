@@ -122,6 +122,9 @@ pub type SttFn = Arc<dyn Fn(stt::SttParams) -> SttCallFuture + Send + Sync>;
 
 /// Capacity of the outbound reply queue (see `init_service`).
 const SEND_QUEUE_CAPACITY: usize = 4096;
+/// After a failed send, further queued messages to that peer are dropped for
+/// this long instead of each waiting out `net::NET_TIMEOUT`.
+const SEND_FAIL_BACKOFF: Duration = Duration::from_secs(10);
 
 /// How long discovery waits for a `provider_hello` (mistai default).
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -543,11 +546,21 @@ impl AiService {
             tokio::sync::mpsc::channel::<(String, ProtocolMessage)>(SEND_QUEUE_CAPACITY);
         let send_room = room.to_string();
         tokio::spawn(async move {
+            // Waiting sends keep large OAI responses lossless; a peer that just
+            // failed is skipped briefly so it cannot stall the room's queue.
+            let mut failed: Option<(String, std::time::Instant)> = None;
             while let Some((to, msg)) = rx.recv().await {
+                if failed
+                    .as_ref()
+                    .is_some_and(|(peer, at)| *peer == to && at.elapsed() < SEND_FAIL_BACKOFF)
+                {
+                    continue;
+                }
                 if let Err(err) =
-                    crate::net::send_direct(&send_room, &to, protocol::encode(&msg)).await
+                    crate::net::send_direct_wait(&send_room, &to, protocol::encode(&msg)).await
                 {
                     debug!(%err, "ai: send failed");
+                    failed = Some((to, std::time::Instant::now()));
                 }
             }
         });

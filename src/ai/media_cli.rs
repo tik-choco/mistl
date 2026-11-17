@@ -472,6 +472,7 @@ async fn write_response(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/octet-stream")
         .to_string();
+    let content_length = response.content_length();
     // Stage alongside the destination so failed downloads never truncate it.
     let parent = path
         .parent()
@@ -486,9 +487,24 @@ async fn write_response(
         .with_context(|| format!("creating temporary output for {}", path.display()))?;
     let result: Result<u64> = async {
         let mut bytes = 0u64;
-        while let Some(chunk) = response.chunk().await.context("reading download")? {
+        let interrupted = |bytes: u64| match content_length {
+            Some(total) => format!(
+                "download interrupted after {bytes} of {total} bytes; the daemon log has the cause; retry the download"
+            ),
+            None => format!(
+                "download interrupted after {bytes} bytes; the daemon log has the cause; retry the download"
+            ),
+        };
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .with_context(|| interrupted(bytes))?
+        {
             file.write_all(&chunk).await.context("writing download")?;
             bytes += chunk.len() as u64;
+        }
+        if content_length.is_some_and(|total| bytes < total) {
+            bail!("{}", interrupted(bytes));
         }
         file.flush().await?;
         drop(file);
@@ -1542,6 +1558,44 @@ mod tests {
         assert_eq!(tokio::fs::read(&path).await.unwrap(), b"replacement");
         server.await.unwrap();
         tokio::fs::remove_file(path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn truncated_download_reports_progress_and_removes_temporary_file() {
+        let directory = temp_path("dir");
+        tokio::fs::create_dir(&directory).await.unwrap();
+        let path = directory.join("download.bin");
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listen = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buffer = [0; 4096];
+            stream.read(&mut buffer).await.unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\nshort",
+                )
+                .await
+                .unwrap();
+        });
+        let response = reqwest::get(format!("http://{listen}/")).await.unwrap();
+        let error = write_response(response, &path, false).await.unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("download interrupted after 5 of 100 bytes"));
+        assert!(message.contains("daemon log"));
+        assert!(message.contains("retry"));
+        assert!(!path.exists());
+        assert!(
+            tokio::fs::read_dir(&directory)
+                .await
+                .unwrap()
+                .next_entry()
+                .await
+                .unwrap()
+                .is_none()
+        );
+        server.await.unwrap();
+        tokio::fs::remove_dir(directory).await.unwrap();
     }
 
     #[tokio::test]
