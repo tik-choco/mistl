@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
+use std::time::{Duration, Instant};
 
 use crate::daemon;
 use crate::tunnel::forward_args;
@@ -127,7 +128,11 @@ pub enum Command {
     /// Open the web dashboard in the default browser (starts the daemon if needed)
     Ui,
     /// Show a combined status overview (daemon, stream, AI)
-    Status,
+    Status {
+        /// Show a compact JSON summary without dashboard credentials.
+        #[arg(long)]
+        brief: bool,
+    },
     /// Show or change configuration (applies without editing config.toml)
     Config {
         #[command(subcommand)]
@@ -247,7 +252,11 @@ pub enum DaemonAction {
     /// Stop the running daemon
     Stop,
     /// Restart the running daemon (e.g. after a settings change that needs one)
-    Restart,
+    Restart {
+        /// Return after requesting the restart, without waiting for the new daemon.
+        #[arg(long)]
+        no_wait: bool,
+    },
     /// Show daemon status
     Status,
 }
@@ -1383,7 +1392,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             DaemonAction::Run { host } => daemon::run_foreground(host),
             DaemonAction::Start { host } => daemon::start_background(host),
             DaemonAction::Stop => client_call("daemon.stop", json!({})),
-            DaemonAction::Restart => client_call("daemon.restart", json!({})),
+            DaemonAction::Restart { no_wait } => daemon_restart_cli(no_wait),
             DaemonAction::Status => client_call("daemon.status", json!({})),
         },
         Command::Profile { action } => match action {
@@ -2006,7 +2015,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         },
         Command::Agent(args) => crate::agent::run(args),
         Command::Ui => open_dashboard(),
-        Command::Status => status_overview(),
+        Command::Status { brief } => status_overview(brief),
         Command::Config { action } => match action {
             ConfigAction::Show => client_call("config.show", json!({})),
             ConfigAction::Get { path } => client_call("config.get", json!({"path": path})),
@@ -2135,14 +2144,83 @@ pub fn dispatch(cli: Cli) -> Result<()> {
     }
 }
 
+fn daemon_restart_cli(no_wait: bool) -> Result<()> {
+    if no_wait {
+        return client_call("daemon.restart", json!({}));
+    }
+    let status = daemon::ipc::client_request("daemon.status", json!({}))?;
+    let previous = daemon_build_snapshot(&status)?;
+    daemon::ipc::client_request("daemon.restart", json!({}))?;
+    let current = wait_for_daemon_restart(&previous)?;
+    let response = json!({
+        "restarted": true,
+        "pid": current["pid"],
+        "version": current["version"],
+        "build_id": current["build_id"],
+        "previous": previous,
+    });
+    println!("{}", serde_json::to_string_pretty(&response)?);
+    Ok(())
+}
+
+fn daemon_build_snapshot(status: &Value) -> Result<Value> {
+    let pid = status["pid"]
+        .as_u64()
+        .context("missing PID in daemon status")?;
+    Ok(json!({
+        "pid": pid,
+        "version": status["build"].get("version").unwrap_or(&status["version"]),
+        "build_id": status["build"]["build_id"],
+    }))
+}
+
+fn wait_for_daemon_restart(previous: &Value) -> Result<Value> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let previous_pid = previous["pid"].as_u64();
+    let (ready, response) = std::sync::mpsc::channel();
+    // A blocking IPC call can outlast the remaining wait budget.
+    std::thread::spawn(move || {
+        while Instant::now() < deadline {
+            if let Ok(status) = daemon::ipc::client_request("daemon.status", json!({}))
+                && Instant::now() < deadline
+                && status["pid"]
+                    .as_u64()
+                    .is_some_and(|pid| Some(pid) != previous_pid)
+            {
+                let _ = ready.send(daemon_build_snapshot(&status));
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    });
+    response
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .context("the daemon did not come back within 30s; check `mistl daemon status`")?
+}
+
 fn update_apply_cli(version: Option<String>, restart: bool) -> Result<()> {
     let explicit = version
         .as_deref()
         .is_some_and(|version| !version.is_empty());
-    let response = request(
-        "update.apply",
-        json!({ "version": version, "restart": restart }),
-    )?;
+    let args = json!({ "version": version, "restart": restart });
+    let response = if restart {
+        let previous = daemon_build_snapshot(&request_or_start("daemon.status", json!({}))?)?;
+        let response = daemon::ipc::client_request("update.apply", args)?;
+        if response["restart"] == "scheduled" {
+            let current = wait_for_daemon_restart(&previous)?;
+            if let Some(expected) = response["to"].as_str()
+                && current["version"].as_str() != Some(expected)
+            {
+                let actual = current["version"].as_str().unwrap_or("unknown");
+                bail!(
+                    "the daemon restarted with version {actual}, but the update staged {expected}"
+                );
+            }
+        }
+        response
+    } else {
+        request("update.apply", args)?
+    };
     println!("{}", serde_json::to_string_pretty(&response)?);
     if explicit
         && response["downgrade"].as_bool() == Some(true)
@@ -2228,17 +2306,202 @@ fn install_cli(enable_autostart: bool, add_to_path: bool) -> Result<()> {
 }
 
 /// One combined, human-scannable status snapshot.
-fn status_overview() -> Result<()> {
+fn status_overview(brief: bool) -> Result<()> {
     // The stream call goes first so its auto-start covers daemon.status
     // (which is exempt from auto-start by design).
     let stream = request("stream.status", json!({}))?;
+    let daemon = daemon::ipc::client_request("daemon.status", json!({}))?;
+    let ai = request("ai.status", json!({}))?;
+    let update_status = daemon::ipc::client_request("update.status", json!({})).ok();
+    let update = status_update(
+        &crate::runtime::build_info(),
+        &daemon,
+        update_status.as_ref(),
+    );
+    if brief {
+        let overview = status_brief(&daemon, &stream, &ai, &update);
+        println!("{}", serde_json::to_string(&overview)?);
+        return Ok(());
+    }
     let overview = json!({
-        "daemon": daemon::ipc::client_request("daemon.status", json!({}))?,
+        "daemon": daemon,
         "stream": stream,
-        "ai": request("ai.status", json!({}))?,
+        "ai": ai,
+        "update": update,
     });
     println!("{}", serde_json::to_string_pretty(&overview)?);
     Ok(())
+}
+
+fn status_update(cli_build: &Value, daemon: &Value, update_status: Option<&Value>) -> Value {
+    let restart_required = cli_build["build_id"] != daemon["build"]["build_id"];
+    let mut update = json!({
+        "cli_version": cli_build["version"],
+        "daemon_version": daemon["build"].get("version").unwrap_or(&daemon["version"]),
+        "restart_required": restart_required,
+    });
+    if restart_required {
+        update["hint"] =
+            json!("run `mistl daemon restart` to switch the daemon to the CLI's version");
+    }
+    if let Some(status) = update_status {
+        if let Some(staged) = status["staged"].as_str() {
+            update["staged_version"] = json!(staged);
+        }
+        if let Some(auto_restart) = status["auto_restart"].as_bool() {
+            update["auto_restart"] = json!(auto_restart);
+        }
+    }
+    update
+}
+
+fn status_brief(daemon: &Value, stream: &Value, ai: &Value, update: &Value) -> Value {
+    let model_count = |models: &Value| models.as_array().map_or(0, Vec::len);
+    let remote = &ai["remote_provider"];
+    let remote_provider = remote.as_object().map(|_| {
+        json!({
+            "node_id": remote["node_id"],
+            "models": model_count(&remote["models"]),
+        })
+    });
+    let rooms: Vec<_> = ai["rooms"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|room| {
+            json!({
+                "room": room["room"],
+                "joined": room["joined"],
+                "peers": room["peers"],
+                "models": model_count(&room["models"]),
+            })
+        })
+        .collect();
+    let recent_errors = ai["recent_requests"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|request| request["status"] == "error")
+        .count();
+    json!({
+        "daemon": {
+            "version": update["daemon_version"],
+            "pid": daemon["pid"],
+            "uptime_secs": daemon["uptime_secs"],
+            "network": daemon["network"]["state"],
+        },
+        "update": update,
+        "ai": {
+            "serving": ai["serving"],
+            "providing": ai["providing"],
+            "connected_peers": ai["connected_peers"],
+            "models": ai["models"],
+            "remote_provider": remote_provider,
+            "rooms": rooms,
+            "recent_errors": recent_errors,
+        },
+        "stream": { "running": stream["running"] },
+    })
+}
+
+#[cfg(test)]
+mod status_cli_tests {
+    use super::*;
+
+    #[test]
+    fn parses_restart_wait_and_status_brief_flags() {
+        for flag in [false, true] {
+            let mut args = vec!["mistl", "daemon", "restart"];
+            if flag {
+                args.push("--no-wait");
+            }
+            let parsed = Cli::try_parse_from(args).unwrap();
+            assert!(matches!(parsed.command,
+                Some(Command::Daemon { action: DaemonAction::Restart { no_wait } }) if no_wait == flag));
+
+            let mut args = vec!["mistl", "status"];
+            if flag {
+                args.push("--brief");
+            }
+            let parsed = Cli::try_parse_from(args).unwrap();
+            assert!(matches!(parsed.command, Some(Command::Status { brief }) if brief == flag));
+        }
+    }
+
+    #[test]
+    fn update_summary_detects_build_skew_at_the_same_version() {
+        let cli_build = json!({ "version": "1.0.0", "build_id": "cli-build" });
+        let daemon = json!({ "build": { "version": "1.0.0", "build_id": "daemon-build" } });
+        let update = json!({ "staged": "1.1.0", "auto_restart": false, "exe_path": "/ignored" });
+        assert_eq!(
+            status_update(&cli_build, &daemon, Some(&update)),
+            json!({
+                "cli_version": "1.0.0",
+                "daemon_version": "1.0.0",
+                "restart_required": true,
+                "hint": "run `mistl daemon restart` to switch the daemon to the CLI's version",
+                "staged_version": "1.1.0",
+                "auto_restart": false,
+            }),
+        );
+        assert_eq!(
+            status_update(&cli_build, &json!({ "build": cli_build }), None),
+            json!({
+                "cli_version": "1.0.0",
+                "daemon_version": "1.0.0",
+                "restart_required": false,
+            }),
+        );
+    }
+
+    #[test]
+    fn brief_status_keeps_local_models_and_counts_remote_models_and_errors() {
+        let daemon = json!({
+            "pid": 42,
+            "build": { "version": "1.0.0", "build_id": "old" },
+            "uptime_secs": 60,
+            "network": { "state": "on" },
+            "dashboard": "http://127.0.0.1:1/",
+        });
+        let stream = json!({ "running": true, "share": { "active": true } });
+        let mut ai = json!({
+            "serving": "127.0.0.1:9000",
+            "providing": true,
+            "connected_peers": 2,
+            "models": ["local"],
+            "remote_provider": { "node_id": "peer", "models": ["a", "b"], "services": [] },
+            "rooms": [
+                { "room": "joined", "joined": true, "peers": 2, "models": ["a"], "owners": [] },
+                { "room": "offline", "joined": false, "peers": 0, "models": null },
+            ],
+            "recent_requests": [{ "status": "error" }, { "status": "done" }, { "status": "error" }],
+        });
+        let update = status_update(
+            &json!({ "version": "1.1.0", "build_id": "new" }),
+            &daemon,
+            None,
+        );
+        assert_eq!(
+            status_brief(&daemon, &stream, &ai, &update),
+            json!({
+                "daemon": { "version": "1.0.0", "pid": 42, "uptime_secs": 60, "network": "on" },
+                "update": update,
+                "ai": {
+                    "serving": "127.0.0.1:9000", "providing": true, "connected_peers": 2,
+                    "models": ["local"],
+                    "remote_provider": { "node_id": "peer", "models": 2 },
+                    "rooms": [
+                        { "room": "joined", "joined": true, "peers": 2, "models": 1 },
+                        { "room": "offline", "joined": false, "peers": 0, "models": 0 },
+                    ],
+                    "recent_errors": 2,
+                },
+                "stream": { "running": true },
+            }),
+        );
+        ai["remote_provider"] = Value::Null;
+        assert!(status_brief(&daemon, &stream, &ai, &update)["ai"]["remote_provider"].is_null());
+    }
 }
 
 // -- `mistl key delegate`/`delegations`/`pair` --------------------------
@@ -2501,11 +2764,15 @@ fn open_dashboard() -> Result<()> {
 /// isn't running (`daemon.*` commands are exempt so `daemon stop`/`status`
 /// never boot a daemon just to talk to it).
 fn request(cmd: &str, args: Value) -> Result<Value> {
+    if cmd.starts_with("daemon.") {
+        return daemon::ipc::client_request(cmd, args);
+    }
+    request_or_start(cmd, args)
+}
+
+fn request_or_start(cmd: &str, args: Value) -> Result<Value> {
     match daemon::ipc::client_request(cmd, args.clone()) {
-        Err(error)
-            if !cmd.starts_with("daemon.")
-                && error.to_string().contains("daemon is not running") =>
-        {
+        Err(error) if error.to_string().contains("daemon is not running") => {
             eprintln!("mistl: starting daemon...");
             daemon::start_background_quiet()?;
             daemon::ipc::client_request(cmd, args)

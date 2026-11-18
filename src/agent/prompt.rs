@@ -21,6 +21,8 @@ Rules:\n\
     s.push_str("\nMistl: operate the local P2P node with `mistl` (args array, no leading mistl) and `mistl_help` (command path). Use help before guessing unfamiliar syntax.\nCommand overview (`mistl --help`):\n");
     s.push_str(catalog.trim());
     s.push_str("\nRun mistl only through the mistl tool, never through shell.\nAI settings live in mistl: inspect `config get ai` (not the whole `config show`) and subcommand help first. Mistl uses ai.providers (HTTP or mist-network://<room>, enabled/models/provide/shared), ai.default_ref = {provider_id, model}, ai.tts and ai.stt. ai.status reports rooms[]. Model ids on the network are raw ids. Do not create presets, set default_preset_id/advertised_models, or send temperature.\n`ai chat` is only for chat models. For speech use `ai speech`/`ai voices`, for transcription `ai transcribe`, and for image-to-3D models `ai 3d generate`; do not call the local API with curl for these. To find a model for a task, read the model lists in `ai status` (rooms[].models) and `config get ai.providers`; mistl routes by model on its own, so add `--room <room>` only when the user names a room (and it has joined: true). 3D generation takes minutes: run `ai 3d generate --no-wait`, then `ai 3d wait <id> -o <file> --timeout 300` (repeat it while the job is still running; never poll `ai 3d status` in a loop).\n");
+    s.push_str("Use `mistl status --brief` for an overview, including `update.restart_required`. Use full `mistl status` for details.\n\
+The agent's AI connection uses the daemon and reconnects automatically after `mistl daemon restart`. Use `mistl daemon stop` only when asked, because it ends the agent's AI access.\n");
     s.push('\n');
     s.push_str("\nWorkspace:\n");
     s.push_str(workspace.trim());

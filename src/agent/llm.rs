@@ -14,6 +14,30 @@ pub fn is_tools_unsupported(err: &anyhow::Error) -> bool {
         .is_some_and(|e| e.status == 400 && e.detail.contains("tools_unsupported"))
 }
 
+pub fn is_connection_error(err: &anyhow::Error) -> bool {
+    use std::io::{Error, ErrorKind};
+
+    let Some(request) = err
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<reqwest::Error>())
+    else {
+        return false;
+    };
+    request.is_connect()
+        || (request.is_request()
+            && err
+                .chain()
+                .filter_map(|cause| cause.downcast_ref::<Error>())
+                .any(|io| {
+                    matches!(
+                        io.kind(),
+                        ErrorKind::ConnectionRefused
+                            | ErrorKind::ConnectionReset
+                            | ErrorKind::ConnectionAborted
+                    )
+                }))
+}
+
 pub struct LlmClient {
     upstream: UpstreamConfig,
 }
@@ -140,6 +164,33 @@ mod tests {
     use crate::agent::types::{FunctionCall, ToolCall};
     use serde_json::{Value, json};
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+    #[tokio::test]
+    async fn connection_error_requires_a_transport_failure() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let error = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .post(format!("http://{address}/v1/chat/completions"))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(is_connection_error(
+            &anyhow::Error::new(error).context("request failed")
+        ));
+        for status in [400, 503] {
+            let error = anyhow::Error::new(UpstreamHttpError {
+                label: "LLM API",
+                status,
+                detail: "connection refused".into(),
+            });
+            assert!(!is_connection_error(&error));
+        }
+        assert!(!is_connection_error(&anyhow!("connection reset")));
+    }
 
     async fn endpoint(body: Value) -> (String, tokio::task::JoinHandle<(String, Value)>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

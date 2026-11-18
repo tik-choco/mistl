@@ -6,17 +6,18 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use tokio::sync::{mpsc, oneshot};
+use tokio::time::Instant as TokioInstant;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::config::{self, Config};
-use crate::agent::llm::{LlmClient, is_tools_unsupported};
-use crate::agent::mistl_tool;
+use crate::agent::llm::{LlmClient, is_connection_error, is_tools_unsupported};
+use crate::agent::mistl_tool::{self, DaemonEffect};
 use crate::agent::prompt;
 use crate::agent::safety::{Guard, ReviewRequest, Verdict};
 use crate::agent::tools::{self, Toolbox};
 use crate::agent::types::{
-    AgentEvent, Approval, ApprovalMode, Message, MistlOp, Role, Safety, ToolCall, ToolMode,
-    ToolOutput, UserCommand,
+    AgentEvent, Approval, ApprovalMode, AssistantTurn, Message, MistlOp, Role, Safety, ToolCall,
+    ToolMode, ToolOutput, ToolSpec, UserCommand,
 };
 use crate::agent::workspace::Workspace;
 
@@ -46,9 +47,29 @@ struct Agent {
     approval: ApprovalMode,
     guard: Guard,
     user_requests: Vec<String>,
-    endpoint_ready: bool,
+    endpoint: Endpoint,
     tx: mpsc::UnboundedSender<AgentEvent>,
     model_catalog: Option<CachedModels>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Endpoint {
+    Initial,
+    Ready,
+    Waiting { previous_pid: Option<u64> },
+    Stopped { previous_pid: Option<u64> },
+}
+
+const DAEMON_STOPPED: &str = "the mistl daemon was stopped; the agent's AI connection is unavailable until it starts again (/mistl start)";
+const RECONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const RECONNECT_POLL: Duration = Duration::from_millis(500);
+
+fn daemon_pid(status: &serde_json::Value) -> Option<u64> {
+    status["pid"].as_u64()
+}
+
+fn daemon_replaced(status: &serde_json::Value, previous_pid: Option<u64>) -> bool {
+    previous_pid.is_none_or(|pid| daemon_pid(status).is_some_and(|running| running != pid))
 }
 
 struct CachedModels {
@@ -181,7 +202,7 @@ pub fn spawn(cfg: Config, workspace: Workspace) -> Result<AgentHandle> {
             cfg.reasoning_effort.clone(),
         ),
         user_requests: Vec::new(),
-        endpoint_ready: false,
+        endpoint: Endpoint::Initial,
         tx: ev_tx,
         model_catalog: None,
         cfg,
@@ -301,21 +322,145 @@ impl Agent {
         });
     }
 
-    /// Discover the local API through the same IPC boundary as the CLI.
-    async fn ensure_endpoint(&mut self, token: &CancellationToken) -> Result<()> {
-        if self.endpoint_ready {
-            return Ok(());
-        }
-        if self.toolbox.mistl.ensure_daemon(token).await? {
-            self.send(AgentEvent::Info("started the mistl daemon".into()));
-        }
+    fn invalidate_endpoint(&mut self, next: Endpoint) {
+        self.endpoint = next;
+        self.model_catalog = None;
+    }
+
+    async fn connect_endpoint(&mut self, token: &CancellationToken) -> Result<String> {
         let listen = self.toolbox.mistl.serve_start(token).await?;
         let url = format!("http://{listen}/v1");
-        self.send(AgentEvent::Info(format!("AI network: via mistl ({url})")));
         self.guard.set_base_url(url.clone());
-        self.llm.set_base_url(url);
-        self.endpoint_ready = true;
-        Ok(())
+        self.llm.set_base_url(url.clone());
+        self.endpoint = Endpoint::Ready;
+        Ok(url)
+    }
+
+    /// Discover the local API through the same IPC boundary as the CLI.
+    /// A stopped daemon is only probed; an explicit start is left to the user.
+    async fn ensure_endpoint(
+        &mut self,
+        token: &CancellationToken,
+        deadline: &mut Option<TokioInstant>,
+    ) -> Result<bool> {
+        match self.endpoint {
+            Endpoint::Ready => {}
+            Endpoint::Initial => {
+                if self.toolbox.mistl.ensure_daemon(token).await? {
+                    self.send(AgentEvent::Info("started the mistl daemon".into()));
+                }
+                let url = self.connect_endpoint(token).await?;
+                self.send(AgentEvent::Info(format!("AI network: via mistl ({url})")));
+            }
+            Endpoint::Stopped { previous_pid } => {
+                match self.toolbox.mistl.daemon_status(token).await {
+                    Ok(status) if daemon_replaced(&status, previous_pid) => {
+                        self.connect_endpoint(token).await?;
+                        self.announce_reconnected(&status);
+                    }
+                    Err(e) if token.is_cancelled() => return Err(e),
+                    _ => return Ok(false),
+                }
+            }
+            Endpoint::Waiting { .. } => self.reconnect_endpoint(token, deadline).await?,
+        }
+        Ok(true)
+    }
+
+    fn announce_reconnected(&self, status: &serde_json::Value) {
+        let version = status["build"]["version"]
+            .as_str()
+            .or_else(|| status["version"].as_str());
+        let info = match version {
+            Some(v) => format!(
+                "reconnected to the mistl daemon (v{})",
+                v.trim_start_matches('v')
+            ),
+            None => "reconnected to the mistl daemon".into(),
+        };
+        self.send(AgentEvent::Info(info));
+    }
+
+    async fn reconnect_endpoint(
+        &mut self,
+        token: &CancellationToken,
+        deadline: &mut Option<TokioInstant>,
+    ) -> Result<()> {
+        let Endpoint::Waiting { previous_pid } = self.endpoint else {
+            anyhow::bail!("daemon reconnection was not requested");
+        };
+        let deadline = *deadline.get_or_insert_with(|| TokioInstant::now() + RECONNECT_TIMEOUT);
+        tokio::select! {
+            biased;
+            _ = token.cancelled() => anyhow::bail!("cancelled"),
+            result = tokio::time::timeout_at(deadline, async {
+                // `mistl daemon restart` already waits for the new daemon, so
+                // the first probe usually succeeds; only say so when it does not.
+                let mut announced = false;
+                loop {
+                    if let Ok(status) = self.toolbox.mistl.daemon_status(token).await
+                        && daemon_replaced(&status, previous_pid)
+                        && self.connect_endpoint(token).await.is_ok()
+                    {
+                        self.announce_reconnected(&status);
+                        break;
+                    }
+                    if !announced {
+                        announced = true;
+                        self.send(AgentEvent::Info("waiting for the mistl daemon to restart…".into()));
+                    }
+                    tokio::time::sleep(RECONNECT_POLL).await;
+                }
+            }) => result.map_err(|_| anyhow::anyhow!("timed out waiting for the mistl daemon to reconnect")),
+        }
+    }
+
+    async fn complete_once(
+        &self,
+        specs: &[ToolSpec],
+        token: &CancellationToken,
+    ) -> (Result<AssistantTurn>, bool) {
+        let mut streamed = false;
+        let tx = &self.tx;
+        let result = self
+            .llm
+            .complete(
+                &self.messages,
+                specs,
+                &mut |delta| {
+                    streamed = true;
+                    let _ = tx.send(AgentEvent::TextDelta(delta.to_string()));
+                },
+                token,
+            )
+            .await;
+        (result, streamed)
+    }
+
+    async fn complete_with_recovery(
+        &mut self,
+        specs: &[ToolSpec],
+        token: &CancellationToken,
+        deadline: &mut Option<TokioInstant>,
+        reconnect: impl AsyncFnOnce(
+            &mut Self,
+            &CancellationToken,
+            &mut Option<TokioInstant>,
+        ) -> Result<()>,
+    ) -> Result<AssistantTurn> {
+        let (result, streamed) = self.complete_once(specs, token).await;
+        if result.as_ref().is_err_and(is_connection_error) {
+            self.invalidate_endpoint(Endpoint::Waiting { previous_pid: None });
+            if !streamed && !token.is_cancelled() {
+                reconnect(self, token, deadline).await?;
+                let (retry, _) = self.complete_once(specs, token).await;
+                if retry.as_ref().is_err_and(is_connection_error) {
+                    self.invalidate_endpoint(Endpoint::Waiting { previous_pid: None });
+                }
+                return retry;
+            }
+        }
+        result
     }
 
     async fn list_models(&mut self, token: &CancellationToken) {
@@ -325,7 +470,9 @@ impl Agent {
             {
                 return Ok(cached.models.clone());
             }
-            self.ensure_endpoint(token).await?;
+            if !self.ensure_endpoint(token, &mut None).await? {
+                anyhow::bail!(DAEMON_STOPPED);
+            }
             let models = self.llm.list_models(token).await?;
             self.model_catalog = Some(CachedModels {
                 fetched: Instant::now(),
@@ -366,9 +513,8 @@ impl Agent {
             }
             MistlOp::Start => match self.toolbox.mistl.ensure_daemon(token).await {
                 Ok(started) => {
-                    if started {
-                        self.endpoint_ready = false;
-                        self.model_catalog = None;
+                    if started || matches!(self.endpoint, Endpoint::Stopped { .. }) {
+                        self.invalidate_endpoint(Endpoint::Waiting { previous_pid: None });
                     }
                     self.send(AgentEvent::Info(if started {
                         "started the mistl daemon".into()
@@ -401,9 +547,17 @@ impl Agent {
             self.user_requests.remove(0);
         }
         self.user_requests.push(text.clone());
-        if let Err(e) = self.ensure_endpoint(token).await {
-            self.report(e);
-            return;
+        let mut reconnect_deadline = None;
+        match self.ensure_endpoint(token, &mut reconnect_deadline).await {
+            Ok(true) => {}
+            Ok(false) => {
+                self.send(AgentEvent::Info(DAEMON_STOPPED.into()));
+                return;
+            }
+            Err(e) => {
+                self.report(e);
+                return;
+            }
         }
         if self.messages.is_empty() {
             self.catalog = tokio::select! {
@@ -421,22 +575,26 @@ impl Agent {
 
         let mut repeats = RepeatGuard::default();
         for _ in 0..self.cfg.max_steps {
+            if matches!(self.endpoint, Endpoint::Waiting { .. })
+                && let Err(e) = self
+                    .reconnect_endpoint(token, &mut reconnect_deadline)
+                    .await
+            {
+                self.report(e);
+                return;
+            }
             let turn = loop {
                 let specs = if self.mode == ToolMode::Native {
                     tools::specs(&self.toolbox.workspace)
                 } else {
                     Vec::new()
                 };
-                let tx = self.tx.clone();
                 let res = self
-                    .llm
-                    .complete(
-                        &self.messages,
+                    .complete_with_recovery(
                         &specs,
-                        &mut |d| {
-                            let _ = tx.send(AgentEvent::TextDelta(d.to_string()));
-                        },
                         token,
+                        &mut reconnect_deadline,
+                        Self::reconnect_endpoint,
                     )
                     .await;
                 match res {
@@ -452,6 +610,7 @@ impl Agent {
                     }
                 };
             };
+            reconnect_deadline = None;
             self.send(AgentEvent::AssistantDone);
 
             let native = self.mode == ToolMode::Native;
@@ -471,10 +630,20 @@ impl Agent {
                 return;
             }
 
-            // (call id, title, output); stops early if the turn is cancelled.
+            // (call id, title, output)
             let mut results: Vec<(String, String, ToolOutput)> = Vec::new();
             let mut stuck = false;
+            let mut reconnect_error = None;
             for call in &calls {
+                // The auto reviewer may need the API before the next completion.
+                if matches!(self.endpoint, Endpoint::Waiting { .. })
+                    && let Err(e) = self
+                        .reconnect_endpoint(token, &mut reconnect_deadline)
+                        .await
+                {
+                    reconnect_error = Some(e);
+                    break;
+                }
                 let (title, mut out) = self.run_call(call, token).await;
                 match repeats.check(&title, &out.text) {
                     Repeat::New => {}
@@ -485,19 +654,25 @@ impl Agent {
                     Repeat::Stop => stuck = true,
                 }
                 results.push((call.id.clone(), title, out));
-                if token.is_cancelled() {
+                if token.is_cancelled() || matches!(self.endpoint, Endpoint::Stopped { .. }) {
                     break;
                 }
             }
 
             if native {
-                // Every tool_call id needs a response, even if cancelled.
+                // Every tool_call id needs a response, even if skipped.
                 for call in &calls {
                     let text = results
                         .iter()
                         .find(|(id, _, _)| *id == call.id)
                         .map(|(_, _, o)| o.text.clone())
-                        .unwrap_or_else(|| "cancelled".into());
+                        .unwrap_or_else(|| {
+                            if token.is_cancelled() {
+                                "cancelled".into()
+                            } else {
+                                "skipped because the mistl daemon was unavailable".into()
+                            }
+                        });
                     self.messages
                         .push(Message::tool_result(call.id.clone(), text));
                 }
@@ -510,8 +685,16 @@ impl Agent {
                     .push(Message::user(prompt::format_prompt_results(&pairs)));
             }
 
+            if matches!(self.endpoint, Endpoint::Stopped { .. }) {
+                self.send(AgentEvent::Info(DAEMON_STOPPED.into()));
+                return;
+            }
             if token.is_cancelled() {
                 self.send(AgentEvent::Info("cancelled".into()));
+                return;
+            }
+            if let Some(e) = reconnect_error {
+                self.report(e);
                 return;
             }
             if stuck {
@@ -546,6 +729,12 @@ impl Agent {
         if let Err(output) = self.approve_call(&inv, &title, token).await {
             return (title, output);
         }
+        let daemon_effect = match &inv {
+            tools::Invocation::Mistl(mistl_tool::Invocation::Run(args)) => {
+                mistl_tool::daemon_effect(args)
+            }
+            _ => None,
+        };
         self.send(AgentEvent::ToolStart {
             id: call.id.clone(),
             title: title.clone(),
@@ -558,7 +747,35 @@ impl Agent {
                 chunk: chunk.into(),
             });
         };
+        let previous_pid = if matches!(
+            daemon_effect,
+            Some(DaemonEffect::Restart | DaemonEffect::Stop)
+        ) {
+            self.toolbox
+                .mistl
+                .daemon_status(token)
+                .await
+                .ok()
+                .as_ref()
+                .and_then(daemon_pid)
+        } else {
+            None
+        };
         let out = self.toolbox.run(&inv, token, &mut on_output).await;
+        if out.ok {
+            match daemon_effect {
+                Some(DaemonEffect::Restart) if !mistl_tool::update_was_skipped(&out) => {
+                    self.invalidate_endpoint(Endpoint::Waiting { previous_pid });
+                }
+                Some(DaemonEffect::Start) => {
+                    self.invalidate_endpoint(Endpoint::Waiting { previous_pid: None });
+                }
+                Some(DaemonEffect::Stop) => {
+                    self.invalidate_endpoint(Endpoint::Stopped { previous_pid });
+                }
+                _ => {}
+            }
+        }
         self.send(AgentEvent::ToolEnd {
             id: call.id.clone(),
             ok: out.ok,
@@ -762,7 +979,7 @@ mod tests {
                 mode: cfg.tool_mode,
                 catalog: String::new(),
                 approval,
-                endpoint_ready: false,
+                endpoint: Endpoint::Initial,
                 tx,
                 model_catalog: None,
                 cfg,
@@ -818,6 +1035,56 @@ mod tests {
             requests
         });
         (url, task)
+    }
+
+    #[tokio::test]
+    async fn completion_retries_once_after_a_connection_failure() {
+        let (mut agent, mut events) = test_agent(ApprovalMode::Auto);
+        let (url, server) = review_endpoint(vec!["allow"]).await;
+        let unavailable = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let unavailable_url = format!("http://{}/v1", unavailable.local_addr().unwrap());
+        agent.llm.set_base_url(unavailable_url.clone());
+        drop(unavailable);
+        agent.endpoint = Endpoint::Ready;
+        agent
+            .messages
+            .push(Message::user("check the updated daemon"));
+        let token = CancellationToken::new();
+        let result = agent
+            .complete_with_recovery(&[], &token, &mut None, async |agent, _, _| {
+                assert!(matches!(
+                    agent.endpoint,
+                    Endpoint::Waiting { previous_pid: None }
+                ));
+                agent.llm.set_base_url(url);
+                agent.endpoint = Endpoint::Ready;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0]["messages"][0]["content"],
+            "check the updated daemon"
+        );
+        assert!(
+            matches!(events.try_recv().unwrap(), AgentEvent::TextDelta(delta) if delta == result.content)
+        );
+        assert!(events.try_recv().is_err());
+
+        agent.llm.set_base_url(unavailable_url);
+        let mut reconnects = 0;
+        let error = agent
+            .complete_with_recovery(&[], &token, &mut None, async |_, _, _| {
+                reconnects += 1;
+                Ok(())
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(reconnects, 1);
+        assert!(is_connection_error(&error));
+        assert!(events.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -1140,7 +1407,7 @@ mod tests {
             approval: ApprovalMode::Ask,
             guard: Guard::new(String::new(), None),
             user_requests: Vec::new(),
-            endpoint_ready: true,
+            endpoint: Endpoint::Ready,
             tx,
             cfg,
         };
@@ -1275,7 +1542,7 @@ mod tests {
             approval: ApprovalMode::Ask,
             guard: Guard::new(String::new(), None),
             user_requests: Vec::new(),
-            endpoint_ready: true,
+            endpoint: Endpoint::Ready,
             tx,
             cfg,
         };
@@ -1324,7 +1591,7 @@ mod tests {
             approval: ApprovalMode::Ask,
             guard: Guard::new(String::new(), None),
             user_requests: Vec::new(),
-            endpoint_ready: true,
+            endpoint: Endpoint::Ready,
             tx,
             cfg,
         };
@@ -1370,7 +1637,7 @@ mod tests {
             approval: ApprovalMode::Ask,
             guard: Guard::new(String::new(), None),
             user_requests: Vec::new(),
-            endpoint_ready: true,
+            endpoint: Endpoint::Ready,
             tx,
             cfg,
         };
@@ -1448,7 +1715,7 @@ mod tests {
             approval: ApprovalMode::Ask,
             guard: Guard::new(String::new(), None),
             user_requests: Vec::new(),
-            endpoint_ready: false,
+            endpoint: Endpoint::Initial,
             tx,
             cfg,
         };
@@ -1457,7 +1724,7 @@ mod tests {
             token.cancel();
             agent.turn("question".into(), &token).await;
             assert!(agent.messages.is_empty());
-            assert!(!agent.endpoint_ready);
+            assert!(agent.endpoint != Endpoint::Ready);
             assert!(
                 matches!(events.try_recv().unwrap(), AgentEvent::Info(reason)
                 if reason == "cancelled")

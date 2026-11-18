@@ -161,6 +161,14 @@ jobs:
         # Only the [package] section has `version =` at column 0.
         run: sed -i.bak -E 's/^version = "[^"]*"/version = "${{ needs.plan.outputs.version }}"/' Cargo.toml && rm Cargo.toml.bak
 
+      - name: Pin build provenance
+        # The stamp above is the only edit to a fresh checkout, so the build is
+        # clean. mistlib's build script would otherwise fall back to
+        # GITHUB_SHA, which is mistl's commit, not the checked-out mistlib ref.
+        run: |
+          echo "MISTL_BUILD_DIRTY=false" >> "$GITHUB_ENV"
+          echo "MISTLIB_BUILD_COMMIT=$MISTLIB_REF" >> "$GITHUB_ENV"
+
       # Test on the runner's native architecture (the macOS x86_64 build
       # can be cross-compiled on an ARM runner). Publishing requires this.
       - name: Test

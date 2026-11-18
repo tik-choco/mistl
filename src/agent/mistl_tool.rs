@@ -25,6 +25,47 @@ pub enum Invocation {
     Help(Vec<String>),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonEffect {
+    Restart,
+    Stop,
+    Start,
+}
+
+pub fn daemon_effect(args: &[String]) -> Option<DaemonEffect> {
+    if args.iter().any(|a| matches!(a.as_str(), "--help" | "-h")) {
+        return None;
+    }
+    let [command, subcommand, rest @ ..] = args else {
+        return None;
+    };
+    match (command.as_str(), subcommand.as_str()) {
+        ("daemon", "restart") => Some(DaemonEffect::Restart),
+        ("daemon", "stop") => Some(DaemonEffect::Stop),
+        ("daemon", "start") => Some(DaemonEffect::Start),
+        ("update", "apply" | "install")
+            if rest
+                .iter()
+                .take_while(|a| *a != "--")
+                .any(|a| a == "--restart") =>
+        {
+            Some(DaemonEffect::Restart)
+        }
+        _ => None,
+    }
+}
+
+pub fn update_was_skipped(output: &ToolOutput) -> bool {
+    extract_stdout(&output.text)
+        .and_then(|stdout| {
+            serde_json::Deserializer::from_str(&stdout)
+                .into_iter::<Value>()
+                .next()
+        })
+        .and_then(|value| value.ok())
+        .is_some_and(|value| value["updated"].as_bool() == Some(false))
+}
+
 /// Native-mode tool definitions.
 pub fn tool_specs() -> Vec<ToolSpec> {
     vec![
@@ -616,6 +657,44 @@ pub(crate) fn truncate_middle(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classifies_daemon_lifecycle_calls() {
+        use DaemonEffect::{Restart, Start, Stop};
+        for (command, expected) in [
+            ("daemon restart", Some(Restart)),
+            ("daemon stop", Some(Stop)),
+            ("daemon start --host 127.0.0.1", Some(Start)),
+            ("update apply --version 1.2.3 --restart", Some(Restart)),
+            ("update install --restart 1.2.3", Some(Restart)),
+            ("update apply --version 1.2.3", None),
+            ("update install -- --restart", None),
+            ("update status --restart", None),
+            ("daemon --help", None),
+            ("daemon restart -h", None),
+            ("daemon stop --help", None),
+            ("update install --help 1.2.3 --restart", None),
+            ("status", None),
+            ("", None),
+        ] {
+            assert_eq!(daemon_effect(&split_args(command)), expected, "{command}");
+        }
+    }
+
+    #[test]
+    fn recognizes_successful_update_without_restart() {
+        for (stdout, expected) in [
+            ("{\"updated\":false}\nNote: auto-update is on.", true),
+            (r#"{"updated":true,"restart":"scheduled"}"#, false),
+            (r#"{"restarting":true}"#, false),
+        ] {
+            let out = ToolOutput {
+                ok: true,
+                text: format!("exit code: 0\n--- stdout ---\n{stdout}"),
+            };
+            assert_eq!(update_was_skipped(&out), expected);
+        }
+    }
 
     #[test]
     fn serve_listen_json() {

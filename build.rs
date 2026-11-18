@@ -43,7 +43,12 @@ fn main() {
     let target = env::var("TARGET").unwrap_or_default();
     let profile = env::var("PROFILE").unwrap_or_default();
     let commit = git(&["rev-parse", "HEAD"]);
-    let dirty = !git(&["status", "--porcelain", "--untracked-files=normal"]).is_empty();
+    // CI stamps the release version into Cargo.toml before building, which
+    // git would report as a local change; it sets MISTL_BUILD_DIRTY instead.
+    let dirty = match env::var("MISTL_BUILD_DIRTY") {
+        Ok(value) => value == "true",
+        Err(_) => !git(&["status", "--porcelain", "--untracked-files=normal"]).is_empty(),
+    };
     let mut hash = Sha256::new();
     for input in [
         "src",
@@ -93,6 +98,7 @@ fn main() {
         println!("cargo:rustc-env=MISTL_{key}={value}");
     }
     println!("cargo:rerun-if-env-changed=MISTL_BUILD_CHANNEL");
+    println!("cargo:rerun-if-env-changed=MISTL_BUILD_DIRTY");
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/index");
 }
