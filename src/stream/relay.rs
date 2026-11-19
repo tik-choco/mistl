@@ -181,19 +181,14 @@ const AUDIO_RTP_QUEUE_CAPACITY: usize = 512;
 /// Interval between PictureLossIndication requests to the publisher, sent
 /// immediately on lock and repeated at this cadence thereafter -- browsers
 /// only emit a keyframe on request, and this also lets a late-joining VRChat
-/// viewer get an IDR within one interval (mistlink does the same).
+/// viewer get an IDR within one interval (mistlink does the same). Losses and
+/// new viewers trigger an immediate (debounced) PLI instead, so this is only
+/// the fallback; every keyframe is a latency spike for a few frames
+/// (stream-lab: p95 latency 74 ms at 5 s vs 132 ms at 2 s), so keep it long.
 const PLI_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Minimum spacing between the *immediate* loss-triggered PLIs `video_task`
-/// sends when it detects an RTP sequence gap (or has to reset a desynced
-/// depacketizer). Without the immediate send, a loss event would sit in the
-/// dropping-until-IDR state for up to a full [`PLI_INTERVAL`] waiting for
-/// `pli_task`'s next scheduled tick -- long enough to trip the RTSP dummy
-/// keepalive (1s) and, on lossy links, to make VRChat viewers reach for the
-/// manual Resync. The debounce keeps a burst of back-to-back gaps (one lossy
-/// spike is many gapped packets) from turning into a PLI storm at the
-/// browser: one immediate PLI per window, with the periodic `pli_task` still
-/// running as the fallback.
+/// Minimum spacing for immediate PLIs. Coalesces bursts of requests from
+/// incoming RTP loss, RTSP backpressure, and newly joined viewers.
 const IMMEDIATE_PLI_DEBOUNCE: Duration = Duration::from_secs(1);
 
 /// Cadence of the periodic INFO throughput summary (`summary_task`): frequent
@@ -1222,14 +1217,14 @@ async fn control_loop(
 
                     let video_handle = tokio::spawn(video_task(
                         event.track.clone(),
-                        event.pc.clone(),
                         rtsp.clone(),
                         remote_id.clone(),
                         ended_tx.clone(),
                         counters.clone(),
                         video_republish,
                     ));
-                    let pli_handle = tokio::spawn(pli_task(event.pc.clone(), event.track.ssrc()));
+                    let pli_handle =
+                        tokio::spawn(pli_task(event.pc.clone(), event.track.ssrc(), rtsp.clone()));
                     replace_task(&active_tasks, TaskRole::Video, video_handle);
                     replace_task(&active_tasks, TaskRole::Pli, pli_handle);
 
@@ -1265,14 +1260,14 @@ async fn control_loop(
 
                     let video_handle = tokio::spawn(video_task(
                         event.track.clone(),
-                        event.pc.clone(),
                         rtsp.clone(),
                         remote_id.clone(),
                         ended_tx.clone(),
                         counters.clone(),
                         video_republish,
                     ));
-                    let pli_handle = tokio::spawn(pli_task(event.pc.clone(), event.track.ssrc()));
+                    let pli_handle =
+                        tokio::spawn(pli_task(event.pc.clone(), event.track.ssrc(), rtsp.clone()));
                     replace_task(&active_tasks, TaskRole::Video, video_handle);
                     replace_task(&active_tasks, TaskRole::Pli, pli_handle);
                 }
@@ -1361,7 +1356,6 @@ fn spawn_rtp_reader(track: Arc<TrackRemote>, capacity: usize) -> RtpReader {
 /// disconnects/EOF.
 async fn video_task(
     track: Arc<TrackRemote>,
-    pc: Arc<RTCPeerConnection>,
     rtsp: Arc<RtspServer>,
     remote_id: String,
     ended_tx: mpsc::UnboundedSender<(String, u32)>,
@@ -1378,9 +1372,6 @@ async fn video_task(
     // `awaiting_keyframe`'s doc below.
     let mut awaiting_keyframe = true;
     let mut last_seq: Option<u16> = None;
-    // Debounce state for the immediate loss-triggered PLI (see
-    // [`IMMEDIATE_PLI_DEBOUNCE`]); `pli_task` remains the periodic fallback.
-    let mut last_immediate_pli: Option<Instant> = None;
 
     while let Some(result) = reader.packets.recv().await {
         let packet = match result {
@@ -1440,18 +1431,7 @@ async fn video_task(
             depacketizer = H264Packet::default();
             assembler = AuAssembler::new();
             awaiting_keyframe = true;
-            // Ask for the recovery keyframe *now* instead of waiting up to a
-            // full PLI_INTERVAL for pli_task's next tick -- debounced so a
-            // burst of gapped packets from one loss spike sends one PLI, not
-            // dozens.
-            if immediate_pli_due(
-                &mut last_immediate_pli,
-                Instant::now(),
-                IMMEDIATE_PLI_DEBOUNCE,
-            ) {
-                debug!(%remote_id, "relay: sending immediate PLI after sequence gap");
-                send_pli(&pc, ssrc).await;
-            }
+            rtsp.request_keyframe();
         }
 
         if packet.payload.len() <= 2 {
@@ -1481,14 +1461,7 @@ async fn video_task(
                 depacketizer = H264Packet::default();
                 assembler = AuAssembler::new();
                 awaiting_keyframe = true;
-                if immediate_pli_due(
-                    &mut last_immediate_pli,
-                    Instant::now(),
-                    IMMEDIATE_PLI_DEBOUNCE,
-                ) {
-                    debug!(%remote_id, "relay: sending immediate PLI after depacketizer reset");
-                    send_pli(&pc, ssrc).await;
-                }
+                rtsp.request_keyframe();
                 continue;
             }
         };
@@ -1528,19 +1501,50 @@ async fn video_task(
     let _ = ended_tx.send((remote_id, ssrc));
 }
 
-/// Sends a PictureLossIndication immediately and every [`PLI_INTERVAL`]
-/// thereafter; `tokio::time::interval`'s first tick fires immediately, so
-/// this single loop covers both the "bootstrap decode" and "keep late
-/// viewers fed" requirements without a separate initial send.
-async fn pli_task(pc: Arc<RTCPeerConnection>, media_ssrc: u32) {
+/// Sends a PictureLossIndication on lock, every [`PLI_INTERVAL`] since the
+/// last send, and on debounced keyframe requests.
+async fn pli_task(pc: Arc<RTCPeerConnection>, media_ssrc: u32, rtsp: Arc<RtspServer>) {
     let mut interval = tokio::time::interval(PLI_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last_pli = None;
+    // A request inside the debounce window is deferred to the window's end,
+    // not dropped: a viewer typically joins right after the lock-time PLI and
+    // would otherwise wait a whole PLI_INTERVAL for its first keyframe.
+    let mut deferred: Option<tokio::time::Instant> = None;
     loop {
-        interval.tick().await;
+        tokio::select! {
+            _ = interval.tick() => {
+                last_pli = Some(Instant::now());
+                deferred = None;
+            }
+            _ = rtsp.wait_for_keyframe_request() => {
+                if !immediate_pli_due(&mut last_pli, Instant::now(), IMMEDIATE_PLI_DEBOUNCE) {
+                    if deferred.is_none() {
+                        let since = last_pli.map_or(Duration::ZERO, |last| last.elapsed());
+                        deferred = Some(
+                            tokio::time::Instant::now()
+                                + IMMEDIATE_PLI_DEBOUNCE.saturating_sub(since),
+                        );
+                    }
+                    continue;
+                }
+                debug!(media_ssrc, "relay: sending immediate PLI");
+                interval.reset();
+            }
+            _ = tokio::time::sleep_until(deferred.unwrap_or_else(tokio::time::Instant::now)),
+                if deferred.is_some() =>
+            {
+                deferred = None;
+                last_pli = Some(Instant::now());
+                debug!(media_ssrc, "relay: sending deferred PLI");
+                interval.reset();
+            }
+        }
         send_pli(&pc, media_ssrc).await;
     }
 }
 
-/// Whether an immediate loss-triggered PLI may be sent right now, given the
+/// Whether an immediate PLI may be sent right now, given the
 /// time the last one went out. Updates `last` when it says yes, so callers
 /// just gate `send_pli` on the return value. Pure (time injected) so the
 /// debounce window is unit-testable without a live `RTCPeerConnection` or

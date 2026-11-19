@@ -1564,7 +1564,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             StreamAction::Start { room } => {
                 let response = request("stream.start", json!({ "room": room }))?;
                 println!("{}", serde_json::to_string_pretty(&response)?);
-                if let Some(url) = response.get("rtsp_url").and_then(Value::as_str) {
+                if let Some(url) = stream_vrchat_url(&response) {
                     println!();
                     if let Some(room) = response.get("room").and_then(Value::as_str) {
                         println!("  Sharing into room {room}. Your own VRChat video player URL:");
@@ -1580,7 +1580,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             StreamAction::Relay { room } => {
                 let response = request("stream.relay.start", json!({ "room": room }))?;
                 println!("{}", serde_json::to_string_pretty(&response)?);
-                if let Some(url) = response.get("rtsp_url").and_then(Value::as_str) {
+                if let Some(url) = stream_vrchat_url(&response) {
                     println!();
                     println!("  Paste this URL into the VRChat video player:");
                     println!();
@@ -1616,7 +1616,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             StreamAction::Share { room } => {
                 let response = request("stream.share.start", json!({ "room": room }))?;
                 println!("{}", serde_json::to_string_pretty(&response)?);
-                if let Some(url) = response.get("rtsp_url").and_then(Value::as_str) {
+                if let Some(url) = stream_vrchat_url(&response) {
                     println!();
                     println!("  Sharing into the room. Your own VRChat video player URL:");
                     println!();
@@ -2758,6 +2758,20 @@ fn open_dashboard() -> Result<()> {
         println!("tip: run `mistl install` to install mistl for your user and start it at login");
     }
     Ok(())
+}
+
+fn stream_vrchat_url(response: &Value) -> Option<String> {
+    response
+        .get("vrchat_url")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| {
+            // Older daemons only return rtsp_url.
+            response
+                .get("rtsp_url")
+                .and_then(Value::as_str)
+                .map(crate::stream::vrchat_url)
+        })
 }
 
 /// Send one request to the daemon, transparently starting it first if it

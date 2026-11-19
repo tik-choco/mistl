@@ -31,9 +31,9 @@ use rtsp_types::headers::{
 use rtsp_types::{Method, Request, Response, StatusCode, Version};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::sync::{Mutex, Semaphore, mpsc};
+use tokio::sync::{Mutex, Notify, Semaphore, mpsc};
 use tokio::task::JoinHandle;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::rtp_out::{self, DUMMY_NALU, RtpHeaderFields};
 
@@ -49,9 +49,13 @@ const MAX_CONNECTIONS: usize = 16;
 /// connections that are between requests are deliberately not timed out.
 const REQUEST_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Outbound frames queued per connection; when full, media frames are
-/// dropped (see the `try_send` call sites) rather than growing memory.
-const WRITER_QUEUE_FRAMES: usize = 1024;
+/// Per-connection queue, large enough for several hundred-packet IDRs.
+/// At the video MTU, 2,048 interleaved packets occupy about 2.75 MiB.
+const WRITER_QUEUE_FRAMES: usize = 2048;
+
+const UDP_VIDEO_BURST_PACKETS: usize = 16;
+const UDP_VIDEO_BURST_GAP: Duration = Duration::from_micros(250);
+const UDP_VIDEO_PACING_BUDGET: Duration = Duration::from_millis(4);
 
 /// How long after the last real access unit the dummy keepalive resumes.
 const REAL_DATA_IDLE: Duration = Duration::from_millis(1000);
@@ -76,7 +80,7 @@ const AUDIO_NOMINAL_STEP: u32 = 960;
 /// source-derived rebase used for Opus).
 const AAC_TIMESTAMP_STEP: u32 = 1024;
 
-/// Which media track a session transport or dispatch targets.
+/// Which media track a session transport targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Media {
     Video,
@@ -85,10 +89,15 @@ enum Media {
 
 /// Per-client RTSP session: up to one transport per media, and whether
 /// `PLAY` has been issued.
+#[derive(Default)]
 struct Session {
     video: Option<SessionTransport>,
     audio: Option<SessionTransport>,
     playing: bool,
+    /// A TCP access unit could not fit in the writer queue. Resume only once
+    /// an entire IDR access unit fits.
+    video_resyncing: bool,
+    last_video_resync_log: Option<Instant>,
     /// RTP outflow diagnostics only (see [`record_rtp_outflow`]): running
     /// packet/byte counters and the last sequence number sent to this
     /// session, plus whether the first-packet-since-PLAY line has already
@@ -181,6 +190,28 @@ struct Inner {
 }
 
 impl Inner {
+    fn serialize_video(&mut self, payloads: &[bytes::Bytes], ts: u32) -> Vec<Vec<u8>> {
+        payloads
+            .iter()
+            .enumerate()
+            .map(|(i, payload)| {
+                let seq = self.real_seq;
+                self.real_seq = self.real_seq.wrapping_add(1);
+                record_stats(&mut self.video_stats, ts, payload.len());
+                rtp_out::serialize_rtp_packet(
+                    rtp_out::PAYLOAD_TYPE_H264,
+                    rtp_out::VIDEO_SSRC,
+                    RtpHeaderFields {
+                        sequence_number: seq,
+                        timestamp: ts,
+                        marker: i + 1 == payloads.len(),
+                    },
+                    payload,
+                )
+            })
+            .collect()
+    }
+
     /// Builds the next dummy-keepalive RTP packet *in the same
     /// sequence/timestamp space as the real video stream*: it consumes the
     /// next `real_seq` and advances `real_ts` by the nominal
@@ -227,6 +258,10 @@ pub struct RtspServer {
     /// no-op.
     audio: Option<rtp_out::AudioCodec>,
     inner: Mutex<Inner>,
+    /// Keep live video, join keyframes and filler in RTP order while UDP
+    /// pacing releases `inner` for audio and RTSP requests.
+    video_output: Mutex<()>,
+    keyframe_requested: Notify,
     background_tasks: std::sync::Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -258,6 +293,8 @@ impl RtspServer {
                 last_delivered_video: None,
                 last_delivered_audio: None,
             }),
+            video_output: Mutex::new(()),
+            keyframe_requested: Notify::new(),
             background_tasks: std::sync::Mutex::new(Vec::new()),
         })
     }
@@ -398,46 +435,19 @@ impl RtspServer {
         self.inner.lock().await.pps = Some(pps);
     }
 
+    pub(super) fn request_keyframe(&self) {
+        self.keyframe_requested.notify_one();
+    }
+
+    pub(super) async fn wait_for_keyframe_request(&self) {
+        self.keyframe_requested.notified().await;
+    }
+
     /// Packetize one Annex-B access unit and fan it out as RTP to every
     /// playing session's video transport; also marks real data as flowing
     /// so the dummy keepalive loop stands down while frames keep arriving.
     pub async fn send_video_access_unit(&self, annex_b: &[u8]) {
-        let mut inner = self.inner.lock().await;
-        inner.last_real_au = Some(Instant::now());
-        if au_contains_idr(annex_b) {
-            inner.last_idr_au = Some(annex_b.to_vec());
-        }
-
-        let payloads = inner.payloader.payload(annex_b);
-        if payloads.is_empty() {
-            return;
-        }
-
-        let ts = inner.real_ts;
-        let step = rtp_out::CLOCK_RATE / self.frame_rate.max(1);
-        inner.real_ts = inner.real_ts.wrapping_add(step);
-
-        let last = payloads.len() - 1;
-        for (i, payload) in payloads.iter().enumerate() {
-            let seq = inner.real_seq;
-            inner.real_seq = inner.real_seq.wrapping_add(1);
-            let bytes = rtp_out::serialize_rtp_packet(
-                rtp_out::PAYLOAD_TYPE_H264,
-                rtp_out::VIDEO_SSRC,
-                RtpHeaderFields {
-                    sequence_number: seq,
-                    timestamp: ts,
-                    marker: i == last,
-                },
-                payload,
-            );
-            record_stats(&mut inner.video_stats, ts, payload.len());
-            let delivered =
-                Self::dispatch(&mut inner.sessions, &self.rtp_socket, Media::Video, &bytes).await;
-            if delivered {
-                inner.last_delivered_video = Some(Instant::now());
-            }
-        }
+        self.send_video(annex_b, None).await;
     }
 
     /// Like [`Self::send_video_access_unit`], but with an explicit source
@@ -447,9 +457,15 @@ impl RtspServer {
     /// advancing sanely even across publisher restarts or clock jumps (see
     /// [`rebase_timestamp`]).
     pub async fn send_video_access_unit_at(&self, annex_b: &[u8], source_rtp_ts: u32) {
+        self.send_video(annex_b, Some(source_rtp_ts)).await;
+    }
+
+    async fn send_video(&self, annex_b: &[u8], source_rtp_ts: Option<u32>) {
+        let _output = self.video_output.lock().await;
         let mut inner = self.inner.lock().await;
         inner.last_real_au = Some(Instant::now());
-        if au_contains_idr(annex_b) {
+        let is_idr = au_contains_idr(annex_b);
+        if is_idr {
             inner.last_idr_au = Some(annex_b.to_vec());
         }
 
@@ -459,38 +475,32 @@ impl RtspServer {
         }
 
         let step = rtp_out::CLOCK_RATE / self.frame_rate.max(1);
-        let mut last_source = inner.last_source_video_ts;
-        let mut output_ts = inner.real_ts;
-        let ts = rebase_timestamp(
-            &mut last_source,
-            &mut output_ts,
-            source_rtp_ts,
-            rtp_out::CLOCK_RATE,
-            step,
-        );
-        inner.last_source_video_ts = last_source;
-        inner.real_ts = output_ts;
-
-        let last = payloads.len() - 1;
-        for (i, payload) in payloads.iter().enumerate() {
-            let seq = inner.real_seq;
-            inner.real_seq = inner.real_seq.wrapping_add(1);
-            let bytes = rtp_out::serialize_rtp_packet(
-                rtp_out::PAYLOAD_TYPE_H264,
-                rtp_out::VIDEO_SSRC,
-                RtpHeaderFields {
-                    sequence_number: seq,
-                    timestamp: ts,
-                    marker: i == last,
-                },
-                payload,
-            );
-            record_stats(&mut inner.video_stats, ts, payload.len());
-            let delivered =
-                Self::dispatch(&mut inner.sessions, &self.rtp_socket, Media::Video, &bytes).await;
-            if delivered {
-                inner.last_delivered_video = Some(Instant::now());
-            }
+        let ts = if let Some(source_rtp_ts) = source_rtp_ts {
+            let Inner {
+                last_source_video_ts,
+                real_ts,
+                ..
+            } = &mut *inner;
+            rebase_timestamp(
+                last_source_video_ts,
+                real_ts,
+                source_rtp_ts,
+                rtp_out::CLOCK_RATE,
+                step,
+            )
+        } else {
+            let ts = inner.real_ts;
+            inner.real_ts = ts.wrapping_add(step);
+            ts
+        };
+        let packets = inner.serialize_video(&payloads, ts);
+        let (tcp_delivered, udp_targets) = self.stage_video(&mut inner, &packets, is_idr, None);
+        if tcp_delivered {
+            inner.last_delivered_video = Some(Instant::now());
+        }
+        drop(inner);
+        if self.send_udp_video(&packets, &udp_targets).await {
+            self.inner.lock().await.last_delivered_video = Some(Instant::now());
         }
     }
 
@@ -577,8 +587,7 @@ impl RtspServer {
             &payload,
         );
         record_stats(&mut inner.audio_stats, ts, payload.len());
-        let delivered =
-            Self::dispatch(&mut inner.sessions, &self.rtp_socket, Media::Audio, &bytes).await;
+        let delivered = self.dispatch_audio(&mut inner.sessions, &bytes).await;
         if delivered {
             inner.last_delivered_audio = Some(Instant::now());
         }
@@ -645,55 +654,124 @@ impl RtspServer {
         sdp
     }
 
-    /// Send `bytes` (a full RTP packet) to every playing session's
-    /// transport for `media`, over UDP or wrapped as an RTSP interleaved
-    /// `Data` frame over TCP. Returns whether at least one playing session
-    /// had a transport for `media` (i.e. this packet was actually handed to
-    /// a client, not just produced by this server) -- used to stamp
-    /// `last_delivered_video`/`last_delivered_audio` for the delivery-aware
-    /// flow indicator. UDP is fire-and-forget and the TCP path just queues
-    /// onto an mpsc channel, so this can't confirm the client's socket
-    /// actually got the bytes -- it only distinguishes "nobody is attached
-    /// to this media" from "at least one attached client was sent this".
-    async fn dispatch(
-        sessions: &mut HashMap<String, Session>,
-        rtp_socket: &UdpSocket,
-        media: Media,
-        bytes: &[u8],
-    ) -> bool {
+    /// Queue complete TCP video access units and collect UDP destinations
+    /// for sending after the shared state lock is released.
+    fn stage_video(
+        &self,
+        inner: &mut Inner,
+        packets: &[Vec<u8>],
+        is_idr: bool,
+        only_session: Option<&str>,
+    ) -> (bool, Vec<SocketAddr>) {
+        let mut tcp_delivered = false;
+        let mut udp_targets = Vec::new();
+        for (session_id, session) in &mut inner.sessions {
+            if !session.playing || only_session.is_some_and(|id| id != session_id.as_str()) {
+                continue;
+            }
+            match session.video.as_ref() {
+                Some(SessionTransport::Udp { rtp_addr, .. }) => udp_targets.push(*rtp_addr),
+                Some(SessionTransport::Tcp {
+                    rtp_channel, tx, ..
+                }) => {
+                    if session.video_resyncing && !is_idr {
+                        continue;
+                    }
+                    // Reserve every slot first. If the queue would run out
+                    // partway through this AU, no fragment reaches the writer.
+                    match tx.try_reserve_many(packets.len()) {
+                        Ok(permits) => {
+                            for (permit, bytes) in permits.zip(packets) {
+                                permit.send(interleaved_frame(*rtp_channel, bytes));
+                            }
+                        }
+                        Err(mpsc::error::TrySendError::Full(())) => {
+                            if !session.video_resyncing {
+                                session.video_resyncing = true;
+                                self.request_keyframe();
+                                let now = Instant::now();
+                                if session
+                                    .last_video_resync_log
+                                    .is_none_or(|at| now.duration_since(at) >= RTP_LOG_INTERVAL)
+                                {
+                                    debug!(%session_id, packets = packets.len(), "RTP TCP-interleaved queue full; waiting for keyframe");
+                                    session.last_video_resync_log = Some(now);
+                                }
+                            }
+                            continue;
+                        }
+                        Err(mpsc::error::TrySendError::Closed(())) => continue,
+                    }
+                    session.video_resyncing = false;
+                    tcp_delivered = true;
+                }
+                None => continue,
+            }
+            for bytes in packets {
+                record_rtp_outflow(session_id, session, Media::Video, bytes);
+            }
+        }
+        (tcp_delivered, udp_targets)
+    }
+
+    async fn send_udp_video(&self, packets: &[Vec<u8>], targets: &[SocketAddr]) -> bool {
+        if targets.is_empty() {
+            return false;
+        }
+
+        let pacing_deadline = Instant::now() + UDP_VIDEO_PACING_BUDGET;
+        let mut bursts = udp_video_bursts(packets).peekable();
+        let mut delivered = false;
+        while let Some(burst) = bursts.next() {
+            for target in targets {
+                for bytes in burst {
+                    match self.rtp_socket.send_to(bytes, target).await {
+                        Ok(_) => delivered = true,
+                        Err(error) => warn!(peer = %target, %error, "RTP UDP send failed"),
+                    }
+                }
+            }
+            if bursts.peek().is_some() {
+                // Yield to receivers between bursts without relying on the
+                // Windows timer granularity for sub-millisecond sleeps.
+                let resume_at = (Instant::now() + UDP_VIDEO_BURST_GAP).min(pacing_deadline);
+                loop {
+                    tokio::task::yield_now().await;
+                    if Instant::now() >= resume_at {
+                        break;
+                    }
+                }
+            }
+        }
+        delivered
+    }
+
+    async fn dispatch_audio(&self, sessions: &mut HashMap<String, Session>, bytes: &[u8]) -> bool {
         let mut delivered = false;
         for (session_id, session) in sessions.iter_mut() {
             if !session.playing {
                 continue;
             }
-            let transport = match media {
-                Media::Video => session.video.as_ref(),
-                Media::Audio => session.audio.as_ref(),
-            };
-            let Some(transport) = transport else {
+            let Some(transport) = session.audio.as_ref() else {
                 continue;
             };
-            delivered = true;
             match transport {
                 SessionTransport::Udp { rtp_addr, .. } => {
-                    if let Err(error) = rtp_socket.send_to(bytes, *rtp_addr).await {
+                    if let Err(error) = self.rtp_socket.send_to(bytes, *rtp_addr).await {
                         warn!(%session_id, peer = %rtp_addr, %error, "RTP UDP send failed");
+                        continue;
                     }
                 }
                 SessionTransport::Tcp {
                     rtp_channel, tx, ..
                 } => {
-                    let mut framed = Vec::with_capacity(4 + bytes.len());
-                    framed.push(b'$');
-                    framed.push(*rtp_channel);
-                    framed.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
-                    framed.extend_from_slice(bytes);
-                    if let Err(error) = tx.try_send(framed) {
-                        warn!(%session_id, %error, "RTP TCP-interleaved send failed");
+                    if tx.try_send(interleaved_frame(*rtp_channel, bytes)).is_err() {
+                        continue;
                     }
                 }
             }
-            record_rtp_outflow(session_id, session, media, bytes);
+            delivered = true;
+            record_rtp_outflow(session_id, session, Media::Audio, bytes);
         }
         delivered
     }
@@ -716,64 +794,34 @@ impl RtspServer {
             SessionTransport::Tcp {
                 rtcp_channel, tx, ..
             } => {
-                let mut framed = Vec::with_capacity(4 + bytes.len());
-                framed.push(b'$');
-                framed.push(*rtcp_channel);
-                framed.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
-                framed.extend_from_slice(bytes);
-                if let Err(error) = tx.try_send(framed) {
+                if let Err(error) = tx.try_send(interleaved_frame(*rtcp_channel, bytes)) {
                     warn!(%session_id, %error, "RTCP TCP-interleaved send failed");
                 }
             }
         }
     }
 
-    /// Unicast the cached IDR access unit (prepended with cached SPS/PPS
-    /// for decoder init) to exactly one session's video transport. Called
-    /// right after that session issues `PLAY`, so a client connecting
-    /// during a static period -- when the damage-driven
-    /// Windows.Graphics.Capture backend emits no frames and so produces no
-    /// new IDR -- still gets a keyframe immediately instead of rendering
-    /// black until the next real one. This does not touch `real_ts`
-    /// (reuses the current live timestamp) and does not go through
-    /// [`Self::dispatch`], so it adds no latency or extra work to the live
-    /// fan-out path; it's a one-off extra send to the joining session
-    /// only. No-op if no IDR has been cached yet, or if the session is
-    /// missing, not playing, or has no video transport.
-    /// Returns the `(sequence_number, rtp_timestamp)` of the first keyframe
-    /// packet sent, for the caller to advertise in the PLAY response's
-    /// `RTP-Info` header; `None` if nothing was sent (no cached IDR yet, or
-    /// the session isn't a playing video receiver).
-    pub async fn send_keyframe_to_session(&self, session_id: &str) -> Option<(u16, u32)> {
-        enum TargetTransport {
-            Udp(SocketAddr),
-            Tcp(u8, mpsc::Sender<Vec<u8>>),
-        }
-
+    /// Called with `video_output` held after the PLAY response is queued.
+    /// The cached IDR lets clients join a static screen immediately.
+    async fn start_playback(&self, session_id: &str) {
         let mut inner = self.inner.lock().await;
 
-        let Some(idr_au) = inner.last_idr_au.clone() else {
-            info!(%session_id, "keyframe-on-join skipped: no cached IDR yet");
-            return None;
+        let Some(session) = inner.sessions.get_mut(session_id) else {
+            return;
         };
-
-        let Some(session) = inner.sessions.get(session_id) else {
-            info!(%session_id, "keyframe-on-join skipped: session not found");
-            return None;
-        };
-        if !session.playing {
-            info!(%session_id, "keyframe-on-join skipped: session not playing");
-            return None;
+        session.playing = true;
+        info!(%session_id, "PLAY: session marked playing");
+        if session.video.is_none() || session.video_resyncing {
+            return;
         }
-        let Some(video_transport) = session.video.as_ref() else {
-            info!(%session_id, "keyframe-on-join skipped: no video transport");
-            return None;
-        };
-        let target = match video_transport {
-            SessionTransport::Udp { rtp_addr, .. } => TargetTransport::Udp(*rtp_addr),
-            SessionTransport::Tcp {
-                rtp_channel, tx, ..
-            } => TargetTransport::Tcp(*rtp_channel, tx.clone()),
+        // The cached IDR gives the viewer a picture at once, but the live
+        // P-frames after it reference frames this viewer never got, so ask for
+        // a fresh keyframe either way (stream-lab: startup waited for the
+        // periodic PLI otherwise).
+        self.request_keyframe();
+        let Some(idr_au) = &inner.last_idr_au else {
+            debug!(%session_id, "keyframe-on-join: no cached IDR yet");
+            return;
         };
 
         // Prepend cached SPS/PPS so the decoder can init even if the
@@ -788,61 +836,37 @@ impl RtspServer {
             bundle.extend_from_slice(&[0, 0, 0, 1]);
             bundle.extend_from_slice(pps);
         }
-        bundle.extend_from_slice(&idr_au);
+        bundle.extend_from_slice(idr_au);
 
         let payloads = inner.payloader.payload(&bundle);
         if payloads.is_empty() {
             info!(%session_id, "keyframe-on-join skipped: payloader produced no packets");
-            return None;
+            return;
         }
 
         let ts = inner.real_ts;
         let first_seq = inner.real_seq;
-        let last = payloads.len() - 1;
-        let mut packets: Vec<Vec<u8>> = Vec::with_capacity(payloads.len());
-        for (i, payload) in payloads.iter().enumerate() {
-            let seq = inner.real_seq;
-            inner.real_seq = inner.real_seq.wrapping_add(1);
-            let bytes = rtp_out::serialize_rtp_packet(
-                rtp_out::PAYLOAD_TYPE_H264,
-                rtp_out::VIDEO_SSRC,
-                RtpHeaderFields {
-                    sequence_number: seq,
-                    timestamp: ts,
-                    marker: i == last,
-                },
-                payload,
-            );
-            record_stats(&mut inner.video_stats, ts, payload.len());
-            packets.push(bytes);
-        }
-
+        let packets = inner.serialize_video(&payloads, ts);
+        let (tcp_delivered, udp_targets) =
+            self.stage_video(&mut inner, &packets, true, Some(session_id));
         drop(inner);
 
-        info!(%session_id, packets = packets.len(), first_seq, ts, "keyframe-on-join: sending cached IDR");
-
-        for bytes in packets {
-            match &target {
-                TargetTransport::Udp(rtp_addr) => {
-                    if let Err(error) = self.rtp_socket.send_to(&bytes, *rtp_addr).await {
-                        warn!(%session_id, peer = %rtp_addr, %error, "keyframe UDP send failed");
-                    }
-                }
-                TargetTransport::Tcp(rtp_channel, tx) => {
-                    let mut framed = Vec::with_capacity(4 + bytes.len());
-                    framed.push(b'$');
-                    framed.push(*rtp_channel);
-                    framed.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
-                    framed.extend_from_slice(&bytes);
-                    if let Err(error) = tx.try_send(framed) {
-                        warn!(%session_id, %error, "keyframe TCP-interleaved send failed");
-                    }
-                }
-            }
+        if tcp_delivered || self.send_udp_video(&packets, &udp_targets).await {
+            info!(%session_id, packets = packets.len(), first_seq, ts, "keyframe-on-join: sent cached IDR");
         }
-
-        Some((first_seq, ts))
     }
+}
+
+fn interleaved_frame(channel: u8, bytes: &[u8]) -> Vec<u8> {
+    let mut framed = Vec::with_capacity(4 + bytes.len());
+    framed.extend_from_slice(&[b'$', channel]);
+    framed.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
+    framed.extend_from_slice(bytes);
+    framed
+}
+
+fn udp_video_bursts(packets: &[Vec<u8>]) -> std::slice::Chunks<'_, Vec<u8>> {
+    packets.chunks(UDP_VIDEO_BURST_PACKETS)
 }
 
 /// Scan an Annex-B buffer (one or more NAL units, each prefixed by a
@@ -982,6 +1006,7 @@ async fn dummy_keepalive_loop(server: Arc<RtspServer>) {
     loop {
         ticker.tick().await;
 
+        let _output = server.video_output.lock().await;
         let mut inner = server.inner.lock().await;
 
         let client_count = inner.sessions.values().filter(|s| s.playing).count();
@@ -1003,16 +1028,12 @@ async fn dummy_keepalive_loop(server: Arc<RtspServer>) {
             continue;
         }
 
-        let bytes = inner.next_keepalive_packet();
+        let packets = [inner.next_keepalive_packet()];
         // Keepalives are diagnostic filler, not real media -- deliberately
         // not counted toward `last_delivered_video`, mirroring `last_real_au`.
-        let _ = RtspServer::dispatch(
-            &mut inner.sessions,
-            &server.rtp_socket,
-            Media::Video,
-            &bytes,
-        )
-        .await;
+        let (_, udp_targets) = server.stage_video(&mut inner, &packets, false, None);
+        drop(inner);
+        server.send_udp_video(&packets, &udp_targets).await;
     }
 }
 
@@ -1118,7 +1139,14 @@ async fn handle_connection(server: Arc<RtspServer>, stream: TcpStream, peer_addr
                         }
                         request_count += 1;
 
-                        let (response, new_session, play_keyframe) =
+                        // Keep the video counters stable from building PLAY's
+                        // RTP-Info until the cached IDR has been dispatched.
+                        let _video_output = if request.method() == Method::Play {
+                            Some(server.video_output.lock().await)
+                        } else {
+                            None
+                        };
+                        let (response, new_session, play_session) =
                             handle_request(&server, &request, peer_addr, tx.clone()).await;
                         if let Some(id) = new_session {
                             session_ids.push(id);
@@ -1145,12 +1173,9 @@ async fn handle_connection(server: Arc<RtspServer>, stream: TcpStream, peer_addr
                         if response.write(&mut out).is_err() || tx.try_send(out).is_err() {
                             break 'conn;
                         }
-                        // Only now that the response is queued do we blast the
-                        // join keyframe, so the PLAY 200 lands before any
-                        // interleaved RTP `$` frames (AVPro rejects data that
-                        // arrives ahead of the PLAY response).
-                        if let Some(id) = play_keyframe {
-                            server.send_keyframe_to_session(&id).await;
+                        // Queue PLAY 200 before enabling RTP for this session.
+                        if let Some(id) = play_session {
+                            server.start_playback(&id).await;
                         }
                     }
                     // Data/Response messages from the client (e.g. RTCP
@@ -1248,9 +1273,8 @@ async fn handle_request(
     peer_addr: SocketAddr,
     tcp_tx: mpsc::Sender<Vec<u8>>,
 ) -> (Response<Vec<u8>>, Option<String>, Option<String>) {
-    // Returns (response, new_session_to_clean_up, play_keyframe_session). The
-    // third element, set only by PLAY, tells the connection loop to blast the
-    // cached keyframe to that session AFTER the response is on the wire.
+    // The third element tells the connection loop which session to activate
+    // after queueing the PLAY response.
     let version = request.version();
     let cseq = request.typed_header::<headers::CSeq>().ok().flatten();
 
@@ -1299,8 +1323,8 @@ async fn handle_request(
             (response, new_session, None)
         }
         Method::Play => {
-            let (response, play_keyframe) = handle_play(server, request, version, cseq).await;
-            (response, None, play_keyframe)
+            let (response, play_session) = handle_play(server, request, version, cseq).await;
+            (response, None, play_session)
         }
         Method::Teardown => {
             let (response, new_session) = handle_teardown(server, request, version, cseq).await;
@@ -1449,19 +1473,7 @@ async fn handle_setup(
         existing.0.clone()
     } else {
         let id = new_session_id();
-        inner.sessions.insert(
-            id.clone(),
-            Session {
-                video: None,
-                audio: None,
-                playing: false,
-                rtp_sent_packets: 0,
-                rtp_sent_bytes: 0,
-                rtp_last_seq: 0,
-                rtp_first_logged: false,
-                rtp_last_summary_at: None,
-            },
-        );
+        inner.sessions.insert(id.clone(), Session::default());
         id
     };
     let is_new_session = requested_session.is_none();
@@ -1527,18 +1539,15 @@ async fn handle_play(
         );
     };
 
-    let mut inner = server.inner.lock().await;
-    let Some(entry) = inner.sessions.get_mut(session.0.as_str()) else {
+    let inner = server.inner.lock().await;
+    let Some(entry) = inner.sessions.get(session.0.as_str()) else {
         return (
             base_response(version, StatusCode::SessionNotFound, cseq).build(Vec::new()),
             None,
         );
     };
-    entry.playing = true;
-    info!(session_id = %session.0, "PLAY: session marked playing");
     let has_video = entry.video.is_some();
     let has_audio = entry.audio.is_some();
-    // The `entry` mutable borrow ends above, so `inner` is free to read here.
     // Grab the next seq/ts of each media to advertise in RTP-Info.
     let video_seq = inner.real_seq;
     let video_ts = inner.real_ts;
@@ -1590,11 +1599,6 @@ async fn handle_play(
         .typed_header(&headers::Session::from(session.0))
         .header(headers::RTP_INFO, rtp_info)
         .build(Vec::new());
-    // The join keyframe is sent by the connection loop AFTER this response is
-    // queued (see handle_connection): the PLAY 200 must reach the client
-    // before any interleaved RTP data, or AVPro discards it. This also fixes
-    // "VRChat shows nothing" on a static screen, where the damage-driven
-    // capture backend emits no fresh IDR for a late joiner to sync on.
     (response, Some(session_id))
 }
 
@@ -1829,7 +1833,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn setup_udp_then_play_marks_session_playing() {
+    async fn setup_udp_then_play_without_cached_idr_requests_keyframe() {
         let server = test_server().await;
 
         let setup_request = Request::builder(Method::Setup, Version::V1_0)
@@ -1851,11 +1855,17 @@ mod tests {
             .header(headers::CSEQ, "2")
             .header(headers::SESSION, session_id.clone())
             .build(Vec::new());
-        let (response, _, _) = handle_request(&server, &play_request, peer(), tx).await;
+        let (response, _, play_session) = handle_request(&server, &play_request, peer(), tx).await;
         assert_eq!(response.status(), StatusCode::Ok);
+        assert_eq!(play_session.as_deref(), Some(session_id.as_str()));
 
-        let inner = server.inner.lock().await;
-        assert!(inner.sessions.get(&session_id).unwrap().playing);
+        assert_eq!(server.client_count().await, 0);
+        let _output = server.video_output.lock().await;
+        server.start_playback(&session_id).await;
+        assert_eq!(server.client_count().await, 1);
+        tokio::time::timeout(Duration::from_secs(1), server.wait_for_keyframe_request())
+            .await
+            .expect("PLAY should request a keyframe without a cached IDR");
     }
 
     #[tokio::test]
@@ -1937,12 +1947,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn setup_tcp_interleaved_is_accepted() {
+    async fn rtspt_uri_is_accepted_for_tcp_interleaved_setup() {
         let server = test_server().await;
-        let setup_request = Request::builder(Method::Setup, Version::V1_0)
-            .header(headers::CSEQ, "1")
-            .header(headers::TRANSPORT, "RTP/AVP/TCP;unicast;interleaved=0-1")
-            .build(Vec::new());
+        let (message, _) = rtsp_types::Message::<Vec<u8>>::parse(
+            b"SETUP rtspt://127.0.0.1:8554/stream/trackID=0 RTSP/1.0\r\n\
+              CSeq: 1\r\nTransport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n\r\n",
+        )
+        .unwrap();
+        let rtsp_types::Message::Request(setup_request) = message else {
+            panic!("expected a SETUP request");
+        };
+        assert_eq!(setup_request.request_uri().unwrap().scheme(), "rtspt");
         let (tx, _rx) = mpsc::channel(WRITER_QUEUE_FRAMES);
         let (response, session_id, _) = handle_request(&server, &setup_request, peer(), tx).await;
 
@@ -2182,8 +2197,12 @@ mod tests {
             .header(headers::CSEQ, "2")
             .header(headers::SESSION, session_id)
             .build(Vec::new());
-        let (response, _, _) = handle_request(&server, &play_request, peer(), tx).await;
+        let (response, _, play_session) = handle_request(&server, &play_request, peer(), tx).await;
         assert_eq!(response.status(), StatusCode::Ok);
+        {
+            let _output = server.video_output.lock().await;
+            server.start_playback(&play_session.unwrap()).await;
+        }
 
         server.send_audio_frame(&[0xAA, 0xBB], 1_000).await;
 
@@ -2214,47 +2233,142 @@ mod tests {
 
     // --- delivery-aware flow indicator ---------------------------------------
 
-    fn tcp_session(playing: bool, video: bool, audio: bool) -> Session {
-        let (tx, _rx) = mpsc::channel(WRITER_QUEUE_FRAMES);
-        Session {
-            video: video.then(|| SessionTransport::Tcp {
-                rtp_channel: 0,
-                rtcp_channel: 1,
-                tx: tx.clone(),
-            }),
-            audio: audio.then(|| SessionTransport::Tcp {
-                rtp_channel: 2,
-                rtcp_channel: 3,
-                tx,
-            }),
-            playing,
-            rtp_sent_packets: 0,
-            rtp_sent_bytes: 0,
-            rtp_last_seq: 0,
-            rtp_first_logged: false,
-            rtp_last_summary_at: None,
+    fn tcp_transport(rtp_channel: u8, tx: &mpsc::Sender<Vec<u8>>) -> SessionTransport {
+        SessionTransport::Tcp {
+            rtp_channel,
+            rtcp_channel: rtp_channel + 1,
+            tx: tx.clone(),
         }
     }
 
     #[tokio::test]
-    async fn dispatch_reports_whether_any_playing_session_received_the_media() {
-        let rtp_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let bytes = [0u8; 12];
+    async fn tcp_queue_full_mid_access_unit_drops_entire_au_and_resumes_at_next_idr() {
+        let server = test_server_with_audio(rtp_out::AudioCodec::Aac).await;
+        let (tx, mut rx) = mpsc::channel(3);
+        let (other_tx, other_rx) = mpsc::channel(16);
+        {
+            let mut inner = server.inner.lock().await;
+            inner.sessions.insert(
+                "slow".into(),
+                Session {
+                    video: Some(tcp_transport(0, &tx)),
+                    audio: Some(tcp_transport(2, &tx)),
+                    playing: true,
+                    ..Session::default()
+                },
+            );
+            inner.sessions.insert(
+                "other".into(),
+                Session {
+                    video: Some(tcp_transport(0, &other_tx)),
+                    playing: true,
+                    ..Session::default()
+                },
+            );
+        }
 
-        // No sessions at all.
-        let mut sessions: HashMap<String, Session> = HashMap::new();
-        assert!(!RtspServer::dispatch(&mut sessions, &rtp_socket, Media::Video, &bytes).await);
+        let fragmented_au = |nal_header| {
+            let mut au = vec![0, 0, 0, 1, nal_header];
+            au.resize(rtp_out::RTP_MTU + 4, 0x2A);
+            au
+        };
+        let delta = fragmented_au(0x41);
+        let idr = fragmented_au(0x65);
 
-        // A session that SETUP'd video but hasn't PLAYed yet -- not delivered.
-        sessions.insert("s1".to_string(), tcp_session(false, true, false));
-        assert!(!RtspServer::dispatch(&mut sessions, &rtp_socket, Media::Video, &bytes).await);
+        // The two-packet delta would fill the queue partway through.
+        tx.try_send(vec![1]).unwrap();
+        tx.try_send(vec![2]).unwrap();
+        server.send_video_access_unit(&delta).await;
+        assert_eq!(rx.try_recv().unwrap(), [1]);
+        assert_eq!(rx.try_recv().unwrap(), [2]);
+        assert!(rx.is_empty());
+        assert_eq!(other_rx.len(), 2);
+        tokio::time::timeout(Duration::from_secs(1), server.wait_for_keyframe_request())
+            .await
+            .expect("queue overflow should request a keyframe");
 
-        // Now playing, with a video transport -- delivered.
-        sessions.get_mut("s1").unwrap().playing = true;
-        assert!(RtspServer::dispatch(&mut sessions, &rtp_socket, Media::Video, &bytes).await);
+        server.send_video_access_unit(&delta).await;
+        assert!(rx.is_empty());
+        server.send_audio_frame(&[0xAA, 0xBB], 1_000).await;
+        assert_eq!(rx.try_recv().unwrap()[1], 2);
 
-        // Same session has no audio transport, so audio is not delivered.
-        assert!(!RtspServer::dispatch(&mut sessions, &rtp_socket, Media::Audio, &bytes).await);
+        tx.try_send(vec![3]).unwrap();
+        tx.try_send(vec![4]).unwrap();
+        server.send_video_access_unit(&idr).await;
+        assert_eq!(rx.try_recv().unwrap(), [3]);
+        assert_eq!(rx.try_recv().unwrap(), [4]);
+        assert!(rx.is_empty());
+        server.send_video_access_unit(&delta).await;
+        assert!(rx.is_empty());
+
+        server.send_video_access_unit(&idr).await;
+        let first = rx.try_recv().unwrap();
+        let last = rx.try_recv().unwrap();
+        assert!(rx.is_empty());
+        assert_eq!(first[17], 0x80 | 5); // FU-A start of the IDR NAL
+        assert_eq!(last[17], 0x40 | 5); // FU-A end of the IDR NAL
+        assert_eq!(first[5] & 0x80, 0);
+        assert_eq!(last[5] & 0x80, 0x80);
+        assert_eq!(
+            rtp_seq_ts(&last[4..]).0,
+            rtp_seq_ts(&first[4..]).0.wrapping_add(1)
+        );
+        server.send_video_access_unit(&delta).await;
+        assert_eq!(rx.len(), 2);
+        assert_eq!(other_rx.len(), 12);
+    }
+
+    #[test]
+    fn udp_video_bursts_preserve_packet_order_and_split_at_the_limit() {
+        let packets: Vec<_> = (0..35).map(|id| vec![id]).collect();
+        let bursts: Vec<_> = udp_video_bursts(&packets).collect();
+        assert_eq!(bursts, [&packets[..16], &packets[16..32], &packets[32..]]);
+        assert_eq!(udp_video_bursts(&packets[..16]).len(), 1);
+        assert_eq!(udp_video_bursts(&[]).len(), 0);
+    }
+
+    #[tokio::test]
+    async fn paced_udp_idr_reaches_loopback_in_order() {
+        let server = test_server().await;
+        let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let rtp_addr = receiver.local_addr().unwrap();
+        server.inner.lock().await.sessions.insert(
+            "udp".into(),
+            Session {
+                video: Some(SessionTransport::Udp {
+                    rtp_addr,
+                    rtcp_addr: rtp_addr,
+                }),
+                playing: true,
+                ..Session::default()
+            },
+        );
+        let mut au = tiny_au();
+        au.resize(rtp_out::RTP_MTU * 120, 0x2A);
+        let expected = rtp_out::H264Rtp::new().payload(&au).len();
+        let send = async {
+            let start = Instant::now();
+            server.send_video_access_unit_at(&au, 1_000).await;
+            eprintln!("paced UDP IDR: {expected} packets in {:?}", start.elapsed());
+        };
+        let receive = async {
+            let mut packet = [0; rtp_out::RTP_MTU];
+            let mut last_seq: Option<u16> = None;
+            for i in 0..expected {
+                let len = receiver.recv(&mut packet).await.unwrap();
+                let (seq, _) = rtp_seq_ts(&packet[..len]);
+                if let Some(previous) = last_seq {
+                    assert_eq!(seq, previous.wrapping_add(1));
+                }
+                assert_eq!(packet[1] & 0x80 != 0, i + 1 == expected);
+                last_seq = Some(seq);
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(send, receive);
+        })
+        .await
+        .expect("the entire paced IDR should reach the UDP receiver");
     }
 
     #[tokio::test]
@@ -2266,11 +2380,17 @@ mod tests {
         assert!(server.inner.lock().await.last_delivered_audio.is_none());
 
         // Attach a playing session with an audio transport, then send again.
+        let (tx, _rx) = mpsc::channel(WRITER_QUEUE_FRAMES);
         {
             let mut inner = server.inner.lock().await;
-            inner
-                .sessions
-                .insert("s1".to_string(), tcp_session(true, false, true));
+            inner.sessions.insert(
+                "s1".to_string(),
+                Session {
+                    audio: Some(tcp_transport(2, &tx)),
+                    playing: true,
+                    ..Session::default()
+                },
+            );
         }
         server.send_audio_frame(&[0u8; 4], 2_000).await;
         assert!(server.inner.lock().await.last_delivered_audio.is_some());

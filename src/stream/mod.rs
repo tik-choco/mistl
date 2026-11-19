@@ -160,7 +160,7 @@ pub async fn is_running() -> bool {
 }
 
 /// Handle `stream.*` IPC commands:
-/// - `stream.start` `{room?}` -> `{rtsp_url, room?}` (local screen capture,
+/// - `stream.start` `{room?}` -> `{rtsp_url, vrchat_url, room?}` (local screen capture,
 ///   idempotent: returns the existing URL if already running. Deliberately
 ///   does *not* fall back to `stream.room` like `relay`/`share` below do --
 ///   this is the generic entry point, so an explicit `room` is required to
@@ -171,15 +171,16 @@ pub async fn is_running() -> bool {
 ///   `stream.share.start` below uses, so any consensus-elected relay in
 ///   that room -- or a direct viewer -- can pick it up. See `share.rs`'s
 ///   module doc, especially its "Loopback" section)
-/// - `stream.relay.start` `{room?}` -> `{rtsp_url, room}` (tc-chat share relay)
-/// - `stream.share.start` `{room?}` -> `{rtsp_url, room}` (back-compat alias
+/// - `stream.relay.start` `{room?}` -> `{rtsp_url, vrchat_url, room}` (tc-chat share relay)
+/// - `stream.selftest.start` -> `{rtsp_url, vrchat_url}` (synthetic test feed)
+/// - `stream.share.start` `{room?}` -> `{rtsp_url, vrchat_url, room}` (back-compat alias
 ///   for `stream.start` that, unlike it, falls back to `stream.room` and
 ///   errors instead of starting local-only when neither is given)
 /// - `stream.share.stop` `{}` -> `{stopped: bool}` (identical to `stream.stop`;
 ///   named separately so a share-specific caller doesn't need to know it
 ///   shares the single-pipeline slot with every other backend)
 /// - `stream.stop` `{}` -> `{stopped: bool}`
-/// - `stream.status` `{}` -> `{running, rtsp_url?, clients?, backend?}` (the
+/// - `stream.status` `{}` -> `{running, rtsp_url?, vrchat_url?, clients?, backend?}` (the
 ///   `relay` backend additionally reports `publisher` and `cascade` -- see
 ///   `relay`'s module doc's "Cascade distribution" section for the latter's
 ///   shape; a `share` field -- `{active, room?, track_id?, ...}` -- is always
@@ -280,7 +281,10 @@ async fn start(
         if backend_kind == CaptureBackend::Share {
             bail!("already sharing; run `stream stop` (or `stream.share.stop`) first");
         }
-        return Ok(json!({ "rtsp_url": existing.rtsp_url }));
+        return Ok(json!({
+            "rtsp_url": existing.rtsp_url,
+            "vrchat_url": vrchat_url(&existing.rtsp_url),
+        }));
     }
 
     let cfg = &state.config().stream;
@@ -355,10 +359,10 @@ async fn start(
     };
     let rtsp_url = format!("rtsp://{advertise_host}:{port}{path}");
 
-    let response = match &room {
-        Some(room) => json!({ "rtsp_url": rtsp_url, "room": room }),
-        None => json!({ "rtsp_url": rtsp_url }),
-    };
+    let mut response = json!({ "rtsp_url": rtsp_url, "vrchat_url": vrchat_url(&rtsp_url) });
+    if let Some(room) = &room {
+        response["room"] = json!(room);
+    }
 
     *guard = Some(Pipeline {
         backend,
@@ -467,6 +471,7 @@ async fn status() -> Result<Value> {
             let mut value = json!({
                 "running": true,
                 "rtsp_url": pipeline.rtsp_url,
+                "vrchat_url": vrchat_url(&pipeline.rtsp_url),
                 "clients": pipeline.rtsp.client_count().await,
                 "uptime_secs": pipeline.started_at.elapsed().as_secs(),
                 "backend": pipeline.backend_kind.as_str(),
@@ -509,6 +514,15 @@ async fn status() -> Result<Value> {
     }
 }
 
+/// AVPro's TCP-interleaved URL for an advertised RTSP stream.
+pub(crate) fn vrchat_url(rtsp_url: &str) -> String {
+    if let Some(address) = rtsp_url.strip_prefix("rtsp://") {
+        format!("rtspt://{address}")
+    } else {
+        rtsp_url.to_owned()
+    }
+}
+
 /// Best-effort LAN IP discovery (used when `stream.rtsp_url` is configured
 /// with a `0.0.0.0` host, so the URL handed back to the caller is one a
 /// VRChat client on the LAN can actually reach). Doesn't require any
@@ -522,6 +536,18 @@ fn lan_ip() -> Option<IpAddr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vrchat_url_changes_only_the_scheme() {
+        assert_eq!(
+            vrchat_url("rtsp://[::1]:8555/custom%20stream?next=rtsp://host"),
+            "rtspt://[::1]:8555/custom%20stream?next=rtsp://host"
+        );
+        assert_eq!(
+            vrchat_url("rtsp://127.0.0.1:8554/stream"),
+            "rtspt://127.0.0.1:8554/stream"
+        );
+    }
 
     #[test]
     fn rejects_unknown_backend_name() {

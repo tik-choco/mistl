@@ -12,6 +12,10 @@ The screen-share feature has two layers that are verified separately:
 All the interesting log lines are at the default `info` level, so "watch the
 log and confirm it works" is the intended workflow.
 
+When the relay doesn't lock, or the picture is choppy, blurry or freezes, read
+[stream-findings.md](stream-findings.md) first: it records the causes found so
+far, what fixed them, what did not help, and measurement recipes.
+
 ## 1. Local RTSP / AVPro serving — `mistl stream selftest`
 
 This feeds a synthetic, decoder-valid H264 stream (a visibly moving test
@@ -21,14 +25,15 @@ screen share.
 
 ```console
 $ mistl stream selftest --audio aac
-  rtsp://127.0.0.1:8554/stream
+  { "rtsp_url": "rtsp://127.0.0.1:8554/stream", "vrchat_url": "rtspt://127.0.0.1:8554/stream" }
 ```
 
 Options: `--audio aac|opus|none` (default `aac`, what AVPro plays),
 `--width`/`--height`/`--fps` (default 640x360@30), `--seconds N` (auto-stop;
 default: run until `mistl stream stop`).
 
-Verify it with any standard RTSP client (`ffprobe`/`ffmpeg`/`ffplay`):
+Paste `vrchat_url` into VRChat's AVPro player to use TCP interleaving.
+Use `rtsp_url` with standard RTSP clients such as `ffprobe`, `ffmpeg`, and VLC.
 
 ```console
 # Two tracks are advertised: H264 video + AAC 48 kHz stereo audio.
@@ -69,6 +74,8 @@ should feed VRChat:
 ```console
 $ mistl stream relay --room <the tc-chat room id>
 ```
+
+Paste the printed `rtspt://` URL into VRChat's AVPro video player.
 
 To watch the pipeline come alive, run the daemon in the **foreground** (its log
 goes to stderr; the background daemon instead writes
@@ -129,7 +136,7 @@ existed; `cascade` then reports just `{"enabled": false}`.
 > leader's re-published track, and mistlib's cascade plumbing does not
 > forward that request back to the original sharer -- only the leader's own
 > PLI (sent directly to the sharer) actually reaches it. A late-joining
-> follower's keyframe wait is therefore bounded by the leader's existing ~5s
+> follower's keyframe wait is therefore bounded by the leader's ~2s
 > PLI cadence, not its own PLI having any effect. This is the same order of
 > magnitude as the pre-cascade single-relay keyframe wait, so it's acceptable
 > for v1.
@@ -145,7 +152,7 @@ cascade distribution layered on top:
   locks onto the sharer, and every other relay locks onto the leader's
   re-published tracks instead;
 - each relay re-serves what it locked onto on **their own localhost**;
-- each viewer's VRChat plays `rtsp://127.0.0.1:8554/stream` (localhost).
+- each viewer's VRChat plays `rtspt://127.0.0.1:8554/stream` (localhost).
 
 No public IP or port-forwarding is needed — everyone talks to their own
 loopback. Without cascade, the ceiling was the **sharer's uplink** (one copy
@@ -168,5 +175,6 @@ The relay adds very little: roughly one frame of access-unit assembly, ~21 ms
 of AAC framing on the audio path, and a localhost hop. The dominant latency is
 outside mistl's control — the browser's encoder and, especially, VRChat AVPro's
 own RTSP jitter/decode buffer. Because each viewer serves RTSP over their own
-loopback, the mesh topology already gives the lowest achievable last-mile
-latency; there is no relay-side buffering left to remove.
+loopback, the mesh topology keeps last-mile latency low. For UDP clients,
+the RTSP server paces large video access units over a few milliseconds to
+give receivers time to drain their sockets.

@@ -138,6 +138,16 @@ tokio = { version = "1", features = ["test-util"] }
 lto = "thin"
 strip = true
 
+# Release-speed code for measurement loops (`just stream-lab`) without the
+# release profile's link-time cost: no LTO, incremental, parallel codegen.
+# Dependencies keep full optimization; only the edit-rebuild cycle gets faster.
+[profile.lab]
+inherits = "release"
+lto = false
+incremental = true
+codegen-units = 16
+strip = false
+
 [profile.dev]
 # Windows `.pdb` files were 6.59 GB of this crate's 60.23 GB debug target dir
 # — full debuginfo is the most expensive single component of a debug build
@@ -181,8 +191,6 @@ mistlib-core = { path = ".mistlib-src/mistlib-core" }
 mistlib-core = { path = ".mistlib-src/mistlib-core" }
 
 # Cargo only applies patches from the root manifest. mistlib 0.7.1 needs
-# its vendored SCTP receive-buffer hook, including through webrtc's deps,
-# and its patched webrtc (renegotiation answers keep the DTLS role).
+# its vendored SCTP receive-buffer hook, including through webrtc's deps.
 [patch.crates-io]
-webrtc = { path = ".mistlib-src/third_party/webrtc" }
 webrtc-sctp = { path = ".mistlib-src/third_party/webrtc-sctp" }

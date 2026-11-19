@@ -190,6 +190,19 @@ check: _ensure-mistlib _ensure-mistlib-consensus
 test: _ensure-mistlib _ensure-mistlib-consensus
     cargo test --locked
 
+# Build the fast-rebuilding `lab` profile, then run the automated screen-share
+# relay measurement (tools/stream-lab, docs/stream-lab.md). Pass --bin <exe> to
+# measure another build instead.
+stream-lab *args: _ensure-mistlib _ensure-mistlib-consensus
+    cargo build --profile lab --bin mistl
+    just _stream-lab-run {{args}}
+
+[positional-arguments]
+[script("node")]
+_stream-lab-run *args:
+    const { pathToFileURL } = require('node:url');
+    import(pathToFileURL(`${process.cwd()}/tools/stream-lab/run.mjs`)).then(({ runCli }) => runCli(process.argv.slice(2)));
+
 # Rebuild (debug) and restart the daemon on every src/ change; the dashboard
 # HTML gets a debug-only live-reload poll (src/web/server.rs) so a browser
 # tab left open on it reloads itself once the new daemon is back up --

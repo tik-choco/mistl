@@ -68,7 +68,7 @@ The same things from the CLI:
 ```console
 $ mistl status                          # daemon, stream and AI at a glance
 $ mistl store put ./file.bin            # -> CID
-$ mistl stream relay --room <room>      # tc-chat share -> rtsp://<LAN IP>:8554/stream
+$ mistl stream relay --room <room>      # paste the rtspt:// URL into VRChat's AVPro player
 $ mistl tunnel serve 22                 # offer local port 22 to the tunnel room
 $ mistl tunnel rule ls                  # list automatic proposal rules
 $ mistl ai serve start                  # OpenAI-compatible API on http://127.0.0.1:6478/v1
