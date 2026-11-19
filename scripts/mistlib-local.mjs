@@ -29,6 +29,9 @@ const MISTLIB_DEV_DIR = path.resolve(ROOT, '..', 'mistlib-dev');
 const CACHE = path.join(ROOT, '.mistlib-src');
 const MARKER = path.join(CACHE, '.mistlib-local-source');
 const CRATES = ['mistlib-core', 'mistlib-native'];
+// Vendored crates.io patches that mistl's root Cargo.toml points
+// `[patch.crates-io]` at (.mistlib-src/third_party/*); copied when present.
+const VENDORED = 'third_party';
 
 function hasMeaningfulGitChanges(dir) {
   if (!existsSync(path.join(dir, '.git'))) return false;
@@ -74,7 +77,8 @@ function on() {
 
   rmSync(CACHE, { recursive: true, force: true });
   mkdirSync(CACHE, { recursive: true });
-  for (const crate of CRATES) {
+  const vendored = existsSync(path.join(MISTLIB_DEV_DIR, VENDORED)) ? [VENDORED] : [];
+  for (const crate of [...CRATES, ...vendored]) {
     cpSync(path.join(MISTLIB_DEV_DIR, crate), path.join(CACHE, crate), {
       recursive: true,
       filter: (src) => !/[\\/](target|\.git)([\\/]|$)/.test(src)

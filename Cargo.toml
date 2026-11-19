@@ -181,6 +181,8 @@ mistlib-core = { path = ".mistlib-src/mistlib-core" }
 mistlib-core = { path = ".mistlib-src/mistlib-core" }
 
 # Cargo only applies patches from the root manifest. mistlib 0.7.1 needs
-# its vendored SCTP receive-buffer hook, including through webrtc's deps.
+# its vendored SCTP receive-buffer hook, including through webrtc's deps,
+# and its patched webrtc (renegotiation answers keep the DTLS role).
 [patch.crates-io]
+webrtc = { path = ".mistlib-src/third_party/webrtc" }
 webrtc-sctp = { path = ".mistlib-src/third_party/webrtc-sctp" }

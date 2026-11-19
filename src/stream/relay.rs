@@ -143,11 +143,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use mistlib::MediaTrackEvent;
+use mistlib::webrtc::Error as WebRtcError;
 use mistlib::webrtc::api::media_engine::{MIME_TYPE_H264, MIME_TYPE_OPUS};
 use mistlib::webrtc::peer_connection::RTCPeerConnection;
 use mistlib::webrtc::rtcp::packet::Packet as RtcpPacket;
 use mistlib::webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use mistlib::webrtc::rtp::codecs::h264::H264Packet;
+use mistlib::webrtc::rtp::packet::Packet;
 use mistlib::webrtc::rtp::packetizer::Depacketizer;
 use mistlib::webrtc::rtp_transceiver::rtp_codec::{RTCRtpCodecCapability, RTPCodecType};
 use mistlib::webrtc::track::track_local::TrackLocalWriter;
@@ -172,6 +174,9 @@ type RepublishTracks = (Arc<TrackLocalStaticRTP>, Arc<TrackLocalStaticRTP>);
 const NAL_TYPE_SPS: u8 = 7;
 const NAL_TYPE_PPS: u8 = 8;
 const NAL_TYPE_IDR: u8 = 5;
+
+const VIDEO_RTP_QUEUE_CAPACITY: usize = 4096;
+const AUDIO_RTP_QUEUE_CAPACITY: usize = 512;
 
 /// Interval between PictureLossIndication requests to the publisher, sent
 /// immediately on lock and repeated at this cadence thereafter -- browsers
@@ -1313,6 +1318,34 @@ async fn control_loop(
     }
 }
 
+struct RtpReader {
+    packets: mpsc::Receiver<Result<Packet, WebRtcError>>,
+    pump: JoinHandle<()>,
+}
+
+impl Drop for RtpReader {
+    fn drop(&mut self) {
+        // The consumer can be aborted while read_rtp is blocked on a silent track.
+        self.pump.abort();
+    }
+}
+
+/// TWCC timestamps packets during read_rtp, so keep reads independent of
+/// decoding and forwarding while the bounded queue has room.
+fn spawn_rtp_reader(track: Arc<TrackRemote>, capacity: usize) -> RtpReader {
+    let (tx, packets) = mpsc::channel(capacity);
+    let pump = tokio::spawn(async move {
+        loop {
+            let packet = track.read_rtp().await.map(|(packet, _)| packet);
+            let ended = packet.is_err();
+            if tx.send(packet).await.is_err() || ended {
+                break;
+            }
+        }
+    });
+    RtpReader { packets, pump }
+}
+
 /// Reads RTP off the locked video track, depacketizes H264 into Annex-B
 /// access units, extracts SPS/PPS, and forwards each complete AU to `rtsp`.
 /// When `republish` is `Some` (leader, cascade active), the raw RTP packet
@@ -1336,6 +1369,7 @@ async fn video_task(
     republish: Option<Arc<TrackLocalStaticRTP>>,
 ) {
     let ssrc = track.ssrc();
+    let mut reader = spawn_rtp_reader(track, VIDEO_RTP_QUEUE_CAPACITY);
     let mut depacketizer = H264Packet::default();
     let mut assembler = AuAssembler::new();
     let mut seen_first_keyframe = false;
@@ -1348,9 +1382,9 @@ async fn video_task(
     // [`IMMEDIATE_PLI_DEBOUNCE`]); `pli_task` remains the periodic fallback.
     let mut last_immediate_pli: Option<Instant> = None;
 
-    loop {
-        let (packet, _attrs) = match track.read_rtp().await {
-            Ok(v) => v,
+    while let Some(result) = reader.packets.recv().await {
+        let packet = match result {
+            Ok(packet) => packet,
             Err(error) => {
                 debug!(%remote_id, %error, "relay: video track ended");
                 break;
@@ -1559,9 +1593,10 @@ async fn audio_task_opus(
     counters: Arc<RelayCounters>,
     republish: Option<Arc<TrackLocalStaticRTP>>,
 ) {
-    loop {
-        match track.read_rtp().await {
-            Ok((packet, _attrs)) => {
+    let mut reader = spawn_rtp_reader(track, AUDIO_RTP_QUEUE_CAPACITY);
+    while let Some(result) = reader.packets.recv().await {
+        match result {
+            Ok(packet) => {
                 counters
                     .audio_rtp_packets_total
                     .fetch_add(1, Ordering::Relaxed);
@@ -1603,9 +1638,10 @@ async fn audio_task_aac(
         }
     };
 
-    loop {
-        match track.read_rtp().await {
-            Ok((packet, _attrs)) => {
+    let mut reader = spawn_rtp_reader(track, AUDIO_RTP_QUEUE_CAPACITY);
+    while let Some(result) = reader.packets.recv().await {
+        match result {
+            Ok(packet) => {
                 counters
                     .audio_rtp_packets_total
                     .fetch_add(1, Ordering::Relaxed);
