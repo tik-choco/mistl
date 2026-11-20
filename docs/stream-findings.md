@@ -273,6 +273,18 @@ negotiation-lock change made no difference. Next step: capture the RTP the
 reader receives around `PLAY` (sequence numbers / NAL types) to see whether
 that first IDR reaches it intact.
 
+Released mistlib 0.7.3-beta.6 (2026-11-20, fix as shipped): both orders lock
+and pass; first frame 4.2 s after publish browser-first, 8.1 s native-first,
+so the gap is still there. That run's browser side was the npm beta.5 WASM
+(no `set_local_track_encoding` yet), hence ~2.5 Mbps.
+
+Same native build with the npm beta.6 WASM (encoding cap applied), three
+runs: the sender's target bitrate rose to 4-6 Mbps with limitation `none`
+(the synthetic page only needs ~2.8 Mbps); first frame 3.5-8.0 s after
+publish in *both* orders, so with this sender the order no longer separates
+fast from slow starts; one 259 ms freeze in one browser-first run (same on
+UDP and TCP, so upstream of the RTSP leg), none in the other runs.
+
 Lesson from the A/B: one good run is not a measurement. The vendored patch
 first looked 3x faster (1.8 s) on a single sample; three more runs put it in
 the same 5-11 s band. Repeat scenarios before comparing builds.
