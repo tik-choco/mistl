@@ -14,7 +14,7 @@ export const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '
 export const run = (exe, args) => spawnSync(exe, args, { cwd: root, encoding: 'utf8', windowsHide: true });
 
 export function latestTagVersion() {
-  const tags = run('git', ['-c', 'versionsort.suffix=-', 'tag', '--list', 'v*', '--sort=-v:refname']);
+  const tags = run('git', ['-c', 'versionsort.suffix=-', 'tag', '--merged', 'HEAD', '--list', 'v*', '--sort=-v:refname']);
   const tag = (tags.stdout || '').split('\n').map(t => t.trim())
     .find(t => /^v\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$/.test(t));
   if (!tag) throw new Error('No vMAJOR.MINOR.PATCH tag found; run `git fetch --tags` first.');

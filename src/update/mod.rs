@@ -1,6 +1,7 @@
 //! Self-update from GitHub Releases: list, check, verify, and stage binaries.
 //! Explicit versions may install older releases or prereleases; automatic
-//! updates and apply without a version remain upgrade-only.
+//! updates and apply without a version remain upgrade-only. Prerelease
+//! builds follow the prerelease track even with `[update] prerelease` off.
 //!
 //! Policy is "download & stage": `update.apply` (and the background task
 //! when `[update] auto_apply` is on) downloads the release binary for this
@@ -130,7 +131,8 @@ async fn cmd_check(state: &Arc<AppState>) -> Result<Value> {
     let update = state.config().update;
     let repo = effective_repo(&update.repo);
     let client = build_client()?;
-    let release = fetch_latest_release_recorded(&client, &repo, update.prerelease).await?;
+    let release =
+        fetch_latest_release_recorded(&client, &repo, include_prereleases(&update)).await?;
 
     let update_available = is_update_available(CURRENT_VERSION, &release.version);
     let asset_available = release
@@ -231,7 +233,7 @@ async fn cmd_apply(args: Value, state: &Arc<AppState>) -> Result<Value> {
     let client = build_client()?;
     let release = match version {
         Some(version) => fetch_version_release_recorded(&client, &repo, version).await?,
-        None => fetch_latest_release_recorded(&client, &repo, update.prerelease).await?,
+        None => fetch_latest_release_recorded(&client, &repo, include_prereleases(&update)).await?,
     };
     let explicit = version.is_some();
     let downgrade = is_downgrade(CURRENT_VERSION, &release.version);
@@ -342,7 +344,7 @@ fn auto_check_due(update: &UpdateConfig, last_check: Option<tokio::time::Instant
 async fn auto_check_once(update: &UpdateConfig, state: &Arc<AppState>) -> Result<()> {
     let repo = effective_repo(&update.repo);
     let client = build_client()?;
-    let release = fetch_latest_release(&client, &repo, update.prerelease).await?;
+    let release = fetch_latest_release(&client, &repo, include_prereleases(update)).await?;
 
     // Keep the check and stage atomic with respect to manual apply.
     let _guard = apply_lock().lock().await;
@@ -861,6 +863,18 @@ fn asset_name(version: &str, target: &str) -> String {
     format!("mistl-v{version}-{target}{ext}")
 }
 
+/// Whether "latest" may be a prerelease: opted in via `[update] prerelease`,
+/// or this build is itself a prerelease (e.g. `0.3.0-beta.13`). Without the
+/// second rule a beta install compares against `releases/latest`, which is
+/// the last full release and therefore always older, so it never updates.
+fn include_prereleases(update: &UpdateConfig) -> bool {
+    update.prerelease || is_prerelease_version(CURRENT_VERSION)
+}
+
+fn is_prerelease_version(version: &str) -> bool {
+    semver::Version::parse(version).is_ok_and(|version| !version.pre.is_empty())
+}
+
 /// `latest > current` by semver. Unparseable versions (odd tags, dev
 /// builds) are logged and treated as "no update" rather than failing.
 fn is_update_available(current: &str, latest: &str) -> bool {
@@ -1061,6 +1075,15 @@ mod tests {
         assert!(!auto_check_due(&update, last));
         update.auto_check = true;
         assert!(auto_check_due(&update, last));
+    }
+
+    #[test]
+    fn prerelease_builds_follow_the_prerelease_track() {
+        assert!(is_prerelease_version("0.3.0-beta.13"));
+        assert!(is_prerelease_version("0.3.0-beta.13+local"));
+        assert!(!is_prerelease_version("0.2.0"));
+        assert!(!is_prerelease_version("0.2.0+local"));
+        assert!(!is_prerelease_version("not-a-version"));
     }
 
     #[test]

@@ -57,8 +57,12 @@ build's `target/release/`.
 ## Releases
 
 Releases are tag-driven: pushing a `v*` tag makes CI build every target and
-publish a GitHub Release (a `-beta.N` tag becomes a prerelease, installed only
-with `update.prerelease = true`). `just publish` computes and creates the tag:
+publish a GitHub Release (a `-beta.N` tag becomes a prerelease; the updater
+offers prereleases only with `update.prerelease = true` or when the running
+build is itself a prerelease, so beta installs keep following betas).
+`just install` stamps `<newest tag merged into HEAD>+local`; a stray local tag
+from another history would otherwise make the build look newer than every
+release and disable auto-update. `just publish` computes and creates the tag:
 
 ```
 $ just publish status                 # current tags and the next versions; changes nothing
