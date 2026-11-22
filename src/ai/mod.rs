@@ -480,9 +480,6 @@ impl AiService {
                     .validate_api_model(protocol::SERVICE_OAI, model.as_deref())?;
                 body["model"] = json!(model.unwrap_or_default());
                 body["stream"] = json!(false);
-                body.as_object_mut()
-                    .context("invalid OAI body")?
-                    .remove("temperature");
                 session.broadcast(ProtocolMessage::ConsumerHello).await;
                 let info = session
                     .consumer
@@ -3237,7 +3234,13 @@ mod tests {
                     .local_provider()
                     .unwrap();
                 assert_eq!(hello["services"], json!(local.services()));
-                service.handle_room_event(crate::net::EVENT_PEER_CONNECTED, room, "new-consumer", &[], &rt);
+                service.handle_room_event(
+                    crate::net::EVENT_PEER_CONNECTED,
+                    room,
+                    "new-consumer",
+                    &[],
+                    &rt,
+                );
                 assert_eq!(
                     protocol::decode(&rx.recv().await.unwrap().2),
                     Some(ProtocolMessage::ConsumerHello)

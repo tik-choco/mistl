@@ -74,7 +74,24 @@ pub async fn run(
             };
         }
     };
-    run_child(child, Some(tree), timeout, cancel, on_output).await
+    run_child(child, Some(tree), timeout, cancel, on_output)
+        .await
+        .tool_output()
+}
+
+/// Capture program output without the shell tool's status and stream labels.
+pub(super) async fn run_stdout(
+    spec: &CommandSpec,
+    timeout: Duration,
+    cancel: &CancellationToken,
+) -> Result<String> {
+    let (child, tree) = spawn(spec)?;
+    let run = run_child(child, Some(tree), Some(timeout), cancel, &mut |_| {}).await;
+    if run.ok {
+        Ok(run.stdout.text())
+    } else {
+        Err(anyhow!(run.tool_output().text))
+    }
 }
 
 /// A mistl client can start a persistent daemon. Do not attach a tree guard:
@@ -88,7 +105,9 @@ pub(super) async fn run_mistl(
     on_output: &mut (dyn FnMut(&str) + Send),
 ) -> ToolOutput {
     match command.spawn() {
-        Ok(child) => run_child(child, None, Some(timeout), cancel, on_output).await,
+        Ok(child) => run_child(child, None, Some(timeout), cancel, on_output)
+            .await
+            .tool_output(),
         Err(error) => ToolOutput {
             text: format!("failed to start mistl: {error}"),
             ok: false,
@@ -102,7 +121,7 @@ async fn run_child(
     timeout: Option<Duration>,
     cancel: &CancellationToken,
     on_output: &mut (dyn FnMut(&str) + Send),
-) -> ToolOutput {
+) -> CapturedRun {
     let mut stdout = Capture::default();
     let mut stderr = Capture::default();
     let end = drive(
@@ -153,19 +172,39 @@ async fn run_child(
         let failure = format!("process tree could not be killed: {error:#}");
         note = Some(note.map_or_else(|| failure.clone(), |note| format!("{note}; {failure}")));
     }
-    let mut text = format!("exit code: {code}");
-    for (name, capture) in [("stdout", stdout), ("stderr", stderr)] {
-        let output = capture.text();
-        if !output.trim().is_empty() {
-            text.push_str(&format!("\n--- {name} ---\n{}", output.trim_end()));
-        }
-    }
-    if let Some(note) = note {
-        text.push_str(&format!("\n[{note}]"));
-    }
-    ToolOutput {
-        text: truncate_middle(&text, MAX_OUTPUT_BYTES),
+    CapturedRun {
+        code,
+        stdout,
+        stderr,
+        note,
         ok,
+    }
+}
+
+struct CapturedRun {
+    code: String,
+    stdout: Capture,
+    stderr: Capture,
+    note: Option<String>,
+    ok: bool,
+}
+
+impl CapturedRun {
+    fn tool_output(self) -> ToolOutput {
+        let mut text = format!("exit code: {}", self.code);
+        for (name, capture) in [("stdout", self.stdout), ("stderr", self.stderr)] {
+            let output = capture.text();
+            if !output.trim().is_empty() {
+                text.push_str(&format!("\n--- {name} ---\n{}", output.trim_end()));
+            }
+        }
+        if let Some(note) = self.note {
+            text.push_str(&format!("\n[{note}]"));
+        }
+        ToolOutput {
+            text: truncate_middle(&text, MAX_OUTPUT_BYTES),
+            ok: self.ok,
+        }
     }
 }
 

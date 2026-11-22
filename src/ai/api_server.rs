@@ -60,6 +60,9 @@
 //!   in bounded windows; synchronous `b64_json` results are capped at 64 MiB.
 //! - `POST /v1/images/edits` (also room-scoped) relays JSON or multipart
 //!   image edits, returning the upstream JSON or image bytes unchanged.
+//! - Game actions and motion endpoints also relay through both scopes.
+//!   `/motion/clips` takes its routing model from the query string and
+//!   `/motion/skeletons/<model>` from the path segment.
 //! - Unscoped lifecycle routes `/api/ps`, `/health`, and the
 //!   root `/voices` alias use the injected local relay.
 //! - Unresolvable explicit models -> `404` with OpenAI `model_not_found`.
@@ -131,8 +134,8 @@ pub(super) type DecisionFn = Arc<
         + Sync,
 >;
 
-/// One request for the tc-ai-api passthrough routes (image edits, 3D generation jobs,
-/// voice catalog, lifecycle). `path` is relative to the `/v1` base
+/// One request for the OpenAI and tc-ai-api passthrough routes.
+/// `path` is relative to the `/v1` base
 /// (`/3d/generations/<id>/content?range=0-8388607`, `/audio/voices`) except
 /// the root lifecycle paths (`/api/ps`, `/health`), which are
 /// passed as-is. `body` is JSON when present.
@@ -1138,7 +1141,7 @@ async fn route_request(
         };
         let is_transcription = path == "/v1/audio/transcriptions";
         let is_gen3d = path == "/v1/3d/generations";
-        let is_image_edit = path == "/v1/images/edits";
+        let has_image_upload = matches!(path.as_str(), "/v1/images/edits" | "/v1/game/act");
         let is_multipart =
             multipart_boundary(head.header("content-type").unwrap_or_default()).is_some();
         let body_cap = if is_transcription {
@@ -1147,9 +1150,9 @@ async fn route_request(
             MAX_GEN3D_MULTIPART_BYTES
         } else if is_gen3d {
             MAX_GEN3D_JSON_BYTES
-        } else if is_image_edit && is_multipart {
+        } else if has_image_upload && is_multipart {
             MAX_IMAGE_EDIT_MULTIPART_BYTES
-        } else if is_image_edit {
+        } else if has_image_upload {
             MAX_IMAGE_EDIT_JSON_BYTES
         } else {
             MAX_JSON_BODY_BYTES
@@ -1165,7 +1168,7 @@ async fn route_request(
             return Ok(());
         }
         if !(is_transcription
-            || (is_gen3d || is_image_edit) && is_multipart
+            || (is_gen3d || has_image_upload) && is_multipart
             || content_type_is_json(head.header("content-type")))
         {
             let _ = write_error(
@@ -1242,6 +1245,7 @@ async fn route_request(
             &body,
             &call,
             oai.as_ref(),
+            relay.as_ref().filter(|_| !scoped),
             head.header("authorization"),
         )
         .await?;
@@ -1287,8 +1291,12 @@ fn room_route(path: &str) -> Option<(String, String)> {
             | "voices"
             | "3d/generations"
             | "images/edits"
+            | "game/act"
+            | "motion/inbetween"
+            | "motion/clips"
     ) && !endpoint.starts_with("models/")
         && !endpoint.starts_with("3d/generations/")
+        && !endpoint.starts_with("motion/skeletons/")
     {
         return None;
     }
@@ -1299,7 +1307,7 @@ fn room_route(path: &str) -> Option<(String, String)> {
     Some((room, endpoint.into()))
 }
 
-fn percent_decode(encoded: &str) -> Option<String> {
+pub(super) fn percent_decode(encoded: &str) -> Option<String> {
     let mut decoded = Vec::new();
     let mut bytes = encoded.bytes();
     while let Some(b) = bytes.next() {
@@ -1319,7 +1327,9 @@ fn relay_path<'a>(method: &str, path: &'a str) -> Option<&'a str> {
         ("GET", "/v1/audio/voices" | "/v1/voices" | "/voices") => Some("/audio/voices"),
         ("GET", "/api/ps" | "/health") => Some(path),
         ("GET" | "POST", "/v1/3d/generations") => Some("/3d/generations"),
-        ("POST", "/v1/images/edits") => Some("/images/edits"),
+        ("POST", "/v1/images/edits" | "/v1/game/act" | "/v1/motion/inbetween")
+        | ("GET", "/v1/motion/clips") => Some(&path[3..]),
+        ("GET", p) if p.starts_with("/v1/motion/skeletons/") => Some(&p[3..]),
         ("GET" | "DELETE", p) if p.starts_with("/v1/3d/generations/") => Some(&p[3..]),
         _ => None,
     }
@@ -1587,17 +1597,22 @@ async fn handle_relay(
     scoped: bool,
     url_base: &str,
 ) -> Result<()> {
+    use super::oai_tunnel;
+
     let method = head.method.to_ascii_uppercase();
     let path = relay_path(&method, path).expect("relay route");
     let gen3d_post = method == "POST" && path == "/3d/generations";
     let image_edit_post = method == "POST" && path == "/images/edits";
+    let game_post = method == "POST" && path == "/game/act";
     let req = if method == "POST" {
-        if (gen3d_post || image_edit_post)
+        if (gen3d_post || image_edit_post || game_post)
             && let Some(boundary) =
                 multipart_boundary(head.header("content-type").unwrap_or_default())
         {
             let string_fields: &[&str] = if image_edit_post {
                 &["background"]
+            } else if game_post {
+                &["system_prompt"]
             } else {
                 &[]
             };
@@ -1625,11 +1640,23 @@ async fn handle_relay(
     } else {
         None
     };
-    let model = req
-        .as_ref()
-        .and_then(|v| v.get("model"))
-        .and_then(Value::as_str)
-        .filter(|m| !m.trim().is_empty());
+    let path = if path == "/motion/clips"
+        && let Some((_, query)) = head.path.split_once('?')
+    {
+        format!("{path}?{query}")
+    } else {
+        path.to_string()
+    };
+    let catalog_model =
+        oai_tunnel::is_motion_catalog(&path).then(|| oai_tunnel::motion_catalog_model(&path));
+    let model = match &catalog_model {
+        Some(result) => result.as_ref().ok().map(String::as_str),
+        None => req
+            .as_ref()
+            .and_then(|v| v.get("model"))
+            .and_then(Value::as_str)
+            .filter(|m| !m.trim().is_empty()),
+    };
     let authorized = match crate::authz::authorize_api(head.header("authorization"), model) {
         Ok(authorized) => authorized,
         Err(denied) => {
@@ -1638,8 +1665,11 @@ async fn handle_relay(
         }
     };
     // Authenticate first; then require an explicit model (no built-in default).
-    if (gen3d_post || image_edit_post) && model.is_none() {
-        return write_tunnel_response(stream, &super::oai_tunnel::missing_model()).await;
+    if let Some(Err(response)) = catalog_model {
+        return write_tunnel_response(stream, &response).await;
+    }
+    if method == "POST" && model.is_none() {
+        return write_tunnel_response(stream, &oai_tunnel::missing_model()).await;
     }
     if let Some(tail) = path.strip_prefix("/3d/generations/") {
         let id = tail.strip_suffix("/content").unwrap_or(tail);
@@ -1673,12 +1703,12 @@ async fn handle_relay(
     }
     let mut usage = ApiUsage::new(authorized);
     usage.started = method == "POST";
-    if method == "GET" && path.ends_with("/content") {
-        return serve_generation_content(stream, relay, path).await;
+    if method == "GET" && path.starts_with("/3d/generations/") && path.ends_with("/content") {
+        return serve_generation_content(stream, relay, &path).await;
     }
     let response = relay(RelayRequest {
         method: method.clone(),
-        path: path.to_string(),
+        path: path.clone(),
         body: (!body.is_empty()).then_some(body),
     })
     .await;
@@ -2124,6 +2154,7 @@ async fn handle_chat_completions_with_oai(
     body: &[u8],
     call: &LlmCallFn,
     oai: Option<&OaiFn>,
+    relay: Option<&RelayFn>,
     authorization: Option<&str>,
 ) -> Result<()> {
     // Validate the ordinary fields using the text parser; only image content
@@ -2135,7 +2166,7 @@ async fn handle_chat_completions_with_oai(
             return Ok(());
         }
     };
-    let parsed_body = vision.as_ref().map_or(body, |(_, text)| text.as_slice());
+    let parsed_body = vision.as_ref().map_or(body, |text| text.as_slice());
     let req = match parse_chat_request(parsed_body) {
         Ok(req) => req,
         Err(message) => {
@@ -2152,23 +2183,31 @@ async fn handle_chat_completions_with_oai(
     };
     let mut usage = ApiUsage::new(authorized);
     let mut vision_call: Option<LlmCallFn> = None;
-    if let Some((mut raw, _)) = vision {
-        let Some(oai) = oai else {
+    if vision.is_some() {
+        if oai.is_none() && relay.is_none() {
             write_error(
                 stream,
                 400,
                 "Bad Request",
-                "image content requires a room-scoped route and an oai provider",
+                "image content requires an OpenAI-compatible provider",
             )
             .await?;
             return Ok(());
-        };
-        raw["stream"] = json!(false);
-        raw.as_object_mut()
-            .expect("validated chat body")
-            .remove("temperature");
+        }
         usage.started = true;
-        let response = match oai(raw).await {
+        let response = if let Some(oai) = oai {
+            let mut raw: Value = serde_json::from_slice(body)?;
+            raw["stream"] = json!(false);
+            oai(raw).await
+        } else {
+            relay.expect("vision route")(RelayRequest {
+                method: "POST".into(),
+                path: "/chat/completions".into(),
+                body: Some(body.to_vec()),
+            })
+            .await
+        };
+        let response = match response {
             Ok(response) => response,
             Err(err) => {
                 write_backend_failure(stream, &err).await;
@@ -2372,11 +2411,8 @@ async fn handle_chat_completions_with_oai(
     Ok(())
 }
 
-fn vision_request(body: &[u8]) -> std::result::Result<Option<(Value, Vec<u8>)>, String> {
-    let raw: Value =
-        serde_json::from_slice(body).map_err(|e| format!("invalid request body: {e}"))?;
-    let has_image = raw
-        .get("messages")
+pub(super) fn has_image_content(body: &Value) -> bool {
+    body.get("messages")
         .and_then(Value::as_array)
         .is_some_and(|messages| {
             messages.iter().any(|m| {
@@ -2388,11 +2424,15 @@ fn vision_request(body: &[u8]) -> std::result::Result<Option<(Value, Vec<u8>)>, 
                             .any(|p| p.get("type").and_then(Value::as_str) == Some("image_url"))
                     })
             })
-        });
-    if !has_image {
+        })
+}
+
+fn vision_request(body: &[u8]) -> std::result::Result<Option<Vec<u8>>, String> {
+    let mut text: Value =
+        serde_json::from_slice(body).map_err(|e| format!("invalid request body: {e}"))?;
+    if !has_image_content(&text) {
         return Ok(None);
     }
-    let mut text = raw.clone();
     for message in text["messages"]
         .as_array_mut()
         .ok_or("messages must be an array")?
@@ -2417,10 +2457,9 @@ fn vision_request(body: &[u8]) -> std::result::Result<Option<(Value, Vec<u8>)>, 
             message["content"] = Value::String(content);
         }
     }
-    Ok(Some((
-        raw,
-        serde_json::to_vec(&text).map_err(|e| e.to_string())?,
-    )))
+    serde_json::to_vec(&text)
+        .map(Some)
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -2631,6 +2670,113 @@ mod tests {
         let server = start_test_server(fake_call_ok(), fake_models()).await;
         let raw = relay_request(&server, "GET", "/v1/voices", "", None).await;
         assert_eq!(status_code(&split_response(&raw).0), 404);
+        server.stop();
+    }
+
+    #[tokio::test]
+    async fn game_and_motion_routes_extract_models_and_preserve_payloads() {
+        let _authz = authz_test().await;
+        let (relay, seen) = recording_relay(|_| TunnelResponse {
+            status: 202,
+            content_type: "text/csv; charset=utf-8".into(),
+            body: b"time,joint\r\n0,1\r\n".to_vec(),
+        });
+        let server = relay_test_server(relay).await;
+        let game = r#"{ "model":"game-model", "image":"data:image/png;base64,AA==" }"#;
+        let motion = r#"{"model":"motion-model","start":[0,1],"format":"csv"}"#;
+        let clips = "/motion/clips?tag=a+b&model=motion%2Dmodel&tag=%2B";
+        let skeleton = "/motion/skeletons/motion%2Dmodel";
+        for prefix in ["/v1", "/v1/rooms/team%2Fone"] {
+            for (method, path, body) in [
+                ("POST", "/game/act", Some(game)),
+                ("POST", "/motion/inbetween", Some(motion)),
+                ("GET", clips, None),
+                ("GET", skeleton, None),
+            ] {
+                let raw = relay_request(
+                    &server,
+                    method,
+                    &format!("{prefix}{path}"),
+                    "application/json",
+                    body,
+                )
+                .await;
+                let (head, payload) = split_response(&raw);
+                assert_eq!(status_code(&head), 202);
+                assert!(
+                    head.to_ascii_lowercase()
+                        .contains("content-type: text/csv; charset=utf-8")
+                );
+                assert_eq!(payload, b"time,joint\r\n0,1\r\n");
+                let calls = seen.lock().unwrap();
+                let sent = calls.last().unwrap();
+                assert_eq!(sent.method, method);
+                assert_eq!(sent.path, path);
+                assert_eq!(sent.body.as_deref(), body.map(str::as_bytes));
+            }
+            for path in ["/motion/clips", "/motion/clips?model=", "/motion/clips?x=1"] {
+                let raw = relay_request(&server, "GET", &format!("{prefix}{path}"), "", None).await;
+                assert_denied(&raw, 400, "missing_required_parameter");
+            }
+            for model in ["", "motion%2Fmodel", "motion/model", "%zz", "%2e%2e"] {
+                let path = format!("{prefix}/motion/skeletons/{model}");
+                let raw = relay_request(&server, "GET", &path, "", None).await;
+                assert_denied(&raw, 400, "invalid_request");
+            }
+            for path in ["/game/act", "/motion/inbetween"] {
+                let raw = relay_request(
+                    &server,
+                    "POST",
+                    &format!("{prefix}{path}"),
+                    "application/json",
+                    Some("{}"),
+                )
+                .await;
+                assert_denied(&raw, 400, "missing_required_parameter");
+            }
+        }
+        let multipart = concat!(
+            "--b\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\ngame-model\r\n",
+            "--b\r\nContent-Disposition: form-data; name=\"image\"; filename=\"frame.png\"\r\n",
+            "Content-Type: image/png\r\n\r\nabc\r\n--b--\r\n"
+        );
+        let raw = relay_request(
+            &server,
+            "POST",
+            "/v1/game/act",
+            "multipart/form-data; boundary=b",
+            Some(multipart),
+        )
+        .await;
+        assert_eq!(status_code(&split_response(&raw).0), 202);
+        let payload: Value = serde_json::from_slice(
+            seen.lock()
+                .unwrap()
+                .last()
+                .unwrap()
+                .body
+                .as_deref()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            payload,
+            json!({"model":"game-model","image":"data:image/png;base64,YWJj"})
+        );
+        assert_eq!(seen.lock().unwrap().len(), 9);
+
+        let token = create_token(json!({"models":["motion-model"]}));
+        for path in [clips, skeleton] {
+            let raw = token_request(&server, &format!("/v1{path}"), Some(&token), None).await;
+            assert_eq!(status_code(&split_response(&raw).0), 202);
+        }
+        for path in [
+            "/motion/clips?model=other-model",
+            "/motion/skeletons/other-model",
+        ] {
+            let raw = token_request(&server, &format!("/v1{path}"), Some(&token), None).await;
+            assert_denied(&raw, 403, "model_not_allowed");
+        }
         server.stop();
     }
 
@@ -4331,7 +4477,7 @@ mod tests {
             assert_eq!(sent["route"], "oai");
             assert_eq!(sent["body"]["reasoning_effort"], "high");
             assert_eq!(sent["body"]["stream"], false);
-            assert!(sent["body"].get("temperature").is_none());
+            assert_eq!(sent["body"]["temperature"], 0.4);
         }
         assert_eq!(
             seen.lock().unwrap().len(),

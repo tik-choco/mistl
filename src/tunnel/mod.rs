@@ -85,6 +85,7 @@ pub mod forward_store;
 pub mod graph;
 pub mod negotiation;
 pub mod notice;
+pub(crate) mod origin;
 pub mod proposal_rules;
 pub mod proxy;
 pub mod room_store;

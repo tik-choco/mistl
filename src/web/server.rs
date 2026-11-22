@@ -6,7 +6,7 @@
 //! - `GET /` (and `GET /index.html`) -> 200 `text/html`, [`super::INDEX_HTML`]
 //! - `GET /favicon.png` -> 200 `image/png`, [`super::FAVICON_PNG`]
 //! - `POST /api/call` -> body `{"cmd": "...", "args": {...}}`; runs
-//!   [`crate::daemon::dispatch`] and answers 200 with
+//!   [`crate::daemon::dispatch_as`] and answers 200 with
 //!   `{"ok":true,"data":...}` or `{"ok":false,"error":"..."}`
 //! - `POST /api/store/upload` -> body is the raw file bytes, name carried in
 //!   the `x-file-name` header (percent-encoded UTF-8); streamed to a temp
@@ -71,7 +71,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 use tracing::{debug, warn};
 
-use crate::daemon::AppState;
+use crate::daemon::{AppState, Caller};
 
 /// Header section size cap (request-line + headers), matches doc.
 const MAX_HEADER_BYTES: usize = 16 * 1024;
@@ -693,6 +693,8 @@ async fn handle_connection_inner(
     instance_id: &str,
     token: &str,
 ) -> io::Result<()> {
+    let peer = stream.peer_addr()?;
+    let mut caller = Caller::http_from(peer);
     let (head, leftover) =
         match tokio::time::timeout(HEAD_READ_TIMEOUT, read_request_head(stream)).await {
             Ok(Ok(Some(pair))) => pair,
@@ -704,10 +706,15 @@ async fn handle_connection_inner(
             }
         };
 
+    // The backend dial can finish after accept. Keep any remote classification
+    // already observed, and check again once request bytes have arrived.
+    if caller == (Caller::Http { remote: false }) {
+        caller = Caller::http_from(peer);
+    }
     let method = head.method.to_ascii_uppercase();
     let path = head.path.split('?').next().unwrap_or("").to_string();
 
-    if !state.network.permitted() && !stream.peer_addr()?.ip().is_loopback() {
+    if !state.network.permitted() && caller == (Caller::Http { remote: true }) {
         return write_error(stream, 403, "Forbidden", "external connections are OFF").await;
     }
     let local_addr = stream.local_addr()?;
@@ -783,7 +790,7 @@ async fn handle_connection_inner(
             // refresh), so it doubles as a liveness signal -- see the `GET
             // /` comment above.
             state.note_dashboard_activity();
-            handle_api_call(stream, &head, leftover, state).await
+            handle_api_call(stream, &head, leftover, state, caller).await
         }
         ("POST", "/api/store/upload") => handle_store_upload(stream, &head, leftover, state).await,
         ("GET", "/api/store/download") => handle_store_download(stream, &head, state).await,
@@ -821,6 +828,7 @@ async fn handle_api_call(
     head: &RequestHead,
     leftover: Vec<u8>,
     state: Arc<AppState>,
+    caller: Caller,
 ) -> io::Result<()> {
     // CSRF guard (browsers can't attach a custom header cross-origin without
     // a preflight, and we never answer preflights successfully) plus the
@@ -868,9 +876,7 @@ async fn handle_api_call(
 
     // The frontend always gets HTTP 200 for a well-formed call and switches
     // on the `ok` field; only malformed/forbidden requests get non-2xx.
-    // Loopback dashboard sessions are as trusted as the CLI; only a peer
-    // reaching a LAN-exposed dashboard (`--host`) gets the restricted policy.
-    let caller = crate::daemon::Caller::http_from(stream.peer_addr()?.ip());
+    // Dispatch runs to completion before we write to the connection.
     match crate::daemon::dispatch_as(caller, cmd, args, &state).await {
         Ok(data) => {
             write_json_response(stream, 200, "OK", &json!({"ok": true, "data": data})).await
@@ -1827,6 +1833,52 @@ mod tests {
         client.read_to_string(&mut response).await.unwrap();
         server.await.unwrap();
         response
+    }
+
+    #[tokio::test]
+    async fn dashboard_api_uses_tunnel_origin_for_vm_authorization() {
+        for tunneled in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                handle_connection_inner(
+                    &mut socket,
+                    AppState::for_test(),
+                    "test-instance",
+                    "token",
+                )
+                .await
+                .unwrap();
+            });
+            let mut client = TcpStream::connect(addr).await.unwrap();
+            let _origin =
+                tunneled.then(|| crate::tunnel::origin::register(client.local_addr().unwrap()));
+            let body = r#"{"cmd":"vm.stop"}"#;
+            let request = format!(
+                "POST /api/call HTTP/1.1\r\nHost: localhost\r\nCookie: mistl_session_{}=token\r\n\
+                 X-Mistl-UI: 1\r\nX-Mistl-Instance: {}\r\nContent-Length: {}\r\n\r\n{body}",
+                addr.port(),
+                page_identity(),
+                body.len(),
+            );
+            client.write_all(request.as_bytes()).await.unwrap();
+            let mut response = String::new();
+            client.read_to_string(&mut response).await.unwrap();
+            server.await.unwrap();
+
+            assert!(response.starts_with("HTTP/1.1 200 "), "{response}");
+            let data: Value =
+                serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap();
+            assert_eq!(data["ok"], false);
+            let error = data["error"].as_str().unwrap();
+            let expected = if tunneled {
+                "remote dashboard session"
+            } else {
+                "requires a server id"
+            };
+            assert!(error.contains(expected), "{error}");
+        }
     }
 
     #[tokio::test]

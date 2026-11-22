@@ -274,7 +274,11 @@ impl Agent {
     }
 
     fn system_prompt(&self) -> String {
-        prompt::system_prompt(self.mode, &self.catalog, &self.workspace_prompt)
+        if self.toolbox.workspace.vm.is_some() {
+            prompt::vm_system_prompt(self.mode, &self.workspace_prompt)
+        } else {
+            prompt::system_prompt(self.mode, &self.catalog, &self.workspace_prompt)
+        }
     }
 
     fn clear(&mut self) {
@@ -560,13 +564,15 @@ impl Agent {
             }
         }
         if self.messages.is_empty() {
-            self.catalog = tokio::select! {
-                _ = token.cancelled() => {
-                    self.send(AgentEvent::Info("cancelled".into()));
-                    return;
-                }
-                catalog = self.toolbox.mistl.catalog() => catalog,
-            };
+            if self.toolbox.workspace.vm.is_none() {
+                self.catalog = tokio::select! {
+                    _ = token.cancelled() => {
+                        self.send(AgentEvent::Info("cancelled".into()));
+                        return;
+                    }
+                    catalog = self.toolbox.mistl.catalog() => catalog,
+                };
+            }
             let sys = self.system_prompt();
             self.messages.push(Message::system(sys));
         }
@@ -941,6 +947,7 @@ mod tests {
             root: ".".into(),
             justfile: None,
             just_bin: "just".into(),
+            vm: None,
         }
     }
 

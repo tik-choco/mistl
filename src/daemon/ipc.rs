@@ -305,7 +305,15 @@ fn client_request_at(path: &Path, cmd: &str, args: Value) -> Result<Value> {
         );
     }
 
-    stream.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
+    // `vm.create` may download a base image first; `vm.stop` waits for an
+    // ACPI shutdown before falling back to a hard stop.
+    let read_secs = match cmd {
+        "vm.create" | "vm.checkpoint" | "vm.restore" | "vm.move" => 1800,
+        "vm.ha.disable" => 90,
+        "vm.start" | "vm.stop" | "vm.rm" | "vm.connect" => 180,
+        _ => 30,
+    };
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(read_secs)))?;
     stream.set_write_timeout(Some(std::time::Duration::from_secs(30)))?;
 
     let request = Request {

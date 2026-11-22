@@ -154,7 +154,7 @@ try {
   assert.equal(q('#panel-store [data-subtab-target="files"]').getAttribute('aria-selected'), 'true');
   assert.equal(window.localStorage.getItem('mistl-subtab-panel-store'), 'files', 'Removed escrow tab falls back to files');
   assert.deepEqual([...q('#sidenav').children].map(el=>el.getAttribute('href') || el.getAttribute('data-i18n')), [
-    '#panel-overview', '#panel-chat', '#panel-ai', 'nav.group.network', '#panel-tunnel', '#panel-nostr',
+    '#panel-overview', '#panel-chat', '#panel-ai', '#panel-vm', 'nav.group.network', '#panel-tunnel', '#panel-nostr',
     'nav.group.data', '#panel-store', '#panel-escrow', 'nav.group.automation', '#panel-scheduler', '#panel-bot',
     'nav.group.manage', '#panel-access', '#panel-settings'
   ]);

@@ -588,6 +588,7 @@ pub(super) mod tests {
             root: PathBuf::from("/workspace/project"),
             justfile: None,
             just_bin: "just".into(),
+            vm: None,
         }
     }
 

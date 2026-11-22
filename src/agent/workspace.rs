@@ -21,8 +21,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::agent::mistl_tool::truncate_middle;
 use crate::agent::types::{RecipeInfo, WorkspaceSummary};
+use crate::agent::vm::{self, Vm};
 
-const MAX_OUTPUT_BYTES: usize = 12 * 1024;
+pub(super) const MAX_OUTPUT_BYTES: usize = 12 * 1024;
 const MAX_DUMP_BYTES: usize = 8 * 1024 * 1024;
 const DUMP_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -79,6 +80,7 @@ pub struct Workspace {
     pub justfile: Option<Justfile>,
     /// `just` executable used for recipes.
     pub just_bin: String,
+    pub(super) vm: Option<Vm>,
 }
 
 impl Workspace {
@@ -125,6 +127,16 @@ impl Workspace {
             root,
             justfile,
             just_bin: just_bin.to_string(),
+            vm: None,
+        }
+    }
+
+    pub(super) fn for_vm(vm: Vm) -> Self {
+        Self {
+            root: vm::ROOT.into(),
+            justfile: None,
+            just_bin: String::new(),
+            vm: Some(vm),
         }
     }
 
@@ -155,6 +167,9 @@ impl Workspace {
     /// recipe list with params/docs, and the (capped) justfile text.
     pub fn prompt_section(&self) -> String {
         let mut text = format!("## Workspace\nRoot: {}\n", display_path(&self.root));
+        if self.vm.is_some() {
+            return text;
+        }
         let Some(justfile) = &self.justfile else {
             text.push_str("No justfile found in the workspace or its ancestors.\n");
             return text;
@@ -856,7 +871,7 @@ fn short_line(text: &str) -> String {
     line
 }
 
-fn capped(text: &str, max: usize) -> String {
+pub(super) fn capped(text: &str, max: usize) -> String {
     if text.len() <= max {
         return text.to_string();
     }
@@ -1009,6 +1024,7 @@ mod tests {
         let workspace = Workspace {
             root: temp.0.clone(),
             just_bin: "just".into(),
+            vm: None,
             justfile: Some(Justfile {
                 path: temp.0.join("justfile"),
                 dir: temp.0.clone(),

@@ -122,6 +122,14 @@ pub enum Command {
         #[command(subcommand)]
         action: TunnelAction,
     },
+    /// Manage QEMU virtual machines and connect to their SSH server
+    Vm {
+        /// Print JSON for VM management commands
+        #[arg(long, global = true)]
+        json: bool,
+        #[command(subcommand)]
+        action: VmAction,
+    },
     /// Natural-language agent (TUI) that runs mistl commands and workspace
     /// tools, using the AI network through the local API
     Agent(crate::agent::AgentArgs),
@@ -1216,6 +1224,117 @@ pub enum NostrAction {
 }
 
 #[derive(Subcommand)]
+pub enum VmAction {
+    /// Manage this VM's replication group
+    Ha {
+        #[command(subcommand)]
+        action: VmHaAction,
+    },
+    /// Move a VM to another host in its group
+    Move {
+        id: String,
+        #[arg(long)]
+        to: String,
+    },
+    /// Check QEMU, acceleration, networking, and SSH tools on this host
+    Doctor,
+    /// Print this instance's public SSH key
+    Key,
+    /// Create a VM from the configured cloud image
+    Create {
+        #[arg(long)]
+        name: Option<String>,
+        /// Guest memory in MB
+        #[arg(long, value_name = "MB")]
+        memory: Option<u32>,
+        #[arg(long)]
+        cpus: Option<u32>,
+        /// Guest disk size in GB
+        #[arg(long, value_name = "GB")]
+        disk: Option<u32>,
+        /// An OpenSSH public key file or a literal key (repeatable)
+        #[arg(long = "ssh-key", value_name = "FILE_OR_LINE")]
+        ssh_keys: Vec<String>,
+        /// A DID allowed to connect through the tunnel (repeatable)
+        #[arg(long, value_name = "DID")]
+        allow: Vec<String>,
+        /// Start this VM automatically when the daemon starts
+        #[arg(long)]
+        autostart: bool,
+        /// Create the VM without starting it
+        #[arg(long)]
+        no_start: bool,
+    },
+    /// List virtual machines
+    Ls,
+    /// Show a VM's status
+    Status { id: String },
+    /// Start a VM
+    Start { id: String },
+    /// Shut down a VM
+    Stop {
+        id: String,
+        /// Skip graceful ACPI shutdown
+        #[arg(long)]
+        force: bool,
+    },
+    /// Capture a local checkpoint of a VM's disk
+    Checkpoint { id: String },
+    /// List the VM's retained local checkpoints
+    Checkpoints { id: String },
+    /// Restore a stopped VM to a local checkpoint
+    Restore {
+        id: String,
+        /// Checkpoint sequence number (defaults to the newest)
+        #[arg(long, value_name = "N")]
+        seq: Option<u64>,
+    },
+    /// Remove a stopped VM and its disk
+    Rm { id: String },
+    /// Show the tail of a VM's serial log
+    Logs {
+        id: String,
+        #[arg(short = 'n', value_name = "N")]
+        lines: Option<u32>,
+    },
+    /// Open an SSH session or run a command on a VM
+    Ssh {
+        id: String,
+        /// Executor node ID (required for remote VMs)
+        #[arg(long, value_name = "NODE_ID")]
+        node: Option<String>,
+        /// Extra arguments passed to ssh
+        #[arg(last = true, value_name = "SSH_ARGS")]
+        extra: Vec<std::ffi::OsString>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum VmHaAction {
+    /// Create a group and print its secret join token
+    Enable {
+        id: String,
+        #[arg(long = "peer", required = true)]
+        peers: Vec<String>,
+        #[arg(long = "witness")]
+        witnesses: Vec<String>,
+        /// Seconds between checkpoints (zero for manual checkpoints)
+        #[arg(long)]
+        interval: Option<u64>,
+    },
+    /// Join a group using its secret token
+    Join {
+        token: String,
+    },
+    Status {
+        id: String,
+    },
+    Disable {
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum TunnelAction {
     /// Show tunnel status: room, self id, peers, forwards, pending prompts,
     /// trust list, and recent chat/notices
@@ -1869,6 +1988,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
                 Ok(())
             }
         },
+        Command::Vm { json, action } => vm_call(action, json),
         Command::Tunnel { action } => match action {
             TunnelAction::Status => client_call("tunnel.status", json!({})),
             TunnelAction::Start => client_call("tunnel.start", json!({})),
@@ -2800,6 +2920,435 @@ fn client_call(cmd: &str, args: Value) -> Result<()> {
     let response = request(cmd, args)?;
     println!("{}", serde_json::to_string_pretty(&response)?);
     Ok(())
+}
+
+fn vm_call(action: VmAction, json_output: bool) -> Result<()> {
+    let (cmd, mut args) = match action {
+        VmAction::Ha { action } => match action {
+            VmHaAction::Enable {
+                id,
+                peers,
+                witnesses,
+                interval,
+            } => (
+                "vm.ha.enable",
+                json!({"id": id, "peers": peers, "witnesses": witnesses, "checkpoint_secs": interval}),
+            ),
+            VmHaAction::Join { token } => ("vm.ha.join", json!({"token": token})),
+            VmHaAction::Status { id } => ("vm.ha.status", json!({"id": id})),
+            VmHaAction::Disable { id } => ("vm.ha.disable", json!({"id": id})),
+        },
+        VmAction::Move { id, to } => ("vm.move", json!({"id": id, "to": to})),
+        VmAction::Doctor => ("vm.doctor", json!({})),
+        VmAction::Key => ("vm.key", json!({})),
+        VmAction::Create {
+            name,
+            memory,
+            cpus,
+            disk,
+            ssh_keys,
+            allow,
+            autostart,
+            no_start,
+        } => {
+            let ssh_keys = ssh_keys
+                .into_iter()
+                .map(|input| vm_public_key(&input))
+                .collect::<Result<Vec<_>>>()?;
+            (
+                "vm.create",
+                json!({
+                    "name": name, "memory_mb": memory, "cpus": cpus, "disk_gb": disk,
+                    "ssh_keys": ssh_keys, "allow": allow, "autostart": autostart, "start": !no_start,
+                }),
+            )
+        }
+        VmAction::Ls => ("vm.list", json!({})),
+        VmAction::Status { id } => ("vm.status", json!({ "id": id })),
+        VmAction::Start { id } => ("vm.start", json!({ "id": id })),
+        VmAction::Stop { id, force } => ("vm.stop", json!({ "id": id, "force": force })),
+        VmAction::Checkpoint { id } => ("vm.checkpoint", json!({ "id": id })),
+        VmAction::Checkpoints { id } => ("vm.checkpoints", json!({ "id": id })),
+        VmAction::Restore { id, seq } => ("vm.restore", json!({ "id": id, "seq": seq })),
+        VmAction::Rm { id } => ("vm.rm", json!({ "id": id })),
+        VmAction::Logs { id, lines } => ("vm.logs", json!({ "id": id, "lines": lines })),
+        VmAction::Ssh { id, node, extra } => return vm_ssh(id, node, extra),
+    };
+    if let Some(args) = args.as_object_mut() {
+        args.retain(|_, value| !value.is_null());
+    }
+    if cmd == "vm.ha.enable" {
+        eprintln!("Keep this join token secret. It contains the VM encryption key.");
+    }
+    if json_output {
+        return client_call(cmd, args);
+    }
+    let response = request(cmd, args)?;
+    match cmd {
+        "vm.ha.enable" => println!(
+            "{}",
+            response["token"]
+                .as_str()
+                .context("missing VM join token")?
+        ),
+        "vm.ha.join" | "vm.ha.status" | "vm.ha.disable" | "vm.move" => {
+            println!("{}", serde_json::to_string_pretty(&response)?)
+        }
+        "vm.doctor" => {
+            let ready = if response["ready"] == true {
+                "ready"
+            } else {
+                "not ready"
+            };
+            let os = response["os"].as_str().unwrap_or("?");
+            let arch = response["arch"].as_str().unwrap_or("?");
+            let qemu = response["qemu_version"].as_str().unwrap_or("unavailable");
+            let accel = response["accel"].as_str().unwrap_or("-");
+            let network = response["network"].as_str().unwrap_or("-");
+            println!("VM host {ready} ({os}/{arch})");
+            println!("QEMU: {qemu} | Acceleration: {accel} | Network: {network}");
+            for (field, label) in [("problems", "Problem"), ("warnings", "Warning")] {
+                if let Some(messages) = response[field].as_array() {
+                    for message in messages.iter().filter_map(Value::as_str) {
+                        println!("{label}: {message}");
+                    }
+                }
+            }
+        }
+        "vm.key" => {
+            let key = response["public_key"]
+                .as_str()
+                .context("missing public key")?;
+            println!("{key}");
+        }
+        "vm.create" => println!("{}", vm_status_row(&response["vm"])),
+        "vm.list" => match response["vms"].as_array().filter(|vms| !vms.is_empty()) {
+            Some(vms) => {
+                let grouped = vms.iter().any(|vm| vm["holder"].is_string());
+                let holder_column = if grouped { "\tHOLDER" } else { "" };
+                println!("ID\tNAME\tSTATE\tMEMORY\tCPUS\tDISK\tSSH{holder_column}");
+                for vm in vms {
+                    let row = vm_status_row(vm);
+                    if grouped {
+                        println!("{row}\t{}", vm["holder"].as_str().unwrap_or("-"));
+                    } else {
+                        println!("{row}");
+                    }
+                }
+            }
+            None => println!("no virtual machines"),
+        },
+        "vm.status" => {
+            println!("{}", vm_status_row(&response));
+            if let Some(holder) = response["holder"].as_str() {
+                println!("Holder {holder}");
+            }
+            if let Some(pid) = response["pid"].as_u64() {
+                let uptime = response["uptime_secs"].as_u64().unwrap_or_default();
+                println!("PID {pid} | Uptime {uptime}s");
+            }
+            if let Some(fingerprint) = response["host_key_fingerprint"].as_str() {
+                println!("SSH host key {fingerprint}");
+            }
+        }
+        "vm.checkpoint" => println!(
+            "Checkpoint {} | {} chunks ({} new) | {} bytes ({} new) | Pause {} ms",
+            response["seq"],
+            response["chunks"],
+            response["new_chunks"],
+            response["bytes"],
+            response["new_bytes"],
+            response["pause_ms"],
+        ),
+        "vm.checkpoints" => match response["checkpoints"]
+            .as_array()
+            .filter(|rows| !rows.is_empty())
+        {
+            Some(rows) => {
+                println!("SEQ\tEPOCH\tCREATED\tBYTES");
+                for row in rows {
+                    println!(
+                        "{}\t{}\t{}\t{}",
+                        row["seq"],
+                        row["epoch"],
+                        row["created_at"].as_str().unwrap_or("?"),
+                        row["disk_bytes"],
+                    );
+                }
+            }
+            None => println!("no checkpoints"),
+        },
+        "vm.rm" => println!("VM removed"),
+        "vm.logs" => {
+            if let Some(lines) = response["lines"].as_array() {
+                for line in lines.iter().filter_map(Value::as_str) {
+                    println!("{line}");
+                }
+            }
+        }
+        _ => println!("{}", vm_status_row(&response)),
+    }
+    Ok(())
+}
+
+fn vm_status_row(vm: &Value) -> String {
+    let id = vm["server_id"].as_str().unwrap_or("?");
+    let name = vm["name"].as_str().unwrap_or("?");
+    let state = vm["state"].as_str().unwrap_or("?");
+    let memory = vm["memory_mb"].as_u64().unwrap_or_default();
+    let cpus = vm["cpus"].as_u64().unwrap_or_default();
+    let disk = vm["disk_gb"].as_u64().unwrap_or_default();
+    let ssh = if vm["published"] == true {
+        vm["ssh_target"].as_str().unwrap_or("-")
+    } else {
+        "-"
+    };
+    format!("{id}\t{name}\t{state}\t{memory} MB\t{cpus}\t{disk} GB\t{ssh}")
+}
+
+fn vm_public_key(input: &str) -> Result<String> {
+    let input = input.trim();
+    if is_ssh_public_key_line(input) {
+        return Ok(input.to_owned());
+    }
+    let contents = std::fs::read_to_string(input).context("reading --ssh-key public key file")?;
+    let key = contents.trim();
+    if !is_ssh_public_key_line(key) {
+        bail!("--ssh-key file must contain one OpenSSH public key");
+    }
+    Ok(key.to_owned())
+}
+
+fn is_ssh_public_key_line(line: &str) -> bool {
+    let mut fields = line.split_whitespace();
+    let kind = fields.next().unwrap_or_default();
+    !line.contains(['\r', '\n', '\u{85}', '\u{2028}', '\u{2029}'])
+        && ["ssh-", "ecdsa-", "sk-"]
+            .iter()
+            .any(|prefix| kind.starts_with(prefix))
+        && fields.next().is_some()
+}
+
+fn vm_ssh(id: String, node: Option<String>, extra: Vec<std::ffi::OsString>) -> Result<()> {
+    let mut args = json!({ "id": id });
+    if let Some(node) = node {
+        args["node"] = json!(node);
+    }
+    let response = request("vm.connect", args)?;
+    let target = match response["local"].as_bool() {
+        Some(true) => None,
+        Some(false) => Some(
+            response["target"]
+                .as_str()
+                .context("missing VM SSH target")?,
+        ),
+        None => bail!("missing VM SSH connection type"),
+    };
+    let status = vm_ssh_command(&response, &extra)
+        .and_then(|mut command| command.status().context("running ssh"));
+    if let Some(target) = target
+        && let Err(error) =
+            daemon::ipc::client_request("vm.disconnect", json!({ "target": target }))
+    {
+        eprintln!("mistl: could not remove VM SSH forward: {error:#}");
+    }
+
+    let status = status?;
+    if !status.success() {
+        #[cfg(unix)]
+        use std::os::unix::process::ExitStatusExt;
+        #[cfg(unix)]
+        let code = status
+            .code()
+            .or_else(|| status.signal().map(|signal| 128 + signal));
+        #[cfg(not(unix))]
+        let code = status.code();
+        std::process::exit(code.unwrap_or(1));
+    }
+    Ok(())
+}
+
+fn vm_ssh_command(
+    connection: &Value,
+    extra: &[std::ffi::OsString],
+) -> Result<std::process::Command> {
+    crate::vm::sshkey::ssh_command(connection, &[], extra)
+}
+
+#[cfg(test)]
+mod vm_cli_tests {
+    use super::*;
+    use crate::vm::sshkey::ssh_path_token;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn parses_vm_create_flags() {
+        let cli = Cli::try_parse_from([
+            "mistl",
+            "vm",
+            "create",
+            "--json",
+            "--name",
+            "guest",
+            "--memory",
+            "4096",
+            "--cpus",
+            "2",
+            "--disk",
+            "30",
+            "--ssh-key",
+            "guest.pub",
+            "--ssh-key",
+            "ssh-ed25519 AAAA guest",
+            "--allow",
+            "did:key:owner",
+            "--allow",
+            "did:key:guest",
+            "--autostart",
+            "--no-start",
+        ])
+        .unwrap();
+        let Some(Command::Vm {
+            json: true,
+            action:
+                VmAction::Create {
+                    name,
+                    memory,
+                    cpus,
+                    disk,
+                    ssh_keys,
+                    allow,
+                    autostart,
+                    no_start,
+                },
+        }) = cli.command
+        else {
+            panic!("expected vm create --json");
+        };
+        assert_eq!(name.as_deref(), Some("guest"));
+        assert_eq!((memory, cpus, disk), (Some(4096), Some(2), Some(30)));
+        assert_eq!(ssh_keys, ["guest.pub", "ssh-ed25519 AAAA guest"]);
+        assert_eq!(allow, ["did:key:owner", "did:key:guest"]);
+        assert!(autostart && no_start);
+        assert_eq!(vm_public_key(&ssh_keys[1]).unwrap(), ssh_keys[1]);
+        assert!(!is_ssh_public_key_line(
+            "ssh-ed25519 AAAA\nssh-ed25519 BBBB"
+        ));
+    }
+
+    #[test]
+    fn passes_ssh_args_after_the_destination() {
+        let cli = Cli::try_parse_from([
+            "mistl",
+            "vm",
+            "ssh",
+            "0123456789abcdef",
+            "--node",
+            "fedcba9876543210",
+            "--",
+            "-tt",
+            "printf",
+            "%s\\n",
+            "--json",
+        ])
+        .unwrap();
+        let Some(Command::Vm {
+            json: false,
+            action: VmAction::Ssh { id, node, extra },
+        }) = cli.command
+        else {
+            panic!("expected vm ssh");
+        };
+        assert_eq!(id, "0123456789abcdef");
+        assert_eq!(node.as_deref(), Some("fedcba9876543210"));
+        let command = vm_ssh_command(
+            &json!({
+                "port": 22200,
+                "user": "mistl",
+                "key": "vm keys/id_ed25519",
+                "known_hosts": "vm keys/known_hosts",
+                "host_key_alias": "mistl-vm-0123456789abcdef",
+            }),
+            &extra,
+        )
+        .unwrap();
+        assert_eq!(command.get_program(), OsStr::new("ssh"));
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            [
+                "-i",
+                "vm keys/id_ed25519",
+                "-o",
+                "IdentitiesOnly=yes",
+                "-o",
+                "HostKeyAlias=mistl-vm-0123456789abcdef",
+                "-o",
+                "UserKnownHostsFile=\"vm keys/known_hosts\"",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "-o",
+                "HashKnownHosts=no",
+                "-p",
+                "22200",
+                "mistl@127.0.0.1",
+                "-tt",
+                "printf",
+                "%s\\n",
+                "--json",
+            ]
+            .map(OsStr::new),
+        );
+    }
+
+    #[test]
+    fn quotes_known_hosts_and_keeps_the_identity_as_one_argument() {
+        let key = r"C:\Users\Alice\AppData\Roaming\mistl keys\id_ed25519";
+        let known_hosts = r"C:\Users\Alice\AppData\Roaming\mistl keys\O'Brien%h\known_hosts";
+        let command = vm_ssh_command(
+            &json!({
+                "port": 22200,
+                "user": "mistl",
+                "key": key,
+                "known_hosts": known_hosts,
+                "host_key_alias": "mistl-vm-0123456789abcdef",
+            }),
+            &[],
+        )
+        .unwrap();
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(&args[..2], &["-i", key].map(OsStr::new));
+        assert_eq!(
+            args[7],
+            OsStr::new(
+                r#"UserKnownHostsFile="C:\\Users\\Alice\\AppData\\Roaming\\mistl keys\\O'Brien%%h\\known_hosts""#
+            )
+        );
+
+        let command = vm_ssh_command(
+            &json!({
+                "port": 22200,
+                "user": "mistl",
+                "key": "/tmp/id_ed25519",
+                "known_hosts": r#"/tmp/quote"name/known_hosts"#,
+                "host_key_alias": "mistl-vm-0123456789abcdef",
+            }),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            command.get_args().nth(7).unwrap(),
+            OsStr::new(r#"UserKnownHostsFile="/tmp/quote\"name/known_hosts""#)
+        );
+    }
+
+    #[test]
+    fn plain_known_hosts_path_stays_unquoted() {
+        assert_eq!(
+            ssh_path_token(r"C:\Users\a\AppData\Roaming\vm\ssh\known_hosts"),
+            r"C:\Users\a\AppData\Roaming\vm\ssh\known_hosts"
+        );
+        assert_eq!(ssh_path_token("/home/a/100%/kh"), "/home/a/100%%/kh");
+    }
 }
 
 fn parse_authz_ttl(value: &str) -> std::result::Result<u64, String> {

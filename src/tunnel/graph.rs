@@ -30,7 +30,14 @@ impl super::auth::ConnectionAuthorizer for GraphAuthorizer {
             if !self.graph.allows_traffic(&request.peer_id).await {
                 return super::auth::AuthDecision::Deny;
             }
-            let decision = self.inner.authorize(request).await;
+            let decision = match crate::vm::authorize_vm_target(
+                &request.forward_key,
+                request.verified_did(),
+            ) {
+                Some(true) => super::auth::AuthDecision::Allow,
+                Some(false) => super::auth::AuthDecision::Deny,
+                None => self.inner.authorize(request).await,
+            };
             // A human may approve after a link was removed or the room changed.
             if self.graph.epoch.load(Ordering::Acquire) == epoch
                 && self.graph.allows_traffic(&request.peer_id).await

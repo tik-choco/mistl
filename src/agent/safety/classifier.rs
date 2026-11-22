@@ -101,7 +101,7 @@ fn message(role: &str, content: String) -> ChatMessage {
     }
 }
 
-fn input(req: &ReviewRequest<'_>) -> Result<Value, Verdict> {
+pub(super) fn input(req: &ReviewRequest<'_>) -> Result<Value, Verdict> {
     let action = action(req)?;
     // Retain the most recent requests when the combined budget is exhausted.
     let mut budget = 8000;
@@ -115,9 +115,9 @@ fn input(req: &ReviewRequest<'_>) -> Result<Value, Verdict> {
         }
     }
     requests.reverse();
-    Ok(
-        json!({"user_requests": requests, "workspace":req.workspace.root.to_string_lossy(), "action":action}),
-    )
+    let mut payload = json!({"user_requests": requests, "workspace":req.workspace.root.to_string_lossy(), "action":action});
+    req.add_execution_context(&mut payload);
+    Ok(payload)
 }
 
 // Shared with the decision backend so recipe context and action data have the

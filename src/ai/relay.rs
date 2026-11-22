@@ -108,16 +108,15 @@ fn job_id(path: &str) -> Option<&str> {
 
 fn allowed(method: &str, path: &str) -> bool {
     match (method, path) {
-        ("POST", "/images/edits")
-        | ("POST" | "GET", "/3d/generations")
-        | ("GET", "/audio/voices" | "/health" | "/api/ps") => true,
-        ("GET", path) => job_id(path).is_some(),
+        ("GET", "/3d/generations" | "/audio/voices" | "/health" | "/api/ps") => true,
+        ("GET", path) => job_id(path).is_some() || oai_tunnel::is_motion_catalog(path),
+        ("POST", path) => path == "/chat/completions" || oai_tunnel::is_model_relay_post(path),
         ("DELETE", path) => !path.ends_with("/content") && job_id(path).is_some(),
         _ => false,
     }
 }
 
-/// Parses a generation or image edit body; `Err` is the 400 to return.
+/// Parses a model-routed passthrough body; `Err` is the 400 to return.
 /// There is no built-in default model: routing needs an explicit id.
 fn generation_body(request: &RelayRequest) -> std::result::Result<Value, TunnelResponse> {
     let body: Value = serde_json::from_slice(request.body.as_deref().unwrap_or_default())
@@ -179,9 +178,9 @@ fn merge_lists(responses: Vec<TunnelResponse>) -> TunnelResponse {
 }
 
 impl AiService {
-    fn generation_route(&self, model: &str) -> Result<(Route, String)> {
+    fn generation_route(&self, model: Option<&str>) -> Result<(Route, String)> {
         let config = self.state.effective_config();
-        let reference = resolve_api_ref(&config.ai, Some(model), &self.live_models())?;
+        let reference = resolve_api_ref(&config.ai, model, &self.live_models())?;
         let resolved = crate::config::resolve_ref(&config.ai, Some(&reference))
             .context("ai: model reference unavailable")?;
         let route = match resolved.base_url.strip_prefix("mist-network://") {
@@ -206,6 +205,10 @@ impl AiService {
                     .api_room(room)
                     .await?
                     .context("ai: room is not enabled")?;
+                if request.path == "/chat/completions" {
+                    let body = serde_json::from_slice(request.body.as_deref().unwrap_or_default())?;
+                    return (routes.oai)(body).await;
+                }
                 (routes.relay)(request).await
             }
             Route::Http { provider_id } => {
@@ -222,11 +225,11 @@ impl AiService {
                     .context("ai: provider unavailable")?;
                 let (path, range) = oai_tunnel::split_range(&request.path)?;
                 let image_edit = request.method == "POST" && path == "/images/edits";
-                // Only the 3D deadline depends on the body; image bodies are large.
+                // Only the 3D deadline depends on the request body.
                 let body = request
                     .body
                     .as_deref()
-                    .filter(|_| !image_edit)
+                    .filter(|_| path == "/3d/generations")
                     .and_then(|raw| serde_json::from_slice::<Value>(raw).ok())
                     .unwrap_or(Value::Null);
                 let response = oai_tunnel::forward_capped(
@@ -244,10 +247,10 @@ impl AiService {
                     },
                 )
                 .await?;
-                Ok(if image_edit {
-                    response
-                } else {
+                Ok(if path.starts_with("/3d/generations") {
                     relativize(response)
+                } else {
+                    response
                 })
             }
         }
@@ -309,15 +312,35 @@ impl AiService {
             )
             .await;
         }
-        if request.method == "POST" {
-            let mut body = match generation_body(&request) {
-                Ok(body) => body,
+        if oai_tunnel::is_motion_catalog(&path) {
+            let model = match oai_tunnel::motion_catalog_model(&path) {
+                Ok(model) => model,
                 Err(response) => return Ok(response),
             };
-            let (route, model) =
-                self.generation_route(body["model"].as_str().expect("validated model"))?;
-            body["model"] = json!(model);
-            request.body = Some(serde_json::to_vec(&body)?);
+            let (route, model) = self.generation_route(Some(&model))?;
+            request.path = oai_tunnel::motion_catalog_path(&path, &model)?;
+            return self.forward_route(route, request).await;
+        }
+        if request.method == "POST" {
+            let body = if path == "/chat/completions" {
+                // The local API has already validated the image request.
+                serde_json::from_slice(request.body.as_deref().unwrap_or_default())?
+            } else {
+                match generation_body(&request) {
+                    Ok(body) => body,
+                    Err(response) => return Ok(response),
+                }
+            };
+            let (route, model) = self.generation_route(body["model"].as_str())?;
+            let mut set = vec![("model", json!(model))];
+            if path == "/chat/completions" && body.get("stream").is_some() {
+                set.push(("stream", json!(false)));
+            }
+            request.body = Some(oai_tunnel::rewrite_object(
+                request.body.as_deref().unwrap_or_default(),
+                &set,
+                &[],
+            )?);
             let response = self.clone().forward_route(route.clone(), request).await?;
             if path == "/3d/generations" {
                 self.relay_jobs.remember(&response, route);
@@ -397,7 +420,9 @@ impl AiRoom {
             Ok(parts) => parts,
             Err(err) => return Ok(error(400, &err.to_string(), "invalid_request", None)),
         };
-        if !allowed(&request.method, &path) || matches!(path.as_str(), "/health" | "/api/ps") {
+        if !allowed(&request.method, &path)
+            || matches!(path.as_str(), "/health" | "/api/ps" | "/chat/completions")
+        {
             return Ok(not_found());
         }
         if path == "/audio/voices" {
@@ -427,27 +452,37 @@ impl AiRoom {
                 json!({"object":"list","count":data.len(),"data":data,"voices":data}),
             ));
         }
-        if request.method == "POST" {
-            let body = match generation_body(&request) {
-                Ok(body) => body,
-                Err(response) => return Ok(response),
+        let catalog = oai_tunnel::is_motion_catalog(&path);
+        if request.method == "POST" || catalog {
+            let (body, model) = if catalog {
+                let model = match oai_tunnel::motion_catalog_model(&path) {
+                    Ok(model) => model,
+                    Err(response) => return Ok(response),
+                };
+                (Value::Null, model)
+            } else {
+                let body = match generation_body(&request) {
+                    Ok(body) => body,
+                    Err(response) => return Ok(response),
+                };
+                let model = body["model"].as_str().expect("validated model").to_string();
+                (body, model)
             };
-            let model = body["model"].as_str().expect("validated model");
             self.consumer
-                .validate_api_model(protocol::SERVICE_OAI, Some(model))?;
+                .validate_api_model(protocol::SERVICE_OAI, Some(&model))?;
             self.broadcast(ProtocolMessage::ConsumerHello).await;
             let info = self
                 .consumer
-                .wait_for_service_model(protocol::SERVICE_OAI, Some(model), DISCOVERY_TIMEOUT)
+                .wait_for_service_model(protocol::SERVICE_OAI, Some(&model), DISCOVERY_TIMEOUT)
                 .await?;
             let response = self
                 .oai
                 .request_method(
                     &info.node_id,
-                    "POST",
+                    &request.method,
                     &path,
-                    &serde_json::to_vec(&body)?,
-                    oai_tunnel::relay_deadline("POST", &path, &body),
+                    request.body.as_deref().unwrap_or_default(),
+                    oai_tunnel::relay_deadline(&request.method, &path, &body),
                 )
                 .await?;
             if path == "/3d/generations" {
@@ -617,6 +652,17 @@ mod tests {
         id: &str,
         handler: impl Fn(&str, &str, &Value) -> (u16, &'static str, Vec<u8>) + Send + Sync + 'static,
     ) -> Mock {
+        mock_raw(id, move |method, path, body| {
+            let body = serde_json::from_slice(body).unwrap_or(Value::Null);
+            handler(method, path, &body)
+        })
+        .await
+    }
+
+    async fn mock_raw(
+        id: &str,
+        handler: impl Fn(&str, &str, &[u8]) -> (u16, &'static str, Vec<u8>) + Send + Sync + 'static,
+    ) -> Mock {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base_url = format!("http://{}/v1/", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -652,10 +698,13 @@ mod tests {
                 let mut first = headers.lines().next().unwrap().split_whitespace();
                 let method = first.next().unwrap().to_string();
                 let path = first.next().unwrap().to_string();
-                let body = serde_json::from_slice(&bytes[headers_end..headers_end + length])
-                    .unwrap_or(Value::Null);
-                let (status, content_type, response) = handler(&method, &path, &body);
-                recorded.lock().unwrap().push((method, path, body, headers));
+                let body = &bytes[headers_end..headers_end + length];
+                let (status, content_type, response) = handler(&method, &path, body);
+                let parsed = serde_json::from_slice(body).unwrap_or(Value::Null);
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push((method, path, parsed, headers));
                 let body = response;
                 let header = format!(
                     "HTTP/1.1 {status} Mock\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -720,6 +769,177 @@ mod tests {
 
     fn value(response: TunnelResponse) -> Value {
         serde_json::from_slice(&response.body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn game_and_motion_select_http_providers_by_model() {
+        const GAME: &str = r#"{ "model":"game-model", "image":"AA==", "game":{"z":0,"a":1} }"#;
+        const MOTION: &str = r#"{ "model":"motion-model", "start":[0,1], "format":"csv" }"#;
+        const CLIPS: &str = "/motion/clips?tag=a+b&model=motion%2Dmodel&tag=%2B";
+        const CSV: &[u8] = b"frame,joint\r\n0,1\r\n";
+        let game_reply =
+            serde_json::to_vec_pretty(&json!({"id":ID,"data":[{"url":"kept"}]})).unwrap();
+        let expected = game_reply.clone();
+        let mut game = mock_raw("game", move |method, path, body| {
+            assert_eq!(
+                (method, path, body),
+                ("POST", "/v1/game/act", GAME.as_bytes())
+            );
+            (202, "application/json", game_reply.clone())
+        })
+        .await;
+        game.provider.models = vec!["game-model".into()];
+        let mut motion = mock_raw("motion", |method, path, body| {
+            match (method, path.strip_prefix("/v1").unwrap()) {
+                ("POST", "/motion/inbetween") => assert_eq!(body, MOTION.as_bytes()),
+                ("GET", "/motion/skeletons/motion-model" | CLIPS) => assert!(body.is_empty()),
+                _ => panic!("unexpected request {method} {path}"),
+            }
+            (200, "text/csv", CSV.to_vec())
+        })
+        .await;
+        motion.provider.models = vec!["motion-model".into()];
+        let service = service(vec![game.provider.clone(), motion.provider.clone()]);
+        for (method, path, body, status, mime, bytes) in [
+            (
+                "POST",
+                "/game/act",
+                Some(GAME),
+                202,
+                "application/json",
+                expected.as_slice(),
+            ),
+            (
+                "POST",
+                "/motion/inbetween",
+                Some(MOTION),
+                200,
+                "text/csv",
+                CSV,
+            ),
+            (
+                "GET",
+                "/motion/skeletons/motion%2Dmodel",
+                None,
+                200,
+                "text/csv",
+                CSV,
+            ),
+            ("GET", CLIPS, None, 200, "text/csv", CSV),
+        ] {
+            let mut req = request(method, path, None);
+            req.body = body.map(|s| s.as_bytes().to_vec());
+            let response = service.clone().relay(req).await.unwrap();
+            assert_eq!(response.status, status);
+            assert_eq!(response.content_type, mime);
+            assert_eq!(response.body, bytes);
+        }
+        let response = service
+            .clone()
+            .relay(request("GET", "/motion/clips", None))
+            .await
+            .unwrap();
+        assert_eq!(response.status, 400);
+        assert_eq!(
+            value(response)["error"]["code"],
+            "missing_required_parameter"
+        );
+        assert_eq!(game.requests.lock().unwrap().len(), 1);
+        assert_eq!(motion.requests.lock().unwrap().len(), 3);
+        assert!(service.relay_jobs.snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unscoped_vision_chat_forwards_raw_http_body_and_adapts_sse() {
+        const VISION: &str = r#"{ "model":"game-model", "temperature":0.4, "stream":false, "messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}]}], "extra":{"z":1,"a":2} }"#;
+        const REPLY: &[u8] = br#"{ "choices": [{"message":{"content":"image answer"}}] }"#;
+        let _guard = crate::authz::TEST_LOCK.lock().await;
+        crate::authz::test_reset();
+        let requests = std::sync::atomic::AtomicUsize::new(0);
+        let mut upstream = mock_raw("vision", move |method, path, body| {
+            assert_eq!((method, path), ("POST", "/v1/chat/completions"));
+            if requests.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
+                assert_eq!(body, VISION.as_bytes());
+            }
+            (200, "application/json", REPLY.to_vec())
+        })
+        .await;
+        upstream.provider.models = vec!["game-model".into()];
+        let service = service(vec![upstream.provider.clone()]);
+        let relay: super::super::api_server::RelayFn =
+            Arc::new(move |request| Box::pin(service.clone().relay(request)));
+        let server = super::super::api_server::ApiServer::start_with_rooms(
+            "127.0.0.1:0",
+            Arc::new(|messages, _, model, _| {
+                Box::pin(async move {
+                    assert_eq!(model.as_deref(), Some("game-model"));
+                    assert_eq!(messages[0].content, "text prompt");
+                    Ok("text answer".to_string().into())
+                })
+            }),
+            Arc::new(Vec::new),
+            Arc::new(|_, _| Box::pin(async { anyhow::bail!("unused") })),
+            Arc::new(|_| Box::pin(async { anyhow::bail!("unused") })),
+            None,
+            Some(relay),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let url = format!("http://{}/v1/chat/completions", server.addr());
+        let post = |body: String| {
+            client
+                .post(&url)
+                .header("content-type", "application/json")
+                .body(body)
+                .send()
+        };
+        let json = post(VISION.into()).await.unwrap();
+        assert_eq!(json.status(), 200);
+        assert_eq!(json.bytes().await.unwrap().as_ref(), REPLY);
+        let sse = post(VISION.replace("\"stream\":false", "\"stream\":true"))
+            .await
+            .unwrap();
+        assert_eq!(sse.status(), 200);
+        assert!(
+            sse.headers()["content-type"]
+                .to_str()
+                .unwrap()
+                .starts_with("text/event-stream")
+        );
+        let sse = sse.text().await.unwrap();
+        assert!(sse.contains("image answer"));
+        assert!(sse.contains("data: [DONE]"));
+        let text = post(
+            r#"{"model":"game-model","messages":[{"role":"user","content":"text prompt"}]}"#.into(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(text.status(), 200);
+        assert_eq!(
+            text.json::<Value>().await.unwrap()["choices"][0]["message"]["content"],
+            "text answer"
+        );
+        let calls = upstream.requests.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().all(|(_, _, sent, head)| {
+            sent["temperature"] == 0.4
+                && sent["stream"] == false
+                && sent
+                    .pointer("/messages/0/content/0/image_url/url")
+                    .and_then(Value::as_str)
+                    == Some("data:image/png;base64,AA==")
+                && head
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer mock-key")
+        }));
+        server.stop();
     }
 
     #[tokio::test]
@@ -984,6 +1204,122 @@ mod tests {
                         .to_ascii_lowercase()
                         .contains("authorization: bearer mock-key"))
         );
+    }
+
+    #[tokio::test]
+    async fn game_motion_and_unscoped_vision_use_room_oai_model_discovery() {
+        use base64::Engine as _;
+        use base64::engine::general_purpose::STANDARD;
+
+        const CLIPS: &str = "/motion/clips?model=motion%2Dmodel&tag=a+b";
+        let cases = [
+            (
+                "game-peer",
+                "POST",
+                "/game/act",
+                r#"{ "model":"game-model","image":"AA==" }"#,
+            ),
+            (
+                "motion-peer",
+                "POST",
+                "/motion/inbetween",
+                r#"{ "model":"motion-model","target":[1] }"#,
+            ),
+            ("motion-peer", "GET", "/motion/skeletons/motion%2Dmodel", ""),
+            ("motion-peer", "GET", CLIPS, ""),
+            (
+                "game-peer",
+                "POST",
+                "/chat/completions",
+                r#"{"messages":[{"content":[{"image_url":{"url":"data:image/png;base64,AA=="},"type":"image_url"}],"role":"user"}],"model":"game-model","stream":false,"temperature":0.4}"#,
+            ),
+        ];
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let room = room(Arc::new(move |peer, message| {
+            tx.send((peer.to_string(), message)).unwrap();
+        }));
+        let service = service(vec![AiProviderConfig {
+            id: "room".into(),
+            base_url: "mist-network://test".into(),
+            ..Default::default()
+        }]);
+        service
+            .rooms
+            .write()
+            .unwrap()
+            .insert("test".into(), room.clone());
+        for (peer, service, model) in [
+            ("chat-peer", protocol::SERVICE_CHAT, "game-model"),
+            ("game-peer", protocol::SERVICE_OAI, "game-model"),
+            ("motion-peer", protocol::SERVICE_OAI, "motion-model"),
+        ] {
+            assert!(room.consumer.handle_message(
+                peer,
+                &ProtocolMessage::ProviderHello {
+                    models: Some(vec![model.into()]),
+                    services: Some(vec![service.into()]),
+                    voices: None,
+                }
+            ));
+        }
+        let oai = room.oai.clone();
+        let responder = tokio::spawn(async move {
+            for (expected_peer, expected_method, expected_path, expected_body) in cases {
+                loop {
+                    let (peer, message) = rx.recv().await.unwrap();
+                    let ProtocolMessage::OaiRequest {
+                        id,
+                        seq,
+                        last,
+                        data,
+                        method,
+                        path,
+                        ..
+                    } = message
+                    else {
+                        assert!(matches!(message, ProtocolMessage::ConsumerHello));
+                        continue;
+                    };
+                    assert_eq!(peer, expected_peer);
+                    assert_eq!(seq, 0);
+                    assert!(last);
+                    assert_eq!(method.as_deref(), Some(expected_method));
+                    assert_eq!(path.as_deref(), Some(expected_path));
+                    assert_eq!(STANDARD.decode(data).unwrap(), expected_body.as_bytes());
+                    oai.handle_message(
+                        &peer,
+                        &ProtocolMessage::OaiResponse {
+                            id,
+                            seq: 0,
+                            last: true,
+                            data: STANDARD.encode(b"frame,joint\r\n0,1\r\n"),
+                            status: Some(202),
+                            content_type: Some("text/csv".into()),
+                        },
+                    );
+                    break;
+                }
+            }
+        });
+        for (_, method, path, body) in cases {
+            let mut request = request(method, path, None);
+            request.body = (!body.is_empty()).then(|| body.as_bytes().to_vec());
+            let response = tokio::time::timeout(Duration::from_secs(5), async {
+                if path == "/chat/completions" {
+                    service.clone().relay(request).await
+                } else {
+                    room.clone().relay(request).await
+                }
+            })
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(response.status, 202);
+            assert_eq!(response.content_type, "text/csv");
+            assert_eq!(response.body, b"frame,joint\r\n0,1\r\n");
+        }
+        assert!(room.relay_jobs.snapshot().is_empty());
+        responder.await.unwrap();
     }
 
     #[tokio::test]

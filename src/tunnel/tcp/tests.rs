@@ -490,6 +490,48 @@ impl ConnectionAuthorizer for SelectiveBlockAuthorizer {
 }
 
 #[tokio::test]
+async fn loopback_backend_origin_is_registered_until_socket_closes() {
+    let (addr, listener) = spawn_backend_listener().await;
+    let mgr = test_manager_with(addr, allow_all());
+
+    let connect = connect_msg("conn-1", &mgr.target);
+    mgr.on_tunnel_message("peer-1", &serde_json::to_vec(&connect).unwrap())
+        .await;
+    let (mut backend, peer_addr) = tokio::time::timeout(Duration::from_secs(1), listener.accept())
+        .await
+        .expect("timed out waiting for the backend connection")
+        .unwrap();
+
+    let data = data_msg("conn-1", &mgr.target, &[1], Some(1));
+    mgr.on_tunnel_message("peer-1", &serde_json::to_vec(&data).unwrap())
+        .await;
+    let mut byte = [0];
+    tokio::time::timeout(Duration::from_secs(1), backend.read_exact(&mut byte))
+        .await
+        .expect("timed out waiting for backend data")
+        .unwrap();
+    assert_eq!(byte, [1]);
+    assert!(crate::tunnel::origin::is_tunneled(peer_addr));
+
+    mgr.close_conn_from_peer("conn-1", "peer-1").await;
+    let eof = tokio::time::timeout(Duration::from_secs(1), backend.read(&mut byte))
+        .await
+        .expect("timed out waiting for backend EOF")
+        .unwrap();
+    assert_eq!(eof, 0);
+    assert!(crate::tunnel::origin::is_tunneled(peer_addr));
+
+    drop(backend);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while crate::tunnel::origin::is_tunneled(peer_addr) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("backend origin was not cleared after the socket closed");
+}
+
+#[tokio::test]
 async fn duplicate_connect_for_already_tracked_conn_is_a_no_op() {
     let (addr, listener) = spawn_backend_listener().await;
     let mgr = test_manager_with(addr, allow_all());

@@ -290,6 +290,7 @@ pub(super) fn state(req: &ReviewRequest<'_>, limit: usize) -> Result<String, Ver
     let mut payload = json!({
         "user_requests": [], "workspace": req.workspace.root.to_string_lossy(), "action": action,
     });
+    req.add_execution_context(&mut payload);
     let base_size = payload.to_string().len();
     if base_size > limit {
         return Err(Verdict::Ask(format!(

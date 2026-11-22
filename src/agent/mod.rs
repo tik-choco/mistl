@@ -10,6 +10,7 @@ mod session;
 mod tools;
 mod tui;
 mod types;
+mod vm;
 mod workspace;
 
 use std::io::Write;
@@ -45,6 +46,12 @@ pub struct AgentArgs {
     /// State-changing commands need auto approval or --yes.
     #[arg(long, short = 'p')]
     prompt: Option<String>,
+    /// Run workspace tools in the VM with this server id
+    #[arg(long)]
+    vm: Option<String>,
+    /// Executor node id for a remote VM
+    #[arg(long, requires = "vm")]
+    node: Option<String>,
     /// Print model ids from mistl's local API and exit
     #[arg(long)]
     list_models: bool,
@@ -96,19 +103,31 @@ async fn run_async(cli: AgentArgs) -> Result<()> {
         ..defaults
     };
 
-    let ws = workspace::Workspace::detect(&std::env::current_dir()?, &cfg.just_bin);
-    if cli.list_models {
-        return list_models(cfg, ws).await;
-    }
-    match cli.prompt {
-        Some(prompt) => headless(cfg, ws, prompt).await,
-        None => {
-            let mut info = tui::UiInfo::from_config(&cfg);
-            info.workspace = ws.summary();
-            let handle = session::spawn(cfg, ws)?;
-            tui::run(info, handle).await
+    let vm = match cli.vm {
+        Some(id) => Some(vm::Vm::connect(id, cli.node).await?),
+        None => None,
+    };
+    let ws = match &vm {
+        Some(vm) => workspace::Workspace::for_vm(vm.clone()),
+        None => workspace::Workspace::detect(&std::env::current_dir()?, &cfg.just_bin),
+    };
+    let result = match (cli.list_models, cli.prompt) {
+        (true, _) => list_models(cfg, ws).await,
+        (false, Some(prompt)) => headless(cfg, ws, prompt).await,
+        (false, None) => {
+            async {
+                let mut info = tui::UiInfo::from_config(&cfg);
+                info.workspace = ws.summary();
+                let handle = session::spawn(cfg, ws)?;
+                tui::run(info, handle).await
+            }
+            .await
         }
+    };
+    if let Some(vm) = vm {
+        vm.disconnect().await;
     }
+    result
 }
 
 async fn list_models(cfg: config::Config, ws: workspace::Workspace) -> Result<()> {
@@ -219,6 +238,19 @@ mod tests {
     struct Cli {
         #[command(flatten)]
         agent: AgentArgs,
+    }
+
+    #[test]
+    fn vm_flags_work_with_a_headless_prompt() {
+        let args = Cli::try_parse_from([
+            "agent", "--vm", "guest", "--node", "executor", "-p", "hello",
+        ])
+        .unwrap()
+        .agent;
+        assert_eq!(args.vm.as_deref(), Some("guest"));
+        assert_eq!(args.node.as_deref(), Some("executor"));
+        assert_eq!(args.prompt.as_deref(), Some("hello"));
+        assert!(Cli::try_parse_from(["agent", "--node", "executor"]).is_err());
     }
 
     #[test]

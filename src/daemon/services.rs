@@ -24,6 +24,8 @@ pub(super) fn spawn(state: Arc<AppState>) {
         });
     }
     crate::ai::migrate_provide_state();
+    // Local VMs need no network; `[vm] enabled` gates autostart only.
+    crate::vm::spawn_background(state.clone());
     if !state.network.permitted() {
         return;
     }

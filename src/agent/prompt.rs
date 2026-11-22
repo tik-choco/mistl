@@ -5,8 +5,8 @@ use serde_json::json;
 use crate::agent::mistl_tool::{TOOL_HELP, TOOL_MISTL, split_args};
 use crate::agent::types::{FunctionCall, ToolCall, ToolMode, ToolOutput};
 
-pub fn system_prompt(mode: ToolMode, catalog: &str, workspace: &str) -> String {
-    let mut s = String::from(
+fn base_prompt() -> String {
+    String::from(
         "You are mistl agent, a terminal assistant for the user's workspace and the tik-choco ecosystem.\n\
 \n\
 Rules:\n\
@@ -17,7 +17,11 @@ Rules:\n\
 - Keep answers short. Many commands print JSON; summarize it for humans instead of pasting it.\n\
 - Never print or request secrets. Use a passphrase only if the user provides it.\n\
 - Your turn ends with your reply and nothing runs for you afterwards: never promise to check back or report later, and do not wait with `sleep`. Poll within the turn, or tell the user what to ask next.\n",
-    );
+    )
+}
+
+pub fn system_prompt(mode: ToolMode, catalog: &str, workspace: &str) -> String {
+    let mut s = base_prompt();
     s.push_str("\nMistl: operate the local P2P node with `mistl` (args array, no leading mistl) and `mistl_help` (command path). Use help before guessing unfamiliar syntax.\nCommand overview (`mistl --help`):\n");
     s.push_str(catalog.trim());
     s.push_str("\nRun mistl only through the mistl tool, never through shell.\nAI settings live in mistl: inspect `config get ai` (not the whole `config show`) and subcommand help first. Mistl uses ai.providers (HTTP or mist-network://<room>, enabled/models/provide/shared), ai.default_ref = {provider_id, model}, ai.tts and ai.stt. ai.status reports rooms[]. Model ids on the network are raw ids. Do not create presets, set default_preset_id/advertised_models, or send temperature.\n`ai chat` is only for chat models. For speech use `ai speech`/`ai voices`, for transcription `ai transcribe`, and for image-to-3D models `ai 3d generate`; do not call the local API with curl for these. To find a model for a task, read the model lists in `ai status` (rooms[].models) and `config get ai.providers`; mistl routes by model on its own, so add `--room <room>` only when the user names a room (and it has joined: true). 3D generation takes minutes: run `ai 3d generate --no-wait`, then `ai 3d wait <id> -o <file> --timeout 300` (repeat it while the job is still running; never poll `ai 3d status` in a loop).\n");
@@ -56,6 +60,25 @@ For other tools (or just with background: true), use a ```tool block containing 
 ```\n\
 After emitting blocks, STOP and wait for the next user message starting with [tool results]. When no tool is needed, answer normally.\n");
         }
+    }
+    s
+}
+
+pub(super) fn vm_system_prompt(mode: ToolMode, workspace: &str) -> String {
+    let mut s = base_prompt();
+    s.push('\n');
+    s.push_str(super::vm::CONTEXT);
+    s.push_str("\n\n");
+    s.push_str(workspace.trim());
+    s.push_str("\nTools: list_dir(path?), find_files(glob, include_ignored), grep(pattern, path?, glob?, case_insensitive), read_file(path, offset?, limit?), shell(command, background), process_list(), process_output(id, tail_bytes?), process_stop(id). File tools stay within the workspace.\n\
+Run long-lived programs with background: true. Inspect them with process_output and stop them with process_stop. stdin is null.\n");
+    match mode {
+        ToolMode::Native => s.push_str("\nUse the provided native tools when a tool is needed.\n"),
+        ToolMode::Prompt => s.push_str("\nTool protocol: use a ```tool block containing exactly one JSON object. It may span lines:\n\
+```tool\n\
+{\"name\":\"shell\",\"arguments\":{\"command\":\"pwd\"}}\n\
+```\n\
+After emitting blocks, STOP and wait for the next user message starting with [tool results]. When no tool is needed, answer normally.\n"),
     }
     s
 }
@@ -274,6 +297,26 @@ mod tests {
         assert!(!n.contains("```mistl") && n.contains("CATALOG"));
         assert!(p.contains("WORKSPACE") && p.contains("```tool"));
         assert!(p.contains("include_ignored: true") && p.contains("background: true"));
+    }
+
+    #[test]
+    fn vm_prompt_names_the_guest_and_available_tools() {
+        for mode in [ToolMode::Native, ToolMode::Prompt] {
+            let text = vm_system_prompt(mode, "Root: /home/mistl/work");
+            for context in [
+                "Ubuntu VM",
+                "user `mistl`",
+                "passwordless sudo",
+                "persist",
+                "/home/mistl/work",
+                "Host files",
+            ] {
+                assert!(text.contains(context), "missing {context}");
+            }
+            for unavailable in ["mistl_help", "```mistl", "```just", "Tools: just"] {
+                assert!(!text.contains(unavailable), "advertised {unavailable}");
+            }
+        }
     }
 
     #[test]

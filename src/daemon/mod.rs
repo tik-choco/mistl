@@ -306,6 +306,8 @@ async fn daemon_main(host_override: Option<String>) -> Result<()> {
         web.close().await;
     }
     server.close().await;
+    // Guests get an ACPI shutdown; their QEMU processes die with the daemon.
+    crate::vm::shutdown_all().await;
     crate::authz::flush();
 
     // Persist whether the dashboard was open at shutdown so the next start
@@ -510,16 +512,13 @@ pub fn external_connections_blocked() -> bool {
         .is_some_and(|state| !state.network.permitted())
 }
 
-/// Who is issuing a command. A dashboard session from this machine (loopback
-/// peer) is as trusted as the CLI; the restriction exists for a dashboard
-/// exposed on the LAN (`--host 0.0.0.0`), where a remote browser must not be
-/// able to run processes, touch arbitrary local paths, or rewire trust.
+/// Who is issuing a command. Remote dashboard sessions have restricted access
+/// to commands that run processes, touch local paths, or change trust.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Caller {
     /// CLI over the token-gated loopback IPC socket.
     Ipc,
-    /// Dashboard `POST /api/call`; `remote` is true when the TCP peer is not
-    /// a loopback address (see [`is_local_peer`]).
+    /// Dashboard HTTP request with locality determined by [`is_local_peer`].
     Http { remote: bool },
     /// Daemon-internal (tray, the dashboard's own upload/download handlers).
     Internal,
@@ -527,17 +526,16 @@ pub enum Caller {
 
 impl Caller {
     /// The caller for a dashboard HTTP request from `peer`.
-    pub fn http_from(peer: std::net::IpAddr) -> Self {
+    pub fn http_from(peer: std::net::SocketAddr) -> Self {
         Caller::Http {
             remote: !is_local_peer(peer),
         }
     }
 }
 
-/// Loopback check that also treats IPv4-mapped IPv6 (`::ffff:127.0.0.1`,
-/// what a dual-stack listener reports for a local IPv4 client) as local.
-pub fn is_local_peer(ip: std::net::IpAddr) -> bool {
-    ip.to_canonical().is_loopback()
+/// Recognize direct loopback peers, including IPv4-mapped IPv6 addresses.
+fn is_local_peer(peer: std::net::SocketAddr) -> bool {
+    peer.ip().to_canonical().is_loopback() && !crate::tunnel::origin::is_tunneled(peer)
 }
 
 /// `config.set` paths a remote dashboard may not change: they grant code
@@ -583,7 +581,7 @@ fn remote_config_denied(path: &str) -> bool {
     ];
     // Whole sections: update source/cadence, dashboard bind address, and the
     // scheduler (its jobs are shell commands).
-    const DENIED_SECTIONS: &[&str] = &["update.", "ui.", "scheduler."];
+    const DENIED_SECTIONS: &[&str] = &["update.", "ui.", "scheduler.", "vm."];
     // Catch-all for future path / listen-address fields.
     let field = path.rsplit('.').next().unwrap_or(path);
     let pathlike = field.ends_with("_dir")
@@ -604,6 +602,24 @@ fn authorize(caller: Caller, cmd: &str, args: &Value) -> Result<()> {
     }
     if cmd == "escrow.client.request" && caller != Caller::Ipc {
         bail!("`escrow.client.request` is available only through local IPC");
+    }
+    if cmd.starts_with("vm.") && caller != Caller::Ipc {
+        match cmd {
+            "vm.list" | "vm.status" | "vm.doctor" | "vm.logs" | "vm.checkpoints"
+            | "vm.ha.status" => {}
+            "vm.create" | "vm.start" | "vm.stop" | "vm.rm" | "vm.checkpoint" | "vm.restore"
+            | "vm.move" | "vm.ha.enable" | "vm.ha.join" | "vm.ha.disable" | "vm.disconnect" => {
+                match caller {
+                    Caller::Http { remote: false } => {}
+                    Caller::Http { remote: true } => bail!(
+                        "`{cmd}` is not available from a remote dashboard session; \
+                         use the mistl CLI or open the dashboard on this machine"
+                    ),
+                    _ => bail!("`{cmd}` requires the mistl CLI or a local dashboard session"),
+                }
+            }
+            _ => bail!("`{cmd}` is available only through the local mistl CLI"),
+        }
     }
     // Room shortcuts are configuration writes and must share config.set's policy.
     if matches!(cmd, "escrow.rooms.add" | "escrow.rooms.remove") {
@@ -675,7 +691,7 @@ fn authorize(caller: Caller, cmd: &str, args: &Value) -> Result<()> {
 }
 
 /// Route a request from daemon-internal code (tray, the dashboard's own
-/// upload/download handlers); unrestricted. IPC and HTTP use [`dispatch_as`].
+/// upload/download handlers). IPC and HTTP use [`dispatch_as`].
 pub async fn dispatch(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Value> {
     dispatch_as(Caller::Internal, cmd, args, state).await
 }
@@ -714,6 +730,8 @@ pub async fn dispatch_as(
     if !state.network.permitted()
         && !crate::network::offline_command_allowed(cmd)
         && !cmd.starts_with("authz.")
+        // Local VMs run offline; creating one may download its base image.
+        && !(cmd.starts_with("vm.") && cmd != "vm.create")
         && !matches!(
             cmd,
             "escrow.status"
@@ -894,6 +912,7 @@ pub async fn dispatch_as(
             Some("topology") => crate::topology::handle(cmd, args, state).await,
             Some("ai") => crate::ai::handle(cmd, args, state).await,
             Some("tunnel") => crate::tunnel::handle(cmd, args, state).await,
+            Some("vm") => crate::vm::handle(cmd, args, state).await,
             Some("nostr") => crate::nostr::handle(cmd, args, state).await,
             Some("update") => crate::update::handle(cmd, args, state).await,
             Some("install") | Some("autostart") | Some("cli_path") => {
@@ -1106,6 +1125,59 @@ mod tests {
     }
 
     #[test]
+    fn only_vm_views_are_available_from_remote_http() {
+        let args = json!({});
+        for cmd in [
+            "vm.create",
+            "vm.start",
+            "vm.stop",
+            "vm.rm",
+            "vm.checkpoint",
+            "vm.restore",
+            "vm.move",
+            "vm.ha.enable",
+            "vm.ha.join",
+            "vm.ha.disable",
+            "vm.disconnect",
+        ] {
+            for caller in [Caller::Ipc, LOCAL] {
+                authorize(caller, cmd, &args).unwrap();
+            }
+            let error = authorize(REMOTE, cmd, &args).unwrap_err().to_string();
+            assert!(error.contains(MSG), "{cmd}: {error}");
+            assert!(error.contains("use the mistl CLI or open the dashboard on this machine"));
+            assert!(authorize(Caller::Internal, cmd, &args).is_err(), "{cmd}");
+        }
+        for cmd in [
+            "vm.list",
+            "vm.status",
+            "vm.doctor",
+            "vm.logs",
+            "vm.checkpoints",
+            "vm.ha.status",
+        ] {
+            for caller in [Caller::Ipc, LOCAL, REMOTE, Caller::Internal] {
+                authorize(caller, cmd, &args).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn vm_cli_only_commands_require_ipc() {
+        let args = json!({});
+        for cmd in ["vm.key", "vm.connect", "vm.future", "vm.ha.future"] {
+            authorize(Caller::Ipc, cmd, &args).unwrap();
+            for caller in [LOCAL, REMOTE, Caller::Internal] {
+                let error = authorize(caller, cmd, &args).unwrap_err();
+                assert_eq!(
+                    error.to_string(),
+                    format!("`{cmd}` is available only through the local mistl CLI")
+                );
+            }
+        }
+    }
+
+    #[test]
     fn escrow_dashboard_commands_follow_config_policy() {
         for caller in [LOCAL, REMOTE, Caller::Ipc, Caller::Internal] {
             for cmd in ["escrow.status", "escrow.auto.slots", "escrow.rooms.list"] {
@@ -1155,13 +1227,32 @@ mod tests {
     fn peer_locality() {
         let ip = |s: &str| s.parse::<std::net::IpAddr>().unwrap();
         for local in ["127.0.0.1", "127.9.9.9", "::1", "::ffff:127.0.0.1"] {
-            assert!(is_local_peer(ip(local)), "{local}");
-            assert_eq!(Caller::http_from(ip(local)), LOCAL);
+            let peer = std::net::SocketAddr::new(ip(local), 50101);
+            assert!(is_local_peer(peer), "{local}");
+            assert_eq!(Caller::http_from(peer), LOCAL);
         }
         for remote in ["192.168.1.5", "10.0.0.2", "::ffff:192.168.1.5", "fe80::1"] {
-            assert!(!is_local_peer(ip(remote)), "{remote}");
-            assert_eq!(Caller::http_from(ip(remote)), REMOTE);
+            let peer = std::net::SocketAddr::new(ip(remote), 50101);
+            assert!(!is_local_peer(peer), "{remote}");
+            assert_eq!(Caller::http_from(peer), REMOTE);
         }
+    }
+
+    #[test]
+    fn tunneled_loopback_http_is_remote() {
+        let local = "127.0.0.4:50102".parse().unwrap();
+        let mapped = "[::ffff:127.0.0.4]:50102".parse().unwrap();
+        let other = "127.0.0.4:50103".parse().unwrap();
+        assert_eq!(Caller::http_from(mapped), LOCAL);
+        let registration = crate::tunnel::origin::register(local);
+        assert_eq!(Caller::http_from(local), REMOTE);
+        let caller = Caller::http_from(mapped);
+        assert_eq!(caller, REMOTE);
+        assert!(authorize(caller, "vm.stop", &json!({})).is_err());
+        assert!(authorize(caller, "config.set", &json!({"path": "vm.max_vms"})).is_err());
+        assert_eq!(Caller::http_from(other), LOCAL);
+        drop(registration);
+        assert_eq!(Caller::http_from(mapped), LOCAL);
     }
 
     #[test]

@@ -160,6 +160,13 @@ strip = false
 # variables in WinDbg/VS; it costs a rebuild, not a redesign.
 debug = "line-tables-only"
 
+# Unoptimized SHA-256 made VM checkpoint hashing in debug builds ~50 ms per MiB
+# while the guest was paused (`mistl vm checkpoint`); optimized it is ~5 ms. The
+# crate is small and rarely rebuilt. (Generic code such as AES-GCM is compiled in
+# the calling crate, so a per-package opt-level would not help it.)
+[profile.dev.package.sha2]
+opt-level = 3
+
 [target."cfg(windows)".dependencies]
 windows-capture = "2.0.0"
 # Per-user login autostart (HKCU\...\Run) for `mistl autostart`.

@@ -112,7 +112,11 @@ pub enum Invocation {
 }
 
 pub fn specs(workspace: &Workspace) -> Vec<ToolSpec> {
-    let mut tools = mistl_tool::tool_specs();
+    let mut tools = if workspace.vm.is_some() {
+        Vec::new()
+    } else {
+        mistl_tool::tool_specs()
+    };
     let string = json!({"type": "string"});
     let boolean = json!({"type": "boolean", "default": false});
     let integer = json!({"type": "integer", "minimum": 1});
@@ -126,7 +130,7 @@ pub fn specs(workspace: &Workspace) -> Vec<ToolSpec> {
             },
         });
     };
-    if public_recipes(workspace).next().is_some() {
+    if workspace.vm.is_none() && public_recipes(workspace).next().is_some() {
         add(
             "just",
             "Run a loaded justfile recipe. Requires approval. Use background for long-lived apps.",
@@ -316,6 +320,9 @@ fn words(value: Option<&Value>) -> Result<Vec<String>> {
 
 pub fn classify(inv: &Invocation, workspace: &Workspace) -> Safety {
     match inv {
+        Invocation::Mistl(_) | Invocation::Just { .. } if workspace.vm.is_some() => {
+            Safety::Blocked(VM_TOOL_DISABLED.into())
+        }
         Invocation::Mistl(inv) => mistl_tool::classify(inv),
         Invocation::Just { recipe, .. }
             if !public_recipes(workspace).any(|name| name == recipe) =>
@@ -328,6 +335,8 @@ pub fn classify(inv: &Invocation, workspace: &Workspace) -> Safety {
         _ => Safety::ReadOnly,
     }
 }
+
+const VM_TOOL_DISABLED: &str = "mistl, mistl_help and just tools are unavailable in VM mode";
 
 fn unknown_recipe(workspace: &Workspace, recipe: &str) -> String {
     let recipes = public_recipes(workspace).collect::<Vec<_>>().join(", ");
@@ -529,8 +538,15 @@ impl Toolbox {
         token: &CancellationToken,
         on_output: &mut (dyn FnMut(&str) + Send),
     ) -> ToolOutput {
-        let spec = process::shell_command(command, &self.workspace.root);
+        let spec = self.shell_command(command);
         sanitize_output(process::run(&spec, None, token, on_output).await)
+    }
+
+    fn shell_command(&self, command: &str) -> CommandSpec {
+        match &self.workspace.vm {
+            Some(vm) => vm.shell_command(command),
+            None => process::shell_command(command, &self.workspace.root),
+        }
     }
 
     async fn run_inner(
@@ -543,6 +559,9 @@ impl Toolbox {
             return failure("cancelled");
         }
         match inv {
+            Invocation::Mistl(_) | Invocation::Just { .. } if self.workspace.vm.is_some() => {
+                failure(VM_TOOL_DISABLED)
+            }
             Invocation::Mistl(inv) => self.mistl.run(inv, token, on_output).await,
             Invocation::Just {
                 recipe,
@@ -575,7 +594,7 @@ impl Toolbox {
                 background,
             } => {
                 self.run_command(
-                    process::shell_command(command, &self.workspace.root),
+                    self.shell_command(command),
                     title(inv),
                     *background,
                     token,
@@ -592,6 +611,9 @@ impl Toolbox {
             }
             Invocation::ProcessStop { id } => output(self.processes.stop(*id).await),
             _ => {
+                if let Some(vm) = &self.workspace.vm {
+                    return output(vm.run_file_tool(inv, self.command_timeout, token).await);
+                }
                 let root = self.workspace.root.clone();
                 let inv = inv.clone();
                 let cancel = token.clone();
@@ -665,6 +687,45 @@ fn output(result: Result<String>) -> ToolOutput {
 mod tests {
     use super::*;
     use crate::agent::workspace::{Justfile, Recipe};
+
+    #[tokio::test]
+    async fn vm_registry_exposes_only_guest_and_process_tools() {
+        let ws = Workspace::for_vm(crate::agent::vm::test_vm());
+        let names: Vec<_> = specs(&ws)
+            .into_iter()
+            .map(|tool| tool.function.name)
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "list_dir",
+                "find_files",
+                "grep",
+                "read_file",
+                "shell",
+                "process_list",
+                "process_output",
+                "process_stop"
+            ]
+        );
+        let toolbox = Toolbox::new(&Config::default(), ws);
+        for (name, arguments) in [
+            ("mistl", r#"{"args":["status"]}"#),
+            ("mistl_help", r#"{"command":["status"]}"#),
+            ("just", r#"{"recipe":"build"}"#),
+        ] {
+            let inv = parse_call(name, arguments).unwrap();
+            assert!(matches!(
+                classify(&inv, &toolbox.workspace),
+                Safety::Blocked(_)
+            ));
+            let output = toolbox
+                .run(&inv, &CancellationToken::new(), &mut |_| {})
+                .await;
+            assert!(!output.ok);
+            assert!(output.text.contains(VM_TOOL_DISABLED));
+        }
+    }
 
     #[test]
     fn token_redaction_is_bounded_and_handles_every_chunk_boundary() {
@@ -746,6 +807,7 @@ mod tests {
         Workspace {
             root: ".".into(),
             just_bin: "just".into(),
+            vm: None,
             justfile: Some(Justfile {
                 path: "justfile".into(),
                 dir: ".".into(),

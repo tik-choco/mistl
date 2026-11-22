@@ -67,6 +67,14 @@ pub struct ReviewRequest<'a> {
     pub workspace: &'a Workspace,
 }
 
+impl ReviewRequest<'_> {
+    fn add_execution_context(&self, payload: &mut serde_json::Value) {
+        if self.workspace.vm.is_some() {
+            payload["execution_context"] = serde_json::Value::from(crate::agent::vm::CONTEXT);
+        }
+    }
+}
+
 pub struct Guard {
     classifier: classifier::Classifier,
     decision: decision::Decision,
@@ -195,6 +203,28 @@ impl Guard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn both_review_backends_receive_guest_context() {
+        let workspace = Workspace::for_vm(crate::agent::vm::test_vm());
+        let inv = Invocation::Shell {
+            command: "uname -a".into(),
+            background: false,
+        };
+        let req = ReviewRequest {
+            inv: &inv,
+            title: "uname -a",
+            user_requests: &[],
+            workspace: &workspace,
+        };
+        let chat = classifier::input(&req).unwrap();
+        let state = decision::state(&req, decision::STATE_LIMIT).unwrap();
+        let decision: serde_json::Value = serde_json::from_str(&state).unwrap();
+        for payload in [chat, decision] {
+            assert_eq!(payload["workspace"], crate::agent::vm::ROOT);
+            assert_eq!(payload["execution_context"], crate::agent::vm::CONTEXT);
+        }
+    }
 
     #[test]
     fn safety_api_parsing_and_names() {

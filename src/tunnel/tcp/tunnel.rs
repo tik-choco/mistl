@@ -6,6 +6,7 @@ use tracing::{debug, error, warn};
 
 use crate::tunnel::auth::{AuthRequest, binding_holds, verified_did_for_peer};
 use crate::tunnel::forward_runtime::ForwardPeerRuntime;
+use crate::tunnel::origin;
 use crate::tunnel::rtc::TunnelMessage;
 
 use super::{
@@ -136,13 +137,18 @@ impl TcpManager {
         }
 
         let addr = &self.remote_addr;
-        let connected = match crate::tunnel::forward_args::resolve_non_link_local(addr).await {
-            Ok(sa) => TcpStream::connect(sa).await,
-            Err(e) => Err(e),
-        };
+        let connected = async {
+            let sa = crate::tunnel::forward_args::resolve_non_link_local(addr).await?;
+            let stream = TcpStream::connect(sa).await?;
+            let registration = origin::register(stream.local_addr()?);
+            Ok::<_, std::io::Error>((stream, registration))
+        }
+        .await;
         match connected {
-            Ok(stream) => {
+            Ok((stream, registration)) => {
+                let mut shutdown = self.runtime.subscribe();
                 if self.runtime.is_cancelled() {
+                    drop(stream);
                     return;
                 }
                 let (read_half, write_half) = stream.into_split();
@@ -152,10 +158,15 @@ impl TcpManager {
                     // than leak it onto an already-gone conn.
                     return;
                 }
-                let mgr = self.clone();
-                let cid = conn_id.clone();
-                let pid = peer_id.clone();
-                tokio::spawn(async move { mgr.forward_tcp_to_dc(cid, pid, read_half).await });
+                tokio::spawn(async move {
+                    // Observe shutdown even if it comes before the reader
+                    // starts and subscribes to the forward's runtime.
+                    tokio::select! {
+                        _ = shutdown.changed() => self.close_conn(&conn_id, false).await,
+                        _ = self.clone().forward_tcp_to_dc(conn_id.clone(), peer_id, read_half) => {}
+                    }
+                    drop(registration);
+                });
             }
             Err(e) => {
                 error!("failed to connect to remote ({}): {}", addr, e);
@@ -281,10 +292,27 @@ impl TcpManager {
                     Some(p) if !p.is_empty() => p,
                     _ => return,
                 };
-                let mut writer = writer.lock().await;
-                if let Err(e) = writer.write_all(payload).await {
+                let mut socket = writer.lock().await;
+                let registration = {
+                    // The reader closes the tracked conn before releasing its
+                    // registration. Pin it here in case this write outlives
+                    // the reader, or discard a write queued before close.
+                    let conns = self.conns.read().await;
+                    if !conns
+                        .get(&tm.conn_id)
+                        .is_some_and(|conn| Arc::ptr_eq(conn, &tc))
+                    {
+                        return;
+                    }
+                    socket.as_ref().local_addr().ok().and_then(origin::retain)
+                };
+                let result = socket.write_all(payload).await;
+                drop(socket);
+                drop(writer);
+                drop(tc);
+                drop(registration);
+                if let Err(e) = result {
                     log_tcp_io_error("failed to write to tcp", &e);
-                    drop(writer);
                     self.close_conn(&tm.conn_id, true).await;
                 } else {
                     metrics.record_bytes_out(payload.len());

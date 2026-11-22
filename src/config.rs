@@ -42,6 +42,8 @@ pub struct Config {
     pub nostr: NostrConfig,
     #[serde(default)]
     pub network: NetworkConfig,
+    #[serde(default)]
+    pub vm: VmConfig,
 }
 
 /// Peer-authentication policy shared by every room protocol (see
@@ -791,6 +793,92 @@ impl AiConfig {
             }
             ok
         });
+    }
+}
+
+/// Personal Linux VMs (`crate::vm`): QEMU guests run on this node and reached
+/// over SSH, locally or through the tunnel (stage 1 of
+/// `docs/vmhost-feasibility.md`). The `max_*` fields are the host owner's
+/// limits across all VMs on this node.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VmConfig {
+    /// Room used by VM replication groups.
+    #[serde(deserialize_with = "deserialize_vm_room")]
+    pub room: String,
+    /// Start VMs marked `autostart` when the daemon starts.
+    pub enabled: bool,
+    /// Path to `qemu-system-x86_64` (or the directory holding it). Empty =
+    /// search PATH and the platform's usual install locations.
+    pub qemu: String,
+    /// `auto`, `kvm`, `whpx`, `hvf` or `tcg`.
+    pub accel: String,
+    /// `auto` (passt when available, else user-mode NAT), `passt`, `slirp`,
+    /// or `isolated` (no guest egress at all).
+    pub network: String,
+    /// Base cloud image; verified against `image_sha256`, or against the
+    /// `SHA256SUMS` file next to it when the pin is empty.
+    pub image_url: String,
+    pub image_sha256: String,
+    pub default_memory_mb: u32,
+    pub default_cpus: u32,
+    pub default_disk_gb: u32,
+    pub max_vms: u32,
+    pub max_memory_mb: u32,
+    pub max_cpus: u32,
+    pub max_disk_gb: u32,
+    /// First loopback port tried for guest SSH forwards.
+    pub ssh_port_base: u16,
+    /// Maximum number of checkpoints retained per VM (1 through 16).
+    #[serde(deserialize_with = "deserialize_checkpoint_keep")]
+    pub checkpoint_keep: usize,
+}
+
+fn deserialize_vm_room<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<String, D::Error> {
+    let room = String::deserialize(d)?;
+    if !room.is_empty() && !crate::escrow::valid_room(&room) {
+        return Err(serde::de::Error::custom("invalid VM room"));
+    }
+    Ok(room)
+}
+
+fn deserialize_checkpoint_keep<'de, D>(deserializer: D) -> std::result::Result<usize, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let keep = usize::deserialize(deserializer)?;
+    if !(1..=16).contains(&keep) {
+        return Err(serde::de::Error::custom(
+            "checkpoint_keep must be between 1 and 16",
+        ));
+    }
+    Ok(keep)
+}
+
+impl Default for VmConfig {
+    fn default() -> Self {
+        Self {
+            room: String::new(),
+            enabled: true,
+            qemu: String::new(),
+            accel: "auto".into(),
+            network: "auto".into(),
+            image_url:
+                "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
+                    .into(),
+            image_sha256: String::new(),
+            default_memory_mb: 2048,
+            default_cpus: 2,
+            default_disk_gb: 20,
+            max_vms: 4,
+            max_memory_mb: 8192,
+            max_cpus: 4,
+            max_disk_gb: 200,
+            ssh_port_base: 22200,
+            checkpoint_keep: 3,
+        }
     }
 }
 

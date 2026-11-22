@@ -93,6 +93,7 @@ pub struct Transport {
 /// The feature holding a reference to a joined room.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum RoomUse {
+    Vm,
     Ai,
     ChatRelay,
     Storage,
@@ -107,6 +108,7 @@ pub enum RoomUse {
 impl RoomUse {
     pub fn id(self) -> &'static str {
         match self {
+            Self::Vm => "vm",
             Self::Ai => "ai",
             Self::ChatRelay => "chat_relay",
             Self::Storage => "storage",

@@ -48,6 +48,8 @@ feature_assets! {
     "messenger.css" => "text/css; charset=utf-8",
     "peers.js" => "text/javascript; charset=utf-8",
     "peers.css" => "text/css; charset=utf-8",
+    "vm.js" => "text/javascript; charset=utf-8",
+    "vm.css" => "text/css; charset=utf-8",
 }
 
 fn find_feature(path: &str) -> Option<&'static FeatureAsset> {
@@ -156,6 +158,7 @@ mod tests {
             "tunnel-graph",
             "messenger",
             "peers",
+            "vm",
         ] {
             for extension in ["js", "css"] {
                 let (mime, bytes) =
@@ -175,6 +178,15 @@ mod tests {
         ] {
             assert!(feature_asset(path).is_none());
         }
+    }
+
+    #[test]
+    fn vm_panel_loads_its_embedded_assets() {
+        let html = super::super::INDEX_HTML;
+        assert!(html.contains("href=\"#panel-vm\""));
+        assert!(html.contains("id=\"panel-vm\""));
+        assert!(html.contains("href=\"/assets/features/vm.css\""));
+        assert!(html.contains("src=\"/assets/features/vm.js\""));
     }
 
     #[cfg(debug_assertions)]

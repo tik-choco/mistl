@@ -21,6 +21,8 @@ pub(super) const MAX_BYTES: usize = MAX_BASE64_CHARS / 4 * 3;
 /// HTTP-direct image results may exceed the room tunnel's body cap.
 pub(super) const MAX_IMAGE_RESPONSE_BYTES: usize = 128 * 1024 * 1024;
 pub(super) const IMAGE_EDIT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// Motion endpoints: a cold start may first build an inference plan (minutes).
+const MOTION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// tc-ai-api passthrough: deadline for a synchronous (`background` not
 /// `true`) `POST /3d/generations`, above the upstream's 30-minute JOB_TIMEOUT.
 pub(super) const GEN3D_SYNC_TIMEOUT: Duration = Duration::from_secs(35 * 60);
@@ -37,6 +39,84 @@ const MAX_SEQ: u64 = (MAX_BASE64_CHARS / CHUNK_SIZE) as u64;
 const MAX_JOB_BINDINGS: usize = 1024;
 const MAX_JOBS_PER_PEER: usize = 64;
 const JOB_TTL: Duration = Duration::from_secs(25 * 60 * 60);
+const SKELETON_PREFIX: &str = "/motion/skeletons/";
+
+pub(super) fn is_model_relay_post(path: &str) -> bool {
+    matches!(
+        path,
+        "/3d/generations" | "/images/edits" | "/game/act" | "/motion/inbetween"
+    )
+}
+
+pub(super) fn is_motion_catalog(path: &str) -> bool {
+    let bare = path.split('?').next().unwrap_or(path);
+    bare == "/motion/clips" || bare.starts_with(SKELETON_PREFIX)
+}
+
+pub(super) fn motion_catalog_model(path: &str) -> std::result::Result<String, TunnelResponse> {
+    use super::api_server::percent_decode;
+
+    let invalid = || {
+        json_response(
+            400,
+            serde_json::json!({"error": {
+                "message":"invalid motion model parameter", "type":"invalid_request_error",
+                "code":"invalid_request", "param":"model"
+            }}),
+        )
+        .expect("small error response")
+    };
+    if let Some(segment) = path.strip_prefix(SKELETON_PREFIX) {
+        return percent_decode(segment)
+            .filter(|s| {
+                !s.trim().is_empty() && !s.contains('/') && !matches!(s.as_str(), "." | "..")
+            })
+            .ok_or_else(invalid);
+    }
+    let Some((_, query)) = path.split_once('?') else {
+        return Err(missing_model());
+    };
+    if query.contains('#') {
+        return Err(invalid());
+    }
+    let mut models = query.split('&').filter_map(|pair| {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        (percent_decode(key).as_deref() == Some("model")).then_some(value)
+    });
+    let model = models.next().ok_or_else(missing_model)?;
+    if models.next().is_some() {
+        return Err(invalid());
+    }
+    percent_decode(&model.replace('+', " "))
+        .ok_or_else(invalid)
+        .and_then(|model| {
+            if model.trim().is_empty() {
+                Err(missing_model())
+            } else {
+                Ok(model)
+            }
+        })
+}
+
+pub(super) fn motion_catalog_path(path: &str, model: &str) -> Result<String> {
+    if !path.starts_with(SKELETON_PREFIX) {
+        return Ok(path.to_string());
+    }
+    // HTTP clients normalize dot segments, including percent-encoded dots.
+    if model.is_empty() || matches!(model, "." | "..") {
+        bail!("request_rejected");
+    }
+    let mut path = SKELETON_PREFIX.to_string();
+    for byte in model.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            path.push(byte as char);
+        } else {
+            use std::fmt::Write;
+            write!(&mut path, "%{byte:02X}").expect("writing to String");
+        }
+    }
+    Ok(path)
+}
 
 /// Rewrites top-level members of a JSON object body without re-serializing
 /// the rest: `set` replaces a member in place (or appends it), `remove`
@@ -76,6 +156,21 @@ pub(super) fn rewrite_object(
     }
 
     let Members(members) = serde_json::from_slice(bytes).context("request_rejected")?;
+    // Preserve the raw body when the routed fields already match. Collapse
+    // duplicates of rewritten fields so routing and upstream see one value.
+    let already_matches = set.iter().all(|(key, value)| {
+        let mut matches = members.iter().filter(|(member, _)| member == key);
+        matches.next().is_some_and(|(_, raw)| {
+            serde_json::from_str::<Value>(raw.get()).as_ref().ok() == Some(value)
+        }) && matches.next().is_none()
+    });
+    if already_matches
+        && !members
+            .iter()
+            .any(|(key, _)| remove.contains(&key.as_str()))
+    {
+        return Ok(bytes.to_vec());
+    }
     let mut out = String::from("{");
     let mut written: Vec<&str> = Vec::new();
     let push = |out: &mut String, key: &str, raw: &str| {
@@ -450,27 +545,29 @@ impl TunnelProvider {
     ) -> Result<TunnelResponse> {
         let (path, range) = split_range(path)?;
         let job_path = generation_path(&path);
+        let model_post = is_model_relay_post(&path);
+        let catalog = is_motion_catalog(&path);
         if !matches!(
             path.as_str(),
-            "/chat/completions"
-                | "/models"
-                | "/embeddings"
-                | "/systemone"
-                | "/3d/generations"
-                | "/images/edits"
-        ) && job_path.is_none()
+            "/chat/completions" | "/models" | "/embeddings" | "/systemone"
+        ) && !model_post
+            && !catalog
+            && job_path.is_none()
         {
             if path.starts_with("/3d/generations/") {
                 return Ok(generation_not_found());
             }
             bail!("unsupported_path");
         }
-        let allowed = match (path.as_str(), job_path) {
-            ("/models", _) => method == "GET",
-            ("/3d/generations", _) => matches!(method, "GET" | "POST"),
-            (_, Some((_, true))) => method == "GET",
-            (_, Some((_, false))) => matches!(method, "GET" | "DELETE"),
-            _ => method == "POST",
+        let allowed = if catalog {
+            method == "GET"
+        } else {
+            match (path.as_str(), job_path) {
+                ("/models", _) | (_, Some((_, true))) => method == "GET",
+                ("/3d/generations", _) => matches!(method, "GET" | "POST"),
+                (_, Some((_, false))) => matches!(method, "GET" | "DELETE"),
+                _ => method == "POST",
+            }
         };
         if !allowed {
             bail!("request_rejected");
@@ -510,6 +607,25 @@ impl TunnelProvider {
         if path == "/3d/generations" && method == "GET" {
             return self.list_generations(from).await;
         }
+        if catalog {
+            let model = match motion_catalog_model(&path) {
+                Ok(model) => model,
+                Err(response) => return Ok(response),
+            };
+            let body = serde_json::json!({"model": model});
+            let target = (self.resolve)(&path, &body)?.context("unsupported_path")?;
+            let path = motion_catalog_path(&path, &target.model)?;
+            return forward_with(
+                &target.base_url,
+                &target.api_key,
+                method,
+                &path,
+                None,
+                None,
+                relay_deadline(method, &path, &Value::Null),
+            )
+            .await;
+        }
         let body: Value = if bytes.is_empty() {
             Value::Null
         } else {
@@ -520,7 +636,7 @@ impl TunnelProvider {
         };
         let generation = path == "/3d/generations";
         let image_edit = path == "/images/edits";
-        if generation || image_edit {
+        if model_post {
             let object = body.as_object().context("request_rejected")?;
             // No built-in default: routing needs an explicit model id.
             if object
@@ -534,22 +650,21 @@ impl TunnelProvider {
         let target = (self.resolve)(&path, &body)?.context("unsupported_path")?;
         let payload = if method == "POST" {
             let mut set = vec![("model", Value::String(target.model.clone()))];
-            if path == "/chat/completions" {
+            let chat = path == "/chat/completions";
+            if chat {
                 set.push(("stream", Value::Bool(false)));
             }
-            Some(rewrite_object(
-                bytes,
-                &set,
-                if generation || image_edit {
+            let remove: &[&str] =
+                if model_post || chat && super::api_server::has_image_content(&body) {
                     &[]
                 } else {
                     &["temperature"]
-                },
-            )?)
+                };
+            Some(rewrite_object(bytes, &set, remove)?)
         } else {
             None
         };
-        if !generation && !image_edit {
+        if !model_post {
             return forward(&target.base_url, &target.api_key, method, &path, payload).await;
         }
         let response = forward_with(
@@ -573,6 +688,9 @@ impl TunnelProvider {
                 ),
                 response => response,
             };
+        }
+        if !generation {
+            return response;
         }
         let mut response = response?;
         if matches!(response.status, 200 | 202)
@@ -694,7 +812,7 @@ fn json_response(status: u16, body: Value) -> Result<TunnelResponse> {
     })
 }
 
-/// 400 for a generation or image edit request without a model id.
+/// 400 for a model-routed relay request without a model id.
 pub(super) fn missing_model() -> TunnelResponse {
     json_response(
         400,
@@ -742,7 +860,7 @@ pub(super) async fn forward(
 }
 
 /// [`forward`] with an explicit `Range: bytes=start-end` header and deadline.
-/// `path` has no query string.
+/// `path` may include a query string to forward upstream.
 pub(super) async fn forward_with(
     base_url: &str,
     api_key: &str,
@@ -817,14 +935,18 @@ pub(super) async fn forward_capped(
     })
 }
 
-/// Deadline for one tc-ai-api passthrough request. `path` may carry the
-/// `?range=` query; `body` is the parsed JSON body (`Value::Null` if none).
+/// Deadline for one tc-ai-api passthrough request. `path` may carry a query.
+/// `body` is the parsed JSON body (`Value::Null` if none).
 pub(super) fn relay_deadline(method: &str, path: &str, body: &Value) -> Duration {
     let path = path.split('?').next().unwrap_or(path);
     if method == "POST" && path == "/images/edits" {
         IMAGE_EDIT_TIMEOUT
     } else if method == "POST" && path == "/3d/generations" && body["background"] != true {
         GEN3D_SYNC_TIMEOUT
+    } else if (method == "POST" && path == "/motion/inbetween")
+        || (method == "GET" && is_motion_catalog(path))
+    {
+        MOTION_TIMEOUT
     } else if generation_path(path).is_some_and(|(_, content)| content) {
         CONTENT_TIMEOUT
     } else {
@@ -833,12 +955,15 @@ pub(super) fn relay_deadline(method: &str, path: &str, body: &Value) -> Duration
 }
 
 /// Splits `/3d/generations/<id>/content?range=<start>-<end>` into the bare
-/// path and the inclusive byte range. Any other query is rejected.
+/// path and the inclusive byte range. Preserve the clips query for upstream.
 pub(super) fn split_range(path: &str) -> Result<(String, Option<(u64, u64)>)> {
-    let Some((path, query)) = path.split_once('?') else {
+    let Some((bare, query)) = path.split_once('?') else {
         return Ok((path.to_string(), None));
     };
-    if !generation_path(path).is_some_and(|(_, content)| content) {
+    if bare == "/motion/clips" {
+        return Ok((path.to_string(), None));
+    }
+    if !generation_path(bare).is_some_and(|(_, content)| content) {
         bail!("request_rejected");
     }
     let (start, end) = query
@@ -856,7 +981,7 @@ pub(super) fn split_range(path: &str) -> Result<(String, Option<(u64, u64)>)> {
     if end < start || end - start >= CONTENT_WINDOW {
         bail!("request_rejected");
     }
-    Ok((path.to_string(), Some((start, end))))
+    Ok((bare.to_string(), Some((start, end))))
 }
 
 /// Rewrites every 3D job's `data[].url` (in a job, a sync response or a
@@ -1227,6 +1352,17 @@ mod tests {
 
     #[test]
     fn relay_deadlines_distinguish_sync_background_and_content() {
+        assert_eq!(
+            relay_deadline("POST", "/game/act", &Value::Null),
+            Duration::from_secs(120)
+        );
+        for (method, path) in [
+            ("POST", "/motion/inbetween"),
+            ("GET", "/motion/clips?model=motion-model"),
+            ("GET", "/motion/skeletons/motion-model"),
+        ] {
+            assert_eq!(relay_deadline(method, path, &Value::Null), MOTION_TIMEOUT);
+        }
         for body in [
             Value::Null,
             json!({"background":true}),
@@ -1303,6 +1439,88 @@ mod tests {
             let original = shape.clone();
             relativize_job_urls(&mut shape);
             assert_eq!(shape, original);
+        }
+    }
+
+    #[tokio::test]
+    async fn game_and_motion_forward_resolved_models_and_verbatim_responses() {
+        let game = serde_json::to_vec_pretty(&fixture_job(JOB_A, 1)).unwrap();
+        let csv = b"frame,joint\r\n0,1\r\n".to_vec();
+        let replies = vec![
+            (202, "application/json", game),
+            (200, "text/csv", csv),
+            (200, "application/json", b"[ 1, 2 ]".to_vec()),
+            (200, "application/json", b"[ \"sample\" ]".to_vec()),
+        ];
+        let (target, recorded, server) = mock_upstream(replies.clone()).await;
+        let (send, _) = capture();
+        let provider = TunnelProvider::new(
+            send,
+            Arc::new(move |path, body| {
+                let mut target = target.clone();
+                if path == "/game/act" {
+                    assert_eq!(body["model"], "game-model");
+                    target.model = "resolved-game-model".into();
+                } else {
+                    assert_eq!(body["model"], "motion-model");
+                    target.model = "resolved+motion model".into();
+                }
+                Ok(Some(target))
+            }),
+        );
+        const CLIPS: &str = "/motion/clips?tag=a+b&model=motion%2Dmodel";
+        let cases = [
+            (
+                "POST",
+                "/game/act",
+                r#"{"model":"game-model","image":"AA==","game":{"z":2,"a":1}}"#,
+            ),
+            (
+                "POST",
+                "/motion/inbetween",
+                r#"{"model":"motion-model","target":[1, 0]}"#,
+            ),
+            ("GET", "/motion/skeletons/motion%2Dmodel", ""),
+            ("GET", CLIPS, ""),
+        ];
+        for ((method, path, body), (status, mime, bytes)) in cases.into_iter().zip(replies) {
+            let response = provider
+                .dispatch("peer", method, path, "application/json", body.as_bytes())
+                .await
+                .unwrap();
+            assert_eq!(response.status, status);
+            assert_eq!(response.content_type, mime);
+            assert_eq!(response.body, bytes);
+        }
+        let response = provider
+            .dispatch("peer", "GET", "/motion/clips", "", b"")
+            .await
+            .unwrap();
+        assert_eq!(response.status, 400);
+        assert_eq!(
+            json_body(&response)["error"]["code"],
+            "missing_required_parameter"
+        );
+        assert!(provider.bindings.lock().unwrap().0.is_empty());
+        server.await.unwrap();
+        let calls = recorded.lock().unwrap();
+        for ((head, body), (request_line, expected_body)) in calls.iter().zip([
+            (
+                "POST /v1/game/act HTTP/1.1".to_string(),
+                r#"{"model":"resolved-game-model","image":"AA==","game":{"z":2,"a":1}}"#,
+            ),
+            (
+                "POST /v1/motion/inbetween HTTP/1.1".to_string(),
+                r#"{"model":"resolved+motion model","target":[1, 0]}"#,
+            ),
+            (
+                "GET /v1/motion/skeletons/resolved%2Bmotion%20model HTTP/1.1".to_string(),
+                "",
+            ),
+            (format!("GET /v1{CLIPS} HTTP/1.1"), ""),
+        ]) {
+            assert_eq!(head.lines().next().unwrap(), request_line);
+            assert_eq!(body, expected_body.as_bytes());
         }
     }
 
@@ -2211,7 +2429,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tunnel_forwards_resolved_key_image_effort_and_http_status_without_temperature() {
+    async fn tunnel_forwards_resolved_key_image_effort_temperature_and_http_status() {
         let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -2289,7 +2507,7 @@ mod tests {
         assert_eq!(upstream["reasoning_effort"], "future-effort");
         assert_eq!(upstream["messages"], body["messages"]);
         assert_eq!(upstream["stream"], false);
-        assert!(upstream.get("temperature").is_none());
+        assert_eq!(upstream["temperature"], 0.8);
         assert!(
             matches!(&sent.lock().unwrap()[0], (peer, ProtocolMessage::OaiResponse { status: Some(429), content_type: Some(ct), last: true, .. }) if peer == "consumer" && ct == "application/json")
         );
@@ -2366,6 +2584,16 @@ mod tests {
         assert_eq!(dup, br#"{"model":"c"}"#);
         assert!(rewrite_object(b"[1]", &[], &[]).is_err());
         assert!(rewrite_object(b"", &[], &[]).is_err());
+    }
+
+    #[test]
+    fn rewrite_object_keeps_matching_raw_body_and_collapses_duplicate_routing_fields() {
+        let set = [("model", json!("game-model")), ("stream", json!(false))];
+        let body = br#"{ "model": "game-model", "stream": false, "image": "AA==" }"#;
+        assert_eq!(rewrite_object(body, &set, &[]).unwrap(), body);
+        let duplicate = br#"{"model":"other-model","model":"game-model","stream":true,"stream":false,"image":"AA=="}"#;
+        let rewritten = br#"{"model":"game-model","stream":false,"image":"AA=="}"#;
+        assert_eq!(rewrite_object(duplicate, &set, &[]).unwrap(), rewritten);
     }
 
     #[tokio::test]

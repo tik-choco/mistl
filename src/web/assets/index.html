@@ -1669,6 +1669,7 @@
 <link rel="stylesheet" href="/assets/features/topology.css">
 <link rel="stylesheet" href="/assets/features/storage.css">
 <link rel="stylesheet" href="/assets/features/escrow.css">
+<link rel="stylesheet" href="/assets/features/vm.css">
 <link rel="stylesheet" href="/assets/features/nostr.css">
 <link rel="stylesheet" href="/assets/features/chat.css">
 <link rel="stylesheet" href="/assets/features/tunnel-graph.css">
@@ -1716,6 +1717,7 @@
     <a href="#panel-overview"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9.5 12 3l9 6.5"/><path d="M5 9.5V21h14V9.5"/></svg><span data-i18n="nav.overview">Overview</span></a>
     <a href="#panel-chat"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg><span data-i18n="nav.chat">Chat</span></a>
     <a href="#panel-ai"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3"/></svg><span data-i18n="nav.ai">AI</span></a>
+    <a href="#panel-vm"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M9 21h6m-3-4v4M7 8l3 3-3 3m6 0h4"/></svg><span>VM</span></a>
     <div class="sidenav-group" role="presentation" data-i18n="nav.group.network">Network</div>
     <a href="#panel-tunnel"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="2.5"/><circle cx="19" cy="12" r="2.5"/><path d="M7.5 12h9"/><path d="m14 9 3 3-3 3"/><path d="m10 9-3 3 3 3"/></svg><span data-i18n="nav.tunnel">Tunnel</span></a>
     <a href="#panel-nostr"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><path d="M8 8a6 6 0 0 0 0 8m8-8a6 6 0 0 1 0 8M5 5a10 10 0 0 0 0 14M19 5a10 10 0 0 1 0 14"/></svg><span data-i18n="nav.nostr">Nostr relay</span></a>
@@ -2642,6 +2644,8 @@
     <div id="authz-app"></div>
   </section>
 
+  <section class="panel panel-span2" id="panel-vm" aria-labelledby="vm-title"></section>
+
   <section class="panel panel-span2" id="panel-settings">
     <h2><span data-i18n="settings.title">Settings</span></h2>
     <div class="subtabs" role="tablist" data-i18n-aria-label="settings.title" aria-label="Settings">
@@ -2751,6 +2755,7 @@
 <script src="/assets/features/chat.js"></script>
 <script src="/assets/features/tunnel-graph.js"></script>
 <script src="/assets/features/messenger.js"></script>
+<script src="/assets/features/vm.js"></script>
 <script>
 (function () {
   "use strict";
@@ -2971,6 +2976,72 @@
       "nav.overview": "Overview",
       "nav.stream": "Stream",
       "nav.ai": "AI",
+      "vm.new": "New VM",
+      "vm.hostUnavailable": "Host readiness unavailable",
+      "vm.hostChecking": "Checking host…",
+      "vm.hostReady": "Host ready",
+      "vm.hostMissing": "Host not ready",
+      "vm.platform": "Platform",
+      "vm.qemu": "QEMU",
+      "vm.accel": "Acceleration",
+      "vm.network": "Network",
+      "vm.cpuCount": "{count} vCPU",
+      "vm.resources": "Resources",
+      "vm.sshTarget": "SSH target",
+      "vm.uptime": "Uptime",
+      "vm.creating": "Creating…",
+      "vm.starting": "Starting…",
+      "vm.stopping": "Stopping…",
+      "vm.restoring": "Restoring…",
+      "vm.saving": "Saving checkpoint…",
+      "vm.removing": "Removing…",
+      "vm.running": "Running",
+      "vm.stopped": "Stopped",
+      "vm.paused": "Paused",
+      "vm.standby": "Standby",
+      "vm.stale": "Stale",
+      "vm.error": "Error",
+      "vm.holder": "Holder",
+      "vm.witness": "Witness",
+      "vm.haRole": "HA {role}",
+      "vm.start": "Start",
+      "vm.stop": "Stop",
+      "vm.checkpoint": "Checkpoint",
+      "vm.logs": "Logs",
+      "vm.checkpoints": "Checkpoints",
+      "vm.remove": "Remove",
+      "vm.restore": "Restore",
+      "vm.stopFirst": "Stop the VM first.",
+      "vm.disableHaFirst": "Disable HA before removing this VM.",
+      "vm.holderRequired": "Restore requires the current holder’s lease.",
+      "vm.copy": "Copy",
+      "vm.sshKey": "SSH public key command",
+      "vm.localHint": "Open the dashboard on this machine or use the CLI.",
+      "vm.loading": "Loading VMs…",
+      "vm.empty": "No virtual machines yet.",
+      "vm.savedCheckpoint": "Checkpoint #{seq} saved.",
+      "vm.back": "Back",
+      "vm.next": "Next",
+      "vm.cancel": "Cancel",
+      "vm.askName": "What should the VM be called?",
+      "vm.name": "Name",
+      "vm.nameRequired": "Enter a name.",
+      "vm.askSize": "How large should the VM be?",
+      "vm.cpus": "vCPUs",
+      "vm.memory": "Memory (MB)",
+      "vm.disk": "Disk (GB)",
+      "vm.askCreate": "Create this VM?",
+      "vm.create": "Create",
+      "vm.confirm.stop": "Stop {name}?",
+      "vm.confirm.rm": "Remove {name}?",
+      "vm.confirm.restore": "Restore {name} to checkpoint #{seq}?",
+      "vm.force": "Force stop immediately",
+      "vm.removeDisk": "This deletes the VM’s disk.",
+      "vm.restoreDisk": "This replaces the VM’s current disk.",
+      "vm.readerTitle": "{section} for {name}",
+      "vm.noLogs": "No serial output yet.",
+      "vm.checkpointNumber": "Checkpoint #{seq}",
+      "vm.noCheckpoints": "No checkpoints yet.",
       "nav.chatRelay": "Chat",
       "nav.chat": "Chat",
       "chat.title": "Chat",
@@ -3954,6 +4025,72 @@
       "nav.overview": "概要",
       "nav.stream": "ストリーム",
       "nav.ai": "AI",
+      "vm.new": "新規 VM",
+      "vm.hostUnavailable": "ホストの準備状況を取得できません",
+      "vm.hostChecking": "ホストを確認中…",
+      "vm.hostReady": "ホストは準備完了",
+      "vm.hostMissing": "ホストの準備が必要",
+      "vm.platform": "プラットフォーム",
+      "vm.qemu": "QEMU",
+      "vm.accel": "アクセラレーション",
+      "vm.network": "ネットワーク",
+      "vm.cpuCount": "{count} vCPU",
+      "vm.resources": "リソース",
+      "vm.sshTarget": "SSH ターゲット",
+      "vm.uptime": "稼働時間",
+      "vm.creating": "作成中…",
+      "vm.starting": "起動中…",
+      "vm.stopping": "停止中…",
+      "vm.restoring": "復元中…",
+      "vm.saving": "チェックポイントを保存中…",
+      "vm.removing": "削除中…",
+      "vm.running": "稼働中",
+      "vm.stopped": "停止済み",
+      "vm.paused": "一時停止中",
+      "vm.standby": "待機",
+      "vm.stale": "旧状態",
+      "vm.error": "エラー",
+      "vm.holder": "保持ノード",
+      "vm.witness": "監視ノード",
+      "vm.haRole": "HA {role}",
+      "vm.start": "起動",
+      "vm.stop": "停止",
+      "vm.checkpoint": "チェックポイントを作成",
+      "vm.logs": "ログ",
+      "vm.checkpoints": "チェックポイント一覧",
+      "vm.remove": "削除",
+      "vm.restore": "復元",
+      "vm.stopFirst": "先に VM を停止してください。",
+      "vm.disableHaFirst": "VM を削除するには先に HA を無効にしてください。",
+      "vm.holderRequired": "復元には現在の保持ノードのリースが必要です。",
+      "vm.copy": "コピー",
+      "vm.sshKey": "SSH 公開鍵の表示コマンド",
+      "vm.localHint": "このマシンでダッシュボードを開くか、CLI を使ってください。",
+      "vm.loading": "VM を読み込み中…",
+      "vm.empty": "VM はまだありません。",
+      "vm.savedCheckpoint": "チェックポイント #{seq} を保存しました。",
+      "vm.back": "戻る",
+      "vm.next": "次へ",
+      "vm.cancel": "キャンセル",
+      "vm.askName": "VM の名前は？",
+      "vm.name": "名前",
+      "vm.nameRequired": "名前を入力してください。",
+      "vm.askSize": "VM に割り当てるリソースは？",
+      "vm.cpus": "vCPU",
+      "vm.memory": "メモリ (MB)",
+      "vm.disk": "ディスク (GB)",
+      "vm.askCreate": "この VM を作成しますか？",
+      "vm.create": "作成",
+      "vm.confirm.stop": "{name} を停止しますか？",
+      "vm.confirm.rm": "{name} を削除しますか？",
+      "vm.confirm.restore": "{name} をチェックポイント #{seq} に復元しますか？",
+      "vm.force": "すぐに強制停止する",
+      "vm.removeDisk": "VM のディスクを削除します。",
+      "vm.restoreDisk": "VM の現在のディスクを上書きします。",
+      "vm.readerTitle": "{name} の{section}",
+      "vm.noLogs": "シリアル出力はまだありません。",
+      "vm.checkpointNumber": "チェックポイント #{seq}",
+      "vm.noCheckpoints": "チェックポイントはまだありません。",
       "nav.chatRelay": "チャット",
       "nav.chat": "チャット",
       "chat.title": "チャット",
@@ -4932,6 +5069,72 @@
       "nav.overview": "概览",
       "nav.stream": "串流",
       "nav.ai": "AI",
+      "vm.new": "新建 VM",
+      "vm.hostUnavailable": "无法获取主机就绪状态",
+      "vm.hostChecking": "正在检查主机…",
+      "vm.hostReady": "主机已就绪",
+      "vm.hostMissing": "主机尚未就绪",
+      "vm.platform": "平台",
+      "vm.qemu": "QEMU",
+      "vm.accel": "加速",
+      "vm.network": "网络",
+      "vm.cpuCount": "{count} vCPU",
+      "vm.resources": "资源",
+      "vm.sshTarget": "SSH 目标",
+      "vm.uptime": "运行时长",
+      "vm.creating": "正在创建…",
+      "vm.starting": "正在启动…",
+      "vm.stopping": "正在停止…",
+      "vm.restoring": "正在恢复…",
+      "vm.saving": "正在保存检查点…",
+      "vm.removing": "正在删除…",
+      "vm.running": "运行中",
+      "vm.stopped": "已停止",
+      "vm.paused": "已暂停",
+      "vm.standby": "备用",
+      "vm.stale": "已过时",
+      "vm.error": "错误",
+      "vm.holder": "持有者",
+      "vm.witness": "见证者",
+      "vm.haRole": "HA {role}",
+      "vm.start": "启动",
+      "vm.stop": "停止",
+      "vm.checkpoint": "创建检查点",
+      "vm.logs": "日志",
+      "vm.checkpoints": "检查点",
+      "vm.remove": "删除",
+      "vm.restore": "恢复",
+      "vm.stopFirst": "请先停止 VM。",
+      "vm.disableHaFirst": "清除 VM 前请先禁用 HA。",
+      "vm.holderRequired": "恢复需要当前持有者的租约。",
+      "vm.copy": "复制",
+      "vm.sshKey": "查看 SSH 公钥的命令",
+      "vm.localHint": "请在此计算机上打开仪表板，或使用 CLI。",
+      "vm.loading": "正在加载 VM…",
+      "vm.empty": "还没有虚拟机。",
+      "vm.savedCheckpoint": "已保存检查点 #{seq}。",
+      "vm.back": "返回",
+      "vm.next": "下一步",
+      "vm.cancel": "取消",
+      "vm.askName": "VM 叫什么名字？",
+      "vm.name": "名称",
+      "vm.nameRequired": "请输入名称。",
+      "vm.askSize": "为 VM 分配多少资源？",
+      "vm.cpus": "vCPU",
+      "vm.memory": "内存（MB）",
+      "vm.disk": "磁盘（GB）",
+      "vm.askCreate": "创建此 VM？",
+      "vm.create": "创建",
+      "vm.confirm.stop": "停止 {name}？",
+      "vm.confirm.rm": "删除 {name}？",
+      "vm.confirm.restore": "将 {name} 恢复到检查点 #{seq}？",
+      "vm.force": "立即强制停止",
+      "vm.removeDisk": "此操作会删除 VM 的磁盘。",
+      "vm.restoreDisk": "此操作会替换 VM 当前的磁盘。",
+      "vm.readerTitle": "{name} 的{section}",
+      "vm.noLogs": "还没有串行输出。",
+      "vm.checkpointNumber": "检查点 #{seq}",
+      "vm.noCheckpoints": "还没有检查点。",
       "nav.chatRelay": "聊天",
       "nav.chat": "聊天",
       "chat.title": "聊天",
@@ -6040,6 +6243,7 @@
     renderChatRelayRooms(state.chatRelayRooms);
     renderStore(state.storeItems);
     escrowView.refreshLanguage();
+    vmView.refreshLanguage();
     nostrView.refreshLanguage();
     renderSandbox(state.sandboxItems);
     renderSchedulerJobs(state.schedulerJobs);
@@ -6989,6 +7193,119 @@
         return Promise.all([pollEscrow(), pollConfig()]);
       });
     });
+  }
+
+  /* ---------- virtual machines ---------- */
+
+  var vmPanel = document.getElementById("panel-vm");
+  var vmState = { rows: [], ha: new Map(), busy: new Map(), loading: true };
+  var vmTimer = null, vmPolling = false, vmAgain = false, vmRevision = 0;
+  var vmVisible = false, vmDoctor = null;
+  var vmView = window.MistlVM.create({
+    root: vmPanel, t: t, formatBytes: fmtBytes, formatUptime: fmtUptime, copy: copyToClipboard,
+    config: function () {
+      return api("config.show", {}).then(function (cfg) { return cfg.vm; }, function () { return state.config?.vm; });
+    },
+    logs: function (id) { return api("vm.logs", { id: id, lines: 100 }); },
+    checkpoints: function (id) { return api("vm.checkpoints", { id: id }); },
+    mutate: mutateVm
+  });
+  vmView.render(vmState);
+
+  function syncVmVisibility() {
+    var visible = !document.hidden && vmPanel.classList.contains("active");
+    if (visible === vmVisible) return;
+    vmVisible = visible;
+    if (!visible) {
+      clearTimeout(vmTimer);
+      vmAgain = false;
+      if (!vmPanel.classList.contains("active")) vmView.close();
+      return;
+    }
+    refreshVmList();
+    if (vmDoctor) return;
+    vmDoctor = api("vm.doctor", {}).then(function (data) {
+      vmView.setDoctor(data, "");
+    }, function (err) {
+      vmView.setDoctor(null, err.message);
+    }).finally(function () { vmDoctor = null; });
+  }
+
+  function refreshVmList() {
+    clearTimeout(vmTimer);
+    if (!vmVisible) return;
+    if (vmPolling) { vmAgain = true; return; }
+    vmPolling = true;
+    var revision = vmRevision;
+    api("vm.list", {}).then(async function (data) {
+      if (revision !== vmRevision) return;
+      vmState.rows = data.vms;
+      vmState.loading = false;
+      vmState.listError = "";
+      var groups = data.vms.filter(function (row) { return Object.hasOwn(row, "holder"); });
+      var previous = vmState.ha;
+      vmState.ha = new Map(groups.filter(function (row) {
+        return previous.has(row.server_id);
+      }).map(function (row) { return [row.server_id, previous.get(row.server_id)]; }));
+      vmView.render(vmState);
+      if (!vmVisible) return;
+      var results = await Promise.all(groups.map(function (row) {
+        return api("vm.ha.status", { id: row.server_id }).then(function (ha) {
+          var member = ha.members?.find(function (member) { return member.node === state.topology?.self?.node_id; });
+          return [row.server_id, Object.assign({}, ha, { role: member?.role === "witness" ? "witness" : ha.state })];
+        }, function () { return null; });
+      }));
+      if (revision !== vmRevision) return;
+      vmState.ha = new Map(results.filter(Boolean));
+      vmView.render(vmState);
+    }).catch(function (err) {
+      if (revision !== vmRevision) return;
+      vmState.loading = false;
+      vmState.listError = err.message;
+      vmView.render(vmState);
+    }).finally(function () {
+      vmPolling = false;
+      if (!vmVisible) return;
+      var transitioning = vmState.creating || vmState.busy.size || vmState.rows.some(function (row) {
+        var ha = vmState.ha.get(row.server_id);
+        return row.state === "creating" || row.state === "restoring" || ha && (ha.moving || ha.disabling);
+      });
+      vmTimer = setTimeout(refreshVmList, vmAgain ? 0 : transitioning ? 1000 : 4000);
+      vmAgain = false;
+    });
+  }
+
+  async function mutateVm(action, args) {
+    var id = args.id;
+    if (vmState.remote || (id ? vmState.busy.has(id) : vmState.creating)) return;
+    vmState.actionError = "";
+    vmState.savedCheckpoint = null;
+    if (id) vmState.busy.set(id, action);
+    else vmState.creating = args;
+    vmView.render(vmState);
+    refreshVmList();
+    try {
+      var data = await api("vm." + action, args);
+      if (action === "create") {
+        vmState.rows = vmState.rows.filter(function (row) { return row.server_id !== data.vm.server_id; }).concat(data.vm);
+      } else if (action === "rm") {
+        vmState.rows = vmState.rows.filter(function (row) { return row.server_id !== id; });
+        vmState.ha.delete(id);
+      } else if (action === "checkpoint") {
+        vmState.savedCheckpoint = data.seq;
+      }
+    } catch (err) {
+      if (!vmState.remote) {
+        vmState.remote = err.message.startsWith("`vm." + action + "` is not available from a remote dashboard session");
+        vmState.actionError = vmState.remote ? err.message.split("; ", 1)[0] : err.message;
+      }
+    } finally {
+      vmRevision++;
+      if (id) vmState.busy.delete(id);
+      else vmState.creating = null;
+      vmView.render(vmState);
+      refreshVmList();
+    }
   }
 
   /* ---------- Nostr relay (Storage sub-page) ---------- */
@@ -11873,12 +12190,13 @@
       startPolling();
       startTicker();
     }
+    syncVmVisibility();
   });
 
   /* ---------- view router (single-view navigation) ---------- */
 
   var PANEL_IDS = [
-    "panel-overview", "panel-chat", "panel-ai",
+    "panel-overview", "panel-chat", "panel-ai", "panel-vm",
     "panel-tunnel", "panel-nostr", "panel-store", "panel-escrow",
     "panel-scheduler", "panel-bot", "panel-access", "panel-settings"
   ];
@@ -11941,6 +12259,7 @@
       else a.removeAttribute("aria-current");
     });
     if (id === "panel-escrow") pollEscrow().catch(function (err) { showToast(err.message || String(err), "error"); });
+    syncVmVisibility();
     if (nostrVisible()) pollNostr();
     if (pollTimer && !wasActive && updateVisible()) pollUpdate();
   }

@@ -198,7 +198,7 @@ directly, independently of `ai.default_ref`, `ai.tts` and `ai.stt`:
 | Method | Route (relative to the base) | Behavior |
 | --- | --- | --- |
 | GET | `/rooms/{room}/models` | Currently advertised raw model ids in that room; no cached or other-room models |
-| POST | `/rooms/{room}/chat/completions` | `llm_request` with the body's `reasoning_effort`; supports JSON and SSE responses |
+| POST | `/rooms/{room}/chat/completions` | `llm_request` for text chat and `oai` for image content; supports JSON and SSE responses |
 | POST | `/rooms/{room}/audio/speech` | That room's advertised TTS service, forwarding body `speed` and `response_format` |
 | POST | `/rooms/{room}/audio/transcriptions` | Multipart upload to that room's advertised STT service |
 | POST | `/rooms/{room}/systemone` | System One decision request (`{model?, state, questions, ...}`, as Ollama's `/v1/systemone`) relayed over the room's `oai` tunnel; upstream status and body are returned as-is |
@@ -217,14 +217,15 @@ $ curl http://127.0.0.1:6478/v1/rooms/team-room/chat/completions \
 ```
 
 Room providers also advertise `oai` when a usable HTTP target exists. The
-mistai-compatible `oai_request` / `oai_response` / `oai_error` tunnel allows only
+mistai-compatible `oai_request` / `oai_response` / `oai_error` tunnel allows
 `POST /chat/completions`, `GET /models`, `POST /embeddings` and `POST /systemone`
-(decision models, e.g. an Ollama upstream), plus the 3D generation paths described
+(decision models, e.g. an Ollama upstream), plus the relayed media paths described
 under the tc-ai-api passthrough below. It resolves the
 model against that room's shared refs with the same rules as LLM requests,
 including `model_not_shared`, first-match ordering and empty-model defaults.
-Only the resolved provider's API key is used. Temperature is removed and chat
-is forced to `stream:false`; upstream status, content type and body are relayed.
+Only the resolved provider's API key is used. Tunnel chat is forced to
+`stream:false`; image chat preserves `temperature`. The tunnel relays upstream
+status, content type and body.
 Redirects are not followed.
 
 The tunnel base64-encodes the entire body before splitting into 12 KiB character
@@ -236,9 +237,13 @@ buffers and drops them on disconnect. Replies are bound to the transport sender.
 The local API retains its body limits: 2 MiB JSON and 10 MiB multipart.
 
 Image `content` parts on a room-scoped chat route select a peer advertising
-`oai`. The upstream response is buffered; `stream:true` clients receive a local
-SSE adaptation once that response completes. Text-only chat still uses
-`llm_request`. Local `/rooms/{room}/embeddings` and tunnel consumers for arbitrary
+`oai`. Unscoped `POST /v1/chat/completions` with image parts resolves the request's
+`model` through `ai.providers` (using `ai.default_ref` if omitted). An HTTP
+provider receives the OpenAI request at `<base_url>/chat/completions` with its
+API key. A Room provider sends it over that room's `oai` tunnel. The upstream
+response is buffered; `stream:true` clients receive a local SSE adaptation once
+that response completes. Direct HTTP vision requests have a 120-second deadline.
+Room-scoped text chat uses `llm_request`. Local `/rooms/{room}/embeddings` and tunnel consumers for arbitrary
 paths are not exposed; mistai consumers can call all four provider tunnel paths.
 The unscoped `POST /v1/systemone` takes the same decision body and resolves its
 `model` like chat completions (omitted: `ai.default_ref`). An HTTP provider
@@ -247,10 +252,9 @@ provider relays it over that room's `oai` tunnel. Upstream status and body are
 returned as-is, so a model that is not a decision model surfaces the upstream's
 own error. Both decision routes honour `mst_` tokens like chat.
 
-### tc-ai-api passthrough (speech, voices, image editing, 3D generation, status)
+### tc-ai-api passthrough
 
-mistl does not generate audio, edit images or generate 3D models itself. A
-tc-ai-api gateway (or any server with the same API) is registered as an ordinary
+Register a tc-ai-api gateway (or any server with the same API) as an ordinary
 HTTP provider, e.g.
 `base_url = "http://localhost:8087/v1"`, and its endpoints become reachable
 through the local API and, when its models are shared, across rooms:
@@ -260,6 +264,10 @@ through the local API and, when its models are shared, across rooms:
 | POST | `/audio/speech` | Unknown top-level fields (`keep_alive`, vendor-specific options, `stream_format`, ...) are passed through to an HTTP TTS provider; `voice` may be omitted. Over a room only the wire v1 fields are carried |
 | GET | `/audio/voices`, `/voices` (also root `/voices`) | The `ai.tts` provider's catalog as returned upstream; a Room synthesizes it from advertised voices |
 | POST | `/images/edits`, `/rooms/{room}/images/edits` | JSON or multipart converted to JSON (the `image` part becomes a data URL); `model` is required |
+| POST | `/game/act` | Forwards the game action request as JSON with a required `model`. A multipart `image` part is converted to a JSON data URL |
+| POST | `/motion/inbetween` | Forwards the JSON request with a required `model` and returns the upstream status, content type and bytes, including JSON, BVH and CSV |
+| GET | `/motion/clips?model=<id>` | Lists sample clips. mistl requires `model` to select a provider (400 `missing_required_parameter` when absent) and forwards the query unchanged |
+| GET | `/motion/skeletons/{model}` | Returns the joint order. URL-encode the model as one segment. mistl decodes it for routing and sends the resolved model in the upstream path |
 | POST | `/3d/generations` | JSON, or multipart converted to JSON (the `image` part becomes a data URL). `model` is required (400 `missing_required_parameter` otherwise); mistl has no built-in default model |
 | GET | `/3d/generations` | Jobs this daemon created (per route), newest first |
 | GET, DELETE | `/3d/generations/{id}` | Job status / delete |
@@ -293,6 +301,16 @@ type and body are relayed verbatim (JSON `b64_json` or binary image), without
 128 MiB per result. Room requests are limited to about 18 MiB after multipart
 conversion (413 if exceeded), and room results to 18 MiB (502
 `response_too_large` if exceeded). The deadline is 10 minutes.
+
+The game and motion endpoints also work under `/rooms/{room}/...`. Their models
+are discoverable over a room when the gateway lists them in `/v1/models` and
+the provider shares them with the room. The game action deadline is 2 minutes,
+including cold load, and all three motion endpoints have a 5-minute deadline
+(a cold start may first build an inference plan).
+Game actions use the image edit upload caps (32 MiB + 128 KiB multipart or about
+42.8 MiB JSON). Motion inbetween uses the 2 MiB JSON cap. Room uploads stay within
+18 MiB after multipart conversion, and game and motion responses are capped at
+18 MiB for both HTTP providers and rooms.
 
 Lifecycle routes sit at the API root and only reach local HTTP providers
 (never peers). Each provider's origin is its `base_url` without `/v1`:
