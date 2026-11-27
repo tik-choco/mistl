@@ -76,6 +76,8 @@ unchanged. Periods use UTC. `mistl authz usage` shows the meters. To bound
 memory, at most 4096 accounts are tracked; any account beyond that shares
 the overflow meter `*`, which is checked against the default limits.
 
+For billing or membership backends, see the [Service API](service-api.md) for scoped HTTP access, grants, consumer credentials, and usage events.
+
 ## Stage 3 — delegation with signed capabilities
 
 A capability is a signed JSON grant from an issuer DID to a holder DID

@@ -14,7 +14,8 @@
 //! launches the daemon headless (`"<exe>" daemon run`), NOT the dashboard:
 //!
 //! - Windows: `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value
-//!   name `mistl`.
+//!   name `mistl`, run under a headless `conhost.exe` so no console window
+//!   appears at login.
 //! - Linux: XDG autostart entry `~/.config/autostart/mistl.desktop`.
 //! - macOS: LaunchAgent `~/Library/LaunchAgents/com.tik-choco.mistl.plist`
 //!   (picked up at the next login; not `launchctl load`ed immediately).
@@ -289,6 +290,8 @@ fn mark_autostart_decided() -> Result<()> {
 /// disable (tray, `mistl autostart disable`, `install --no-autostart`) is
 /// remembered and never undone. Dev/preview builds never register.
 pub fn apply_default_autostart() {
+    #[cfg(windows)]
+    hide_legacy_autostart_window();
     if crate::runtime::CHANNEL != "stable" {
         return;
     }
@@ -320,7 +323,7 @@ fn set_autostart_entry(enabled: bool) -> Result<()> {
         .create_subkey(RUN_KEY_PATH)
         .context("install: opening the HKCU Run key")?;
     if enabled {
-        let command = autostart_command(&autostart_exe()?);
+        let command = hidden_launch(&autostart_command(&autostart_exe()?));
         run.set_value(crate::runtime::registration_name(), &command)
             .context("install: writing the HKCU Run value")?;
         info!(%command, "install: autostart enabled");
@@ -371,6 +374,56 @@ pub fn autostart_enabled() -> bool {
 
 #[cfg(windows)]
 const RUN_KEY_PATH: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+
+/// Wrap a Run command so the console exe starts without a window: a
+/// headless `conhost.exe` (Windows 10 1809+) hosts the daemon's console
+/// instead of a visible one. Falls back to the bare command when conhost is
+/// missing.
+#[cfg(windows)]
+fn hidden_launch(command: &str) -> String {
+    let conhost = std::env::var_os("SystemRoot")
+        .map(|root| PathBuf::from(root).join("System32").join("conhost.exe"))
+        .filter(|path| path.exists());
+    match conhost {
+        Some(conhost) => headless_command(&conhost, command),
+        None => command.to_string(),
+    }
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn headless_command(conhost: &Path, command: &str) -> String {
+    format!("\"{}\" --headless {command}", conhost.display())
+}
+
+/// Entries written before [`hidden_launch`] start the daemon in a visible
+/// console window at every login; rewrap them in place (the command itself,
+/// including the exe it points at, is kept).
+#[cfg(windows)]
+fn hide_legacy_autostart_window() {
+    use winreg::RegKey;
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE};
+
+    let name = crate::runtime::registration_name();
+    let Ok(run) = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey_with_flags(RUN_KEY_PATH, KEY_READ | KEY_SET_VALUE)
+    else {
+        return;
+    };
+    let Ok(command) = run.get_value::<String, _>(&name) else {
+        return;
+    };
+    if command.contains(" --headless ") {
+        return;
+    }
+    let hidden = hidden_launch(&command);
+    if hidden == command {
+        return;
+    }
+    match run.set_value(&name, &hidden) {
+        Ok(()) => info!(command = %hidden, "install: autostart now launches without a window"),
+        Err(error) => warn!(%error, "install: could not update the autostart entry"),
+    }
+}
 
 /// Shared Unix flow: write the autostart file rendered by `render`, or
 /// remove it (idempotently) when disabling.
@@ -628,6 +681,18 @@ mod tests {
         assert!(
             command.ends_with("daemon run"),
             "must not launch the dashboard"
+        );
+    }
+
+    #[test]
+    fn headless_command_runs_the_command_under_a_windowless_conhost() {
+        let command = headless_command(
+            Path::new(r"C:\Windows\System32\conhost.exe"),
+            r#""C:\Jo Do\mistl.exe" daemon run"#,
+        );
+        assert_eq!(
+            command,
+            r#""C:\Windows\System32\conhost.exe" --headless "C:\Jo Do\mistl.exe" daemon run"#
         );
     }
 

@@ -10,6 +10,103 @@ use tokio::process::Command;
 
 use crate::config::VmConfig;
 
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct Resources {
+    pub cpus: u32,
+    pub mem_total_mb: u64,
+    pub mem_free_mb: u64,
+    pub disk_free_gb: u64,
+}
+
+pub fn resources(path: &Path) -> Resources {
+    let (mem_total_mb, mem_free_mb) = memory_mb();
+    Resources {
+        cpus: std::thread::available_parallelism().map_or(1, |cpus| cpus.get() as u32),
+        mem_total_mb,
+        mem_free_mb,
+        disk_free_gb: disk_free_gb(path),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn memory_mb() -> (u64, u64) {
+    let Ok(info) = std::fs::read_to_string("/proc/meminfo") else {
+        return (0, 0);
+    };
+    let read_mb = |field: &str| {
+        info.lines()
+            .find_map(|line| line.strip_prefix(field))
+            .and_then(|value| value.split_ascii_whitespace().next()?.parse::<u64>().ok())
+            .unwrap_or_default()
+            / 1024
+    };
+    (read_mb("MemTotal:"), read_mb("MemAvailable:"))
+}
+
+#[cfg(windows)]
+fn memory_mb() -> (u64, u64) {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+
+    let mut info = MEMORYSTATUSEX {
+        dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: info is writable and its size is set as required by the API.
+    if unsafe { GlobalMemoryStatusEx(&mut info) } == 0 {
+        return (0, 0);
+    }
+    (info.ullTotalPhys >> 20, info.ullAvailPhys >> 20)
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+fn memory_mb() -> (u64, u64) {
+    (0, 0)
+}
+
+#[cfg(unix)]
+fn disk_free_gb(path: &Path) -> u64 {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let Ok(path) = CString::new(path.as_os_str().as_bytes()) else {
+        return 0;
+    };
+    let mut info = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: path is NUL-terminated and info can hold the result.
+    if unsafe { libc::statvfs(path.as_ptr(), info.as_mut_ptr()) } != 0 {
+        return 0;
+    }
+    // SAFETY: statvfs succeeded and initialized info.
+    let info = unsafe { info.assume_init() };
+    let bytes = u128::from(info.f_bavail) * u128::from(info.f_frsize);
+    u64::try_from(bytes >> 30).unwrap_or(u64::MAX)
+}
+
+#[cfg(windows)]
+fn disk_free_gb(path: &Path) -> u64 {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
+    let path: Vec<_> = path.as_os_str().encode_wide().chain([0]).collect();
+    let mut available = 0;
+    // SAFETY: path is NUL-terminated and available is writable. The other
+    // two outputs are optional.
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            path.as_ptr(),
+            &mut available,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 { 0 } else { available >> 30 }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn disk_free_gb(_path: &Path) -> u64 {
+    0
+}
+
 pub(super) fn require_ha_support(os: &str) -> Result<()> {
     anyhow::ensure!(
         matches!(os, "windows" | "linux"),
@@ -547,6 +644,15 @@ fn resolve_network(host: &mut HostInfo, configured: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_resources_are_plausible() {
+        let info = resources(&env::temp_dir());
+        assert!(info.cpus > 0);
+        #[cfg(any(windows, target_os = "linux"))]
+        assert!(info.mem_total_mb > 0);
+        assert!(info.mem_free_mb <= info.mem_total_mb);
+    }
 
     #[test]
     fn ha_requires_a_platform_with_daemon_owned_qemu() {

@@ -93,6 +93,19 @@ impl AppState {
         Ok(())
     }
 
+    /// Persists `[tunnel] room_id` without re-validating unrelated sections.
+    pub fn set_tunnel_room(&self, room: &str) -> Result<()> {
+        let mut config = self.config.write().expect("config lock poisoned");
+        if config.tunnel.room_id == room {
+            return Ok(());
+        }
+        let mut updated = config.clone();
+        updated.tunnel.room_id = room.into();
+        updated.save()?;
+        *config = updated;
+        Ok(())
+    }
+
     pub fn set_ai_provide(&self, start: bool) -> Result<Vec<String>> {
         let mut config = self.config.write().expect("config lock poisoned");
         let mut updated = config.clone();
@@ -606,18 +619,18 @@ fn authorize(caller: Caller, cmd: &str, args: &Value) -> Result<()> {
     if cmd.starts_with("vm.") && caller != Caller::Ipc {
         match cmd {
             "vm.list" | "vm.status" | "vm.doctor" | "vm.logs" | "vm.checkpoints"
-            | "vm.ha.status" => {}
+            | "vm.ha.status" | "vm.pool.status" => {}
             "vm.create" | "vm.start" | "vm.stop" | "vm.rm" | "vm.checkpoint" | "vm.restore"
-            | "vm.move" | "vm.ha.enable" | "vm.ha.join" | "vm.ha.disable" | "vm.disconnect" => {
-                match caller {
-                    Caller::Http { remote: false } => {}
-                    Caller::Http { remote: true } => bail!(
-                        "`{cmd}` is not available from a remote dashboard session; \
+            | "vm.move" | "vm.protect" | "vm.ha.enable" | "vm.ha.join" | "vm.ha.disable"
+            | "vm.disconnect" | "vm.pool.create" | "vm.pool.join" | "vm.pool.leave"
+            | "vm.pool.invite" => match caller {
+                Caller::Http { remote: false } => {}
+                Caller::Http { remote: true } => bail!(
+                    "`{cmd}` is not available from a remote dashboard session; \
                          use the mistl CLI or open the dashboard on this machine"
-                    ),
-                    _ => bail!("`{cmd}` requires the mistl CLI or a local dashboard session"),
-                }
-            }
+                ),
+                _ => bail!("`{cmd}` requires the mistl CLI or a local dashboard session"),
+            },
             _ => bail!("`{cmd}` is available only through the local mistl CLI"),
         }
     }
@@ -665,6 +678,8 @@ fn authorize(caller: Caller, cmd: &str, args: &Value) -> Result<()> {
                     | "authz.token.list"
                     | "authz.cap.list"
                     | "authz.cap.verify"
+                    | "authz.grant.list"
+                    | "authz.events"
             ) =>
         {
             Some("changes who is trusted or issues credentials")
@@ -1097,6 +1112,8 @@ mod tests {
             "authz.token.list",
             "authz.cap.list",
             "authz.cap.verify",
+            "authz.grant.list",
+            "authz.events",
         ] {
             authorize(REMOTE, cmd, &json!({})).unwrap_or_else(|e| panic!("{cmd}: {e}"));
         }
@@ -1129,6 +1146,7 @@ mod tests {
         let args = json!({});
         for cmd in [
             "vm.create",
+            "vm.protect",
             "vm.start",
             "vm.stop",
             "vm.rm",
@@ -1139,6 +1157,10 @@ mod tests {
             "vm.ha.join",
             "vm.ha.disable",
             "vm.disconnect",
+            "vm.pool.create",
+            "vm.pool.join",
+            "vm.pool.leave",
+            "vm.pool.invite",
         ] {
             for caller in [Caller::Ipc, LOCAL] {
                 authorize(caller, cmd, &args).unwrap();
@@ -1155,6 +1177,7 @@ mod tests {
             "vm.logs",
             "vm.checkpoints",
             "vm.ha.status",
+            "vm.pool.status",
         ] {
             for caller in [Caller::Ipc, LOCAL, REMOTE, Caller::Internal] {
                 authorize(caller, cmd, &args).unwrap();

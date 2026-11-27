@@ -309,7 +309,7 @@ fn client_request_at(path: &Path, cmd: &str, args: Value) -> Result<Value> {
     // ACPI shutdown before falling back to a hard stop.
     let read_secs = match cmd {
         "vm.create" | "vm.checkpoint" | "vm.restore" | "vm.move" => 1800,
-        "vm.ha.disable" => 90,
+        "vm.ha.disable" | "vm.protect" => 90,
         "vm.start" | "vm.stop" | "vm.rm" | "vm.connect" => 180,
         _ => 30,
     };

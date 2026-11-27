@@ -1,6 +1,5 @@
 //! Automatic slot replication across escrow providers sharing a room.
 pub(super) mod decision;
-pub(super) mod placement;
 mod proxy;
 mod service;
 #[cfg(test)]

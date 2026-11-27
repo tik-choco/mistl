@@ -821,6 +821,9 @@ pub enum AuthzTokenAction {
         name: String,
         #[arg(long = "model")]
         models: Vec<String>,
+        /// Token scope (repeatable or comma-separated; default: infer)
+        #[arg(long = "scope", value_delimiter = ',', value_parser = ["infer", "usage", "manage"])]
+        scopes: Vec<String>,
         #[command(flatten)]
         limits: AuthzLimitArgs,
         /// Lifetime, e.g. 10m, 12h, or 7d (daemon minimum: 60s)
@@ -1230,6 +1233,13 @@ pub enum VmAction {
         #[command(subcommand)]
         action: VmHaAction,
     },
+    /// Manage the VM host pool. Keep the invite code secret.
+    Pool {
+        #[command(subcommand)]
+        action: VmPoolAction,
+    },
+    /// Protect a local VM on other nodes in its pool
+    Protect { id: String },
     /// Move a VM to another host in its group
     Move {
         id: String,
@@ -1244,12 +1254,12 @@ pub enum VmAction {
     Create {
         #[arg(long)]
         name: Option<String>,
-        /// Guest memory in MB
+        /// Guest memory in MB (at least 1024)
         #[arg(long, value_name = "MB")]
         memory: Option<u32>,
         #[arg(long)]
         cpus: Option<u32>,
-        /// Guest disk size in GB
+        /// Guest disk size in GB (at least 8 and the base image's size)
         #[arg(long, value_name = "GB")]
         disk: Option<u32>,
         /// An OpenSSH public key file or a literal key (repeatable)
@@ -1300,7 +1310,7 @@ pub enum VmAction {
     /// Open an SSH session or run a command on a VM
     Ssh {
         id: String,
-        /// Executor node ID (required for remote VMs)
+        /// Executor node ID (optional when this node knows the VM's HA group)
         #[arg(long, value_name = "NODE_ID")]
         node: Option<String>,
         /// Extra arguments passed to ssh
@@ -1332,6 +1342,20 @@ pub enum VmHaAction {
     Disable {
         id: String,
     },
+}
+
+#[derive(Subcommand)]
+pub enum VmPoolAction {
+    /// Create a pool and print its secret invite code
+    Create,
+    /// Join a pool using its secret invite code
+    Join { code: String },
+    /// Leave the current pool
+    Leave,
+    /// Show pool members and their available capacity
+    Status,
+    /// Print the current pool's secret invite code
+    Invite,
 }
 
 #[derive(Subcommand)]
@@ -2922,6 +2946,47 @@ fn client_call(cmd: &str, args: Value) -> Result<()> {
     Ok(())
 }
 
+fn print_vm_pool_status(response: &Value) {
+    if response["joined"] != true {
+        println!("This node is not in a VM pool.");
+        return;
+    }
+    println!(
+        "VM pool {} ({})",
+        response["pool_id"].as_str().unwrap_or("?"),
+        response["room"].as_str().unwrap_or("?"),
+    );
+    let Some(members) = response["members"].as_array() else {
+        return;
+    };
+    println!(
+        "{:<16} {:<8} {:<6} {:>4} {:>9} {:>9} {:>7} {:>10}  NAME",
+        "NODE", "STATE", "ACCEL", "CPUS", "FREE MiB", "FREE GiB", "VMS", "SCORE"
+    );
+    for member in members {
+        let status = if member["self"] == true {
+            "self"
+        } else if member["online"] == true {
+            "online"
+        } else {
+            "offline"
+        };
+        let vms = format!("{}/{}", member["running_vms"], member["max_vms"]);
+        let score = member["score"]
+            .as_f64()
+            .map_or_else(|| "-".into(), |score| format!("{score:.2}"));
+        println!(
+            "{:<16} {status:<8} {:<6} {:>4} {:>9} {:>9} {vms:>7} {score:>10}  {}",
+            member["node"].as_str().unwrap_or("?"),
+            member["accel"].as_str().unwrap_or("-"),
+            member["cpus"].as_u64().unwrap_or_default(),
+            member["mem_free_mb"].as_u64().unwrap_or_default(),
+            member["disk_free_gb"].as_u64().unwrap_or_default(),
+            member["name"].as_str().unwrap_or_default(),
+        );
+    }
+}
+
 fn vm_call(action: VmAction, json_output: bool) -> Result<()> {
     let (cmd, mut args) = match action {
         VmAction::Ha { action } => match action {
@@ -2938,6 +3003,14 @@ fn vm_call(action: VmAction, json_output: bool) -> Result<()> {
             VmHaAction::Status { id } => ("vm.ha.status", json!({"id": id})),
             VmHaAction::Disable { id } => ("vm.ha.disable", json!({"id": id})),
         },
+        VmAction::Pool { action } => match action {
+            VmPoolAction::Create => ("vm.pool.create", json!({})),
+            VmPoolAction::Join { code } => ("vm.pool.join", json!({"code": code})),
+            VmPoolAction::Leave => ("vm.pool.leave", json!({})),
+            VmPoolAction::Status => ("vm.pool.status", json!({})),
+            VmPoolAction::Invite => ("vm.pool.invite", json!({})),
+        },
+        VmAction::Protect { id } => ("vm.protect", json!({"id": id})),
         VmAction::Move { id, to } => ("vm.move", json!({"id": id, "to": to})),
         VmAction::Doctor => ("vm.doctor", json!({})),
         VmAction::Key => ("vm.key", json!({})),
@@ -2980,6 +3053,9 @@ fn vm_call(action: VmAction, json_output: bool) -> Result<()> {
     if cmd == "vm.ha.enable" {
         eprintln!("Keep this join token secret. It contains the VM encryption key.");
     }
+    if matches!(cmd, "vm.pool.create" | "vm.pool.invite") {
+        eprintln!("Keep this invite code secret. It grants access to the VM pool.");
+    }
     if json_output {
         return client_call(cmd, args);
     }
@@ -2993,6 +3069,38 @@ fn vm_call(action: VmAction, json_output: bool) -> Result<()> {
         ),
         "vm.ha.join" | "vm.ha.status" | "vm.ha.disable" | "vm.move" => {
             println!("{}", serde_json::to_string_pretty(&response)?)
+        }
+        "vm.pool.create" | "vm.pool.invite" => {
+            println!(
+                "{}",
+                response["invite"]
+                    .as_str()
+                    .context("missing VM pool invite")?
+            );
+        }
+        "vm.pool.join" => println!(
+            "Joined VM pool {} ({})",
+            response["pool_id"].as_str().unwrap_or("?"),
+            response["room"].as_str().unwrap_or("?"),
+        ),
+        "vm.pool.leave" => println!("Left the VM pool."),
+        "vm.pool.status" => print_vm_pool_status(&response),
+        "vm.protect" => {
+            println!("VM {}", response["server_id"].as_str().unwrap_or("?"));
+            if let Some(members) = response["members"].as_array() {
+                for member in members {
+                    let status = if member["joined"] == true {
+                        "joined"
+                    } else {
+                        member["error"].as_str().unwrap_or("join failed")
+                    };
+                    println!(
+                        "{}\t{}\t{status}",
+                        member["node"].as_str().unwrap_or("?"),
+                        member["role"].as_str().unwrap_or("?"),
+                    );
+                }
+            }
         }
         "vm.doctor" => {
             let ready = if response["ready"] == true {
@@ -3021,7 +3129,12 @@ fn vm_call(action: VmAction, json_output: bool) -> Result<()> {
                 .context("missing public key")?;
             println!("{key}");
         }
-        "vm.create" => println!("{}", vm_status_row(&response["vm"])),
+        "vm.create" => {
+            println!("{}", vm_status_row(&response["vm"]));
+            if let Some(node) = response["node"].as_str() {
+                println!("Host node {node}");
+            }
+        }
         "vm.list" => match response["vms"].as_array().filter(|vms| !vms.is_empty()) {
             Some(vms) => {
                 let grouped = vms.iter().any(|vm| vm["holder"].is_string());
@@ -3087,6 +3200,10 @@ fn vm_call(action: VmAction, json_output: bool) -> Result<()> {
             }
         }
         _ => println!("{}", vm_status_row(&response)),
+    }
+    // stderr keeps stdout limited to the invite or the join line.
+    if let Some(hint) = response["tunnel_room_hint"].as_str() {
+        eprintln!("{hint}");
     }
     Ok(())
 }
@@ -3180,6 +3297,16 @@ mod vm_cli_tests {
     use super::*;
     use crate::vm::sshkey::ssh_path_token;
     use std::ffi::OsStr;
+
+    #[test]
+    fn parses_vm_protect() {
+        let id = "0123456789abcdef";
+        let cli = Cli::try_parse_from(["mistl", "vm", "protect", id]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Vm { action: VmAction::Protect { id: value }, .. }) if value == id
+        ));
+    }
 
     #[test]
     fn parses_vm_create_flags() {
@@ -3575,18 +3702,19 @@ fn authz_request_with_input(
             AuthzTokenAction::Create {
                 name,
                 models,
+                scopes,
                 limits,
                 ttl,
                 expires,
             } => {
                 let mut value = json!({});
                 limits.apply(&mut value)?;
-                (
-                    "authz.token.create",
-                    json!({"name": name, "models": models, "limits": value,
-                    "ttl_secs": ttl, "expires_at": expires}),
-                    AuthzOutput::Secret,
-                )
+                let mut args = json!({"name": name, "models": models, "limits": value,
+                    "ttl_secs": ttl, "expires_at": expires});
+                if !scopes.is_empty() {
+                    args["scopes"] = json!(scopes);
+                }
+                ("authz.token.create", args, AuthzOutput::Secret)
             }
             AuthzTokenAction::List => ("authz.token.list", json!({}), AuthzOutput::Tokens),
             AuthzTokenAction::Update {
@@ -3999,8 +4127,8 @@ fn render_authz_usage(response: &Value, service: Option<AuthzService>) -> String
 
 fn render_authz_tokens(response: &Value) -> String {
     let mut lines = vec![format!(
-        "Tokens\n{:<12}  {:<16}  {:<10}  {:<25}  {}",
-        "ID", "NAME", "STATUS", "EXPIRES", "MODELS"
+        "Tokens\n{:<12}  {:<16}  {:<10}  {:<25}  {:<18}  {}",
+        "ID", "NAME", "STATUS", "EXPIRES", "SCOPES", "MODELS"
     )];
     if let Some(tokens) = response.as_array() {
         for token in tokens {
@@ -4032,12 +4160,23 @@ fn render_authz_tokens(response: &Value) -> String {
                 })
                 .filter(|models| !models.is_empty())
                 .unwrap_or_else(|| "all".into());
+            let scopes = token["scopes"]
+                .as_array()
+                .map(|scopes| {
+                    scopes
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .unwrap_or_else(|| "infer".into());
             lines.push(format!(
-                "{:<12}  {:<16}  {:<10}  {:<25}  {}",
+                "{:<12}  {:<16}  {:<10}  {:<25}  {:<18}  {}",
                 authz_text(token, "id"),
                 authz_text(token, "name"),
                 status,
                 authz_text(token, "expires_at"),
+                scopes,
                 models
             ));
             lines.push(format!(

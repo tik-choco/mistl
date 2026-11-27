@@ -223,18 +223,17 @@ async fn running_ctx() -> Result<SessionContext> {
 /// and `tunnel.room.set` (explicit switch, live or not), so both paths keep
 /// the persisted config and the recent-rooms list in sync the same way.
 async fn persist_room(state: &Arc<AppState>, room: &str) -> Result<()> {
-    let mut cfg = state.config();
-    if cfg.tunnel.room_id != room {
-        cfg.tunnel.room_id = room.to_string();
-        cfg.save().context("tunnel: persisting room_id")?;
-        state.set_config(cfg);
-    }
-    let store = RoomStore::load(default_room_store_path())
-        .await
-        .context("tunnel: loading room store")?;
+    state
+        .set_tunnel_room(room)
+        .context("tunnel: persisting room_id")?;
     // Best-effort: a room switch that otherwise succeeded must not fail just
     // because the recent-rooms bookkeeping couldn't write to disk.
-    if let Err(error) = store.record_use(room).await {
+    let recorded = async {
+        let store = RoomStore::load(default_room_store_path()).await?;
+        store.record_use(room).await
+    }
+    .await;
+    if let Err(error) = recorded {
         warn!(%error, %room, "tunnel: failed to record room in the recent-rooms store");
     }
     Ok(())
@@ -444,23 +443,35 @@ async fn room_set(state: &Arc<AppState>, args: Value) -> Result<Value> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
-    let room = requested.unwrap_or_else(generate_room_id);
+    let room = set_room(state, requested.unwrap_or_else(generate_room_id), false).await?;
+    Ok(json!({ "room": room }))
+}
 
-    {
-        let guard = SESSION.lock().await;
-        if let Some(session) = guard.as_ref() {
-            // A live session has to actually leave the old room and join the
-            // new one; `switch_room` needs `state` because rejoining goes
-            // through `net::ensure_started`, which owns the shared engine.
-            session
-                .ctx
-                .switch_room(state, room.clone())
-                .await
-                .context("tunnel.room.set: switching the live session's room")?;
+/// Defaults the tunnel room while keeping a room the user already configured.
+pub(crate) async fn set_room_if_unset(state: &Arc<AppState>, room: &str) -> Result<String> {
+    set_room(state, room.to_owned(), true).await
+}
+
+async fn set_room(state: &Arc<AppState>, room: String, only_if_unset: bool) -> Result<String> {
+    let guard = SESSION.lock().await;
+    if only_if_unset {
+        let configured = state.config().tunnel.room_id;
+        if !configured.trim().is_empty() {
+            return Ok(configured);
         }
     }
+    if let Some(session) = guard.as_ref() {
+        // A live session has to actually leave the old room and join the
+        // new one; `switch_room` needs `state` because rejoining goes
+        // through `net::ensure_started`, which owns the shared engine.
+        session
+            .ctx
+            .switch_room(state, room.clone())
+            .await
+            .context("tunnel.room.set: switching the live session's room")?;
+    }
     persist_room(state, &room).await?;
-    Ok(json!({ "room": room }))
+    Ok(room)
 }
 
 /// `tunnel.room.new {} -> {"room":"a1b2c3d4"}`

@@ -662,7 +662,7 @@ impl Provider {
                     }),
                 };
                 let Some(authorized) =
-                    self.authorize_request(room.as_deref(), &from, &id, model.clone(), "llm")
+                    self.authorize_request(room.as_deref(), &from, &id, model.clone(), "chat")
                 else {
                     return;
                 };
@@ -679,7 +679,7 @@ impl Provider {
                 response_format,
             } => {
                 let Some(authorized) =
-                    self.authorize_request(room.as_deref(), &from, &id, model.clone(), "voice")
+                    self.authorize_request(room.as_deref(), &from, &id, model.clone(), "tts")
                 else {
                     return;
                 };
@@ -742,17 +742,17 @@ impl Provider {
         from: &str,
         id: &str,
         model: Option<String>,
-        kind: &str,
+        op: &'static str,
     ) -> Option<Authorized> {
         match crate::authz::authorize_p2p(Service::Ai, Action::Infer, room, from, None) {
-            Ok(authorized) => Some(authorized),
+            Ok(authorized) => Some(authorized.with_op(op).with_model(model.as_deref())),
             Err(denied) => {
                 self.log_denied(from, id, model, &denied);
                 let id = id.to_string();
                 let code = Some(denied.code.to_string());
                 let message = denied.message;
-                let reply = match kind {
-                    "llm" => ProtocolMessage::LlmError { id, message, code },
+                let reply = match op {
+                    "chat" => ProtocolMessage::LlmError { id, message, code },
                     "oai" => ProtocolMessage::OaiError { id, message, code },
                     _ => ProtocolMessage::VoiceError { id, message, code },
                 };
@@ -890,7 +890,7 @@ impl Provider {
                 .map
                 .get(&(from.clone(), id.clone()))
                 .and_then(|b| b.authorized.clone())
-                .or_else(|| self.authorize_request(room, &from, &id, model.clone(), "voice"));
+                .or_else(|| self.authorize_request(room, &from, &id, model.clone(), "stt"));
             let Some(authorized) = authorized else {
                 return;
             };
@@ -1621,6 +1621,8 @@ mod tests {
     async fn stt_authorizes_first_chunk_and_charges_one_request() {
         let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         let _reset = AuthzReset::new();
+        crate::authz::test_command("authz.token.create", json!({"name":"b","scopes":["usage"]}))
+            .unwrap();
         let peer = "0123456789abcdef";
         let (send, sent) = fake_send();
         let captured = Arc::new(Mutex::new(None));
@@ -1650,7 +1652,7 @@ mod tests {
                         data: "eA==".into(),
                         last: seq == 1,
                         mime: "audio/wav".into(),
-                        model: None,
+                        model: (seq == 0).then(|| "example-model".into()),
                         file_name: None,
                     },
                 )
@@ -1662,6 +1664,11 @@ mod tests {
         assert_eq!(captured.lock().unwrap().as_ref().unwrap().0, b"xx");
         assert_eq!(ai_usage(peer)["requests"], 1);
         assert_eq!(ai_usage(peer)["output_chars"], 0);
+        let events = crate::authz::test_command("authz.events", json!({})).unwrap();
+        let events = events["events"].as_array().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["op"], "stt");
+        assert_eq!(events[0]["model"], "example-model");
     }
 
     #[tokio::test]

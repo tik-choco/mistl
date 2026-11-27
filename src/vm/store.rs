@@ -12,7 +12,7 @@ const RECORD_FILE: &str = "vm.json";
 pub struct VmRecord {
     pub server_id: String,
     pub name: String,
-    /// DID of the identity that created the VM on this node.
+    /// DID of the identity that requested the VM.
     pub owner_did: String,
     /// Extra DIDs allowed to reach the guest's SSH through the tunnel.
     #[serde(default)]

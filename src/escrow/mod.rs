@@ -356,7 +356,13 @@ impl Service {
             resource_owner.as_deref(),
         );
         if let Ok(authorized) = authorization {
-            authorized.record(1, 0);
+            let op = match kind {
+                "escrow_get" => "get",
+                "escrow_put" => "put",
+                _ => "delete",
+            };
+            // PUT sizes are unverified here, before any blob transfer or commit.
+            authorized.with_op(op).record(1, 0);
         } else {
             let id = msg["id"].as_str().filter(|s| s.len() <= 64).unwrap_or("");
             return Some(Error::new("forbidden").reply(id));

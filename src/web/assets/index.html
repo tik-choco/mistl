@@ -2977,6 +2977,38 @@
       "nav.stream": "Stream",
       "nav.ai": "AI",
       "vm.new": "New VM",
+      "vm.pool.title": "Pool",
+      "vm.pool.loading": "Checking pool…",
+      "vm.pool.help": "Join your nodes once. VMs run on the best node and move automatically if that node fails.",
+      "vm.pool.create": "Create pool",
+      "vm.pool.confirmCreate": "Create a pool on this node?",
+      "vm.pool.join": "Join pool",
+      "vm.pool.invite": "Invite",
+      "vm.pool.leave": "Leave",
+      "vm.pool.confirmLeave": "Leave the pool on this node?",
+      "vm.pool.code": "Invite code",
+      "vm.pool.loadingInvite": "Getting invite code…",
+      "vm.pool.secret": "Keep this code secret. Anyone who knows it can join the pool.",
+      "vm.pool.online": "Online",
+      "vm.pool.offline": "Offline",
+      "vm.pool.canHost": "Can host",
+      "vm.pool.voteOnly": "Vote only",
+      "vm.pool.freeRam": "Free RAM: {memory}",
+      "vm.pool.running": "VMs running: {count}",
+      "vm.thisNode": "this node",
+      "vm.runningOn": "Running on",
+      "vm.protected": "Protected on {count} nodes",
+      "vm.unprotected": "Not protected",
+      "vm.protectionUnknown": "Protection status unknown",
+      "vm.protect": "Protect",
+      "vm.confirm.protect": "Protect {name}?",
+      "vm.protectHelp": "Replicate this VM to other pool nodes so it can restart automatically if this node fails.",
+      "vm.move": "Move",
+      "vm.askMove": "Which node should run the VM?",
+      "vm.confirm.move": "Move {name} to {node}?",
+      "vm.moveHelp": "The VM will stop for about a minute. Any running programs will end.",
+      "vm.placement": "Placement",
+      "vm.automatic": "Automatic",
       "vm.hostUnavailable": "Host readiness unavailable",
       "vm.hostChecking": "Checking host…",
       "vm.hostReady": "Host ready",
@@ -2993,7 +3025,7 @@
       "vm.starting": "Starting…",
       "vm.stopping": "Stopping…",
       "vm.restoring": "Restoring…",
-      "vm.saving": "Saving checkpoint…",
+      "vm.saving": "Backing up…",
       "vm.removing": "Removing…",
       "vm.running": "Running",
       "vm.stopped": "Stopped",
@@ -3006,20 +3038,20 @@
       "vm.haRole": "HA {role}",
       "vm.start": "Start",
       "vm.stop": "Stop",
-      "vm.checkpoint": "Checkpoint",
+      "vm.checkpoint": "Back up now",
       "vm.logs": "Logs",
-      "vm.checkpoints": "Checkpoints",
+      "vm.checkpoints": "Backups",
       "vm.remove": "Remove",
-      "vm.restore": "Restore",
+      "vm.restore": "Restore this backup",
       "vm.stopFirst": "Stop the VM first.",
       "vm.disableHaFirst": "Disable HA before removing this VM.",
-      "vm.holderRequired": "Restore requires the current holder’s lease.",
+      "vm.holderRequired": "Only the node currently running this VM can restore it.",
       "vm.copy": "Copy",
       "vm.sshKey": "SSH public key command",
       "vm.localHint": "Open the dashboard on this machine or use the CLI.",
       "vm.loading": "Loading VMs…",
       "vm.empty": "No virtual machines yet.",
-      "vm.savedCheckpoint": "Checkpoint #{seq} saved.",
+      "vm.savedCheckpoint": "Backup #{seq} saved.",
       "vm.back": "Back",
       "vm.next": "Next",
       "vm.cancel": "Cancel",
@@ -3030,18 +3062,20 @@
       "vm.cpus": "vCPUs",
       "vm.memory": "Memory (MB)",
       "vm.disk": "Disk (GB)",
+      "vm.sizeMinimum": "Minimum: 1024 MB memory and 8 GB disk.",
       "vm.askCreate": "Create this VM?",
       "vm.create": "Create",
       "vm.confirm.stop": "Stop {name}?",
       "vm.confirm.rm": "Remove {name}?",
-      "vm.confirm.restore": "Restore {name} to checkpoint #{seq}?",
+      "vm.confirm.restore": "Return {name} to backup #{seq}?",
       "vm.force": "Force stop immediately",
       "vm.removeDisk": "This deletes the VM’s disk.",
-      "vm.restoreDisk": "This replaces the VM’s current disk.",
+      "vm.restoreDisk": "Changes made after this backup are lost.",
       "vm.readerTitle": "{section} for {name}",
       "vm.noLogs": "No serial output yet.",
-      "vm.checkpointNumber": "Checkpoint #{seq}",
-      "vm.noCheckpoints": "No checkpoints yet.",
+      "vm.checkpointNumber": "Backup #{seq}",
+      "vm.noCheckpoints": "No backups yet.",
+      "vm.backupHelp": "A backup saves the VM’s disk so you can return to that point later. Running programs are not saved. With HA, backups are taken automatically and copied to the other nodes.",
       "nav.chatRelay": "Chat",
       "nav.chat": "Chat",
       "chat.title": "Chat",
@@ -4026,6 +4060,38 @@
       "nav.stream": "ストリーム",
       "nav.ai": "AI",
       "vm.new": "新規 VM",
+      "vm.pool.title": "プール",
+      "vm.pool.loading": "プールを確認中…",
+      "vm.pool.help": "ノードを一度プールに参加させると、VM は最適なノードで稼働し、そのノードに障害が起きると自動で移ります。",
+      "vm.pool.create": "プールを作成",
+      "vm.pool.confirmCreate": "このノードでプールを作成しますか？",
+      "vm.pool.join": "プールに参加",
+      "vm.pool.invite": "招待",
+      "vm.pool.leave": "脱退",
+      "vm.pool.confirmLeave": "このノードをプールから外しますか？",
+      "vm.pool.code": "参加コード",
+      "vm.pool.loadingInvite": "参加コードを取得中…",
+      "vm.pool.secret": "このコードは秘密です。知っている人は誰でもプールに参加できます。",
+      "vm.pool.online": "オンライン",
+      "vm.pool.offline": "オフライン",
+      "vm.pool.canHost": "VM を実行可能",
+      "vm.pool.voteOnly": "投票のみ",
+      "vm.pool.freeRam": "空きメモリ {memory}",
+      "vm.pool.running": "稼働中の VM {count} 台",
+      "vm.thisNode": "このノード",
+      "vm.runningOn": "稼働ノード",
+      "vm.protected": "{count} ノードで保護中",
+      "vm.unprotected": "未保護",
+      "vm.protectionUnknown": "保護状態は不明",
+      "vm.protect": "保護する",
+      "vm.confirm.protect": "{name} を保護しますか？",
+      "vm.protectHelp": "このノードに障害が起きても、別のノードで VM を自動起動できるように複製を作成します。",
+      "vm.move": "別のノードへ移す",
+      "vm.askMove": "どのノードに移しますか？",
+      "vm.confirm.move": "{name} を {node} に移しますか？",
+      "vm.moveHelp": "VM は約 1 分間停止し、実行中のプログラムは終了します。",
+      "vm.placement": "配置",
+      "vm.automatic": "自動",
       "vm.hostUnavailable": "ホストの準備状況を取得できません",
       "vm.hostChecking": "ホストを確認中…",
       "vm.hostReady": "ホストは準備完了",
@@ -4042,7 +4108,7 @@
       "vm.starting": "起動中…",
       "vm.stopping": "停止中…",
       "vm.restoring": "復元中…",
-      "vm.saving": "チェックポイントを保存中…",
+      "vm.saving": "バックアップ中…",
       "vm.removing": "削除中…",
       "vm.running": "稼働中",
       "vm.stopped": "停止済み",
@@ -4055,20 +4121,20 @@
       "vm.haRole": "HA {role}",
       "vm.start": "起動",
       "vm.stop": "停止",
-      "vm.checkpoint": "チェックポイントを作成",
+      "vm.checkpoint": "今すぐバックアップ",
       "vm.logs": "ログ",
-      "vm.checkpoints": "チェックポイント一覧",
+      "vm.checkpoints": "バックアップ",
       "vm.remove": "削除",
-      "vm.restore": "復元",
+      "vm.restore": "この時点に戻す",
       "vm.stopFirst": "先に VM を停止してください。",
       "vm.disableHaFirst": "VM を削除するには先に HA を無効にしてください。",
-      "vm.holderRequired": "復元には現在の保持ノードのリースが必要です。",
+      "vm.holderRequired": "この VM を今動かしているノードでのみ戻せます。",
       "vm.copy": "コピー",
       "vm.sshKey": "SSH 公開鍵の表示コマンド",
       "vm.localHint": "このマシンでダッシュボードを開くか、CLI を使ってください。",
       "vm.loading": "VM を読み込み中…",
       "vm.empty": "VM はまだありません。",
-      "vm.savedCheckpoint": "チェックポイント #{seq} を保存しました。",
+      "vm.savedCheckpoint": "バックアップ #{seq} を保存しました。",
       "vm.back": "戻る",
       "vm.next": "次へ",
       "vm.cancel": "キャンセル",
@@ -4079,18 +4145,20 @@
       "vm.cpus": "vCPU",
       "vm.memory": "メモリ (MB)",
       "vm.disk": "ディスク (GB)",
+      "vm.sizeMinimum": "最低: メモリ 1024 MB、ディスク 8 GB。",
       "vm.askCreate": "この VM を作成しますか？",
       "vm.create": "作成",
       "vm.confirm.stop": "{name} を停止しますか？",
       "vm.confirm.rm": "{name} を削除しますか？",
-      "vm.confirm.restore": "{name} をチェックポイント #{seq} に復元しますか？",
+      "vm.confirm.restore": "{name} をバックアップ #{seq} の時点に戻しますか？",
       "vm.force": "すぐに強制停止する",
       "vm.removeDisk": "VM のディスクを削除します。",
-      "vm.restoreDisk": "VM の現在のディスクを上書きします。",
+      "vm.restoreDisk": "このバックアップ以降の変更は失われます。",
       "vm.readerTitle": "{name} の{section}",
       "vm.noLogs": "シリアル出力はまだありません。",
-      "vm.checkpointNumber": "チェックポイント #{seq}",
-      "vm.noCheckpoints": "チェックポイントはまだありません。",
+      "vm.checkpointNumber": "バックアップ #{seq}",
+      "vm.noCheckpoints": "バックアップはまだありません。",
+      "vm.backupHelp": "バックアップは VM のディスクを保存し、あとでその時点に戻せるようにします。実行中のプログラムは保存されません。HA を有効にすると自動でバックアップされ、ほかのノードにも複製されます。",
       "nav.chatRelay": "チャット",
       "nav.chat": "チャット",
       "chat.title": "チャット",
@@ -5070,6 +5138,38 @@
       "nav.stream": "串流",
       "nav.ai": "AI",
       "vm.new": "新建 VM",
+      "vm.pool.title": "资源池",
+      "vm.pool.loading": "正在检查资源池…",
+      "vm.pool.help": "节点加入资源池后，VM 会在最合适的节点上运行，并在该节点发生故障时自动切换。",
+      "vm.pool.create": "创建资源池",
+      "vm.pool.confirmCreate": "要在此节点上创建资源池吗？",
+      "vm.pool.join": "加入资源池",
+      "vm.pool.invite": "邀请",
+      "vm.pool.leave": "退出",
+      "vm.pool.confirmLeave": "要让此节点退出资源池吗？",
+      "vm.pool.code": "邀请码",
+      "vm.pool.loadingInvite": "正在获取邀请码…",
+      "vm.pool.secret": "请保管好此邀请码。任何知道此码的人都可以加入资源池。",
+      "vm.pool.online": "在线",
+      "vm.pool.offline": "离线",
+      "vm.pool.canHost": "可运行 VM",
+      "vm.pool.voteOnly": "仅投票",
+      "vm.pool.freeRam": "可用内存：{memory}",
+      "vm.pool.running": "运行中的 VM：{count}",
+      "vm.thisNode": "此节点",
+      "vm.runningOn": "运行节点",
+      "vm.protected": "已在 {count} 个节点上受到保护",
+      "vm.unprotected": "未受保护",
+      "vm.protectionUnknown": "保护状态未知",
+      "vm.protect": "启用保护",
+      "vm.confirm.protect": "要为 {name} 启用保护吗？",
+      "vm.protectHelp": "将此 VM 复制到资源池中的其他节点，以便此节点发生故障时自动重启 VM。",
+      "vm.move": "迁移",
+      "vm.askMove": "要将 VM 迁移到哪个节点？",
+      "vm.confirm.move": "要将 {name} 迁移到 {node} 吗？",
+      "vm.moveHelp": "VM 将停止约一分钟，正在运行的程序会退出。",
+      "vm.placement": "放置策略",
+      "vm.automatic": "自动",
       "vm.hostUnavailable": "无法获取主机就绪状态",
       "vm.hostChecking": "正在检查主机…",
       "vm.hostReady": "主机已就绪",
@@ -5086,7 +5186,7 @@
       "vm.starting": "正在启动…",
       "vm.stopping": "正在停止…",
       "vm.restoring": "正在恢复…",
-      "vm.saving": "正在保存检查点…",
+      "vm.saving": "正在备份…",
       "vm.removing": "正在删除…",
       "vm.running": "运行中",
       "vm.stopped": "已停止",
@@ -5099,20 +5199,20 @@
       "vm.haRole": "HA {role}",
       "vm.start": "启动",
       "vm.stop": "停止",
-      "vm.checkpoint": "创建检查点",
+      "vm.checkpoint": "立即备份",
       "vm.logs": "日志",
-      "vm.checkpoints": "检查点",
+      "vm.checkpoints": "备份",
       "vm.remove": "删除",
-      "vm.restore": "恢复",
+      "vm.restore": "恢复到此时",
       "vm.stopFirst": "请先停止 VM。",
       "vm.disableHaFirst": "清除 VM 前请先禁用 HA。",
-      "vm.holderRequired": "恢复需要当前持有者的租约。",
+      "vm.holderRequired": "只有当前运行此 VM 的节点可以恢复。",
       "vm.copy": "复制",
       "vm.sshKey": "查看 SSH 公钥的命令",
       "vm.localHint": "请在此计算机上打开仪表板，或使用 CLI。",
       "vm.loading": "正在加载 VM…",
       "vm.empty": "还没有虚拟机。",
-      "vm.savedCheckpoint": "已保存检查点 #{seq}。",
+      "vm.savedCheckpoint": "已保存备份 #{seq}。",
       "vm.back": "返回",
       "vm.next": "下一步",
       "vm.cancel": "取消",
@@ -5123,18 +5223,20 @@
       "vm.cpus": "vCPU",
       "vm.memory": "内存（MB）",
       "vm.disk": "磁盘（GB）",
+      "vm.sizeMinimum": "最低：内存 1024 MB，磁盘 8 GB。",
       "vm.askCreate": "创建此 VM？",
       "vm.create": "创建",
       "vm.confirm.stop": "停止 {name}？",
       "vm.confirm.rm": "删除 {name}？",
-      "vm.confirm.restore": "将 {name} 恢复到检查点 #{seq}？",
+      "vm.confirm.restore": "将 {name} 恢复到备份 #{seq}？",
       "vm.force": "立即强制停止",
       "vm.removeDisk": "此操作会删除 VM 的磁盘。",
-      "vm.restoreDisk": "此操作会替换 VM 当前的磁盘。",
+      "vm.restoreDisk": "此备份之后的更改将会丢失。",
       "vm.readerTitle": "{name} 的{section}",
       "vm.noLogs": "还没有串行输出。",
-      "vm.checkpointNumber": "检查点 #{seq}",
-      "vm.noCheckpoints": "还没有检查点。",
+      "vm.checkpointNumber": "备份 #{seq}",
+      "vm.noCheckpoints": "还没有备份。",
+      "vm.backupHelp": "备份会保存 VM 的磁盘，之后可以回到那个时间点。正在运行的程序不会被保存。启用 HA 后会自动备份并复制到其他节点。",
       "nav.chatRelay": "聊天",
       "nav.chat": "聊天",
       "chat.title": "聊天",
@@ -7237,7 +7339,18 @@
     if (vmPolling) { vmAgain = true; return; }
     vmPolling = true;
     var revision = vmRevision;
-    api("vm.list", {}).then(async function (data) {
+    vmState.selfNode = state.topology?.self?.node_id;
+    var poolStatus = api("vm.pool.status", {}).then(function (data) {
+      if (revision !== vmRevision) return;
+      vmState.pool = data;
+      vmState.poolError = "";
+      vmView.render(vmState);
+    }, function (err) {
+      if (revision !== vmRevision) return;
+      vmState.poolError = err.message;
+      vmView.render(vmState);
+    });
+    var list = api("vm.list", {}).then(async function (data) {
       if (revision !== vmRevision) return;
       vmState.rows = data.vms;
       vmState.loading = false;
@@ -7263,10 +7376,11 @@
       vmState.loading = false;
       vmState.listError = err.message;
       vmView.render(vmState);
-    }).finally(function () {
+    });
+    Promise.all([poolStatus, list]).finally(function () {
       vmPolling = false;
       if (!vmVisible) return;
-      var transitioning = vmState.creating || vmState.busy.size || vmState.rows.some(function (row) {
+      var transitioning = vmState.creating || vmState.poolBusy || vmState.busy.size || vmState.rows.some(function (row) {
         var ha = vmState.ha.get(row.server_id);
         return row.state === "creating" || row.state === "restoring" || ha && (ha.moving || ha.disabling);
       });
@@ -7275,12 +7389,14 @@
     });
   }
 
-  async function mutateVm(action, args) {
+  async function mutateVm(action, args, inline) {
     var id = args.id;
-    if (vmState.remote || (id ? vmState.busy.has(id) : vmState.creating)) return;
+    var poolAction = action.startsWith("pool.");
+    if (vmState.remote || (poolAction ? vmState.poolBusy : id ? vmState.busy.has(id) : vmState.creating)) return;
     vmState.actionError = "";
     vmState.savedCheckpoint = null;
-    if (id) vmState.busy.set(id, action);
+    if (poolAction) vmState.poolBusy = true;
+    else if (id) vmState.busy.set(id, action);
     else vmState.creating = args;
     vmView.render(vmState);
     refreshVmList();
@@ -7293,15 +7409,21 @@
         vmState.ha.delete(id);
       } else if (action === "checkpoint") {
         vmState.savedCheckpoint = data.seq;
+      } else if (poolAction && action !== "pool.invite") {
+        vmState.pool = null;
+        vmState.poolError = "";
       }
+      return data;
     } catch (err) {
-      if (!vmState.remote) {
-        vmState.remote = err.message.startsWith("`vm." + action + "` is not available from a remote dashboard session");
-        vmState.actionError = vmState.remote ? err.message.split("; ", 1)[0] : err.message;
-      }
+      var remote = err.message.startsWith("`vm." + action + "` is not available from a remote dashboard session");
+      if (remote) vmState.remote = true;
+      var error = remote ? err.message.split("; ", 1)[0] : err.message;
+      if (inline) throw new Error(error);
+      if (!vmState.remote || remote) vmState.actionError = error;
     } finally {
       vmRevision++;
-      if (id) vmState.busy.delete(id);
+      if (poolAction) vmState.poolBusy = false;
+      else if (id) vmState.busy.delete(id);
       else vmState.creating = null;
       vmView.render(vmState);
       refreshVmList();

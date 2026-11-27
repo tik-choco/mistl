@@ -34,7 +34,7 @@
 //! - anything else -> 404 JSON error
 //!
 //! Security:
-//! - Every route except `GET /favicon.png` needs the `mistl_session_<port>` cookie
+//! - Dashboard routes except `GET /favicon.png` need the `mistl_session_<port>` cookie
 //!   holding the persistent dashboard token ([`super::auth`]). `GET /?token=<t>`
 //!   with the right token answers 303 to `/` and sets the cookie; `GET /`
 //!   without a session serves a small 401 "locked" page. This holds on
@@ -162,14 +162,14 @@ pub async fn serve(state: Arc<AppState>, listen: &str) -> Result<WebServer> {
 
 /// Parsed request line + headers (header names lower-cased for
 /// case-insensitive lookup).
-struct RequestHead {
-    method: String,
-    path: String,
+pub(super) struct RequestHead {
+    pub(super) method: String,
+    pub(super) path: String,
     headers: Vec<(String, String)>,
 }
 
 impl RequestHead {
-    fn header(&self, name: &str) -> Option<&str> {
+    pub(super) fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case(name))
@@ -271,7 +271,7 @@ async fn read_idle(stream: &mut TcpStream, buf: &mut [u8]) -> io::Result<usize> 
 /// Read the remaining body bytes (on top of any `leftover` already read
 /// during header parsing) until exactly `content_length` bytes are
 /// available.
-async fn read_body(
+pub(super) async fn read_body(
     stream: &mut TcpStream,
     mut leftover: Vec<u8>,
     content_length: usize,
@@ -481,7 +481,7 @@ fn is_valid_port(port: &str) -> bool {
 /// A malformed escape (a `%` not followed by two hex digits) fails the
 /// whole decode rather than passing the raw bytes through, same as an
 /// invalid UTF-8 byte sequence.
-fn percent_decode(input: &str) -> Option<String> {
+pub(super) fn percent_decode(input: &str) -> Option<String> {
     let bytes = input.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -687,7 +687,7 @@ async fn handle_connection(
     }
 }
 
-async fn handle_connection_inner(
+pub(super) async fn handle_connection_inner(
     stream: &mut TcpStream,
     state: Arc<AppState>,
     instance_id: &str,
@@ -716,6 +716,12 @@ async fn handle_connection_inner(
 
     if !state.network.permitted() && caller == (Caller::Http { remote: true }) {
         return write_error(stream, 403, "Forbidden", "external connections are OFF").await;
+    }
+    // The Service API is bearer-only: no session cookie or instance header.
+    // DNS rebinding cannot authorize a request without the token; skipping
+    // the Host guard also allows TLS reverse proxies.
+    if path == "/service/v1" || path.starts_with("/service/v1/") {
+        return super::service_api::handle(stream, &head, leftover, state).await;
     }
     let local_addr = stream.local_addr()?;
     if !host_is_allowed(head.header("host").unwrap_or(""), &local_addr) {

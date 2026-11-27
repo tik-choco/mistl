@@ -1,6 +1,6 @@
 //! Pure convergence, retention and status decisions.
-use super::placement::Candidate;
 use crate::escrow::protocol::{Error, Head};
+use crate::placement::Candidate;
 use serde::{Deserialize, Serialize};
 
 pub struct ProviderInput<'a> {

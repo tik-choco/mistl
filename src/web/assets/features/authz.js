@@ -14,6 +14,10 @@
       reset: 'Reset usage', gauge: 'Stored bytes reflect files on disk. Remove stored files to free space.',
       tokens: 'API tokens', require: 'Require token for local API', apiHelp: 'When enabled, clients need a live Bearer token for the OpenAI-compatible API.',
       create: 'Create token', emptyTokens: 'No API tokens yet.', allModels: 'All models', lastUsed: 'Last used', expires: 'Expires', never: 'Never',
+      tokenPurpose: 'What will this token be used for?', tokenScope: 'Scope', tokenInfer: 'AI API', tokenUsage: 'Usage', tokenManage: 'Manage',
+      tokenInferChoice: 'Apps using the AI API', tokenInferHelp: 'Allow inference through the OpenAI-compatible API.',
+      tokenUsageChoice: 'Read usage for billing', tokenUsageHelp: 'Read usage and usage events through the Service API.',
+      tokenManageChoice: 'Manage access for a service app', tokenManageHelp: 'Read usage and manage grants, tokens and capabilities through the Service API.',
       revoked: 'Revoked', expired: 'Expired', active: 'Active', revoke: 'Revoke', delete: 'Delete',
       next: 'Next', back: 'Back', close: 'Close', confirm: 'Confirm', done: 'Done', copy: 'Copy', copied: 'Copied',
       who: 'Who should this rule apply to?', manual: 'Enter DID / node id', subject: 'DID / node id',
@@ -25,11 +29,12 @@
       maxRequests: 'How many requests are allowed?', maxChars: 'How many output characters are allowed?',
       maxStored: 'How much can each node store?', unlimited: 'Leave blank for unlimited. Zero disables usage.',
       number: 'Maximum', invalidNumber: 'Enter a whole number of zero or more within the supported range.',
-      unlimitedShort: 'Unlimited', perNode: 'per node', tokenName: 'What is this token for?', name: 'Name',
+      unlimitedShort: 'Unlimited', perNode: 'per node', tokenName: 'What should this token be called?', name: 'Name',
       models: 'Which models can it use?', modelsHelp: 'Choose configured models, or allow all models including future additions.',
       noModels: 'No configured models found. You can allow all models.', selectModels: 'Choose at least one model, or allow all models.',
       nameError: 'Enter a name of 1 to 64 characters.', review: 'Review your changes', service: 'Service', action: 'Action',
       reveal: 'Save your API token', once: 'Shown only once. Copy this token now and keep it somewhere safe.',
+      tokenServiceHelp: 'Use it as a Bearer token for /service/v1 on this dashboard address. See docs/service-api.md.',
       copyError: 'Could not copy. Select the token and copy it manually.', error: 'The request failed. Refresh and try again.',
       resetHelp: 'Reset the AI counters for this account? This also resets enforcement of its usage limit.',
       revokeHelp: 'Revoke this token? Clients using it will lose access immediately.', deleteHelp: 'Delete this token permanently? Clients using it will lose access.',
@@ -62,6 +67,10 @@
       reset: '利用記録をリセット', gauge: '保存量はディスク上のファイルから集計します。空きを増やすには保存済みファイルを削除してください。',
       tokens: 'API トークン', require: 'ローカル API にトークンを必須にする', apiHelp: '有効にすると、OpenAI 互換 API の利用に有効な Bearer トークンが必要になります。',
       create: 'トークンを作成', emptyTokens: 'API トークンはありません。', allModels: 'すべてのモデル', lastUsed: '最終利用', expires: '有効期限', never: 'なし',
+      tokenPurpose: 'このトークンは何に使いますか？', tokenScope: '権限', tokenInfer: 'AI API', tokenUsage: '利用状況', tokenManage: '管理',
+      tokenInferChoice: 'AI API を利用するアプリ', tokenInferHelp: 'OpenAI 互換 API での推論を許可します。',
+      tokenUsageChoice: '請求用に利用状況を取得', tokenUsageHelp: 'サービス API で利用状況と利用イベントを読み取れます。',
+      tokenManageChoice: 'サービスアプリでアクセスを管理', tokenManageHelp: 'サービス API で利用状況の取得、アクセス許可・トークン・共有権限の管理ができます。',
       revoked: '失効済み', expired: '期限切れ', active: '有効', revoke: '失効', delete: '削除',
       next: '次へ', back: '戻る', close: '閉じる', confirm: '確定', done: '完了', copy: 'コピー', copied: 'コピーしました',
       who: 'どの相手に適用しますか？', manual: 'DID / ノード ID を入力', subject: 'DID / ノード ID',
@@ -72,11 +81,12 @@
       period: '利用量の集計期間は？', day: '毎日（UTC）', month: '毎月（UTC）', total: 'リセットなし（累計）',
       maxRequests: 'リクエスト数の上限は？', maxChars: '出力文字数の上限は？', maxStored: 'ノードごとの保存量の上限は？',
       unlimited: '空欄で無制限、0 で利用不可になります。', number: '上限', invalidNumber: '対応範囲内の0以上の整数を入力してください。',
-      unlimitedShort: '無制限', perNode: 'ノードごと', tokenName: '何に使うトークンですか？', name: '名前',
+      unlimitedShort: '無制限', perNode: 'ノードごと', tokenName: 'トークンの名前は？', name: '名前',
       models: '利用できるモデルは？', modelsHelp: '設定済みのモデルを選ぶか、今後追加するモデルも含めてすべて許可できます。',
       noModels: '設定済みのモデルがありません。すべてのモデルを許可できます。', selectModels: 'モデルを1つ以上選ぶか、すべて許可してください。',
       nameError: '名前は1〜64文字で入力してください。', review: '変更内容を確認', service: 'サービス', action: '操作',
       reveal: 'API トークンを保存', once: 'この画面で一度だけ表示されます。今すぐコピーして安全に保管してください。',
+      tokenServiceHelp: 'このダッシュボードのアドレスの /service/v1 に Bearer トークンとして使用してください。docs/service-api.md を参照してください。',
       copyError: 'コピーできませんでした。トークンを選択して手動でコピーしてください。', error: '処理に失敗しました。更新して再試行してください。',
       resetHelp: 'この利用者の AI 利用記録をリセットしますか？利用上限の判定もリセットされます。',
       revokeHelp: '失効すると、このトークンを使うクライアントは直ちに利用できなくなります。', deleteHelp: 'トークンを完全に削除しますか？使用中のクライアントは利用できなくなります。',
@@ -98,6 +108,7 @@
       issuerWho: '誰に権限の発行を任せますか？', issuerHelp: 'この DID に、このサービスの利用権限の発行を許可しますか？', issuerRemoveHelp: 'この発行者の信頼を解除しますか？発行済みの権限も再判定されます。'
     }
   };
+  const tokenScopeKeys = { infer: 'tokenInfer', usage: 'tokenUsage', manage: 'tokenManage' };
 
   function mount(host, options) {
     const doc = host.ownerDocument, call = options.call, panel = host.closest('.panel');
@@ -299,8 +310,11 @@
       tokens.forEach(function (token) {
         const row = el('div', 'authz-row'), body = el('div', 'authz-row-body');
         const state = token.revoked_at ? 'revoked' : token.expires_at && Date.parse(token.expires_at) <= Date.now() ? 'expired' : 'active';
-        body.append(el('strong', null, token.name), el('code', 'authz-id', token.hint), el('span', 'authz-badge authz-' + state, t(state)));
-        muted(body, (token.models || []).length ? token.models.join(', ') : t('allModels')); muted(body, limitsText(token.limits, 'ai'));
+        const scopes = token.scopes || ['infer'];
+        body.append(el('strong', null, token.name));
+        scopes.forEach(function (scope) { body.append(el('span', 'authz-badge', t(tokenScopeKeys[scope]))); });
+        body.append(el('code', 'authz-id', token.hint), el('span', 'authz-badge authz-' + state, t(state)));
+        if (scopes.includes('infer')) { muted(body, (token.models || []).length ? token.models.join(', ') : t('allModels')); muted(body, limitsText(token.limits, 'ai')); }
         muted(body, t('lastUsed') + ': ' + date(token.last_used_at) + ' · ' + t('expires') + ': ' + date(token.expires_at));
         const actions = el('div', 'authz-actions');
         if (!token.revoked_at) actions.append(btn('revoke', function () { confirmAction('revokeHelp', token.name, 'authz.token.revoke', { id: token.id }); }, '', 'revoke-' + token.id));
@@ -470,6 +484,14 @@
       });
     }
     function tokenWizard() {
+      const purpose = { title: 'tokenPurpose', render: function (w, parent) {
+        Object.keys(tokenScopeKeys).forEach(function (scope) {
+          const key = tokenScopeKeys[scope], row = choice(parent, t(key + 'Choice'), scope, w.values.scope, function (v) { w.values.scope = v; });
+          row.append(el('small', 'authz-muted', t(key + 'Help')));
+        });
+      }, validate: function (w) {
+        w.steps = [purpose, name].concat(w.values.scope === 'infer' ? inferSteps : [], [expiry, summary]); return true;
+      } };
       const name = { title: 'tokenName', render: function (w, parent) { const input = field(parent, 'name', w.values.name, function (v) { w.values.name = v; }); input.required = true; input.maxLength = 128; }, validate: function (w) {
         w.values.name = w.values.name.trim(); if (!w.values.name || Array.from(w.values.name).length > 64) { showError(w, 'nameError'); return false; } return true;
       } };
@@ -496,10 +518,16 @@
           }).catch(function () { w.values.modelsLoaded = true; w.values.modelsError = true; if (!w.closed && list.isConnected) showModels(); });
         }
       }, validate: function (w) { if (!w.values.allModels && !w.values.models.length) { showError(w, 'selectModels'); return false; } return true; } };
-      open([name, models].concat(aiLimitSteps(), [durationStep(), review(function (w, parent) {
-        detail(parent, 'name', w.values.name); detail(parent, 'models', w.values.allModels ? t('allModels') : w.values.models.join(', ')); detail(parent, 'limits', limitsText(w.values.limits, 'ai')); detail(parent, 'expires', duration(w.values));
-      })]), { name: '', models: [], allModels: true, availableModels: [], limits: { period: 'day' }, ttl: 0 }, function (v) {
-        const args = { name: v.name, models: v.allModels ? [] : v.models, limits: v.limits }; if (v.ttl) args.ttl_secs = v.ttl;
+      const inferSteps = [models].concat(aiLimitSteps()), expiry = durationStep();
+      const summary = review(function (w, parent) {
+        const v = w.values;
+        detail(parent, 'name', v.name); detail(parent, 'tokenScope', t(tokenScopeKeys[v.scope] + 'Choice'));
+        if (v.scope === 'infer') { detail(parent, 'models', v.allModels ? t('allModels') : v.models.join(', ')); detail(parent, 'limits', limitsText(v.limits, 'ai')); }
+        detail(parent, 'expires', duration(v));
+      });
+      open([purpose, name].concat(inferSteps, [expiry, summary]), { scope: 'infer', name: '', models: [], allModels: true, availableModels: [], limits: { period: 'day' }, ttl: 0 }, function (v) {
+        const args = { name: v.name, scopes: [v.scope] }; if (v.ttl) args.ttl_secs = v.ttl;
+        if (v.scope === 'infer') { args.models = v.allModels ? [] : v.models; args.limits = v.limits; }
         return call('authz.token.create', args);
       });
     }
@@ -573,6 +601,7 @@
     }
     function reveal(w) {
       w.heading.textContent = t('reveal'); muted(w.body, t('once'));
+      if (w.values.scope === 'usage' || w.values.scope === 'manage') muted(w.body, t('tokenServiceHelp'));
       const secret = el('textarea', 'authz-secret'); secret.readOnly = true; secret.rows = 3; secret.value = w.secret; secret.setAttribute('aria-label', t('token')); secret.spellcheck = false; w.body.append(secret);
       const actions = el('div', 'authz-actions'), copy = btn('copy', async function () {
         try { await global.navigator.clipboard.writeText(w.secret); if (!w.closed) copy.textContent = t('copied'); }

@@ -9,6 +9,18 @@ use super::{Denied, Limits};
 
 pub const MAX_TOKENS: usize = 256;
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Scope {
+    Infer,
+    Usage,
+    Manage,
+}
+
+fn default_scopes() -> Vec<Scope> {
+    vec![Scope::Infer]
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ApiToken {
@@ -22,6 +34,8 @@ pub struct ApiToken {
     pub last_used_at: Option<DateTime<Utc>>,
     pub models: Vec<String>,
     pub limits: Limits,
+    #[serde(default = "default_scopes")]
+    pub scopes: Vec<Scope>,
 }
 
 impl ApiToken {
@@ -35,9 +49,21 @@ impl ApiToken {
         self.revoked_at.is_none() && self.expires_at.is_none_or(|expiry| expiry > now)
     }
 
+    pub fn has_scope(&self, scope: Scope) -> bool {
+        self.scopes.contains(&scope)
+            || (scope == Scope::Usage && self.scopes.contains(&Scope::Manage))
+    }
+
     pub fn validate(&self) -> Result<()> {
         validate_name(&self.name)?;
         validate_models(&self.models)?;
+        ensure!(
+            (1..=3).contains(&self.scopes.len()),
+            "token must have 1 to 3 scopes"
+        );
+        for (i, scope) in self.scopes.iter().enumerate() {
+            ensure!(!self.scopes[..i].contains(scope), "duplicate token scope");
+        }
         ensure!(
             self.hash.len() == 64
                 && self
@@ -62,6 +88,7 @@ impl TokenBook {
         models: Vec<String>,
         limits: Limits,
         expires_at: Option<DateTime<Utc>>,
+        scopes: Option<Vec<Scope>>,
         now: DateTime<Utc>,
     ) -> Result<(String, ApiToken)> {
         ensure!(
@@ -86,7 +113,11 @@ impl TokenBook {
             last_used_at: None,
             models,
             limits,
+            scopes: scopes
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(default_scopes),
         };
+        token.validate()?;
         ensure!(
             !self.0.iter().any(|t| t.id == token.id),
             "token id collision; please retry"

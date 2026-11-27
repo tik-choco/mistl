@@ -1657,8 +1657,17 @@ async fn handle_relay(
             .and_then(Value::as_str)
             .filter(|m| !m.trim().is_empty()),
     };
+    let op = match path.as_str() {
+        "/images/edits" => "image_edit",
+        "/game/act" => "game",
+        "/audio/voices" => "voices",
+        "/api/ps" | "/health" => "status",
+        p if p.starts_with("/3d/generations") => "gen3d",
+        p if p.starts_with("/motion/") => "motion",
+        _ => "oai",
+    };
     let authorized = match crate::authz::authorize_api(head.header("authorization"), model) {
-        Ok(authorized) => authorized,
+        Ok(authorized) => authorized.with_op(op),
         Err(denied) => {
             write_denied(stream, denied).await?;
             return Ok(());
@@ -1827,7 +1836,7 @@ async fn handle_audio_speech(
     let lang = req.get("lang").and_then(Value::as_str).map(str::to_string);
 
     let authorized = match crate::authz::authorize_api(authorization, Some(&params.model)) {
-        Ok(authorized) => authorized,
+        Ok(authorized) => authorized.with_op("tts"),
         Err(denied) => {
             write_denied(stream, denied).await?;
             return Ok(());
@@ -1907,7 +1916,7 @@ async fn handle_audio_transcriptions(
     };
 
     let authorized = match crate::authz::authorize_api(authorization, Some(&params.model)) {
-        Ok(authorized) => authorized,
+        Ok(authorized) => authorized.with_op("stt"),
         Err(denied) => {
             write_denied(stream, denied).await?;
             return Ok(());
@@ -2132,7 +2141,7 @@ async fn handle_decision(
     }
     let model = req.get("model").and_then(Value::as_str);
     let authorized = match crate::authz::authorize_api(authorization, model) {
-        Ok(authorized) => authorized,
+        Ok(authorized) => authorized.with_op("decision"),
         Err(denied) => {
             write_denied(stream, denied).await?;
             return Ok(());
@@ -2175,7 +2184,7 @@ async fn handle_chat_completions_with_oai(
         }
     };
     let authorized = match crate::authz::authorize_api(authorization, req.model.as_deref()) {
-        Ok(authorized) => authorized,
+        Ok(authorized) => authorized.with_op("chat"),
         Err(denied) => {
             write_denied(stream, denied).await?;
             return Ok(());
@@ -4070,13 +4079,14 @@ mod tests {
         let image_stream = image_body(true);
         let (room_server, _) = room_test_server().await;
         let default_server = start_test_server(fake_call_ok(), fake_models()).await;
-        for (server, path, content_type, body, chars) in [
+        for (server, path, content_type, body, chars, op) in [
             (
                 &default_server,
                 "/v1/chat/completions",
                 "application/json",
                 CHAT_BODY,
                 5,
+                "chat",
             ),
             (
                 &default_server,
@@ -4084,13 +4094,15 @@ mod tests {
                 "application/json",
                 stream_body.as_str(),
                 5,
+                "chat",
             ),
             (
                 &default_server,
                 "/v1/audio/speech",
                 "application/json",
-                r#"{"input":"hi"}"#,
+                r#"{"model":"m1","input":"hi"}"#,
                 0,
+                "tts",
             ),
             (
                 &default_server,
@@ -4098,6 +4110,7 @@ mod tests {
                 "multipart/form-data; boundary=b",
                 AUDIO_BODY,
                 0,
+                "stt",
             ),
             (
                 &room_server,
@@ -4105,6 +4118,7 @@ mod tests {
                 "application/json",
                 image.as_str(),
                 12,
+                "chat",
             ),
             (
                 &room_server,
@@ -4112,9 +4126,15 @@ mod tests {
                 "application/json",
                 image_stream.as_str(),
                 12,
+                "chat",
             ),
         ] {
             crate::authz::test_reset();
+            crate::authz::test_command(
+                "authz.token.create",
+                json!({"name":"b","scopes":["usage"]}),
+            )
+            .unwrap();
             let token = create_token(json!({"limits":{"max_requests":1}}));
             require_token(true);
             let raw = token_request(server, path, Some(&token), Some((content_type, body))).await;
@@ -4124,6 +4144,11 @@ mod tests {
             assert_eq!(usage["output_chars"], chars, "{path}");
             let raw = token_request(server, path, Some(&token), Some((content_type, body))).await;
             assert_denied(&raw, 429, "usage_limit_exceeded");
+            let events = crate::authz::test_command("authz.events", json!({})).unwrap();
+            let events = events["events"].as_array().unwrap();
+            assert_eq!(events.len(), 1, "{path}");
+            assert_eq!(events[0]["op"], op, "{path}");
+            assert_eq!(events[0]["model"], "m1", "{path}");
         }
     }
 

@@ -2,8 +2,9 @@
 //! daemon, plus a small JSON bridge (`POST /api/call`) that routes straight
 //! into [`crate::daemon::dispatch`] -- the same router the CLI IPC uses.
 //!
-//! Loopback-only by default; every route but the favicon needs the persistent
-//! dashboard token (see `auth`). Cross-origin requests are also
+//! Loopback-only by default; dashboard routes other than the favicon need the
+//! persistent dashboard token (see `auth`). The Service API uses scoped bearer
+//! tokens instead. Cross-origin dashboard requests are also
 //! rejected via a required custom header (browsers can't send it cross-site
 //! without a CORS preflight, which this server never grants).
 
@@ -12,6 +13,7 @@ pub mod auth;
 pub mod autoreopen;
 pub mod browser;
 pub mod server;
+mod service_api;
 pub mod ui_state;
 
 pub use auth::dashboard_url;

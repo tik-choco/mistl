@@ -89,6 +89,7 @@ options and approval behavior.
 | [AI configuration](docs/ai-config.md) | Providers, rooms and the local API |
 | [Identity](docs/identity.md) | Profile document and DID delegation |
 | [Authorization](docs/authorization.md) | Allow/deny peers, API tokens, usage limits, capabilities |
+| [Service API](docs/service-api.md) | HTTP integration for membership, billing, grants, and usage events |
 | [Architecture](docs/architecture.md) | Modules, interop, bot delivery, known limitations |
 | [Runtime](docs/runtime.md) | Dev and stable instances, connection controls |
 | [Building from source](docs/building.md) | Requirements, build, releases |

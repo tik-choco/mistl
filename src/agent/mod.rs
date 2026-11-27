@@ -49,7 +49,7 @@ pub struct AgentArgs {
     /// Run workspace tools in the VM with this server id
     #[arg(long)]
     vm: Option<String>,
-    /// Executor node id for a remote VM
+    /// Executor node ID (optional when this node knows the VM's HA group)
     #[arg(long, requires = "vm")]
     node: Option<String>,
     /// Print model ids from mistl's local API and exit

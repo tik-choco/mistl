@@ -3,7 +3,7 @@
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
-pub struct Candidate {
+pub(crate) struct Candidate {
     pub did: String,
     /// Advertised free bytes plus bytes already held for this owner.
     pub available: u64,
@@ -24,7 +24,7 @@ fn negative_log_uniform(value: u64) -> f64 {
 /// `available >= bytes`. `home`, when Some, is always included first (even if
 /// absent from `candidates`) and counts toward `replicas`. Deterministic for
 /// equal inputs; order = home, then best score.
-pub fn place(
+pub(crate) fn place(
     owner: &str,
     bytes: u64,
     replicas: usize,

@@ -3,9 +3,10 @@
   "use strict";
 
   const sizes = [
-    { key: "cpus", label: "vm.cpus", fallback: 2 },
-    { key: "memory_mb", label: "vm.memory", fallback: 2048 },
-    { key: "disk_gb", label: "vm.disk", fallback: 20 },
+    { key: "cpus", label: "vm.cpus", fallback: 2, min: 1 },
+    // Minimums match MIN_MEMORY_MB / MIN_DISK_GB in src/vm/mod.rs.
+    { key: "memory_mb", label: "vm.memory", fallback: 2048, min: 1024 },
+    { key: "disk_gb", label: "vm.disk", fallback: 20, min: 8 },
   ];
   const phases = new Set(["creating", "starting", "stopping", "restoring"]);
   const states = new Set([...phases, "running", "stopped", "paused", "standby", "stale", "error"]);
@@ -13,7 +14,7 @@
   function create({ root, t, formatBytes, formatUptime, copy, config, logs, checkpoints, mutate }) {
     const document = root.ownerDocument;
     const cards = new Map();
-    let model, doctor, doctorError, activeDialog;
+    let model, doctor, doctorError, activeDialog, poolMembers, selfNode, hasBackupHost;
 
     function node(tag, className, text) {
       const element = document.createElement(tag);
@@ -66,6 +67,19 @@
         row.disk_gb && row.disk_gb + " GB"].filter(Boolean).join(" · ");
     }
 
+    function nodeName(id) {
+      return poolMembers.get(id)?.name || id.slice(0, 8);
+    }
+
+    function freeRam(member) {
+      const mb = member?.mem_free_mb;
+      return t("vm.pool.freeRam", { memory: mb == null ? "—" : mb + " MB" });
+    }
+
+    function canHost(member) {
+      return member.ha_capable && member.score != null;
+    }
+
     const head = node("div", "vm-page-head");
     const heading = node("div");
     const title = node("h2", "", "VM");
@@ -83,6 +97,22 @@
     const remoteHint = node("p", "vm-muted");
     const result = node("p", "vm-result");
     result.setAttribute("role", "status");
+    const pool = node("section", "vm-card vm-pool");
+    const poolTitle = node("h3");
+    const poolHead = node("div", "vm-card-head");
+    poolHead.append(poolTitle);
+    const poolHelp = node("p", "vm-muted");
+    const poolError = errorLine();
+    const members = node("ul", "vm-pool-members");
+    const poolActions = node("div", "vm-actions");
+    const poolButtons = [
+      [false, "vm.pool.create", createPool],
+      [false, "vm.pool.join", joinPool],
+      [true, "vm.pool.invite", invitePool],
+      [true, "vm.pool.leave", leavePool],
+    ].map(([joined, label, open]) => [joined, label, button("", open)]);
+    poolActions.append(...poolButtons.map(([, , control]) => control));
+    pool.append(poolHead, poolHelp, poolError, members, poolActions);
     const empty = node("p", "empty-note");
     const list = node("div", "vm-list");
     const key = commandLine(() => "mistl vm key");
@@ -101,7 +131,38 @@
     const dialogBody = node("div");
     dialog.append(dialogHead, dialogBody);
     dialog.addEventListener("cancel", (event) => { event.preventDefault(); close(); });
-    root.append(head, actionError, remoteHint, result, listError, empty, list, keyDetails, dialog);
+    root.append(head, actionError, remoteHint, result, pool, listError, empty, list, keyDetails, dialog);
+
+    function poolAvailable(joined) {
+      return model.pool?.joined === joined && !model.poolError && !model.poolBusy && !model.remote;
+    }
+
+    function renderPool() {
+      write(poolTitle, t("vm.pool.title"));
+      message(poolHelp, !model.pool && !model.poolError ? t("vm.pool.loading") :
+        model.pool?.joined === false ? t("vm.pool.help") : "");
+      message(poolError, model.poolError);
+      members.hidden = !model.pool?.joined;
+      members.replaceChildren(...Array.from(poolMembers.values(), (member) => {
+        const row = node("li");
+        const dot = node("span", "vm-pool-dot");
+        const status = t(member.online ? "vm.pool.online" : "vm.pool.offline");
+        dot.dataset.online = Boolean(member.online);
+        dot.setAttribute("role", "img");
+        dot.setAttribute("aria-label", status);
+        dot.title = status;
+        const name = nodeName(member.node) + (member.self ? " (" + t("vm.thisNode") + ")" : "");
+        const facts = [t(canHost(member) ? "vm.pool.canHost" : "vm.pool.voteOnly"), freeRam(member),
+          t("vm.pool.running", { count: member.running_vms })].join(" · ");
+        row.append(dot, node("strong", "", name), node("span", "vm-muted", facts));
+        return row;
+      }));
+      for (const [joined, label, control] of poolButtons) {
+        write(control, t(label));
+        control.hidden = model.pool?.joined !== joined;
+        control.disabled = !poolAvailable(joined);
+      }
+    }
 
     function setDoctor(data, error) {
       doctor = data;
@@ -133,7 +194,7 @@
       header.append(name, state, ha);
       const facts = node("dl", "vm-facts");
       const factValues = {};
-      for (const label of ["resources", "sshTarget", "uptime"]) {
+      for (const label of ["resources", "sshTarget", "uptime", "runningOn"]) {
         const field = node("div");
         const term = node("dt");
         const value = node("dd");
@@ -142,19 +203,21 @@
         factValues[label] = { term, value };
       }
       const error = node("p", "vm-error");
+      const protection = node("p", "vm-muted vm-protection");
       const actions = node("div", "vm-actions");
-      const card = { element, name, state, ha, factValues, error, actions };
+      const card = { element, name, state, ha, factValues, error, protection, actions };
       card.power = button("", () => {
         if (isRunning(card.row)) confirmAction(card.row, "stop");
         else mutate("start", { id: card.row.server_id });
       });
-      card.checkpoint = button("", () => mutate("checkpoint", { id: card.row.server_id }));
       card.logs = button("", () => openReader(card.row, "logs"));
       card.checkpoints = button("", () => openReader(card.row, "checkpoints"));
+      card.protect = button("", () => protectVm(card.row));
+      card.move = button("", () => moveVm(card.row));
       card.remove = button("", () => confirmAction(card.row, "rm"));
       card.command = commandLine(() => card.command.code.textContent);
-      actions.append(card.power, card.checkpoint, card.logs, card.checkpoints, card.remove);
-      element.append(header, facts, error, actions, card.command.line);
+      actions.append(card.power, card.checkpoints, card.logs, card.protect, card.move, card.remove);
+      element.append(header, facts, protection, error, actions, card.command.line);
       return card;
     }
 
@@ -169,6 +232,22 @@
 
     function mutationLocked(row) {
       return model.remote || model.busy.has(row.server_id) || phases.has(row.state);
+    }
+
+    function isHolder(row, ha) {
+      return Boolean(row.holder && (selfNode ? row.holder === selfNode : ha?.state === "holder"));
+    }
+
+    function hostNodes(ha) {
+      return ha?.retired ? [] : (ha?.members || []).filter((member) => member.role === "host").map((member) => member.node);
+    }
+
+    function canProtect(row) {
+      return hasBackupHost && !Object.hasOwn(row, "holder");
+    }
+
+    function moveLocked(row, ha) {
+      return mutationLocked(row) || ha?.state !== "holder" || ha.moving || ha.disabling || ha.stale || ha.lease_valid === false;
     }
 
     function removalBlocked(row, ha) {
@@ -194,25 +273,35 @@
       const role = ha?.role || (phase === "standby" ? "standby" : "");
       message(card.ha, role ? t("vm.haRole", { role: t("vm." + role) }) : "");
 
+      const grouped = Object.hasOwn(row, "holder");
+      const local = isHolder(row, ha);
+      const hosts = hostNodes(ha);
       const values = {
         resources: resourceText(row),
         sshTarget: row.ssh_target,
         uptime: typeof row.uptime_secs === "number" ? formatUptime(row.uptime_secs) : "",
+        runningOn: pending ? "" : !grouped || local ? t("vm.thisNode") : row.holder ? nodeName(row.holder) : "—",
       };
       for (const [key, { term, value }] of Object.entries(card.factValues)) {
         write(term, t("vm." + key));
         write(value, values[key] || "—");
         term.parentElement.hidden = !values[key];
       }
+      message(card.protection, !pending && (hosts.length >= 2 ? t("vm.protected", { count: hosts.length }) :
+        grouped && !ha ? t("vm.protectionUnknown") : t("vm.unprotected")));
       message(card.error, row.last_error || ha?.last_error);
       card.actions.hidden = pending;
       write(card.power, t(running ? "vm.stop" : "vm.start"));
       card.power.disabled = Boolean(locked || !row.ssh_target || (!running && !writable));
-      write(card.checkpoint, t("vm.checkpoint"));
-      card.checkpoint.disabled = Boolean(locked || !row.ssh_target || !writable);
       write(card.logs, t("vm.logs"));
       card.logs.disabled = !row.ssh_target;
       write(card.checkpoints, t("vm.checkpoints"));
+      write(card.protect, t("vm.protect"));
+      card.protect.hidden = !canProtect(row);
+      card.protect.disabled = Boolean(locked);
+      write(card.move, t("vm.move"));
+      card.move.hidden = !local || hosts.length < 2 || !hosts.some((node) => node !== row.holder);
+      card.move.disabled = Boolean(moveLocked(row, ha));
       write(card.remove, t("vm.remove"));
       const removeReason = removalBlocked(row, ha);
       card.remove.disabled = Boolean(locked || removeReason);
@@ -224,6 +313,11 @@
 
     function render(data) {
       model = data;
+      poolMembers = new Map((data.pool?.joined ? data.pool.members : []).map((member) => [member.node, member]));
+      selfNode = data.pool?.members?.find((member) => member.self)?.node || data.selfNode;
+      hasBackupHost = !data.poolError && Array.from(poolMembers.values()).some((member) =>
+        !member.self && member.node !== selfNode && member.online && canHost(member));
+      renderPool();
       newButton.disabled = Boolean(data.remote || data.creating);
       message(actionError, data.actionError);
       message(remoteHint, data.remote && t("vm.localHint"));
@@ -269,6 +363,7 @@
     function close() {
       activeDialog = null;
       if (dialog.open) dialog.close();
+      dialogBody.replaceChildren();
     }
 
     function inputField(label, input) {
@@ -286,6 +381,141 @@
       actions.append(submit);
       form.addEventListener("submit", (event) => { event.preventDefault(); onSubmit(); });
       return { form, actions, submit };
+    }
+
+    function mutationStep({ title, label, action, getArgs, content, focus, back, done = close }) {
+      const error = errorLine();
+      let pending = false;
+      const session = { sync() { submit.disabled = pending || !getArgs(); } };
+      const { form, actions, submit } = formStep(back || close, label, async () => {
+        if (pending || activeDialog !== session) return;
+        const args = getArgs();
+        if (!args) return;
+        pending = true;
+        session.sync();
+        message(error, "");
+        try {
+          const data = await mutate(action, args, true);
+          if (activeDialog === session) done(data);
+        } catch (err) {
+          if (activeDialog === session) message(error, err.message);
+        } finally {
+          pending = false;
+          if (activeDialog === session) session.sync();
+        }
+      });
+      if (!back) write(actions.firstElementChild, t("vm.cancel"));
+      form.append(...content, error, actions);
+      form.addEventListener("input", session.sync);
+      activeDialog = session;
+      session.sync();
+      show(title, form, focus);
+    }
+
+    function createPool() {
+      mutationStep({
+        title: t("vm.pool.confirmCreate"), label: t("vm.pool.create"), action: "pool.create",
+        getArgs: () => poolAvailable(false) ? {} : null,
+        content: [node("p", "vm-muted", t("vm.pool.help"))],
+        done: (data) => showInvite(data.invite),
+      });
+    }
+
+    function joinPool() {
+      const input = node("textarea");
+      input.rows = 3;
+      input.required = true;
+      input.autocomplete = "off";
+      input.spellcheck = false;
+      mutationStep({
+        title: t("vm.pool.join"), label: t("vm.pool.join"), action: "pool.join",
+        getArgs: () => {
+          const code = input.value.trim();
+          return code && poolAvailable(false) ? { code } : null;
+        },
+        content: [inputField(t("vm.pool.code"), input)], focus: input,
+      });
+    }
+
+    function showInvite(invite) {
+      const command = commandLine(() => command.code.textContent);
+      write(command.code, invite);
+      write(command.copyButton, t("vm.copy"));
+      const body = node("div", "vm-form");
+      body.append(node("p", "vm-muted", t("vm.pool.secret")), command.line);
+      activeDialog = {};
+      show(t("vm.pool.code"), body, command.copyButton);
+    }
+
+    async function invitePool() {
+      if (!poolAvailable(true)) return;
+      const session = {};
+      const body = node("div", "vm-form");
+      const loading = node("p", "vm-muted", t("vm.pool.loadingInvite"));
+      loading.setAttribute("role", "status");
+      const error = errorLine();
+      body.append(loading, error);
+      activeDialog = session;
+      show(t("vm.pool.code"), body);
+      try {
+        const data = await mutate("pool.invite", {}, true);
+        if (activeDialog === session) showInvite(data.invite);
+      } catch (err) {
+        if (activeDialog === session) message(error, err.message);
+      } finally {
+        loading.hidden = true;
+      }
+    }
+
+    function leavePool() {
+      mutationStep({
+        title: t("vm.pool.confirmLeave"), label: t("vm.pool.leave"), action: "pool.leave",
+        getArgs: () => poolAvailable(true) ? {} : null,
+        content: [],
+      });
+    }
+
+    function protectVm(row) {
+      const id = row.server_id;
+      mutationStep({
+        title: t("vm.confirm.protect", { name: row.name || id }), label: t("vm.protect"), action: "protect",
+        getArgs: () => {
+          const current = model.rows.find((row) => row.server_id === id);
+          return current && !mutationLocked(current) && canProtect(current) ? { id } : null;
+        },
+        content: [node("p", "vm-muted", t("vm.protectHelp"))],
+      });
+    }
+
+    function moveVm(row) {
+      const id = row.server_id;
+      const name = row.name || id;
+      const ha = model.ha.get(id);
+      const targets = hostNodes(ha).filter((node) => node !== row.holder);
+      targets.sort((a, b) => (poolMembers.get(b)?.score ?? -Infinity) - (poolMembers.get(a)?.score ?? -Infinity));
+      const choices = node("div", "vm-move-targets");
+      const controls = targets.map((to) => {
+        const getArgs = () => {
+          const current = model.rows.find((row) => row.server_id === id);
+          const status = model.ha.get(id);
+          return current && isHolder(current, status) && !moveLocked(current, status) &&
+            to !== current.holder && hostNodes(status).includes(to) ? { id, to } : null;
+        };
+        const select = button("", () => {
+          mutationStep({
+            title: t("vm.confirm.move", { name, node: nodeName(to) }), label: t("vm.move"), action: "move",
+            getArgs, content: [node("p", "vm-muted", t("vm.moveHelp"))], back: () => moveVm(row),
+          });
+        });
+        select.append(node("strong", "", nodeName(to)), node("span", "vm-muted", freeRam(poolMembers.get(to))));
+        choices.append(select);
+        return { select, getArgs };
+      });
+      activeDialog = { sync() {
+        for (const { select, getArgs } of controls) select.disabled = !getArgs();
+      } };
+      activeDialog.sync();
+      show(t("vm.askMove"), choices, controls.find(({ select }) => !select.disabled)?.select);
     }
 
     function openWizard() {
@@ -315,11 +545,11 @@
 
       function sizeStep(defaults) {
         session.sync = null;
-        const inputs = sizes.map(({ key, fallback }) => {
+        const inputs = sizes.map(({ key, fallback, min }) => {
           const input = node("input");
           input.type = "number";
           input.required = true;
-          input.min = 1;
+          input.min = min;
           input.max = defaults?.["max_" + key] ?? 4294967295;
           input.value = args[key] ?? defaults?.["default_" + key] ?? fallback;
           return input;
@@ -330,7 +560,7 @@
         });
         const sizeFields = node("div", "vm-size-fields");
         sizeFields.append(...inputs.map((input, index) => inputField(t(sizes[index].label), input)));
-        form.append(sizeFields, actions);
+        form.append(sizeFields, node("p", "vm-muted", t("vm.sizeMinimum")), actions);
         show(t("vm.askSize"), form, inputs[0]);
       }
 
@@ -339,11 +569,16 @@
           close();
           mutate("create", args);
         });
-        session.sync = () => { submit.disabled = newButton.disabled; };
-        session.sync();
         const summary = node("dl", "vm-facts");
+        const placement = node("dl", "vm-facts");
         fields(summary, [["vm.name", args.name], ["vm.resources", resourceText(args)]]);
-        form.append(summary, actions);
+        fields(placement, [["vm.placement", t("vm.automatic")]]);
+        session.sync = () => {
+          submit.disabled = newButton.disabled;
+          placement.hidden = !model.pool?.joined;
+        };
+        session.sync();
+        form.append(summary, placement, actions);
         show(t("vm.askCreate"), form);
       }
     }
@@ -399,6 +634,22 @@
       const refresh = button(t("common.refresh"), load);
       const error = errorLine();
       const content = node("div");
+      if (kind === "checkpoints") {
+        // Saving lives next to the list so the card needs only one backup button.
+        const save = button(t("vm.checkpoint"), async () => {
+          save.disabled = true;
+          await mutate("checkpoint", { id });
+          if (activeDialog === session) load();
+        }, "primary");
+        const canSave = () => {
+          const current = model.rows.find((row) => row.server_id === id);
+          return current && !mutationLocked(current) && current.ssh_target && canWriteDisk(current, model.ha.get(id));
+        };
+        session.sync = session.syncSave = () => { save.disabled = !canSave(); };
+        session.syncSave();
+        toolbar.append(save);
+        body.append(node("p", "vm-muted", t("vm.backupHelp")));
+      }
       toolbar.append(refresh);
       body.append(toolbar, error, content);
       activeDialog = session;
@@ -435,6 +686,7 @@
             const hint = node("p", "vm-muted");
             content.replaceChildren(data.checkpoints.length ? entries : node("p", "vm-muted", t("vm.noCheckpoints")), hint);
             session.sync = () => {
+              session.syncSave();
               const reason = restoreBlocked(id);
               controls.forEach((button) => { button.disabled = reason !== null; });
               message(hint, controls.length && (model.remote ? t("vm.localHint") : reason));

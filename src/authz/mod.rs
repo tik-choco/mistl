@@ -4,6 +4,7 @@
 
 mod capability;
 mod delegation;
+mod events;
 mod policy;
 mod tokens;
 mod usage;
@@ -25,8 +26,8 @@ pub use policy::{
     AccessMode, Action, ApiPolicy, LimitOverride, Limits, Period, Policy, Rule, Service,
     ServicePolicy,
 };
-pub use tokens::ApiToken;
 use tokens::TokenBook;
+pub use tokens::{ApiToken, Scope};
 use usage::UsageBook;
 
 static STORE: LazyLock<Mutex<Store>> = LazyLock::new(|| Mutex::new(Store::default()));
@@ -78,6 +79,13 @@ impl Denied {
         }
     }
 
+    fn scope_required() -> Self {
+        Self {
+            code: "scope_required",
+            message: "API token lacks the required scope".into(),
+        }
+    }
+
     pub fn http_status(&self) -> u16 {
         match self.code {
             "unauthorized" => 401,
@@ -95,10 +103,14 @@ pub struct Authorized {
     pub principal: Option<Principal>,
     #[allow(dead_code)]
     pub token: Option<String>,
+    pub action: Action,
+    pub op: Option<&'static str>,
+    pub model: Option<String>,
     accounts: Vec<String>,
     service: Service,
     limits: Limits,
     cap_accounts: Vec<(String, Limits)>,
+    cap_ids: Vec<String>,
 }
 
 impl Authorized {
@@ -106,21 +118,42 @@ impl Authorized {
         Self {
             principal: None,
             token: None,
+            action: Action::Infer,
+            op: None,
+            model: None,
             accounts: Vec::new(),
             service: Service::Ai,
             limits: Limits::default(),
             cap_accounts: Vec::new(),
+            cap_ids: Vec::new(),
         }
     }
 
+    pub fn with_op(mut self, op: &'static str) -> Self {
+        self.op = Some(op);
+        self
+    }
+
+    pub fn with_model(mut self, model: Option<&str>) -> Self {
+        self.model = model.map(|m| {
+            let mut end = m.len().min(256);
+            while !m.is_char_boundary(end) {
+                end -= 1;
+            }
+            m[..end].to_owned()
+        });
+        self
+    }
+
     pub fn record(&self, requests: u64, output_chars: u64) {
-        if self.accounts.is_empty() && self.cap_accounts.is_empty() {
+        let metered = !self.accounts.is_empty() || !self.cap_accounts.is_empty();
+        if !metered && self.principal.is_none() && self.token.is_none() {
             return;
         }
         let now = Utc::now();
         let mut store = STORE.lock().expect("authz store lock");
         store.record(self, requests, output_chars, now);
-        if now.signed_duration_since(store.last_flush) >= Duration::seconds(30) {
+        if metered && now.signed_duration_since(store.last_flush) >= Duration::seconds(30) {
             store.flush_best_effort(now);
         }
     }
@@ -137,6 +170,7 @@ struct Store {
     last_flush: DateTime<Utc>,
     caps: delegation::Book,
     local_did: Option<String>,
+    events: events::EventLog,
 }
 
 impl Default for Store {
@@ -151,6 +185,7 @@ impl Default for Store {
             last_flush: Utc::now(),
             caps: delegation::Book::default(),
             local_did: None,
+            events: events::EventLog::default(),
         }
     }
 }
@@ -164,6 +199,7 @@ impl Store {
             tokens: load_or_recover(&dir, "tokens.json", now, TokenBook::validate),
             usage: load_or_recover(&dir, "usage.json", now, UsageBook::validate),
             caps: delegation::Book::load(&dir, now),
+            events: events::EventLog::load(&dir),
             dir: Some(dir),
             last_flush: now,
             ..Self::default()
@@ -239,11 +275,14 @@ impl Store {
         if let Some(cap) = &cap {
             self.caps.mark_trusted(&principal.node, &cap.id);
         }
+        let cap_ids = cap.iter().map(|c| c.id.clone()).collect();
         let policy = self.policy.service(service);
         if service == Service::Escrow && cap.as_ref().is_none_or(|c| c.limits.is_none()) {
             return Ok(Authorized {
                 principal: Some(principal),
                 service,
+                action,
+                cap_ids,
                 ..Authorized::anonymous()
             });
         }
@@ -273,6 +312,10 @@ impl Store {
             service,
             limits,
             cap_accounts,
+            action,
+            cap_ids,
+            op: None,
+            model: None,
         })
     }
 
@@ -289,6 +332,9 @@ impl Store {
         else {
             return Ok(Authorized::anonymous());
         };
+        if !token.has_scope(Scope::Infer) {
+            return Err(Denied::scope_required());
+        }
         if !token.models.is_empty()
             && !model.is_some_and(|m| token.models.iter().any(|allowed| allowed == m))
         {
@@ -311,7 +357,9 @@ impl Store {
             service: Service::Ai,
             limits: token.limits,
             cap_accounts: Vec::new(),
-        })
+            ..Authorized::anonymous()
+        }
+        .with_model(model))
     }
 
     fn model_filter(
@@ -324,11 +372,32 @@ impl Store {
             .lookup(authorization, self.policy.api.require_token, now)?
             .cloned();
         if let Some(token) = token {
+            if !token.has_scope(Scope::Infer) {
+                return Err(Denied::scope_required());
+            }
             self.touch_token(&token.id, now);
             Ok((!token.models.is_empty()).then_some(token.models))
         } else {
             Ok(None)
         }
+    }
+
+    fn authorize_service(
+        &mut self,
+        authorization: Option<&str>,
+        scope: Scope,
+        now: DateTime<Utc>,
+    ) -> std::result::Result<String, Denied> {
+        let token = self
+            .tokens
+            .lookup(authorization, true, now)?
+            .ok_or_else(Denied::unauthorized)?;
+        if !token.has_scope(scope) {
+            return Err(Denied::scope_required());
+        }
+        let id = token.id.clone();
+        self.touch_token(&id, now);
+        Ok(id)
     }
 
     fn touch_token(&mut self, id: &str, now: DateTime<Utc>) {
@@ -366,6 +435,16 @@ impl Store {
             );
         }
         self.usage_dirty |= !authorized.accounts.is_empty() || !authorized.cap_accounts.is_empty();
+        if (authorized.principal.is_some() || authorized.token.is_some())
+            && self
+                .tokens
+                .0
+                .iter()
+                .any(|t| t.live(now) && t.has_scope(Scope::Usage))
+        {
+            self.events
+                .record(self.dir.as_deref(), authorized, requests, output_chars, now);
+        }
     }
 
     fn usage_rows(&self, service: Option<Service>, now: DateTime<Utc>) -> Value {
@@ -452,6 +531,21 @@ impl Store {
                 ));
             }
             "authz.usage" => return Ok(self.usage_rows(optional_field(args, "service")?, now)),
+            "authz.grant.list" => {
+                let filter: Option<Service> = optional_field(args, "service")?;
+                let mut grants = Vec::new();
+                for service in [Service::Ai, Service::Escrow] {
+                    if filter.is_some_and(|s| s != service) {
+                        continue;
+                    }
+                    let policy = self.policy.service(service);
+                    for rule in policy.allow.iter().filter(|r| r.active(now)) {
+                        grants.push(grant_info(service, rule, policy));
+                    }
+                }
+                return Ok(json!(grants));
+            }
+            "authz.events" => return self.events_query(args)?.run(),
             "authz.peers" => {
                 return Ok(json!(
                     crate::net::peer_auth::verified_peers()
@@ -484,6 +578,44 @@ impl Store {
             "authz.mode.set" => {
                 next.policy.service_mut(field(args, "service")?).mode = field(args, "mode")?;
                 (None, "policy.json")
+            }
+            "authz.grant.put" | "authz.grant.remove" => {
+                let service = field(args, "service")?;
+                let subject: String = field(args, "subject")?;
+                policy::validate_subject(&subject)?;
+                let policy = next.policy.service_mut(service);
+                if cmd.ends_with(".put") {
+                    let rule = Rule {
+                        subject: subject.clone(),
+                        expires_at: expiry(args, now)?,
+                        note: optional_field(args, "note")?,
+                    };
+                    let limits: Option<Limits> = optional_field(args, "limits")?;
+                    policy.allow.retain(|r| r.active(now));
+                    if let Some(existing) = policy.allow.iter_mut().find(|r| r.subject == subject) {
+                        *existing = rule.clone();
+                    } else {
+                        policy.allow.push(rule.clone());
+                    }
+                    if let Some(limits) = limits {
+                        if let Some(existing) =
+                            policy.overrides.iter_mut().find(|r| r.subject == subject)
+                        {
+                            existing.limits = limits;
+                        } else {
+                            policy.overrides.push(LimitOverride { subject, limits });
+                        }
+                    } else {
+                        policy.overrides.retain(|r| r.subject != subject);
+                    }
+                    (Some(grant_info(service, &rule, policy)), "policy.json")
+                } else {
+                    let count = policy.allow.len() + policy.overrides.len();
+                    policy.allow.retain(|r| r.subject != subject);
+                    policy.overrides.retain(|r| r.subject != subject);
+                    let removed = policy.allow.len() + policy.overrides.len() != count;
+                    (Some(json!({"removed": removed})), "policy.json")
+                }
             }
             "authz.allow.add" | "authz.deny.add" | "authz.allow.remove" | "authz.deny.remove" => {
                 let subject: String = field(args, "subject")?;
@@ -572,6 +704,7 @@ impl Store {
                     optional_field(args, "models")?.unwrap_or_default(),
                     optional_field(args, "limits")?.unwrap_or_default(),
                     expiry(args, now)?,
+                    optional_field(args, "scopes")?,
                     now,
                 )?;
                 (
@@ -594,6 +727,10 @@ impl Store {
                     if cmd == "authz.token.revoke" {
                         token.revoked_at = Some(now);
                     } else {
+                        ensure!(
+                            args.get("scopes").is_none(),
+                            "token scopes cannot be changed"
+                        );
                         if args.get("name").is_some() {
                             token.name = field(args, "name")?;
                         }
@@ -603,7 +740,7 @@ impl Store {
                         if args.get("limits").is_some() {
                             token.limits = field(args, "limits")?;
                         }
-                        if args.get("expires_at").is_some() {
+                        if args.get("expires_at").is_some() || args.get("ttl_secs").is_some() {
                             token.expires_at = expiry(args, now)?;
                         }
                     }
@@ -633,6 +770,28 @@ impl Store {
         *self = next;
         Ok(result)
     }
+}
+
+impl Store {
+    fn events_query(&self, args: &Value) -> Result<events::Query> {
+        let after = optional_field(args, "after")?.unwrap_or(0);
+        let limit = optional_field(args, "limit")?.unwrap_or(100);
+        ensure!(
+            (1..=1000).contains(&limit),
+            "limit must be between 1 and 1000"
+        );
+        Ok(self.events.plan(self.dir.as_deref(), after, limit))
+    }
+}
+
+fn grant_info(service: Service, rule: &Rule, policy: &ServicePolicy) -> Value {
+    let limits = policy
+        .overrides
+        .iter()
+        .find(|r| r.subject == rule.subject)
+        .map(|r| &r.limits);
+    json!({"service": service, "subject": rule.subject, "expires_at": rule.expires_at,
+        "note": rule.note, "limits": limits})
 }
 
 fn field<T: DeserializeOwned>(args: &Value, key: &str) -> Result<T> {
@@ -806,6 +965,18 @@ pub fn authorize_api(
         .authorize_api(authorization, model, Utc::now())
 }
 
+/// Authorizes control-plane requests independently of the inference API policy.
+#[allow(dead_code)] // Used by the service HTTP layer.
+pub fn authorize_service(
+    authorization: Option<&str>,
+    scope: Scope,
+) -> std::result::Result<String, Denied> {
+    STORE
+        .lock()
+        .expect("authz store lock")
+        .authorize_service(authorization, scope, Utc::now())
+}
+
 /// Whether the local OpenAI-compatible API refuses requests without a live token.
 pub fn api_token_required() -> bool {
     STORE
@@ -848,6 +1019,14 @@ pub(crate) fn test_command(cmd: &str, args: Value) -> Result<Value> {
 pub async fn handle(cmd: &str, args: Value, state: &Arc<crate::daemon::AppState>) -> Result<Value> {
     if cmd.starts_with("authz.cap.") {
         return delegation::handle(cmd, args, state).await;
+    }
+    if cmd == "authz.events" {
+        // Scan the log files without holding the store lock.
+        let query = STORE
+            .lock()
+            .expect("authz store lock")
+            .events_query(&args)?;
+        return tokio::task::spawn_blocking(move || query.run()).await?;
     }
     let local = if cmd == "authz.show" {
         let identity = crate::identity::current(state).await?;

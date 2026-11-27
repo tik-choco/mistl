@@ -17,12 +17,13 @@ use serde_json::{Value, json};
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
 use super::{
-    CheckpointStore, checkpoint, net, store,
+    CheckpointStore, VmSize, checkpoint, host, net, pool, store,
     wire::{self, Message, Packet},
 };
 use crate::daemon::AppState;
 
 const MEMBERS: usize = 32;
+const MAX_JOINED_GROUPS: usize = 1024;
 const TOKEN_PREFIX: &str = "mistl-vm1:";
 const SECOND: u64 = 1000;
 const ELECTION_JITTER: u64 = 5 * SECOND;
@@ -33,15 +34,15 @@ const OFFER_PIN_LIMIT: usize = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-enum Role {
+pub(super) enum Role {
     Host,
     Witness,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct Member {
-    node: String,
-    role: Role,
+pub(super) struct Member {
+    pub node: String,
+    pub role: Role,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -116,17 +117,24 @@ impl Config {
     fn lease_ttl(&self) -> u64 {
         self.timing.lease_ttl_secs * SECOND
     }
-    fn delay(&self, me: &str, holder: &str) -> Option<u64> {
-        let rank = self
+    fn delay(&self, me: &str, holder: &str, score: impl Fn(&str) -> Option<f64>) -> Option<u64> {
+        let mut candidates: Vec<_> = self
             .hosts()
             .filter(|n| *n != holder)
-            .position(|n| n == me)?;
+            .map(|node| (node, score(node)))
+            .collect();
+        // Stable sort preserves the configured order for ties and missing scores.
+        candidates.sort_by(|(_, a), (_, b)| match (a, b) {
+            (Some(a), Some(b)) => b.total_cmp(a),
+            _ => b.is_some().cmp(&a.is_some()),
+        });
+        let rank = candidates.iter().position(|(node, _)| *node == me)?;
         Some((self.timing.failover_after_secs + rank as u64 * 10) * SECOND)
     }
 }
 
 #[derive(Serialize, Deserialize)]
-struct Token {
+pub(super) struct Token {
     #[serde(flatten)]
     config: Config,
     holder: String,
@@ -152,7 +160,7 @@ impl Token {
             URL_SAFE_NO_PAD.encode(serde_json::to_vec(self)?)
         ))
     }
-    fn decode(secret: &str) -> Result<(Self, [u8; 32])> {
+    pub(super) fn decode(secret: &str) -> Result<(Self, [u8; 32])> {
         ensure!(
             secret.len() <= wire::CONTROL_LIMIT,
             "VM join token too large"
@@ -183,6 +191,14 @@ impl Token {
             .and_then(|b| b.try_into().ok())
             .context("invalid VM key")?;
         Ok((token, key))
+    }
+
+    pub(super) fn verify_holder(&self, id: &str, sender: &str) -> Result<()> {
+        ensure!(
+            self.config.server_id == id && self.holder == sender,
+            "VM group token does not match the server id and sender"
+        );
+        Ok(())
     }
 }
 
@@ -463,6 +479,7 @@ pub(super) struct RunLease {
 
 struct Core {
     d: Disk,
+    size: Option<VmSize>,
     last_lease: u64,
     until: u64,
     run_until: u64,
@@ -487,6 +504,7 @@ impl Core {
         Self {
             next_checkpoint: d.config.timing.checkpoint_secs.saturating_mul(SECOND),
             d,
+            size: None,
             last_lease: 0,
             until: 0,
             run_until: 0,
@@ -601,6 +619,35 @@ pub(super) fn lookup(id: &str) -> Option<Arc<Group>> {
 fn path(root: &Path, id: &str) -> PathBuf {
     store::vm_dir(root, id).join("ha.json")
 }
+
+pub(super) fn has_active_groups(root: &Path, room: Option<&str>) -> Result<bool> {
+    // Include fenced groups whose state could not be loaded at startup.
+    for entry in std::fs::read_dir(root)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(id) = name.to_str().filter(|id| store::valid_server_id(id)) else {
+            continue;
+        };
+        let bytes = match std::fs::read(path(root, id)) {
+            Ok(bytes) => bytes,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error).context("reading VM group state"),
+        };
+        let group: Disk = serde_json::from_slice(&bytes).context("reading VM group state")?;
+        if !group.retired && room.is_none_or(|room| group.config.room == room) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn persist(root: &Path, d: &Disk) -> Result<()> {
     crate::statefile::write_private(&path(root, &d.config.server_id), &serde_json::to_vec(d)?)
 }
@@ -782,6 +829,16 @@ fn launch(root: PathBuf, d: Disk, key: [u8; 32], state: &Arc<AppState>) -> Arc<G
     LISTEN.call_once(wire::listen);
     let (inbox, mut rx) = mpsc::channel(128);
     let (outbox, mut tx) = mpsc::channel(256);
+    let id = &d.config.server_id;
+    // A standby may only have a checkpoint manifest, with no materialized VM record.
+    let size = (d.have_seq > 0)
+        .then(|| CheckpointStore::open(&root, id).and_then(|s| s.load_manifest(d.have_seq)))
+        .and_then(Result::ok)
+        .map(|manifest| VmSize::from(&manifest.record))
+        .or_else(|| store::load(&root, id).ok().as_ref().map(VmSize::from));
+    let mut core = Core::new(d);
+    core.size = size;
+    let d = &core.d;
     let g = Arc::new(Group {
         root,
         id: d.config.server_id.clone(),
@@ -791,7 +848,7 @@ fn launch(root: PathBuf, d: Disk, key: [u8; 32], state: &Arc<AppState>) -> Arc<G
         key,
         state: state.clone(),
         origin: Instant::now(),
-        core: Mutex::new(Core::new(d)),
+        core: Mutex::new(core),
         op: AsyncMutex::new(()),
         pull: AsyncMutex::new(()),
         boot: AsyncMutex::new(()),
@@ -975,13 +1032,21 @@ fn fence(c: &Core, state: &str, now: u64) -> Fence {
 }
 
 impl Group {
+    // Take this without a group core locked: slots() locks the group cores.
+    fn try_vm_slot(&self) -> Result<Option<tokio::sync::MutexGuard<'static, ()>>> {
+        let Ok(create) = super::CREATE_LOCK.try_lock() else {
+            return Ok(None);
+        };
+        let max_vms = self.state.config().vm.max_vms as usize;
+        Ok((slots(&self.root)? < max_vms).then_some(create))
+    }
+
     async fn tick(self: &Arc<Self>) -> Result<()> {
-        let process = super::REGISTRY
-            .lock()
-            .await
-            .running
-            .get(&self.id)
-            .map(|vm| vm.process.state);
+        let (process, running_vms) = {
+            let registry = super::REGISTRY.lock().await;
+            let process = registry.running.get(&self.id).map(|vm| vm.process.state);
+            (process, registry.running.len() as u32)
+        };
         let now = self.now();
         let mut c = self.core.lock().unwrap();
         let check_publication = now >= c.next_publication && self.state.network.permitted();
@@ -1058,24 +1123,52 @@ impl Group {
             }
             // A newer promise can fence this host before anyone announces the winner.
             let holder = if c.d.holder == self.me && c.d.stale && c.d.release.is_none() {
-                &c.d.voted_for
+                c.d.voted_for.as_str()
             } else {
-                &c.d.holder
+                c.d.holder.as_str()
             };
-            let Some(delay) = self.config.delay(&self.me, holder) else {
+            if holder == self.me || !self.config.host(&self.me) {
                 return Ok(());
-            };
+            }
             let epoch =
                 c.d.promised_epoch
                     .checked_add(1)
                     .context("VM epoch exhausted")?;
             let handover = c.d.waiver(&self.me, epoch, c.d.have_seq);
             let elapsed = now.saturating_sub(c.last_lease);
-            if (handover || elapsed >= delay + c.jitter)
+            let earliest = self.config.timing.failover_after_secs * SECOND + c.jitter;
+            if (handover || elapsed >= earliest)
                 && now >= c.retry_at
                 && !c.offer_cleanup_pending
                 && c.d.vote(&self.me, epoch, c.d.have_seq, handover, elapsed)
             {
+                if !handover {
+                    let mut members = pool::election_members(&self.room);
+                    if let Some(local) = members.iter_mut().find(|m| m.node == self.me) {
+                        local.hello.running_vms = running_vms;
+                        local.hello.max_vms = self.state.config().vm.max_vms;
+                    }
+                    let delay = self.config.delay(&self.me, holder, |node| {
+                        let size = c.size?;
+                        let member = members.iter().find(|m| m.node == node)?;
+                        pool::score(member, size.memory_mb, size.cpus, size.disk_gb)
+                    });
+                    if delay.is_none_or(|delay| elapsed < delay + c.jitter) {
+                        return Ok(());
+                    }
+                }
+                let have_seq = c.d.have_seq;
+                drop(c);
+                // If every host is at its VM limit, the VM stays down until a slot frees up.
+                let Some(_create) = self.try_vm_slot()? else {
+                    self.core.lock().unwrap().retry_at = now + SECOND;
+                    return Ok(());
+                };
+                let mut c = self.core.lock().unwrap();
+                // A checkpoint pull can finish while slots() is scanning.
+                if !self.online() || c.offer_cleanup_pending || c.d.have_seq != have_seq {
+                    return Ok(());
+                }
                 let mut d = c.d.clone();
                 d.voted_for = self.me.clone();
                 d.promised_epoch = epoch;
@@ -1403,6 +1496,16 @@ impl Group {
                     && r.acks.len() >= majority(self.config.members.len())
                 {
                     let vote_seq = r.vote_seq;
+                    c.election = None;
+                    drop(c);
+                    // Another group or a standalone VM can take the last slot during the vote.
+                    let Some(_create) = self.try_vm_slot()? else {
+                        return Ok(());
+                    };
+                    let mut c = self.core.lock().unwrap();
+                    if !self.online() {
+                        return Ok(());
+                    }
                     let mut d = c.d.clone();
                     d.holder = self.me.clone();
                     d.epoch = p.epoch;
@@ -1418,7 +1521,6 @@ impl Group {
                     c.renew = 0;
                     c.rounds.clear();
                     c.have.clear();
-                    c.election = None;
                 }
             }
             Message::Release { to, seq }
@@ -1561,8 +1663,13 @@ impl Group {
         );
         let (manifest, missing) = tokio::task::spawn_blocking({
             let checkpoints = checkpoints.clone();
+            let root = self.root.clone();
             move || {
                 let missing = checkpoints.verified_missing_chunks(&manifest, true)?;
+                ensure!(
+                    host::resources(&root).disk_free_gb >= checkpoint_space_gb(missing.len()),
+                    "not enough free disk space for the VM checkpoint"
+                );
                 Ok::<_, anyhow::Error>((manifest, missing))
             }
         })
@@ -1609,6 +1716,7 @@ impl Group {
                     let mut d = c.d.clone();
                     d.install_offer(epoch, seq);
                     g.save(&mut c, d)?;
+                    c.size = Some(VmSize::from(&manifest.record));
                     let cleanup = drop_abandoned(
                         &g.root,
                         &g.id,
@@ -1637,7 +1745,7 @@ impl Group {
             );
             c.d.epoch
         };
-        let (_, stats) = super::create_checkpoint(&self.id, epoch, &self.state).await?;
+        let (manifest, stats) = super::create_checkpoint(&self.id, epoch, &self.state).await?;
         let mut c = self.core.lock().unwrap();
         ensure!(
             c.d.epoch == epoch && c.d.leading(),
@@ -1646,84 +1754,178 @@ impl Group {
         let mut d = c.d.clone();
         d.have_seq = stats.seq;
         self.save(&mut c, d)?;
+        c.size = Some(VmSize::from(&manifest.record));
         c.have.insert(self.me.clone(), stats.seq);
         self.offer(&mut c)?;
         Ok(stats)
     }
 }
 
+fn checkpoint_space_gb(missing: usize) -> u64 {
+    // Allow space for chunk authentication tags and the manifest, then round up
+    // because the host reports only whole GiB of free space.
+    let bytes = missing as u64 * checkpoint::CHUNK_SIZE as u64 + (128 << 20);
+    bytes.div_ceil(1 << 30)
+}
+
 pub(super) fn slots(root: &Path) -> Result<usize> {
     let mut n = 0;
     for entry in std::fs::read_dir(root)? {
         let entry = entry?;
-        if entry
-            .file_name()
-            .to_str()
-            .is_some_and(store::valid_server_id)
-            && entry.file_type()?.is_dir()
-        {
+        let name = entry.file_name();
+        let Some(id) = name.to_str().filter(|id| store::valid_server_id(id)) else {
+            continue;
+        };
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let used = if let Some(group) = lookup(id) {
+            // Elected holders count while restoring, before they have a VM record.
+            group.core.lock().unwrap().d.leading()
+        } else {
+            !path(root, id).try_exists()? && entry.path().join("vm.json").try_exists()?
+        };
+        if used {
             n += 1;
         }
     }
     Ok(n)
 }
 
+// Callers hold CREATE_LOCK while configuring the group.
+pub(super) fn group_config(state: &AppState) -> Result<crate::config::VmConfig> {
+    super::host::require_ha_support(std::env::consts::OS)?;
+    let cfg = state.config().vm;
+    ensure!(
+        crate::escrow::valid_room(&cfg.room),
+        "configure a nonempty [vm] room first"
+    );
+    Ok(cfg)
+}
+
+pub(super) async fn join(
+    root: PathBuf,
+    cfg: &crate::config::VmConfig,
+    me: String,
+    token: Token,
+    key: [u8; 32],
+    state: &Arc<AppState>,
+) -> Result<Value> {
+    let id = &token.config.server_id;
+    let _vm = super::lock_vm(id).await?;
+    ensure!(
+        cfg.room == token.config.room,
+        "VM token room differs from [vm] room"
+    );
+    ensure!(
+        token.config.members.iter().any(|m| m.node == me) && token.holder != me,
+        "this node is not a standby or witness in the group"
+    );
+    if let Some(g) = group(&root, id)? {
+        ensure!(
+            g.key == key
+                && g.config.members.iter().map(|m| (&m.node, m.role)).eq(token
+                    .config
+                    .members
+                    .iter()
+                    .map(|m| (&m.node, m.role)))
+                && !g.core.lock().unwrap().d.retired,
+            "a different or retired VM group already exists"
+        );
+        return Ok(g.status());
+    }
+    let dir = store::vm_dir(&root, id);
+    ensure!(
+        !dir.join("vm.json").try_exists()? && !dir.join("disk.qcow2").try_exists()?,
+        "refusing to join over an existing VM"
+    );
+    ensure!(!dir.try_exists()?, "VM directory exists");
+    // Standbys and witnesses consume runtime state even when they use no VM slot.
+    ensure!(
+        GROUPS.read().unwrap().len() < MAX_JOINED_GROUPS,
+        "VM HA group limit ({MAX_JOINED_GROUPS}) reached"
+    );
+    let d = Disk::new(token.config, me, token.holder, token.epoch);
+    crate::statefile::create_private_dir(&dir)?;
+    if let Err(error) =
+        checkpoint::install_key(&root, &d.config.server_id, &key).and_then(|_| persist(&root, &d))
+    {
+        let _ = store::remove(&root, &d.config.server_id);
+        return Err(error);
+    }
+    Ok(launch(root, d, key, state).status())
+}
+
+pub(super) async fn enable(
+    root: PathBuf,
+    id: &str,
+    room: String,
+    me: String,
+    members: Vec<Member>,
+    checkpoint_secs: Option<u64>,
+    state: &Arc<AppState>,
+) -> Result<(Arc<Group>, String)> {
+    let _vm = super::lock_vm(id).await?;
+    ensure!(group(&root, id)?.is_none(), "VM group already exists");
+    let record = store::load(&root, id)?;
+    let config = Config {
+        v: 1,
+        server_id: id.to_owned(),
+        room,
+        owner_did: record.owner_did,
+        members,
+        timing: Timing {
+            checkpoint_secs: checkpoint_secs.unwrap_or(600),
+            ..Timing::default()
+        },
+    };
+    config.validate()?;
+    let key = checkpoint::load_or_create_key(&root, id)?;
+    let have = CheckpointStore::open(&root, id)?
+        .sequences()?
+        .first()
+        .copied()
+        .unwrap_or(0);
+    let archive = store::vm_dir(&root, id).join("ha.disabled");
+    let previous_epoch = if archive.try_exists()? {
+        serde_json::from_slice::<Disk>(&std::fs::read(archive)?)?.promised_epoch
+    } else {
+        0
+    };
+    let epoch = previous_epoch
+        .max(have >> 32)
+        .checked_add(1)
+        .context("VM epoch exhausted")?;
+    let token = Token {
+        config: config.clone(),
+        key_b64: STANDARD.encode(key),
+        holder: me.clone(),
+        epoch,
+    }
+    .encode()?;
+    let mut d = Disk::new(config, me.clone(), me, epoch);
+    d.have_seq = have;
+    d.want_run = super::REGISTRY.lock().await.running.contains_key(id);
+    if !d.want_run {
+        super::host::fence_previous_qemu(&store::vm_dir(&root, id))?;
+    }
+    persist(&root, &d)?;
+    let g = launch(root, d, key, state);
+    g.schedule_fence(true);
+    Ok((g, token))
+}
+
 pub(super) async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Value> {
     if cmd == "vm.ha.join" || cmd == "vm.ha.enable" {
-        super::host::require_ha_support(std::env::consts::OS)?;
         let root = store::vm_root()?;
         let _create = super::CREATE_LOCK.lock().await;
-        let cfg = state.config().vm;
-        ensure!(
-            crate::escrow::valid_room(&cfg.room),
-            "configure a nonempty [vm] room first"
-        );
+        let cfg = group_config(state)?;
         let identity = crate::identity::current(state).await?;
         let me = identity.node_id();
         if cmd == "vm.ha.join" {
             let (token, key) =
                 Token::decode(args["token"].as_str().context("missing VM join token")?)?;
-            let id = &token.config.server_id;
-            let _vm = super::lock_vm(id).await?;
-            ensure!(
-                cfg.room == token.config.room,
-                "VM token room differs from [vm] room"
-            );
-            ensure!(
-                token.config.members.iter().any(|m| m.node == me) && token.holder != me,
-                "this node is not a standby or witness in the group"
-            );
-            if let Some(g) = group(&root, id)? {
-                ensure!(
-                    g.key == key
-                        && g.config.members.iter().map(|m| (&m.node, m.role)).eq(token
-                            .config
-                            .members
-                            .iter()
-                            .map(|m| (&m.node, m.role)))
-                        && !g.core.lock().unwrap().d.retired,
-                    "a different or retired VM group already exists"
-                );
-                return Ok(g.status());
-            }
-            let dir = store::vm_dir(&root, id);
-            ensure!(
-                !dir.join("vm.json").try_exists()? && !dir.join("disk.qcow2").try_exists()?,
-                "refusing to join over an existing VM"
-            );
-            ensure!(
-                !dir.try_exists()? && slots(&root)? < cfg.max_vms as usize,
-                "VM directory exists or host VM limit reached"
-            );
-            let d = Disk::new(token.config, me, token.holder, token.epoch);
-            crate::statefile::create_private_dir(&dir)?;
-            if let Err(error) = checkpoint::install_key(&root, &d.config.server_id, &key)
-                .and_then(|_| persist(&root, &d))
-            {
-                let _ = store::remove(&root, &d.config.server_id);
-                return Err(error);
-            }
-            return Ok(launch(root, d, key, state).status());
+            return join(root, &cfg, me, token, key, state).await;
         }
         #[derive(Deserialize)]
         struct Enable {
@@ -1734,9 +1936,6 @@ pub(super) async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Res
         }
         let id = super::server_id(&args)?.to_owned();
         let options: Enable = serde_json::from_value(args)?;
-        let _vm = super::lock_vm(&id).await?;
-        ensure!(group(&root, &id)?.is_none(), "VM group already exists");
-        let record = store::load(&root, &id)?;
         let mut members = vec![Member {
             node: me.clone(),
             role: Role::Host,
@@ -1749,50 +1948,16 @@ pub(super) async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Res
             node,
             role: Role::Witness,
         }));
-        let config = Config {
-            v: 1,
-            server_id: id.clone(),
-            room: cfg.room,
-            owner_did: record.owner_did,
+        let (_, token) = enable(
+            root,
+            &id,
+            cfg.room,
+            me,
             members,
-            timing: Timing {
-                checkpoint_secs: options.checkpoint_secs.unwrap_or(600),
-                ..Timing::default()
-            },
-        };
-        config.validate()?;
-        let key = checkpoint::load_or_create_key(&root, &id)?;
-        let have = CheckpointStore::open(&root, &id)?
-            .sequences()?
-            .first()
-            .copied()
-            .unwrap_or(0);
-        let archive = store::vm_dir(&root, &id).join("ha.disabled");
-        let previous_epoch = if archive.try_exists()? {
-            serde_json::from_slice::<Disk>(&std::fs::read(archive)?)?.promised_epoch
-        } else {
-            0
-        };
-        let epoch = previous_epoch
-            .max(have >> 32)
-            .checked_add(1)
-            .context("VM epoch exhausted")?;
-        let token = Token {
-            config: config.clone(),
-            key_b64: STANDARD.encode(key),
-            holder: me.clone(),
-            epoch,
-        }
-        .encode()?;
-        let mut d = Disk::new(config, me.clone(), me, epoch);
-        d.have_seq = have;
-        d.want_run = super::REGISTRY.lock().await.running.contains_key(&id);
-        if !d.want_run {
-            super::host::fence_previous_qemu(&store::vm_dir(&root, &id))?;
-        }
-        persist(&root, &d)?;
-        let g = launch(root, d, key, state);
-        g.schedule_fence(true);
+            options.checkpoint_secs,
+            state,
+        )
+        .await?;
         return Ok(json!({"token":token}));
     }
     let root = store::vm_root()?;
@@ -2035,6 +2200,67 @@ mod tests {
                 .collect(),
             timing: Timing::default(),
         }
+    }
+
+    #[test]
+    fn checkpoint_space_counts_missing_chunks_and_rounds_up() {
+        assert_eq!(checkpoint_space_gb(0), 1);
+        assert_eq!(checkpoint_space_gb(896), 1);
+        assert_eq!(checkpoint_space_gb(897), 2);
+        assert_eq!(checkpoint_space_gb(12 * 1024), 13);
+    }
+
+    #[tokio::test]
+    async fn election_needs_a_free_slot_to_campaign_and_to_win() {
+        let state = AppState::for_test();
+        let mut cfg = state.config();
+        cfg.vm.max_vms = 1;
+        state.set_config(cfg);
+
+        let mut cfg = config(&[Role::Host; 2]);
+        cfg.server_id = store::new_server_id();
+        let holder = cfg.members[0].node.clone();
+        let me = cfg.members[1].node.clone();
+        let root = std::env::temp_dir().join(format!("mistl-vm-ha-{}", cfg.server_id));
+        std::fs::create_dir_all(root.join(&cfg.server_id)).unwrap();
+        let standalone = root.join(store::new_server_id()).join("vm.json");
+        std::fs::create_dir(standalone.parent().unwrap()).unwrap();
+        std::fs::write(&standalone, b"{}").unwrap();
+        let mut d = Disk::new(cfg, me.clone(), holder.clone(), 1);
+        d.have_seq = 1;
+        d.release = Some(Release {
+            epoch: 1,
+            to: me,
+            seq: 1,
+        });
+        let g = launch(root.clone(), d, [19; 32], &state);
+        g.core.lock().unwrap().next_publication = u64::MAX;
+        g.joined.store(true, Ordering::Release);
+
+        g.tick().await.unwrap();
+        assert_eq!(g.core.lock().unwrap().d.promised_epoch, 1);
+
+        std::fs::remove_file(&standalone).unwrap();
+        g.core.lock().unwrap().retry_at = 0;
+        g.tick().await.unwrap();
+        let nonce = g.core.lock().unwrap().election.as_ref().unwrap().nonce;
+
+        std::fs::write(&standalone, b"{}").unwrap();
+        g.receive(
+            serde_json::from_value(json!({
+                "mvm": 1, "vm": g.id, "from": holder, "ts": 0,
+                "nonce": nonce, "epoch": 2, "type": "vote", "granted": true
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        {
+            let c = g.core.lock().unwrap();
+            assert!(c.election.is_none());
+            assert!(!c.d.leading());
+        }
+        g.forget();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2344,11 +2570,37 @@ mod tests {
         use Role::*;
         let cfg = config(&[Host, Witness, Host, Host]);
         let id = |i: usize| cfg.members[i].node.as_str();
-        assert_eq!(cfg.delay(id(2), id(0)), Some(45_000));
-        assert_eq!(cfg.delay(id(3), id(0)), Some(55_000));
-        assert_eq!(cfg.delay(id(0), id(2)), Some(45_000));
-        assert_eq!(cfg.delay(id(0), id(0)), None);
-        assert_eq!(cfg.delay(id(1), id(0)), None);
+        assert_eq!(cfg.delay(id(2), id(0), |_| None), Some(45_000));
+        assert_eq!(cfg.delay(id(3), id(0), |_| None), Some(55_000));
+        assert_eq!(cfg.delay(id(0), id(2), |_| None), Some(45_000));
+        assert_eq!(cfg.delay(id(0), id(0), |_| Some(1.0)), None);
+        assert_eq!(cfg.delay(id(1), id(0), |_| Some(1.0)), None);
+    }
+
+    #[test]
+    fn election_rank_prefers_higher_scores_then_configured_order() {
+        use Role::*;
+        let cfg = config(&[Host, Host, Host, Host, Host, Witness, Host, Host]);
+        let id = |i: usize| cfg.members[i].node.as_str();
+        let score = |node: &str| {
+            let scores = [
+                Some(99.0),
+                None,
+                Some(5.0),
+                Some(8.0),
+                Some(5.0),
+                Some(99.0),
+                None,
+                Some(0.0),
+            ];
+            scores[cfg.members.iter().position(|m| m.node == node).unwrap()]
+        };
+        for (rank, i) in [3, 2, 4, 7, 1, 6].into_iter().enumerate() {
+            assert_eq!(
+                cfg.delay(id(i), id(0), score),
+                Some(45_000 + rank as u64 * 10_000)
+            );
+        }
     }
 
     #[test]
@@ -2372,6 +2624,18 @@ mod tests {
         let (decoded, bytes) = Token::decode(&secret).unwrap();
         assert_eq!(bytes, key);
         assert_eq!(decoded.encode().unwrap(), secret);
+        let id = &decoded.config.server_id;
+        assert!(decoded.verify_holder(id, &decoded.holder).is_ok());
+        assert!(
+            decoded
+                .verify_holder(id, &decoded.config.members[1].node)
+                .is_err()
+        );
+        assert!(
+            decoded
+                .verify_holder("fedcba9876543210", &decoded.holder)
+                .is_err()
+        );
         for text in [format!("{decoded}"), format!("{decoded:?}")] {
             assert!(!text.contains(&STANDARD.encode(key)) && !text.contains(&secret));
         }

@@ -614,7 +614,14 @@ fn entry_and_token_caps_and_failed_saves_leave_store_unchanged() {
     for _ in 0..tokens::MAX_TOKENS {
         store
             .tokens
-            .create("test".into(), Vec::new(), Limits::default(), None, now())
+            .create(
+                "test".into(),
+                Vec::new(),
+                Limits::default(),
+                None,
+                None,
+                now(),
+            )
             .unwrap();
     }
     assert!(
@@ -670,4 +677,477 @@ fn usage_listing_and_reset() {
             .unwrap(),
         json!({"reset":1})
     );
+}
+
+#[test]
+fn token_scopes_default_and_validate() {
+    let dir = temp_dir();
+    let mut store = Store::load(&dir, now()).unwrap();
+    let (header, id) = create_token(&mut store, json!({"name":"legacy"}));
+    let path = dir.join("authz/tokens.json");
+    let mut legacy: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    legacy[0].as_object_mut().unwrap().remove("scopes");
+    std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    let mut store = Store::load(&dir, now()).unwrap();
+    assert_eq!(store.tokens.0[0].scopes, vec![Scope::Infer]);
+    assert!(store.authorize_api(Some(&header), None, now()).is_ok());
+    for scopes in [json!([]), Value::Null] {
+        let result = store
+            .command(
+                "authz.token.create",
+                &json!({"name":"default","scopes":scopes}),
+                now(),
+            )
+            .unwrap();
+        assert_eq!(result["info"]["scopes"], json!(["infer"]));
+    }
+    let result = store
+        .command(
+            "authz.token.create",
+            &json!({"name":"all","scopes":["infer","usage","manage"]}),
+            now(),
+        )
+        .unwrap();
+    assert_eq!(
+        result["info"]["scopes"],
+        json!(["infer", "usage", "manage"])
+    );
+    for scopes in [
+        json!(["usage", "usage"]),
+        json!(["infer", "usage", "manage", "infer"]),
+        json!(["other"]),
+        json!("infer"),
+    ] {
+        assert!(
+            store
+                .command(
+                    "authz.token.create",
+                    &json!({"name":"invalid","scopes":scopes}),
+                    now()
+                )
+                .is_err()
+        );
+    }
+    for scopes in [json!(["manage"]), Value::Null, json!([])] {
+        assert!(
+            store
+                .command(
+                    "authz.token.update",
+                    &json!({"id":id,"scopes":scopes}),
+                    now()
+                )
+                .is_err()
+        );
+    }
+    let mut invalid = store.tokens.0[0].clone();
+    invalid.scopes.clear();
+    assert!(invalid.validate().is_err());
+    assert_eq!(store.tokens.0[0].scopes, vec![Scope::Infer]);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn inference_and_service_scopes_are_separate() {
+    let mut store = Store::default();
+    let (infer, _) = create_token(&mut store, json!({"name":"infer"}));
+    let (usage, usage_id) = create_token(&mut store, json!({"name":"usage","scopes":["usage"]}));
+    let (manage, manage_id) =
+        create_token(&mut store, json!({"name":"manage","scopes":["manage"]}));
+    for header in [&usage, &manage] {
+        let denied = store.authorize_api(Some(header), None, now()).unwrap_err();
+        assert_eq!(denied.code, "scope_required");
+        assert_eq!(denied.http_status(), 403);
+        assert_eq!(
+            store.model_filter(Some(header), now()).unwrap_err().code,
+            "scope_required"
+        );
+    }
+    for header in [None, Some("Bearer invalid"), Some("Bearer mst_invalid")] {
+        let denied = store
+            .authorize_service(header, Scope::Usage, now())
+            .unwrap_err();
+        assert_eq!(denied.code, "unauthorized");
+        assert_eq!(denied.http_status(), 401);
+    }
+    assert_eq!(
+        store
+            .authorize_service(Some(&infer), Scope::Usage, now())
+            .unwrap_err()
+            .http_status(),
+        403
+    );
+    assert_eq!(
+        store
+            .authorize_service(Some(&usage), Scope::Usage, now())
+            .unwrap(),
+        usage_id
+    );
+    assert_eq!(
+        store
+            .authorize_service(Some(&usage), Scope::Manage, now())
+            .unwrap_err()
+            .http_status(),
+        403
+    );
+    for scope in [Scope::Usage, Scope::Manage] {
+        assert_eq!(
+            store
+                .authorize_service(Some(&manage), scope, now())
+                .unwrap(),
+            manage_id
+        );
+    }
+    assert!(store.tokens_dirty);
+    assert_eq!(
+        store
+            .tokens
+            .0
+            .iter()
+            .find(|t| t.id == manage_id)
+            .unwrap()
+            .last_used_at,
+        Some(now())
+    );
+    store
+        .command("authz.token.revoke", &json!({"id":manage_id}), now())
+        .unwrap();
+    assert_eq!(
+        store
+            .authorize_service(Some(&manage), Scope::Usage, now())
+            .unwrap_err()
+            .http_status(),
+        401
+    );
+    let (expiring, _) = create_token(
+        &mut store,
+        json!({"name":"expiring","scopes":["usage"],"ttl_secs":60}),
+    );
+    assert_eq!(
+        store
+            .authorize_service(Some(&expiring), Scope::Usage, now() + Duration::seconds(60))
+            .unwrap_err()
+            .http_status(),
+        401
+    );
+}
+
+#[test]
+fn grants_replace_rules_and_overrides_atomically() {
+    let dir = temp_dir();
+    let mut store = Store::load(&dir, now()).unwrap();
+    let subject = peer(true).did.unwrap();
+    let args = json!({"service":"ai","subject":subject,"ttl_secs":60,"note":"first","limits":{"max_requests":5}});
+    let grant = store.command("authz.grant.put", &args, now()).unwrap();
+    assert_eq!(grant["service"], "ai");
+    assert_eq!(grant["subject"], subject);
+    assert_eq!(grant["expires_at"], json!(now() + Duration::seconds(60)));
+    assert_eq!(grant["note"], "first");
+    assert_eq!(grant["limits"]["max_requests"], 5);
+    assert_eq!(
+        store
+            .command("authz.grant.list", &json!({}), now())
+            .unwrap(),
+        json!([grant])
+    );
+    assert_eq!(
+        store
+            .command(
+                "authz.grant.list",
+                &json!({}),
+                now() + Duration::seconds(60)
+            )
+            .unwrap(),
+        json!([])
+    );
+    // An override without an active allow rule is not a grant.
+    store
+        .command(
+            "authz.limits.set",
+            &json!({"service":"escrow","subject":subject,"limits":{"max_stored_bytes":50}}),
+            now(),
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .command("authz.grant.list", &json!({"service":"escrow"}), now())
+            .unwrap(),
+        json!([])
+    );
+    let replacement = json!({"service":"ai","subject":subject,"note":"replaced"});
+    let grant = store
+        .command("authz.grant.put", &replacement, now())
+        .unwrap();
+    assert_eq!(grant["note"], "replaced");
+    assert!(grant["expires_at"].is_null());
+    assert!(grant["limits"].is_null());
+    assert_eq!(store.policy.ai.allow.len(), 1);
+    assert!(store.policy.ai.overrides.is_empty());
+    for invalid in [
+        json!({"service":"ai","subject":subject,"note":"x".repeat(201)}),
+        json!({"service":"ai","subject":subject,"ttl_secs":59}),
+        json!({"service":"ai","subject":subject,"expires_at":now()}),
+        json!({"service":"ai","subject":subject,"limits":{"max_requests":-1}}),
+        json!({"service":"ai","subject":"invalid"}),
+    ] {
+        assert!(store.command("authz.grant.put", &invalid, now()).is_err());
+    }
+    assert_eq!(
+        store
+            .command("authz.grant.list", &json!({}), now())
+            .unwrap(),
+        json!([grant])
+    );
+    let mut store = Store::load(&dir, now()).unwrap();
+    assert_eq!(
+        store
+            .command("authz.grant.list", &json!({}), now())
+            .unwrap(),
+        json!([grant])
+    );
+    store.command("authz.grant.put", &args, now()).unwrap();
+    store
+        .command(
+            "authz.grant.put",
+            &json!({"service":"ai","subject":subject,"limits":null}),
+            now(),
+        )
+        .unwrap();
+    assert!(store.policy.ai.overrides.is_empty());
+    store.command("authz.grant.put", &args, now()).unwrap();
+    let remove = json!({"service":"ai","subject":subject});
+    assert_eq!(
+        store.command("authz.grant.remove", &remove, now()).unwrap(),
+        json!({"removed":true})
+    );
+    assert!(store.policy.ai.allow.is_empty());
+    assert!(store.policy.ai.overrides.is_empty());
+    assert_eq!(
+        store.command("authz.grant.remove", &remove, now()).unwrap(),
+        json!({"removed":false})
+    );
+    assert_eq!(
+        store
+            .command(
+                "authz.grant.remove",
+                &json!({"service":"escrow","subject":subject}),
+                now()
+            )
+            .unwrap(),
+        json!({"removed":true})
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn event_opt_in_cursor_and_meter_behavior() {
+    let mut store = Store::default();
+    let principal = peer(true);
+    let proof = allow(&mut store, principal.clone(), now())
+        .unwrap()
+        .with_op("chat")
+        .with_model(Some(&"界".repeat(100)));
+    let escrow = store
+        .authorize_peer(
+            Service::Escrow,
+            Action::Write,
+            principal.clone(),
+            None,
+            now(),
+        )
+        .unwrap()
+        .with_op("put");
+    assert!(escrow.accounts.is_empty());
+    assert!(escrow.cap_accounts.is_empty());
+    let (header, id) = create_token(&mut store, json!({"name":"infer"}));
+    let api = store
+        .authorize_api(Some(&header), Some("model"), now())
+        .unwrap();
+    store.record(&proof, 1, 10, now());
+    store.record(&escrow, 1, 0, now());
+    store.record(&api, 1, 2, now());
+    assert_eq!(
+        store.command("authz.events", &json!({}), now()).unwrap(),
+        json!({"events":[],"next":0,"oldest":null,"gap":false})
+    );
+    let (_, usage_id) = create_token(&mut store, json!({"name":"meter","scopes":["usage"]}));
+    store.record(&proof, 1, 10, now());
+    store.record(&escrow, 1, 0, now());
+    store.record(&api, 1, 2, now());
+    store.record(&Authorized::anonymous(), 1, 10, now());
+    let page = store
+        .command("authz.events", &json!({"limit":2}), now())
+        .unwrap();
+    assert_eq!(page["next"], 2);
+    assert_eq!(page["oldest"], 1);
+    assert_eq!(page["gap"], false);
+    let ai = &page["events"][0];
+    assert_eq!(ai["seq"], 1);
+    assert_eq!(ai["at"], "2026-11-03T12:00:00.000Z");
+    assert_eq!(ai["service"], "ai");
+    assert_eq!(ai["action"], "infer");
+    assert_eq!(ai["op"], "chat");
+    assert_eq!(ai["node"], principal.node);
+    assert_eq!(ai["did"], principal.did.as_deref().unwrap());
+    assert_eq!(ai["model"].as_str().unwrap().len(), 255);
+    assert_eq!(ai["requests"], 1);
+    assert_eq!(ai["output_chars"], 10);
+    assert!(ai.get("token").is_none());
+    let event = &page["events"][1];
+    assert_eq!(event["seq"], 2);
+    assert_eq!(event["service"], "escrow");
+    assert_eq!(event["action"], "write");
+    assert!(event.get("output_chars").is_none());
+    assert!(store.usage.escrow.is_empty());
+    let page = store
+        .command("authz.events", &json!({"after":2}), now())
+        .unwrap();
+    assert_eq!(page["next"], 3);
+    assert_eq!(page["events"][0]["token"], id);
+    assert_eq!(page["events"][0]["model"], "model");
+    assert!(page["events"][0].get("node").is_none());
+    assert_eq!(store.usage.ai[&principal.account()].requests, 2);
+    assert_eq!(store.usage.ai[&format!("token:{id}")].output_chars, 4);
+    store
+        .command("authz.token.revoke", &json!({"id":usage_id}), now())
+        .unwrap();
+    store.record(&proof, 1, 10, now());
+    create_token(
+        &mut store,
+        json!({"name":"expired","scopes":["usage"],"ttl_secs":60}),
+    );
+    store.record(&proof, 1, 10, now() + Duration::seconds(60));
+    assert_eq!(
+        store
+            .command("authz.events", &json!({"after":3}), now())
+            .unwrap(),
+        json!({"events":[],"next":3,"oldest":1,"gap":false})
+    );
+    create_token(&mut store, json!({"name":"manager","scopes":["manage"]}));
+    store.record(&proof, 1, 10, now() + Duration::seconds(60));
+    assert_eq!(
+        store
+            .command("authz.events", &json!({"after":3}), now())
+            .unwrap()["next"],
+        4
+    );
+    for limit in [0, 1001] {
+        assert!(
+            store
+                .command("authz.events", &json!({"limit":limit}), now())
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn events_rotate_and_resume_sequence_on_reload() {
+    let dir = temp_dir();
+    let mut store = Store::load(&dir, now()).unwrap();
+    let proof = allow(&mut store, peer(false), now()).unwrap();
+    store.record(&proof, 1, 5, now());
+    assert!(!dir.join("authz/events.jsonl").exists());
+    create_token(&mut store, json!({"name":"meter","scopes":["usage"]}));
+    store.events.set_rotation_bytes(1); // one event per file
+    for _ in 0..4 {
+        store.record(&proof, 1, 5, now());
+    }
+    let page = store.command("authz.events", &json!({}), now()).unwrap();
+    assert_eq!(page["oldest"], 3);
+    assert_eq!(page["gap"], true);
+    assert_eq!(page["next"], 4);
+    assert_eq!(page["events"].as_array().unwrap().len(), 2);
+    let page = store
+        .command("authz.events", &json!({"after":2,"limit":1}), now())
+        .unwrap();
+    assert_eq!(page["gap"], false);
+    assert_eq!(page["next"], 3);
+    let mut store = Store::load(&dir, now()).unwrap();
+    store.record(&proof, 1, 5, now());
+    let page = store
+        .command("authz.events", &json!({"after":4}), now())
+        .unwrap();
+    assert_eq!(page["oldest"], 3);
+    assert_eq!(page["next"], 5);
+    assert_eq!(page["events"][0]["seq"], 5);
+    assert_eq!(page["gap"], false);
+    // Simulate a restart between rotation and the append to the current file.
+    std::fs::rename(
+        dir.join("authz/events.jsonl"),
+        dir.join("authz/events.1.jsonl"),
+    )
+    .unwrap();
+    let mut store = Store::load(&dir, now()).unwrap();
+    store.record(&proof, 1, 5, now());
+    assert_eq!(
+        store
+            .command("authz.events", &json!({"after":5}), now())
+            .unwrap()["next"],
+        6
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn event_log_failure_does_not_change_metering() {
+    let dir = temp_dir();
+    let mut store = Store::load(&dir, now()).unwrap();
+    create_token(&mut store, json!({"name":"meter","scopes":["usage"]}));
+    let principal = peer(false);
+    let proof = allow(&mut store, principal.clone(), now()).unwrap();
+    let path = dir.join("authz/events.jsonl");
+    std::fs::create_dir(&path).unwrap();
+    store.record(&proof, 1, 5, now());
+    assert_eq!(store.usage.ai[&principal.account()].output_chars, 5);
+    std::fs::remove_dir(&path).unwrap();
+    store.record(&proof, 1, 5, now());
+    assert_eq!(store.usage.ai[&principal.account()].output_chars, 10);
+    let page = store.command("authz.events", &json!({}), now()).unwrap();
+    assert_eq!(page["next"], 1);
+    assert_eq!(page["events"].as_array().unwrap().len(), 1);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn in_memory_event_ring_is_bounded() {
+    let mut store = Store::default();
+    create_token(&mut store, json!({"name":"meter","scopes":["usage"]}));
+    let proof = allow(&mut store, peer(false), now()).unwrap();
+    for _ in 0..4100 {
+        store.record(&proof, 1, 0, now());
+    }
+    let page = store.command("authz.events", &json!({}), now()).unwrap();
+    assert_eq!(page["oldest"], 5);
+    assert_eq!(page["gap"], true);
+    assert_eq!(page["events"].as_array().unwrap().len(), 100);
+    assert_eq!(page["next"], 104);
+}
+
+#[tokio::test]
+async fn public_record_logs_unmetered_escrow() {
+    let _guard = TEST_LOCK.lock().await;
+    test_reset();
+    let created = test_command(
+        "authz.token.create",
+        json!({"name":"manager","scopes":["manage"]}),
+    )
+    .unwrap();
+    let header = format!("Bearer {}", created["token"].as_str().unwrap());
+    assert_eq!(
+        authorize_service(Some(&header), Scope::Usage).unwrap(),
+        created["info"]["id"].as_str().unwrap()
+    );
+    let proof = authorize_p2p(
+        Service::Escrow,
+        Action::Write,
+        None,
+        "0123456789abcdef",
+        None,
+    )
+    .unwrap();
+    proof.with_op("put").record(1, 0);
+    let page = test_command("authz.events", json!({})).unwrap();
+    test_reset();
+    assert!(page["events"][0].get("output_chars").is_none());
+    assert_eq!(page["events"][0]["op"], "put");
+    assert_eq!(page["events"][0]["node"], "0123456789abcdef");
 }

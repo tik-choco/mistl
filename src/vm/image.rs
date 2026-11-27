@@ -431,6 +431,32 @@ pub(crate) async fn rebase_unsafe(qemu_img: &Path, base: &Path, overlay: &Path) 
     Ok(())
 }
 
+/// Virtual disk size in bytes, from `qemu-img info --output=json`.
+pub async fn virtual_size(qemu_img: &Path, image: &Path) -> Result<u64> {
+    let mut command = Command::new(qemu_img);
+    command
+        .args(["info", "--output=json", "-f", "qcow2"])
+        .arg(image)
+        .stdin(Stdio::null());
+    crate::child_process::prepare(&mut command);
+    let result = command.output().await.context("running qemu-img info")?;
+    ensure!(
+        result.status.success(),
+        "qemu-img info failed ({}): {}",
+        result.status,
+        String::from_utf8_lossy(&result.stderr).trim()
+    );
+    parse_virtual_size(&result.stdout)
+}
+
+fn parse_virtual_size(info: &[u8]) -> Result<u64> {
+    let info: serde_json::Value =
+        serde_json::from_slice(info).context("parsing qemu-img info output")?;
+    info["virtual-size"]
+        .as_u64()
+        .context("qemu-img info did not report virtual-size")
+}
+
 fn overlay_args(base: &Path, output: &Path, size_gb: u32) -> Result<Vec<OsString>> {
     let base = std::path::absolute(base).context("resolving VM backing image path")?;
     let mut args = ["create", "-f", "qcow2", "-F", "qcow2", "-b"]
@@ -534,6 +560,13 @@ fn rename_overlay(from: &Path, to: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn virtual_size_reads_qemu_img_info() {
+        let info = br#"{"virtual-size": 3758096384, "filename": "base.img", "format": "qcow2"}"#;
+        assert_eq!(parse_virtual_size(info).unwrap(), 3758096384);
+        assert!(parse_virtual_size(br#"{"format": "qcow2"}"#).is_err());
+    }
 
     #[test]
     fn manifest_matches_the_exact_decoded_filename() {

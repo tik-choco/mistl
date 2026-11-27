@@ -16,6 +16,7 @@ mod install;
 mod net;
 mod network;
 mod nostr;
+pub(crate) mod placement;
 mod runtime;
 mod scheduler;
 mod statefile;

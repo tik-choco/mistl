@@ -415,7 +415,7 @@ impl TunnelProvider {
                 None
             } else {
                 match crate::authz::authorize_p2p(Service::Ai, Action::Infer, room, from, None) {
-                    Ok(authorized) => Some(authorized),
+                    Ok(authorized) => Some(authorized.with_op("oai")),
                     Err(denied) => {
                         self.error(from, id, &denied.message, Some(denied.code));
                         return Err(denied);
@@ -473,13 +473,20 @@ impl TunnelProvider {
             );
             return Ok(());
         };
-        let authorized = ready.authorized.clone().expect("authorized OAI assembly");
+        let mut authorized = ready.authorized.clone().expect("authorized OAI assembly");
         let path = ready.path.clone();
         let method = ready.method.clone();
         let content_type = ready.content_type.clone();
         let result = match ready.decode() {
             Ok(bytes) => {
                 let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+                let catalog_model = is_motion_catalog(&path)
+                    .then(|| motion_catalog_model(&path).ok())
+                    .flatten();
+                let model = catalog_model
+                    .as_deref()
+                    .or_else(|| body.get("model").and_then(Value::as_str));
+                authorized = authorized.with_model(model);
                 let deadline = relay_deadline(&method, &path, &body);
                 tokio::time::timeout(
                     deadline,

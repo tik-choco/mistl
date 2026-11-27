@@ -39,11 +39,17 @@ mistl vm rm <id>                 # stopped VMs only; deletes the disk
 `create` options: `--memory MB`, `--cpus N`, `--disk GB`, `--ssh-key FILE_OR_LINE`
 (repeatable), `--allow DID` (repeatable), `--autostart` and `--no-start`.
 
+Guests need at least 1024 MB of memory and an 8 GB disk; below that cloud-init and apt
+run out of memory or space. The disk must also be at least as large as the base image's
+virtual size (3.5 GiB for the default image), otherwise its root partition would be cut
+off. `create` rejects smaller values.
+
 ### Dashboard
 
 The VM page shows VM and HA status, host diagnostics, serial logs, and
-checkpoints. To create, start, stop, or remove a VM or take or restore a
-checkpoint, open the dashboard at its loopback address on the machine running mistl. The
+checkpoints. The dashboard calls checkpoints "backups": one **Backups** button per VM
+opens the list with "Back up now" and a restore action per entry. To create, start, stop,
+or remove a VM or take or restore a checkpoint, open the dashboard at its loopback address on the machine running mistl. The
 dashboard API also requires a local session to move a VM, manage HA groups, or
 disconnect an SSH forward. Dashboard sessions over LAN or a tunnel have
 read-only VM access. `vm.key` and `vm.connect` are CLI-only.
@@ -136,9 +142,10 @@ VM record. Guest SSH still requires an authorized key.
   the guest. A higher epoch fences the former holder and marks its disk stale. A two-node
   group requires both nodes. Two hosts and a witness can elect a surviving host after
   one failure when it holds a sufficiently recent checkpoint.
-- A standby waits 45 seconds after its last accepted lease, plus 10 seconds per earlier
-  eligible host in the configured order. Voters persist their epoch promise before
-  replying. A candidate must have a complete checkpoint at least as recent as the
+- A standby waits 45 seconds after its last accepted lease, plus 10 seconds per host
+  ahead of it and up to 5 seconds of jitter. Pool hosts are ranked as described below.
+  Outside a pool, the configured host order applies. Voters persist their epoch promise
+  before replying. A candidate must have a complete checkpoint at least as recent as the
   committed sequence known to each granting voter. At restore time the winner selects
   the newest complete checkpoint on the accepted branch at or above both its voted
   sequence and its committed sequence. It then boots and republishes the SSH target.
@@ -163,14 +170,90 @@ use reliable direct sends with at most 15 KiB of ciphertext per frame. Both dire
 allow at most eight outstanding requests per peer. Each request has a 60-second timeout,
 and the 64 MiB aggregate inbound budget includes assembled blobs the receiver is still using.
 
+### Pools
+
+Use a VM pool to share host presence and available CPU, memory, and disk space
+among trusted nodes.
+
+```sh
+mistl vm pool create       # Create a pool and print its secret invite code
+mistl vm pool join <code>  # Run on each additional node
+mistl vm pool status       # Show members and their capacity
+mistl vm pool invite       # Print the invite code again
+mistl vm pool leave        # Leave the pool on this node
+mistl vm protect <id>      # Set up replication for a VM on its current host
+```
+
+Keep the invite code secret and share it only with nodes you trust. Members
+use its shared key to authenticate pool messages and encrypt HA join tokens.
+Pool hosts can read the disks of VMs they host. Creating or joining a pool sets
+`[vm] room` to the pool room. An active HA group prevents switching away from
+its room. Leaving requires retiring all local HA groups and keeps the configured
+room. Announcements run while external connections are enabled.
+
+Creating or joining a pool also sets an unset `[tunnel] room_id` to the pool
+room. If a different tunnel room is already configured, the response includes
+`tunnel_room_hint`. SSH requires the same tunnel room and a running tunnel on
+both nodes. Use `mistl tunnel start` to start it.
+
+While the pool room is joined, `mistl vm create` selects an online host with
+enough CPU, RAM, disk space and free VM slots for the requested size. If no
+node fits, the create falls back to the local node and its own limit checks.
+It prefers more
+available memory, then CPU headroom, and breaks ties in favor of the local
+node. A remote VM belongs to the requesting identity and includes its client SSH
+public key. The create output shows the remote host's node ID. When this node
+knows the VM's group, `mistl vm ssh <id>`, `vm.connect`, and `mistl agent --vm
+<id>` can use the current holder automatically. For a remote VM whose group
+this node does not know, specify `--node <host>` (or `node` in `vm.connect`).
+
+After creation, the host tries to protect the VM automatically before its first
+boot. The guest then starts once the group holds a quorum lease. If no lease
+arrives within a minute, the create reports a start failure. The VM keeps its
+group, and `mistl vm start <id>` starts it once enough voters are online. The
+host also checks for stopped local VMs without a group every minute. It backs
+off failed attempts for ten minutes. Automatic protection skips running VMs,
+because enabling HA would pause a guest that has no lease yet. It also skips VMs
+whose group was retired with `mistl vm ha disable`. Use `mistl vm protect <id>` on the host to request
+protection immediately. It selects up to two eligible standby hosts based on
+free disk and adds online HA-capable witnesses to reach an odd number of voters where
+possible, with a maximum of five. The command reports which members joined.
+The holder starts an initial checkpoint after it obtains a quorum lease.
+Check `mistl vm ha status <id>` for the committed checkpoint before relying on
+failover. If some joins fail, the configured group stays in place and requires
+a voting majority to run. In a two-node pool, both hosts must be online for
+quorum.
+
+VM disks are replicated by the group itself (encrypted, deduplicated 1 MiB checkpoint
+chunks, a full copy on every host of the group), not by the escrow mesh. The mesh is built
+for a bounded number of small signed slots per room; thousands of immutable chunks per VM
+would hit its slot caps, keep tombstones forever and replicate about one slot per tick.
+The pool reuses only its HRW placement function (`src/placement.rs`) to pick standbys.
+
+For automatic failover, the group ranks its hosts other than the reference
+holder by the latest available pool score for that VM's CPU, memory, and disk
+size. Higher scores go first. Offline hosts, hosts at their running VM limit,
+and other hosts that cannot fit the VM receive no score and go after the scored
+hosts. Ties use the configured order. Failback is manual. A recovered node
+rejoins as a standby. To move the VM back, use `mistl vm move <id> --to <node>`
+or **Move** in the dashboard.
+
+`[vm] max_vms` counts standalone VMs and HA groups this node leads, including
+holders restoring a VM. Standby copies and witnesses use no slots. A node can
+join additional groups while it has fewer than 1,024 groups loaded. A standby
+needs enough free space on the VM filesystem for the checkpoint chunks it does not
+already hold. A host at its VM limit does not stand for election, so it cannot take
+over above `max_vms`. If every host is at its limit, the VM stays down until a
+slot frees up.
+
 ### An AI agent with its own Linux computer
 
 `mistl agent --vm <id>` runs the normal agent (same model selection, approval modes and
 TUI; `-p` for one prompt) but its workspace is `/home/mistl/work` inside the VM:
 
 ```sh
-mistl agent --vm <id>                         # VM on this node
-mistl agent --vm <id> --node <executor>       # VM on another node, over the tunnel
+mistl agent --vm <id>                         # Local VM or known HA holder
+mistl agent --vm <id> --node <executor>       # Specify a remote executor
 mistl agent --vm <id> -p "set up a cron job that ..."
 ```
 

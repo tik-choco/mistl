@@ -128,9 +128,8 @@ async fn remove_ssh_forward(state: &Arc<AppState>, target: &str, direction: &str
 
 /// Creates a Connect forward on a free loopback port. Returns
 /// `{"target": "...", "port": N}`.
-pub async fn connect(state: &Arc<AppState>, server_id: &str, node: Option<&str>) -> Result<Value> {
+pub async fn connect(state: &Arc<AppState>, server_id: &str, node: &str) -> Result<Value> {
     ensure!(valid_server_id(server_id), "invalid VM server id");
-    let node = node.context("remote VM SSH requires --node <executor node id>")?;
     ensure!(
         !node.is_empty() && !node.contains('@') && !node.contains(char::is_whitespace),
         "invalid VM host node id"

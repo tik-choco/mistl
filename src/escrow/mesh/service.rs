@@ -1,6 +1,6 @@
 use super::{
     decision::{self, Acceptance, Entry},
-    now_ms, placement, wire,
+    now_ms, wire,
 };
 use crate::{
     escrow::{
@@ -9,6 +9,7 @@ use crate::{
         repository::MeshRecord,
     },
     identity::Identity,
+    placement,
 };
 use serde_json::{Value, json};
 use std::{

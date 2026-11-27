@@ -17,6 +17,7 @@ mod ha;
 pub mod host;
 mod image;
 mod net;
+mod pool;
 mod qemu;
 mod seed;
 pub(crate) mod sshkey;
@@ -51,9 +52,16 @@ pub(crate) use net::authorize_vm_target;
 static REGISTRY: LazyLock<Mutex<Registry>> = LazyLock::new(|| Mutex::new(Registry::default()));
 static CREATE_LOCK: Mutex<()> = Mutex::const_new(());
 static KEY_LOCK: Mutex<()> = Mutex::const_new(());
-static VM_LOCKS: LazyLock<std::sync::Mutex<HashMap<String, Weak<Mutex<()>>>>> =
-    LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+type VmLocks = std::sync::Mutex<HashMap<String, Weak<Mutex<()>>>>;
+static VM_LOCKS: LazyLock<VmLocks> = LazyLock::new(Default::default);
+// Serialize process registration with automatic protection of the same VM.
+static VM_START_LOCKS: LazyLock<VmLocks> = LazyLock::new(Default::default);
 
+/// Smallest guest a cloud image boots and updates in reliably: below 1 GiB of RAM
+/// cloud-init and apt get OOM-killed, and a few GiB of free disk are needed on top
+/// of the base image for package upgrades.
+pub const MIN_MEMORY_MB: u32 = 1024;
+pub const MIN_DISK_GB: u32 = 8;
 const TUNNEL_TIMEOUT: Duration = Duration::from_secs(3);
 const LOG_WINDOW: u64 = 2 * 1024 * 1024;
 const SERIAL_ROTATE_BYTES: u64 = 8 * 1024 * 1024;
@@ -149,9 +157,17 @@ async fn qmp_request(qmp: &mpsc::Sender<QmpRequest>, action: QmpAction) -> Resul
 }
 
 pub(crate) async fn lock_vm(id: &str) -> Result<OwnedMutexGuard<()>> {
+    lock_vm_in(id, &VM_LOCKS).await
+}
+
+async fn lock_vm_start(id: &str) -> Result<OwnedMutexGuard<()>> {
+    lock_vm_in(id, &VM_START_LOCKS).await
+}
+
+async fn lock_vm_in(id: &str, locks: &VmLocks) -> Result<OwnedMutexGuard<()>> {
     ensure!(store::valid_server_id(id), "invalid VM server id");
     let lock = {
-        let mut locks = VM_LOCKS.lock().expect("VM operation locks");
+        let mut locks = locks.lock().expect("VM operation locks");
         if let Some(lock) = locks.get(id).and_then(Weak::upgrade) {
             lock
         } else {
@@ -176,6 +192,7 @@ impl Running {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateArgs {
     name: Option<String>,
     memory_mb: Option<u32>,
@@ -188,6 +205,46 @@ struct CreateArgs {
     #[serde(default)]
     autostart: bool,
     start: Option<bool>,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+struct VmSize {
+    memory_mb: u32,
+    cpus: u32,
+    disk_gb: u32,
+}
+
+impl From<&VmRecord> for VmSize {
+    fn from(record: &VmRecord) -> Self {
+        Self {
+            memory_mb: record.memory_mb,
+            cpus: record.cpus,
+            disk_gb: record.disk_gb,
+        }
+    }
+}
+
+impl CreateArgs {
+    fn size(&self, cfg: &VmConfig, host_limits: bool) -> Result<VmSize> {
+        let max = |limit| if host_limits { limit } else { u32::MAX };
+        Ok(VmSize {
+            memory_mb: resource(
+                self.memory_mb,
+                cfg.default_memory_mb,
+                MIN_MEMORY_MB,
+                max(cfg.max_memory_mb),
+                "memory_mb",
+            )?,
+            cpus: resource(self.cpus, cfg.default_cpus, 1, max(cfg.max_cpus), "cpus")?,
+            disk_gb: resource(
+                self.disk_gb,
+                cfg.default_disk_gb,
+                MIN_DISK_GB,
+                max(cfg.max_disk_gb),
+                "disk_gb",
+            )?,
+        })
+    }
 }
 
 #[derive(Serialize)]
@@ -211,6 +268,13 @@ pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Val
         "vm.ha.enable" | "vm.ha.join" | "vm.ha.status" | "vm.ha.disable" | "vm.move" => {
             ha::handle(cmd, args, state).await
         }
+        "vm.pool.status" | "vm.pool.create" | "vm.pool.join" | "vm.pool.invite"
+        | "vm.pool.leave" => pool::handle(cmd, args, state).await,
+        "vm.protect" => {
+            let id = server_id(&args)?.to_owned();
+            let state = state.clone();
+            tokio::spawn(async move { pool::protect(&id, &state).await }).await?
+        }
         "vm.doctor" => {
             let host = host::detect(&state.config().vm).await;
             let mut info = serde_json::to_value(&host)?;
@@ -226,7 +290,7 @@ pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Val
             let args = serde_json::from_value(args).context("invalid VM create arguments")?;
             // Provisioning must finish or roll back even if the caller disconnects.
             let state = state.clone();
-            tokio::spawn(async move { create(args, &state).await }).await?
+            tokio::spawn(async move { pool::place_create(args, &state).await }).await?
         }
         "vm.disconnect" => {
             let target = args["target"]
@@ -279,10 +343,15 @@ pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Val
             let id = server_id(&args)?;
             let root = store::vm_root()?;
             match cmd {
-                "vm.start" => match ha::group(&root, id)? {
-                    Some(g) => g.set_running(true, false).await,
-                    None => start(&root, id, state).await,
-                },
+                "vm.start" => {
+                    let start = lock_vm_start(id).await?;
+                    if let Some(group) = ha::group(&root, id)? {
+                        drop(start);
+                        group.set_running(true, false).await
+                    } else {
+                        start_with_lock(&root, id, state, start).await
+                    }
+                }
                 "vm.stop" => {
                     let force = args
                         .get("force")
@@ -382,11 +451,15 @@ async fn ensure_client_key(root: &Path) -> Result<ClientKey> {
     sshkey::ensure_client_key(root, &keygen).await
 }
 
-fn resource(value: Option<u32>, default: u32, max: u32, name: &str) -> Result<u32> {
+fn resource(value: Option<u32>, default: u32, min: u32, max: u32, name: &str) -> Result<u32> {
     let value = value.unwrap_or(default);
     ensure!(
-        value > 0 && value <= max,
-        "{name} must be greater than zero and at most {max}"
+        min <= max,
+        "{name}: the host limit [vm] max_{name} = {max} is below the minimum {min}"
+    );
+    ensure!(
+        (min..=max).contains(&value),
+        "{name} must be between {min} and {max}"
     );
     Ok(value)
 }
@@ -442,21 +515,18 @@ fn create_directory(root: &Path) -> Result<(String, PathBuf)> {
     }
 }
 
-async fn create(args: CreateArgs, state: &Arc<AppState>) -> Result<Value> {
+async fn create(
+    args: CreateArgs,
+    owner_did: Option<String>,
+    expected_pool: Option<&pool::PoolState>,
+    state: &Arc<AppState>,
+) -> Result<Value> {
     let cfg = state.config().vm;
-    let memory_mb = resource(
-        args.memory_mb,
-        cfg.default_memory_mb,
-        cfg.max_memory_mb,
-        "memory_mb",
-    )?;
-    let cpus = resource(args.cpus, cfg.default_cpus, cfg.max_cpus, "cpus")?;
-    let disk_gb = resource(
-        args.disk_gb,
-        cfg.default_disk_gb,
-        cfg.max_disk_gb,
-        "disk_gb",
-    )?;
+    let VmSize {
+        memory_mb,
+        cpus,
+        disk_gb,
+    } = args.size(&cfg, true)?;
     for did in &args.allow {
         crate::identity::pubkey_from_did(did)
             .context("allow contains an invalid Ed25519 did:key")?;
@@ -467,19 +537,19 @@ async fn create(args: CreateArgs, state: &Arc<AppState>) -> Result<Value> {
     let root = store::vm_root()?;
     let host = host::detect(&cfg).await;
     usable_host(&host)?;
+    if let Some(expected) = expected_pool {
+        pool::require_current(expected, state)?;
+    }
+    ensure!(
+        !REGISTRY.lock().await.shutting_down,
+        "daemon is shutting down"
+    );
+    check_create_slots(&root, cfg.max_vms)?;
     let record = {
-        let _create = CREATE_LOCK.lock().await;
-        ensure!(
-            !REGISTRY.lock().await.shutting_down,
-            "daemon is shutting down"
-        );
-        ensure!(
-            ha::slots(&root)? < cfg.max_vms as usize,
-            "host VM limit ({}) reached",
-            cfg.max_vms
-        );
-
-        let owner = crate::identity::current(state).await?;
+        let owner_did = match owner_did {
+            Some(did) => did,
+            None => crate::identity::current(state).await?.did().to_owned(),
+        };
         let client_key = ensure_client_key(&root).await?;
         let mut ssh_authorized_keys = args.ssh_keys;
         if !ssh_authorized_keys.contains(&client_key.public) {
@@ -495,19 +565,32 @@ async fn create(args: CreateArgs, state: &Arc<AppState>) -> Result<Value> {
             .qemu_img
             .as_deref()
             .context("qemu-img is unavailable")?;
+        // A virtual disk smaller than the image would cut off its root partition.
+        let base_bytes = image::virtual_size(qemu_img, &base.path).await?;
+        ensure!(
+            u64::from(disk_gb) << 30 >= base_bytes,
+            "disk_gb must be at least {} for this base image",
+            base_bytes.div_ceil(1 << 30)
+        );
         let (server_id, dir) = create_directory(&root)?;
         let name = args.name.unwrap_or_else(|| format!("vm-{server_id}"));
         let persist = async {
             image::create_overlay(qemu_img, &base.path, &dir.join("disk.qcow2"), disk_gb).await?;
             seed::write_seed(&dir.join("seed"), &server_id, &name, &ssh_authorized_keys)?;
+            let _create = CREATE_LOCK.lock().await;
+            if let Some(expected) = expected_pool {
+                pool::require_current(expected, state)?;
+            }
+            check_create_slots(&root, state.config().vm.max_vms)?;
             // Serialize port selection and saving with starts that reassign a port.
-            let _registry = REGISTRY.lock().await;
+            let registry = REGISTRY.lock().await;
+            ensure!(!registry.shutting_down, "daemon is shutting down");
             let records = store::load_all_except(&root, Some(&server_id))?;
             let ssh_port = available_ssh_port(cfg.ssh_port_base, &records)?;
             let record = VmRecord {
                 server_id: server_id.clone(),
                 name,
-                owner_did: owner.did().to_owned(),
+                owner_did,
                 allowed_dids: args.allow,
                 memory_mb,
                 cpus,
@@ -533,11 +616,29 @@ async fn create(args: CreateArgs, state: &Arc<AppState>) -> Result<Value> {
         }
     };
 
+    let id = &record.server_id;
+    // Configure protection before the initial start so a guest never boots
+    // standalone and then has to be fenced while the voters join.
+    let _initial_start = if let Some(pool) = expected_pool {
+        let (done, started) = oneshot::channel();
+        pool::auto_protect(id, pool, Some(started), state).await;
+        Some(done)
+    } else {
+        None
+    };
     let vm = if args.start.unwrap_or(true) {
-        let id = &record.server_id;
-        start_with_host(&root, id, &state.config().vm, host, state)
-            .await
-            .with_context(|| format!("VM {id} was created but could not be started"))?
+        async {
+            let start = lock_vm_start(id).await?;
+            if let Some(group) = ha::group(&root, id)? {
+                drop(start);
+                pool::wait_for_lease(&group).await?;
+                group.set_running(true, false).await
+            } else {
+                start_with_host(&root, id, &state.config().vm, host, state, start).await
+            }
+        }
+        .await
+        .with_context(|| format!("VM {id} was created but could not be started"))?
     } else {
         serde_json::to_value(status_object(
             &root,
@@ -548,6 +649,14 @@ async fn create(args: CreateArgs, state: &Arc<AppState>) -> Result<Value> {
         ))?
     };
     Ok(json!({"vm": vm}))
+}
+
+fn check_create_slots(root: &Path, max_vms: u32) -> Result<()> {
+    ensure!(
+        ha::slots(root)? < max_vms as usize,
+        "host VM limit ({max_vms}) reached"
+    );
+    Ok(())
 }
 
 fn check_running_budget(registry: &Registry, record: &VmRecord, cfg: &VmConfig) -> Result<()> {
@@ -576,9 +685,19 @@ fn check_running_budget(registry: &Registry, record: &VmRecord, cfg: &VmConfig) 
 }
 
 async fn start(root: &Path, id: &str, state: &Arc<AppState>) -> Result<Value> {
+    let start = lock_vm_start(id).await?;
+    start_with_lock(root, id, state, start).await
+}
+
+async fn start_with_lock(
+    root: &Path,
+    id: &str,
+    state: &Arc<AppState>,
+    start: OwnedMutexGuard<()>,
+) -> Result<Value> {
     let cfg = state.config().vm;
     let host = host::detect(&cfg).await;
-    start_with_host(root, id, &cfg, host, state).await
+    start_with_host(root, id, &cfg, host, state, start).await
 }
 
 async fn start_with_host(
@@ -587,6 +706,7 @@ async fn start_with_host(
     cfg: &VmConfig,
     host: HostInfo,
     state: &Arc<AppState>,
+    start: OwnedMutexGuard<()>,
 ) -> Result<Value> {
     let _vm = lock_vm(id).await?;
     let registry = REGISTRY.lock().await;
@@ -604,6 +724,7 @@ async fn start_with_host(
             running.process.state
         );
         drop(registry);
+        drop(start);
         return status(&record, root, state).await;
     }
     drop(registry);
@@ -655,6 +776,8 @@ async fn start_with_host(
         started,
     );
     drop(registry);
+    // Automatic protection can now see the starting process.
+    drop(start);
     result
         .await
         .context("VM supervisor exited during startup")??;
@@ -1451,21 +1574,25 @@ async fn connect(
         .as_ref()
         .is_some_and(|g| node.or(holder.as_deref()) != Some(g.me.as_str()));
     let node = node.or(if remote { holder.as_deref() } else { None });
-    let local = !remote && local_ssh_port(root, id).await?.is_some();
+    let port = if remote {
+        None
+    } else {
+        local_ssh_port(root, id).await?
+    };
+    let node = node.filter(|node| !node.trim().is_empty());
     ensure!(
-        local || node.is_some_and(|node| !node.trim().is_empty()),
+        port.is_some() || node.is_some(),
         "remote VM SSH requires --node <executor node id>"
     );
     let key = ensure_client_key(root).await?;
-    let mut result = if local {
-        let port = local_ssh_port(root, id)
-            .await?
-            .context("VM is not running")?;
-        json!({"port": port, "local": true})
-    } else {
-        let mut forward = net::connect(state, id, node).await?;
-        forward["local"] = json!(false);
-        forward
+    let mut result = match (port, node) {
+        (Some(port), _) => json!({"port": port, "local": true}),
+        (None, Some(node)) => {
+            let mut forward = net::connect(state, id, node).await?;
+            forward["local"] = json!(false);
+            forward
+        }
+        (None, None) => unreachable!("VM SSH requires a local port or remote node"),
     };
     result["user"] = json!("mistl");
     result["key"] = json!(key.private);
@@ -1479,6 +1606,7 @@ pub fn spawn_background(state: Arc<AppState>) {
     if let Err(error) = ha::load(&state) {
         tracing::warn!(%error, "could not load VM groups");
     }
+    pool::spawn_background(state.clone());
     if !state.config().vm.enabled {
         return;
     }
@@ -1488,11 +1616,15 @@ pub fn spawn_background(state: Arc<AppState>) {
         match result {
             Ok((root, records)) => {
                 for record in records.into_iter().filter(|record| record.autostart) {
-                    if !matches!(ha::group(&root, &record.server_id), Ok(None)) {
+                    let id = &record.server_id;
+                    let Ok(start) = lock_vm_start(id).await else {
+                        continue;
+                    };
+                    if !matches!(ha::group(&root, id), Ok(None)) {
                         continue;
                     }
-                    if let Err(error) = start(&root, &record.server_id, &state).await {
-                        tracing::warn!(id = %record.server_id, "VM autostart failed: {error:#}");
+                    if let Err(error) = start_with_lock(&root, id, &state, start).await {
+                        tracing::warn!(%id, "VM autostart failed: {error:#}");
                     }
                 }
             }
@@ -1579,10 +1711,28 @@ mod tests {
 
     #[test]
     fn resources_validate_defaults_and_explicit_values() {
-        assert_eq!(resource(None, 4, 4, "cpus").unwrap(), 4);
-        assert_eq!(resource(Some(1), 4, 4, "cpus").unwrap(), 1);
-        assert!(resource(Some(0), 4, 4, "cpus").is_err());
-        assert!(resource(None, 4, 3, "cpus").is_err());
+        assert_eq!(resource(None, 4, 1, 4, "cpus").unwrap(), 4);
+        assert_eq!(resource(Some(1), 4, 1, 4, "cpus").unwrap(), 1);
+        assert!(resource(Some(0), 4, 1, 4, "cpus").is_err());
+        assert!(resource(None, 4, 1, 3, "cpus").is_err());
+        assert_eq!(resource(Some(8), 20, 8, 200, "disk_gb").unwrap(), 8);
+        assert!(resource(Some(1), 20, 8, 200, "disk_gb").is_err());
+        assert!(resource(Some(512), 2048, 1024, 8192, "memory_mb").is_err());
+        assert!(resource(None, 4, 8, 4, "disk_gb").is_err());
+    }
+
+    #[test]
+    fn create_arguments_do_not_accept_an_owner_override() {
+        let args: CreateArgs = serde_json::from_value(json!({"name": "guest"})).unwrap();
+        let mut cfg = VmConfig::default();
+        cfg.default_memory_mb = MIN_MEMORY_MB * 2;
+        cfg.max_memory_mb = MIN_MEMORY_MB;
+        assert_eq!(
+            args.size(&cfg, false).unwrap().memory_mb,
+            cfg.default_memory_mb
+        );
+        assert!(args.size(&cfg, true).is_err());
+        assert!(serde_json::from_value::<CreateArgs>(json!({"owner_did": "override"})).is_err());
     }
 
     #[test]
