@@ -77,7 +77,7 @@ stdio_enabled = false                        # let approved peers run `stdio_com
 # tts = { provider_id = "http", model = "speech-model", voice = "speaker", lang_voices = { en = "english-speaker" } }
 # stt = { provider_id = "http", model = "transcription-model" }
 api_listen = "127.0.0.1:6478"                # local OpenAI-compatible API (serve)
-# api_allowed_origins = ["https://example.com"]  # web apps allowed to call that API (CORS)
+api_allowed_origins = ["https://tik-choco.github.io", "https://app.tik-choco.com"]  # web apps allowed to call that API (CORS); [] = none
 request_timeout_secs = 120                   # p2p inactivity timeout (resets per chunk)
 
 # [[ai.providers]]                          # HTTP endpoint

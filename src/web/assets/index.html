@@ -1631,8 +1631,24 @@
   .ai-sharing-group-heading .ai-provider-count { margin-left: auto; font-size: 12px; font-weight: normal; }
   .ai-sharing-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-top: 1px solid var(--panel-border); font-size: 13px; }
   .ai-sharing-model { min-width: 0; overflow-wrap: anywhere; }
+  .ai-model-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 6px; font-size: 12px; }
+  .ai-model-meta select { max-width: 100%; padding: 4px 6px; font-size: 12px; }
+  .ai-model-meta label { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
+  .ai-media-heading { display: flex; align-items: center; justify-content: space-between; }
+  .ai-media-list { display: grid; gap: 10px; margin-top: 12px; }
+  .ai-media-job { border: 1px solid var(--panel-border); border-radius: 8px; padding: 12px; display: grid; gap: 8px; overflow-wrap: anywhere; }
+  .ai-media-job-head, .ai-media-file { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+  .ai-media-job-head button { margin-left: auto; }
+  .ai-media-progress { display: flex; align-items: center; gap: 10px; }
+  .ai-media-progress progress { flex: 1; min-width: 0; accent-color: var(--accent); }
+  .ai-media-job :is(img, video) { display: block; max-width: 100%; max-height: 320px; border-radius: 6px; }
+  .ai-media-job audio { max-width: 100%; }
+  .ai-media-modal textarea, .ai-media-modal input { width: 100%; box-sizing: border-box; }
+  .ai-media-reference { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; overflow-wrap: anywhere; }
+  .ai-media-modal textarea { min-height: 96px; resize: vertical; }
   .ai-sharing-chips { flex-shrink: 0; max-width: 65%; justify-content: flex-end; }
   @media (max-width: 600px) {
+    #panel-ai .subtabs button { min-width: 0; padding: 10px 4px; font-size: 12px; }
     .ai-connection-popup .row:not(.ai-connection-footer) { flex-direction: column; align-items: stretch; }
     .ai-connection-popup .row:not(.ai-connection-footer) > button { align-self: flex-start; }
     .ai-sharing-row { align-items: flex-start; flex-direction: column; gap: 8px; }
@@ -1890,11 +1906,13 @@
 
   <section class="panel panel-span2" id="panel-ai">
     <h2><span data-i18n="ai.title">AI</span> <span class="spacer"></span>
+      <button type="button" class="primary" id="btn-ai-generate" data-i18n="ai.media.generate">Generate</button>
     </h2>
     <div class="subtabs" role="tablist" data-i18n-aria-label="ai.tabs.groupLabel" aria-label="AI sections">
       <button type="button" data-subtab-target="connection" data-i18n="ai.tab.connection">Connections</button>
       <button type="button" data-subtab-target="tasks" data-i18n="ai.tab.tasks">Tasks</button>
       <button type="button" data-subtab-target="sharing" data-i18n="ai.tab.sharing">Sharing</button>
+      <button type="button" data-subtab-target="generated" data-i18n="ai.media.generated">Generated</button>
     </div>
     <div class="ai-subtab-content">
     <div class="subtab-page" data-subtab="connection">
@@ -1918,6 +1936,11 @@
     </div>
     <div class="subtab-page" data-subtab="sharing">
       <div id="ai-sharing-editor"></div>
+    </div>
+    <div class="subtab-page" data-subtab="generated">
+      <div class="ai-media-heading"><strong data-i18n="ai.media.generated">Generated</strong><button type="button" id="btn-ai-media-refresh" data-i18n="common.refresh">Refresh</button></div>
+      <div id="ai-media-error" class="tg-error" role="status" hidden></div>
+      <div id="ai-media-list" class="ai-media-list"></div>
     </div>
     </div>
     <div class="topology-slot" id="topology-slot-ai"></div>
@@ -2896,6 +2919,44 @@
       "ai.sharing.copyRoomId": "Copy room ID",
       "ai.sharing.paused": "Paused",
       "ai.tab.sharing": "Sharing",
+      "ai.media.generate": "Generate",
+      "ai.media.generated": "Generated",
+      "ai.media.kind": "Model kind",
+      "ai.media.kind.unknown": "Unknown",
+      "ai.media.kind.chat": "Chat",
+      "ai.media.kind.image": "Image",
+      "ai.media.kind.video": "Video",
+      "ai.media.kind.music": "Music",
+      "ai.media.kind.speech": "Speech",
+      "ai.media.kind.3d": "3D",
+      "ai.media.kind.other": "Other",
+      "ai.media.metered": "May incur charges",
+      "ai.media.askKind": "What do you want to generate?",
+      "ai.media.askModel": "Which model do you want to use?",
+      "ai.media.noModels": "No generation models are available. Set a model kind in Sharing or connect to a room that offers one.",
+      "ai.media.local": "Local HTTP provider",
+      "ai.media.room": "Room: {room}",
+      "ai.media.askPrompt": "What should the model generate?",
+      "ai.media.prompt": "Prompt",
+      "ai.media.size": "Size (optional)",
+      "ai.media.seconds": "Seconds (optional)",
+      "ai.media.duration": "Duration in seconds (optional)",
+      "ai.media.reference": "Reference image (optional)",
+      "ai.media.chooseReference": "Choose image",
+      "ai.media.noReference": "No image selected",
+      "ai.media.referenceLarge": "Choose a smaller reference image (up to 20 MiB).",
+      "ai.media.referenceError": "Could not read the reference image.",
+      "ai.media.confirm": "Confirm generation",
+      "ai.media.chargeWarning": "This model may incur charges for the provider.",
+      "ai.media.loading": "Loading models…",
+      "ai.media.started": "Generation started.",
+      "ai.media.empty": "No generated media yet.",
+      "ai.media.running": "Running",
+      "ai.media.completed": "Completed",
+      "ai.media.failed": "Failed",
+      "ai.media.download": "Download",
+      "ai.media.remove": "Remove",
+      "ai.media.removeConfirm": "Remove this generation and its files?",
       "ai.model.effort": "Reasoning effort",
       "settings.ai.providers.keyPlaceholder": "API key",
       "ai.tab.connection": "Connections",
@@ -3979,6 +4040,44 @@
       "ai.sharing.copyRoomId": "IDをコピー",
       "ai.sharing.paused": "停止",
       "ai.tab.sharing": "提供",
+      "ai.media.generate": "生成",
+      "ai.media.generated": "生成結果",
+      "ai.media.kind": "モデルの種類",
+      "ai.media.kind.unknown": "不明",
+      "ai.media.kind.chat": "チャット",
+      "ai.media.kind.image": "画像",
+      "ai.media.kind.video": "動画",
+      "ai.media.kind.music": "音楽",
+      "ai.media.kind.speech": "音声",
+      "ai.media.kind.3d": "3D",
+      "ai.media.kind.other": "その他",
+      "ai.media.metered": "料金が発生する可能性あり",
+      "ai.media.askKind": "何を生成しますか？",
+      "ai.media.askModel": "どのモデルを使いますか？",
+      "ai.media.noModels": "利用可能な生成モデルがありません。提供設定でモデルの種類を設定するか、生成モデルを提供するルームに接続してください。",
+      "ai.media.local": "ローカルHTTP接続先",
+      "ai.media.room": "ルーム: {room}",
+      "ai.media.askPrompt": "何を生成するか指定してください。",
+      "ai.media.prompt": "プロンプト",
+      "ai.media.size": "サイズ（任意）",
+      "ai.media.seconds": "秒数（任意）",
+      "ai.media.duration": "長さ・秒数（任意）",
+      "ai.media.reference": "参照画像（任意）",
+      "ai.media.chooseReference": "画像を選択",
+      "ai.media.noReference": "画像が選択されていません",
+      "ai.media.referenceLarge": "20 MiB以下の参照画像を選択してください。",
+      "ai.media.referenceError": "参照画像を読み込めませんでした。",
+      "ai.media.confirm": "生成の確認",
+      "ai.media.chargeWarning": "このモデルの利用により、提供者に料金が発生する可能性があります。",
+      "ai.media.loading": "モデルを読み込み中…",
+      "ai.media.started": "生成を開始しました。",
+      "ai.media.empty": "まだ生成結果がありません。",
+      "ai.media.running": "生成中",
+      "ai.media.completed": "完了",
+      "ai.media.failed": "失敗",
+      "ai.media.download": "ダウンロード",
+      "ai.media.remove": "削除",
+      "ai.media.removeConfirm": "この生成結果とファイルを削除しますか？",
       "ai.model.effort": "推論の強さ",
       "settings.ai.providers.keyPlaceholder": "APIキー",
       "ai.tab.connection": "接続先",
@@ -5120,6 +5219,44 @@
       "ai.model.sources": "来源",
       "ai.model.all": "全部",
       "ai.tab.sharing": "共享",
+      "ai.media.generate": "生成",
+      "ai.media.generated": "生成结果",
+      "ai.media.kind": "模型类型",
+      "ai.media.kind.unknown": "未知",
+      "ai.media.kind.chat": "聊天",
+      "ai.media.kind.image": "图片",
+      "ai.media.kind.video": "视频",
+      "ai.media.kind.music": "音乐",
+      "ai.media.kind.speech": "语音",
+      "ai.media.kind.3d": "3D",
+      "ai.media.kind.other": "其他",
+      "ai.media.metered": "可能产生费用",
+      "ai.media.askKind": "您想生成什么？",
+      "ai.media.askModel": "您想使用哪个模型？",
+      "ai.media.noModels": "没有可用的生成模型。请在共享设置中指定模型类型，或连接提供生成模型的房间。",
+      "ai.media.local": "本地 HTTP 提供方",
+      "ai.media.room": "房间：{room}",
+      "ai.media.askPrompt": "请指定要生成的内容。",
+      "ai.media.prompt": "提示词",
+      "ai.media.size": "尺寸（可选）",
+      "ai.media.seconds": "秒数（可选）",
+      "ai.media.duration": "时长（秒，可选）",
+      "ai.media.reference": "参考图片（可选）",
+      "ai.media.chooseReference": "选择图片",
+      "ai.media.noReference": "未选择图片",
+      "ai.media.referenceLarge": "请选择不超过 20 MiB 的参考图片。",
+      "ai.media.referenceError": "无法读取参考图片。",
+      "ai.media.confirm": "确认生成",
+      "ai.media.chargeWarning": "使用此模型可能会给提供方产生费用。",
+      "ai.media.loading": "正在加载模型…",
+      "ai.media.started": "已开始生成。",
+      "ai.media.empty": "还没有生成结果。",
+      "ai.media.running": "生成中",
+      "ai.media.completed": "已完成",
+      "ai.media.failed": "失败",
+      "ai.media.download": "下载",
+      "ai.media.remove": "移除",
+      "ai.media.removeConfirm": "移除此生成任务及其文件？",
       "ai.tab.tasks": "任务",
       "settings.ai.providers.keyPlaceholder": "API密钥",
       "daemon.connected": "已连接",
@@ -6342,6 +6479,8 @@
     renderStream();
     renderTopology();
     renderAi();
+    renderAiMedia();
+    if (aiMediaWizard && !aiMediaWizard.busy) renderAiMediaStep();
     renderChatRelayRooms(state.chatRelayRooms);
     renderStore(state.storeItems);
     escrowView.refreshLanguage();
@@ -7182,6 +7321,259 @@
       });
     }
   });
+
+  /* ---------- media generation ---------- */
+
+  var aiMediaGenerate = document.getElementById("btn-ai-generate");
+  var aiMediaList = document.getElementById("ai-media-list");
+  var aiMediaError = document.getElementById("ai-media-error");
+  var aiMediaJobs = [];
+  var aiMediaTimer = null, aiMediaRequest = null;
+  var aiMediaOverlay = el("div", { class: "modal-overlay tg-modal ai-media-modal", hidden: "" });
+  var aiMediaDialog = el("div", { class: "modal-panel tg-dialog", role: "dialog", "aria-modal": "true", "aria-labelledby": "ai-media-title" });
+  var aiMediaTitle = el("h3", { id: "ai-media-title" });
+  var aiMediaClose = el("button", { type: "button", class: "modal-close", text: "×" });
+  var aiMediaBody = el("div", { class: "tg-dialog-body" });
+  var aiMediaStatus = el("p", { class: "tg-dialog-status tg-error", role: "status" });
+  aiMediaDialog.append(el("div", { class: "modal-header" }, [aiMediaTitle, aiMediaClose]), aiMediaBody, aiMediaStatus);
+  aiMediaOverlay.appendChild(aiMediaDialog);
+  document.body.appendChild(aiMediaOverlay);
+  var aiMediaWizard = null;
+  var aiMediaKinds = ["image", "video", "music"];
+
+  function aiMediaModels(status, config) {
+    var models = [];
+    var meteredNames = new Set();
+    function add(map, room) {
+      Object.keys(map || {}).forEach(function (model) {
+        var info = map[model];
+        if (info && info.metered === true) meteredNames.add(model);
+        if (!info || aiMediaKinds.indexOf(info.kind) < 0) return;
+        var previous = models.find(function (m) { return m.model === model && m.room === room && m.kind === info.kind; });
+        if (previous) previous.metered = previous.metered || info.metered === true;
+        else models.push({ kind: info.kind, model: model, room: room, metered: info.metered === true });
+      });
+    }
+    ((status && status.rooms) || []).forEach(function (r) {
+      if (r.enabled !== false && r.room) add(r.model_info, r.room);
+    });
+    ((config && config.ai && config.ai.providers) || []).forEach(function (p) {
+      if (p.enabled !== false && !aiIsRoom(p)) add(p.model_info, null);
+    });
+    // Unscoped routing cannot choose between providers with the same model name.
+    models.forEach(function (m) {
+      if (!m.room) m.metered = meteredNames.has(m.model);
+    });
+    return models;
+  }
+
+  function closeAiMediaWizard() {
+    if (!aiMediaWizard || aiMediaWizard.busy) return;
+    aiMediaWizard = null;
+    aiMediaOverlay.hidden = true;
+    aiMediaBody.replaceChildren();
+    aiMediaGenerate.focus({ preventScroll: true });
+  }
+  aiMediaClose.addEventListener("click", closeAiMediaWizard);
+  aiMediaOverlay.addEventListener("pointerdown", function (e) { if (e.target === aiMediaOverlay) closeAiMediaWizard(); });
+  aiMediaOverlay.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeAiMediaWizard(); return; }
+    if (e.key !== "Tab") return;
+    var nodes = Array.from(aiMediaDialog.querySelectorAll("button,input,textarea,select")).filter(function (node) { return !node.disabled && !node.closest("[hidden]"); });
+    if (!nodes.length) return;
+    if (e.shiftKey && document.activeElement === nodes[0]) { e.preventDefault(); nodes[nodes.length - 1].focus(); }
+    else if (!e.shiftKey && document.activeElement === nodes[nodes.length - 1]) { e.preventDefault(); nodes[0].focus(); }
+  });
+
+  function openAiMediaWizard() {
+    var w = aiMediaWizard = { step: "kind", loading: true, models: [], kind: "", selected: null, params: {}, reference: null };
+    aiMediaOverlay.hidden = false;
+    renderAiMediaStep();
+    Promise.all([
+      api("ai.status", {}).catch(function () { return state.ai; }),
+      api("config.show", {}).catch(function () { return state.config; })
+    ]).then(function (data) {
+      if (aiMediaWizard !== w) return;
+      w.models = aiMediaModels(data[0], data[1]);
+      w.loading = false;
+      renderAiMediaStep();
+    });
+  }
+  aiMediaGenerate.addEventListener("click", openAiMediaWizard);
+
+  function renderAiMediaStep() {
+    var w = aiMediaWizard;
+    if (!w) return;
+    aiMediaTitle.textContent = t("ai.media.generate");
+    aiMediaClose.setAttribute("aria-label", t("common.close"));
+    aiMediaBody.replaceChildren();
+    aiMediaBody.dataset.step = w.step;
+    aiMediaStatus.textContent = "";
+    var step = w.step;
+    var form = el("form", { class: "tg-wizard" });
+    var foot = el("div", { class: "tg-dialog-foot" });
+    var input, onNext;
+    function ask(key) { form.appendChild(el("h4", { class: "tg-question", text: t(key) })); }
+    function go(next) { w.step = next; renderAiMediaStep(); }
+    function source(m) { return m.room ? t("ai.media.room", { room: m.room }) : t("ai.media.local"); }
+    function field(key, param, attrs) {
+      var node = el("input", Object.assign({ id: "ai-media-" + param }, attrs));
+      node.value = w.params[param] || "";
+      form.append(el("label", { for: node.id, text: t(key) }), node);
+      node.addEventListener("input", function () { w.params[param] = node.value; });
+      return node;
+    }
+    function submit() {
+      w.busy = true;
+      var controls = Array.from(form.querySelectorAll("button,input,textarea"));
+      controls.forEach(function (node) { node.disabled = true; });
+      aiMediaClose.disabled = true;
+      var params = {};
+      Object.keys(w.params).forEach(function (key) { if (w.params[key] !== "") params[key] = w.params[key]; });
+      if (params.duration !== undefined) params.duration = Number(params.duration);
+      var args = { kind: w.kind, model: w.selected.model, params: params };
+      if (w.selected.room) args.room = w.selected.room;
+      var reference = Promise.resolve();
+      if (w.kind === "video" && w.reference) {
+        reference = new Promise(function (resolve, reject) {
+          if (w.reference.size > 20 * 1024 * 1024) { reject(new Error(t("ai.media.referenceLarge"))); return; }
+          var reader = new FileReader();
+          reader.onload = function () { params.input_reference = reader.result; resolve(); };
+          reader.onerror = function () { reject(new Error(t("ai.media.referenceError"))); };
+          reader.readAsDataURL(w.reference);
+        });
+      }
+      reference.then(function () { return api("ai.media.generate", args); }).then(function () {
+        w.busy = false; aiMediaClose.disabled = false;
+        closeAiMediaWizard();
+        showToast(t("ai.media.started"), "success");
+        refreshAiMedia();
+        subtabActivate["panel-ai"]("generated");
+      }, function (err) {
+        w.busy = false; aiMediaClose.disabled = false;
+        controls.forEach(function (node) { node.disabled = false; });
+        aiMediaStatus.textContent = err.message || String(err);
+      });
+    }
+    if (step === "kind") {
+      ask("ai.media.askKind");
+      var kinds = aiMediaKinds.filter(function (kind) { return w.models.some(function (m) { return m.kind === kind; }); });
+      if (w.loading || !kinds.length) form.appendChild(el("p", { class: "tg-help", text: t(w.loading ? "ai.media.loading" : "ai.media.noModels") }));
+      kinds.forEach(function (kind) {
+        form.appendChild(tunnelRuleChoice(aiModelKindLabel(kind), "", kind, w.kind === kind, function () {
+          if (w.kind !== kind) { w.params = {}; w.reference = null; w.selected = null; }
+          w.kind = kind; go("model");
+        }));
+      });
+    } else if (step === "model") {
+      ask("ai.media.askModel");
+      w.models.filter(function (m) { return m.kind === w.kind; }).forEach(function (m) {
+        form.appendChild(tunnelRuleChoice(m.model, source(m) + (m.metered ? " · " + t("ai.media.metered") : ""), m.model, m === w.selected, function () { w.selected = m; go("prompt"); }));
+      });
+    } else if (step === "prompt") {
+      ask("ai.media.askPrompt");
+      input = el("textarea", { id: "ai-media-prompt", required: "", rows: "4" });
+      input.value = w.params.prompt || "";
+      input.addEventListener("input", function () { w.params.prompt = input.value; });
+      form.append(el("label", { for: input.id, text: t("ai.media.prompt") }), input);
+      if (w.kind !== "music") field("ai.media.size", "size", { type: "text" });
+      if (w.kind === "video") {
+        field("ai.media.seconds", "seconds", { type: "number", min: "1", step: "1" });
+        var file = el("input", { type: "file", accept: "image/*", id: "ai-media-reference", hidden: "" });
+        var chooseFile = el("button", { type: "button", text: t("ai.media.chooseReference"), "aria-label": t("ai.media.reference") });
+        chooseFile.addEventListener("click", function () { file.click(); });
+        var filename = el("span", { class: "muted", text: w.reference ? w.reference.name : t("ai.media.noReference") });
+        var clear = el("button", { type: "button", text: t("ai.media.remove") });
+        clear.hidden = !w.reference;
+        form.append(el("label", { for: file.id, text: t("ai.media.reference") }), file, el("div", { class: "ai-media-reference" }, [chooseFile, filename, clear]));
+        file.addEventListener("change", function () { w.reference = file.files[0] || null; filename.textContent = w.reference ? w.reference.name : t("ai.media.noReference"); clear.hidden = !w.reference; });
+        clear.addEventListener("click", function () { w.reference = null; file.value = ""; filename.textContent = t("ai.media.noReference"); clear.hidden = true; });
+      }
+      if (w.kind === "music") field("ai.media.duration", "duration", { type: "number", min: "1", step: "1" });
+      onNext = function () {
+        if (!input.value.trim()) { input.focus(); return; }
+        if (w.reference && w.reference.size > 20 * 1024 * 1024) { aiMediaStatus.textContent = t("ai.media.referenceLarge"); return; }
+        if (w.selected.metered) go("confirm"); else submit();
+      };
+    } else {
+      ask("ai.media.confirm");
+      form.append(el("strong", { text: w.selected.model }), el("p", { class: "tg-help", text: source(w.selected) }), el("p", { class: "tunnel-rule-warning", text: t("ai.media.chargeWarning") }));
+      onNext = submit;
+    }
+    if (step !== "kind") {
+      var back = el("button", { type: "button", class: "tg-back", text: t("tunnel.rules.back") });
+      back.addEventListener("click", function () { go({ model: "kind", prompt: "model", confirm: "prompt" }[step]); });
+      foot.appendChild(back);
+    }
+    if (onNext) foot.appendChild(el("button", { type: "submit", class: "primary", text: t(step === "prompt" && w.selected.metered ? "tunnel.rules.next" : "ai.media.generate") }));
+    form.appendChild(foot);
+    form.addEventListener("submit", function (e) { e.preventDefault(); if (onNext && !w.busy) onNext(); });
+    aiMediaBody.appendChild(form);
+    (input || form.querySelector(".tg-chosen") || form.querySelector("button") || aiMediaClose).focus();
+  }
+
+  function renderAiMedia() {
+    var nodes = new Map(Array.from(aiMediaList.children).map(function (node) { return [node.dataset.jobId, node]; }));
+    if (!aiMediaJobs.length) {
+      aiMediaList.replaceChildren(el("div", { class: "muted", text: t("ai.media.empty") }));
+      return;
+    }
+    aiMediaJobs.forEach(function (job, i) {
+      var signature = JSON.stringify([currentLang, job]);
+      var card = nodes.get(job.id);
+      nodes.delete(job.id);
+      if (!card || card._signature !== signature) {
+        var next = el("article", { class: "ai-media-job", "data-job-id": job.id });
+        next._signature = signature;
+        var remove = el("button", { type: "button", class: "danger", text: t("ai.media.remove") });
+        var badge = job.status === "completed" ? "ok-badge" : job.status === "failed" ? "status-error" : "queued";
+        var head = el("div", { class: "ai-media-job-head" }, [el("strong", { text: job.model }), el("span", { class: "badge", text: aiModelKindLabel(job.kind) }), el("span", { class: "badge " + badge, text: t("ai.media." + job.status) })]);
+        if (job.metered) head.appendChild(el("span", { class: "badge deposited", text: t("ai.media.metered") }));
+        head.appendChild(remove);
+        next.appendChild(head);
+        if (job.room) next.appendChild(el("span", { class: "muted", text: t("ai.media.room", { room: job.room }) }));
+        if (job.status === "running") {
+          var bar = el("progress", { max: "100", "aria-label": t("ai.media.running") });
+          var progress = el("div", { class: "ai-media-progress" }, [bar]);
+          if (Number.isFinite(job.progress)) { bar.value = job.progress; progress.appendChild(el("span", { class: "muted", text: job.progress + "%" })); }
+          next.appendChild(progress);
+        }
+        if (job.error) next.appendChild(el("div", { class: "tg-error", text: job.error }));
+        if (job.status === "completed") (job.files || []).forEach(function (file) {
+          var url = "/api/ai/media/" + encodeURIComponent(job.id) + "/" + encodeURIComponent(file.index);
+          var mime = file.mime || "";
+          if (mime.indexOf("image/") === 0) next.appendChild(el("img", { src: url + "?inline=1", alt: file.name, loading: "lazy" }));
+          else if (mime.indexOf("audio/") === 0 || mime.indexOf("video/") === 0) next.appendChild(el(mime.split("/")[0], { src: url + "?inline=1", controls: "", preload: "metadata" }));
+          next.appendChild(el("div", { class: "ai-media-file" }, [el("span", { text: file.name }), el("span", { class: "muted", text: fmtBytes(file.bytes) }), el("a", { href: url, download: "", text: t("ai.media.download") })]));
+        });
+        remove.addEventListener("click", function () {
+          if (!confirm(t("ai.media.removeConfirm"))) return;
+          withBusy(remove, function () { return api("ai.media.remove", { id: job.id }); }).then(refreshAiMedia, function (err) { showToast(err.message, "error"); });
+        });
+        if (card) card.replaceWith(next);
+        card = next;
+      }
+      if (aiMediaList.children[i] !== card) aiMediaList.insertBefore(card, aiMediaList.children[i] || null);
+    });
+    nodes.forEach(function (node) { node.remove(); });
+  }
+  function pollAiMedia() {
+    if (aiMediaRequest) return aiMediaRequest;
+    clearTimeout(aiMediaTimer);
+    aiMediaRequest = api("ai.media.list", {}).then(function (data) {
+      aiMediaJobs = data.jobs || [];
+      aiMediaError.textContent = ""; aiMediaError.hidden = true;
+      renderAiMedia();
+    }, function (err) { aiMediaError.textContent = err.message; aiMediaError.hidden = false; }).finally(function () {
+      aiMediaRequest = null;
+      if (aiMediaJobs.some(function (job) { return job.status === "running"; })) aiMediaTimer = setTimeout(pollAiMedia, 3000);
+    });
+    return aiMediaRequest;
+  }
+  function refreshAiMedia() {
+    return aiMediaRequest ? aiMediaRequest.then(pollAiMedia) : pollAiMedia();
+  }
+  document.getElementById("btn-ai-media-refresh").addEventListener("click", function () { pollAiMedia(); });
 
   /* ---------- peers (signed profiles) + direct messages ---------- */
 
@@ -10925,6 +11317,44 @@
     });
     return aiProviderWrite;
   }
+  var aiModelKinds = ["unknown", "chat", "image", "video", "music", "speech", "3d", "other"];
+  function aiModelKindLabel(kind) {
+    return aiModelKinds.indexOf(kind) !== -1 ? t("ai.media.kind." + kind) : kind || t("ai.media.kind.unknown");
+  }
+  function buildAiModelMetadata(ref, p, shared, refresh) {
+    var info = (p.model_info || {})[ref.model] || {};
+    var kind = info.kind || "unknown";
+    var wrap = el("div", { class: "ai-model-meta" });
+    var select = el("select", { "aria-label": t("ai.media.kind") + ": " + ref.model, "data-model-field": "kind" });
+    var kinds = aiModelKinds.indexOf(kind) < 0 ? aiModelKinds.concat(kind) : aiModelKinds;
+    kinds.forEach(function (k) { select.appendChild(el("option", { value: k, text: aiModelKindLabel(k) })); });
+    select.value = kind;
+    var metered = el("input", { type: "checkbox", role: "switch", "data-model-field": "metered" });
+    metered.checked = info.metered === true;
+    var toggle = el("span", { class: "toggle-switch" }, [metered, el("span", { class: "slider", "aria-hidden": "true" })]);
+    wrap.append(select, el("label", { class: "switch-control" }, [toggle, el("span", { class: shared && metered.checked ? "badge deposited" : "", text: t("ai.media.metered") })]));
+    function save(field, value) {
+      select.disabled = metered.disabled = true;
+      aiProviderWrite = aiProviderWrite.then(function () {
+        var current = aiProvider(p.id);
+        if (!current) return false;
+        var map = Object.assign(Object.create(null), current.model_info || {});
+        var old = map[ref.model] || {};
+        var next = { kind: old.kind || "unknown", metered: old.metered === true };
+        next[field] = value;
+        if (next.kind === "unknown" && !next.metered) delete map[ref.model];
+        else {
+          if (next.kind === "unknown") delete next.kind;
+          map[ref.model] = next;
+        }
+        return aiSaveConfig("providers", aiProviders().map(function (item) { return item.id === p.id ? withField(item, "model_info", map) : item; }));
+      });
+      aiProviderWrite.then(refresh);
+    }
+    select.addEventListener("change", function () { save("kind", select.value); });
+    metered.addEventListener("change", function () { save("metered", metered.checked); });
+    return wrap;
+  }
   function aiRenderRoomStatus(card, p) {
     if (card._refreshProvider) card._refreshProvider();
   }
@@ -11229,6 +11659,8 @@
     }
     function render() {
       var active = document.activeElement;
+      var focusField = wrap.contains(active) && active.getAttribute("data-model-field");
+      var focusRow = focusField && active.closest(".ai-sharing-row");
       var focusRoom = wrap.contains(active) && active.getAttribute("data-room-id");
       var focusProvider = focusRoom && active.getAttribute("data-provider-id");
       var focusModel = focusRoom && active.getAttribute("data-model");
@@ -11301,7 +11733,9 @@
         entries.forEach(function (entry) {
           var ref = entry.ref;
           var row = el("div", { class: "ai-sharing-row", "data-provider-id": ref.provider_id, "data-model": ref.model });
-          row.appendChild(el("span", { class: "ai-sharing-model", text: ref.model }));
+          var model = el("div", { class: "ai-sharing-model" }, [el("span", { text: ref.model })]);
+          model.appendChild(buildAiModelMetadata(ref, p, shared(ref), render));
+          row.appendChild(model);
           var chips = el("div", { class: "ai-sharing-chips" });
           rooms.forEach(function (room) {
             var selected = (room.shared || []).some(function (r) { return aiSameRef(r, ref); });
@@ -11333,7 +11767,12 @@
       });
       if (http.length && !count) results.appendChild(el("div", { class: "muted", text: t("ai.model.empty") }));
       results.scrollTop = scroll;
-      if (focusRoom) {
+      if (focusRow) {
+        var targetRow = Array.from(results.querySelectorAll(".ai-sharing-row")).find(function (row) {
+          return row.dataset.providerId === focusRow.dataset.providerId && row.dataset.model === focusRow.dataset.model;
+        });
+        if (targetRow) targetRow.querySelector('[data-model-field="' + focusField + '"]').focus(); else search.focus();
+      } else if (focusRoom) {
         var target = Array.prototype.find.call(wrap.querySelectorAll("button[data-room-id]"), function (chip) {
           return chip.getAttribute("data-room-id") === focusRoom && chip.getAttribute("data-provider-id") === focusProvider && chip.getAttribute("data-model") === focusModel;
         });
@@ -12356,6 +12795,7 @@
   function showPanel(id) {
     var wasActive = document.getElementById(id).classList.contains("active");
     if (id === "panel-ai" || id === "panel-settings") aiRefreshModels(false);
+    if (id === "panel-ai") pollAiMedia();
     /* poll-driven DOM renders defer until the entrance animation finishes;
        450ms = --dur 340ms + margin */
     window.__mistlViewSwitchUntil = performance.now() + 450;
@@ -12502,6 +12942,7 @@
           }
         }
         if (panel.id === "panel-ai" && name === "sharing" && panel.classList.contains("active")) aiRefreshModels(false);
+        if (panel.id === "panel-ai" && name === "generated" && panel.classList.contains("active")) pollAiMedia();
         if (panel.id === "panel-settings" && name === "update" && changed && updateVisible()) pollUpdate();
         try { localStorage.setItem(storeKey, name); } catch (e) { /* ignore */ }
       }

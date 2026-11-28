@@ -100,6 +100,11 @@ $ mistl ai 3d status gen3d_0123456789abcdef0123456789abcdef
 $ mistl ai 3d wait gen3d_0123456789abcdef0123456789abcdef -o asset.glb
 $ mistl ai 3d get gen3d_0123456789abcdef0123456789abcdef -o asset.glb
 $ mistl ai 3d rm gen3d_0123456789abcdef0123456789abcdef
+$ mistl ai image generate "a lighthouse at dusk" -m image-model -o lighthouse.png
+$ mistl ai video generate "waves on rocks" -m video-model -o waves.mp4 --image first-frame.png
+$ mistl ai video ls
+$ mistl ai music generate "calm piano" -m music-model -o piano.mp3 --no-wait
+$ mistl ai music get <id> -o piano.mp3
 $ mistl ai models
 $ mistl ai status
 $ mistl ai external apply --owner my-app < registration.json

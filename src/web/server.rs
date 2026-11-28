@@ -14,6 +14,8 @@
 //! - `GET /api/store/download?cid=...` -> `store.get`'s the cid to a temp
 //!   file and streams it back with a `Content-Disposition: attachment`
 //!   header, or 404 JSON error if the cid is unknown.
+//! - `GET /api/ai/media/<local id>/<index>` -> saved media job file download;
+//!   `?inline=1` omits the attachment header for previews.
 //! - `GET /api/escrow/export?room=...` -> portable encrypted escrow download;
 //!   repeat `room` to select rooms, or omit it to export all rooms.
 //! - `POST /api/escrow/import?room=...` -> raw escrow export file, streamed to
@@ -45,7 +47,8 @@
 //!   without a CORS preflight, and this server never sends CORS headers
 //!   (OPTIONS -> 403), so web pages from other origins can't drive the
 //!   daemon (CSRF protection).
-//! - `GET /api/store/download`, `GET /api/store/sandbox-download`, and `GET /api/escrow/export`
+//! - `GET /api/store/download`, `GET /api/store/sandbox-download`, `GET /api/escrow/export`,
+//!   and `GET /api/ai/media/<local id>/<index>`
 //!   deliberately skip the `x-mistl-ui` check; see the doc comment on
 //!   `handle_store_download` for why that's still safe.
 //! - The `Host` header must be `127.0.0.1[:port]` or `localhost[:port]`
@@ -55,7 +58,8 @@
 //!
 //! Read the request line + headers (case-insensitive names) up to
 //! [`MAX_HEADER_BYTES`], then exactly `Content-Length` body bytes (411 if
-//! missing on `POST /api/call`; 413 over [`MAX_BODY_BYTES`]). One request per
+//! missing on `POST /api/call`; 413 over [`MAX_BODY_BYTES`], except media
+//! generation requests which may include reference media). One request per
 //! connection, `Connection: close`. Tolerate both `\r\n` and bare `\n`.
 
 use std::io;
@@ -77,6 +81,9 @@ use crate::daemon::{AppState, Caller};
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 /// Body size cap for `POST /api/call`.
 const MAX_BODY_BYTES: usize = 1024 * 1024;
+/// Media generation accepts up to 32 MiB of params, plus the IPC envelope.
+const MAX_MEDIA_CALL_BYTES: usize = 33 * 1024 * 1024;
+static LARGE_CALL_SLOTS: Semaphore = Semaphore::const_new(2);
 /// Body size cap for `POST /api/store/upload` (streamed to disk, not memory).
 const MAX_UPLOAD_BYTES: u64 = 1024 * 1024 * 1024;
 /// Chunk size used when streaming an upload/download body to/from disk.
@@ -800,6 +807,21 @@ pub(super) async fn handle_connection_inner(
         }
         ("POST", "/api/store/upload") => handle_store_upload(stream, &head, leftover, state).await,
         ("GET", "/api/store/download") => handle_store_download(stream, &head, state).await,
+        ("GET", path) if path.starts_with("/api/ai/media/") => {
+            let dir = match crate::config::data_dir() {
+                Ok(dir) => dir.join("ai-media"),
+                Err(_) => {
+                    return write_error(
+                        stream,
+                        500,
+                        "Internal Server Error",
+                        "media directory unavailable",
+                    )
+                    .await;
+                }
+            };
+            handle_media_download(stream, &head.path, &dir).await
+        }
         ("GET", "/api/escrow/export") => handle_escrow_export(stream, &head, state).await,
         ("POST", "/api/escrow/import") => {
             handle_escrow_import(stream, &head, leftover, state).await
@@ -855,9 +877,27 @@ async fn handle_api_call(
             return write_error(stream, 411, "Length Required", "Content-Length required").await;
         }
     };
-    if content_length > MAX_BODY_BYTES {
+    if content_length > MAX_MEDIA_CALL_BYTES {
         return write_error(stream, 413, "Payload Too Large", "request body too large").await;
     }
+    // Keep the usual 1 MiB cap for all other calls and limit the number of
+    // larger bodies held in memory before we know which command they contain.
+    let _large_slot = if content_length > MAX_BODY_BYTES {
+        match LARGE_CALL_SLOTS.try_acquire() {
+            Ok(permit) => Some(permit),
+            Err(_) => {
+                return write_error(
+                    stream,
+                    503,
+                    "Service Unavailable",
+                    "too many large requests",
+                )
+                .await;
+            }
+        }
+    } else {
+        None
+    };
     let body = match read_body(stream, leftover, content_length).await {
         Ok(b) => b,
         Err(_) => return write_error(stream, 400, "Bad Request", "incomplete request body").await,
@@ -875,9 +915,13 @@ async fn handle_api_call(
             .await;
         }
     };
+    drop(body);
     let Some(cmd) = parsed.cmd.as_str() else {
         return write_error(stream, 400, "Bad Request", "cmd must be a string").await;
     };
+    if content_length > MAX_BODY_BYTES && cmd != "ai.media.generate" {
+        return write_error(stream, 413, "Payload Too Large", "request body too large").await;
+    }
     let args = parsed.args.unwrap_or_else(|| json!({}));
 
     // The frontend always gets HTTP 200 for a well-formed call and switches
@@ -897,6 +941,97 @@ async fn handle_api_call(
             .await
         }
     }
+}
+
+async fn handle_media_download(stream: &mut TcpStream, path: &str, dir: &Path) -> io::Result<()> {
+    let (path, query) = path.split_once('?').unwrap_or((path, ""));
+    let found = || -> Option<(&str, usize)> {
+        let (id, index) = path.strip_prefix("/api/ai/media/")?.split_once('/')?;
+        let suffix = id.strip_prefix("media_")?;
+        if suffix.len() != 32
+            || !suffix
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return None;
+        }
+        Some((id, index.parse().ok()?))
+    };
+    let Some((id, index)) = found() else {
+        return write_error(stream, 404, "Not Found", "media file not found").await;
+    };
+    // The media store publishes only completed files in its atomically
+    // replaced index. Read that snapshot, never a path supplied by a peer.
+    let jobs: Value = match crate::statefile::read(dir, "index.json") {
+        Ok(jobs) => jobs,
+        Err(_) => {
+            return write_error(
+                stream,
+                500,
+                "Internal Server Error",
+                "media index unavailable",
+            )
+            .await;
+        }
+    };
+    let metadata = jobs["jobs"].as_array().and_then(|jobs| {
+        let job = jobs
+            .iter()
+            .find(|j| j["id"] == id && j["status"] == "completed")?;
+        job["files"]
+            .as_array()?
+            .iter()
+            .find(|f| f["index"].as_u64() == Some(index as u64))
+    });
+    let Some((name, mime)) = metadata.and_then(|f| {
+        let name = f["name"].as_str()?;
+        let ext = name.strip_prefix(&format!("{index}."))?;
+        if ext.is_empty()
+            || ext.len() > 5
+            || !ext
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        {
+            return None;
+        }
+        let mime = f["mime"].as_str()?;
+        // The job store emits passive types only; also keep header values
+        // safe if a locally edited index contains invalid metadata.
+        let mime = if mime.len() <= 100
+            && !mime.is_empty()
+            && mime
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'-' | b'.' | b'+'))
+        {
+            mime
+        } else {
+            "application/octet-stream"
+        };
+        Some((name, mime))
+    }) else {
+        return write_error(stream, 404, "Not Found", "media file not found").await;
+    };
+    let mut file = match File::open(dir.join(id).join(name)).await {
+        Ok(file) => file,
+        Err(_) => return write_error(stream, 404, "Not Found", "media file not found").await,
+    };
+    let len = match file.metadata().await {
+        Ok(m) if m.is_file() => m.len(),
+        _ => return write_error(stream, 404, "Not Found", "media file not found").await,
+    };
+    let disposition = if parse_query_param(query, "inline").as_deref() == Some("1") {
+        String::new()
+    } else {
+        // `id` is validated hex and `name` is `<index>.<ext>`: header-safe.
+        let short = &id["media_".len()..][..8];
+        format!("Content-Disposition: attachment; filename=\"mistl-{short}-{name}\"\r\n")
+    };
+    let headers = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {len}\r\n{disposition}X-Content-Type-Options: nosniff\r\nContent-Security-Policy: sandbox\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(headers.as_bytes()).await?;
+    tokio::io::copy(&mut file, stream).await?;
+    stream.flush().await
 }
 
 fn escrow_room_filter(path: &str) -> Option<Option<Vec<String>>> {
@@ -1839,6 +1974,74 @@ mod tests {
         client.read_to_string(&mut response).await.unwrap();
         server.await.unwrap();
         response
+    }
+
+    #[tokio::test]
+    async fn media_download_requires_session() {
+        let response = dashboard_request(
+            "/api/ai/media/media_00000000000000000000000000000000/0",
+            false,
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 401 "), "{response}");
+    }
+
+    #[tokio::test]
+    async fn media_download_attachment_inline_and_not_found() {
+        let dir =
+            std::env::temp_dir().join(format!("mistl-media-web-test-{}", uuid::Uuid::new_v4()));
+        let id = "media_1234567890abcdef1234567890abcdef";
+        std::fs::create_dir_all(dir.join(id)).unwrap();
+        std::fs::write(dir.join(id).join("0.mp4"), b"video").unwrap();
+        crate::statefile::write(&dir, "index.json", &json!({"jobs":[{
+            "id":id, "status":"completed", "files":[{"index":0,"name":"0.mp4","mime":"video/mp4","bytes":5}]
+        }]})).unwrap();
+        for (path, status, inline) in [
+            (format!("/api/ai/media/{id}/0"), 200, false),
+            (format!("/api/ai/media/{id}/0?inline=1"), 200, true),
+            (format!("/api/ai/media/{id}/1"), 404, false),
+            (
+                "/api/ai/media/media_00000000000000000000000000000000/0".into(),
+                404,
+                false,
+            ),
+            ("/api/ai/media/../0".into(), 404, false),
+            (format!("/api/ai/media/{id}/../index.json"), 404, false),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let download_dir = dir.clone();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                handle_media_download(&mut socket, &path, &download_dir)
+                    .await
+                    .unwrap();
+            });
+            let mut client = TcpStream::connect(addr).await.unwrap();
+            let mut response = String::new();
+            client.read_to_string(&mut response).await.unwrap();
+            server.await.unwrap();
+            assert!(
+                response.starts_with(&format!("HTTP/1.1 {status} ")),
+                "{response}"
+            );
+            let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+            if status == 200 {
+                assert!(headers.contains("Content-Type: video/mp4\r\n"), "{headers}");
+                assert!(headers.contains("Content-Length: 5\r\n"), "{headers}");
+                assert_eq!(
+                    headers.contains(
+                        "Content-Disposition: attachment; filename=\"mistl-12345678-0.mp4\"\r\n"
+                    ),
+                    !inline
+                );
+                assert_eq!(body, "video");
+            } else {
+                assert!(headers.contains("Content-Type: application/json\r\n"));
+                assert_eq!(serde_json::from_str::<Value>(body).unwrap()["ok"], false);
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]

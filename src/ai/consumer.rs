@@ -58,6 +58,8 @@ pub struct ProviderInfo {
     pub models: Vec<String>,
     /// Whether the latest hello included a model list (even an empty one).
     pub models_known: bool,
+    /// Per-model metadata from the provider's latest hello.
+    pub model_info: BTreeMap<String, protocol::ModelInfo>,
     /// Raw `services` from the provider's latest `provider_hello`, as
     /// decoded (`None` if the field was absent/invalid on the wire). This
     /// consumer only locks onto providers that advertise chat (see the
@@ -204,15 +206,17 @@ impl Consumer {
     pub fn handle_message(&self, from: &str, msg: &ProtocolMessage) -> bool {
         match msg {
             ProtocolMessage::ProviderHello {
+                model_info,
                 models,
                 services,
                 voices,
             } => {
                 if models.as_ref().is_some_and(|values| {
                     values.len() > 256 || values.iter().any(|v| v.len() > 512)
-                }) || services
-                    .as_ref()
-                    .is_some_and(|values| values.len() > 32 || values.iter().any(|v| v.len() > 128))
+                }) || model_info.as_ref().is_some_and(|values| values.len() > 256)
+                    || services.as_ref().is_some_and(|values| {
+                        values.len() > 32 || values.iter().any(|v| v.len() > 128)
+                    })
                     || voices.as_ref().is_some_and(|values| {
                         values.len() > 256 || values.iter().any(|v| v.len() > 256)
                     })
@@ -251,6 +255,7 @@ impl Consumer {
                                 node_id: from.to_string(),
                                 models: models.clone().unwrap_or_default(),
                                 models_known: models.is_some(),
+                                model_info: model_info.clone().unwrap_or_default(),
                                 services: services.clone(),
                                 voices: voices.clone(),
                             },
@@ -282,6 +287,7 @@ impl Consumer {
                             node_id: from.to_string(),
                             models: models.clone().unwrap_or_default(),
                             models_known: models.is_some(),
+                            model_info: model_info.clone().unwrap_or_default(),
                             services: services.clone(),
                             voices: voices.clone(),
                         });
@@ -291,6 +297,7 @@ impl Consumer {
                     Some(info) if info.node_id == from => {
                         info.models = models.clone().unwrap_or_default();
                         info.models_known = models.is_some();
+                        info.model_info = model_info.clone().unwrap_or_default();
                         info.services = services.clone();
                         info.voices = voices.clone();
                         info.did = did.clone();
@@ -394,6 +401,22 @@ impl Consumer {
             }
         }
         models.into_iter().collect()
+    }
+
+    /// Union of advertised metadata over the room catalog. Provider node-id
+    /// order breaks kind conflicts; any metered advertisement wins.
+    pub fn model_info(&self) -> BTreeMap<String, protocol::ModelInfo> {
+        let mut merged: BTreeMap<String, protocol::ModelInfo> = BTreeMap::new();
+        for provider in self.catalog.lock().expect("catalog lock").values() {
+            for (model, info) in &provider.model_info {
+                let entry = merged.entry(model.clone()).or_default();
+                if entry.kind.is_none() {
+                    entry.kind.clone_from(&info.kind);
+                }
+                entry.metered |= info.metered;
+            }
+        }
+        merged
     }
 
     /// Reject unknown explicit local API models using current advertisements.
@@ -824,6 +847,7 @@ mod tests {
         consumer.handle_message(
             "legacy",
             &ProtocolMessage::ProviderHello {
+                model_info: None,
                 models: None,
                 services: None,
                 voices: None,
@@ -848,6 +872,7 @@ mod tests {
             consumer.handle_message(
                 peer,
                 &ProtocolMessage::ProviderHello {
+                    model_info: None,
                     models: Some(models),
                     services: Some(vec!["chat".into()]),
                     voices: None,
@@ -875,6 +900,7 @@ mod tests {
         consumer.handle_message(
             "two",
             &ProtocolMessage::ProviderHello {
+                model_info: None,
                 models: Some(vec![]),
                 services: Some(vec!["tts".into()]),
                 voices: None,
@@ -892,6 +918,7 @@ mod tests {
         consumer.handle_message(
             "two",
             &ProtocolMessage::ProviderHello {
+                model_info: None,
                 models: None,
                 services: Some(vec!["tts".into()]),
                 voices: None,
@@ -916,6 +943,7 @@ mod tests {
             consumer.handle_message(
                 peer,
                 &ProtocolMessage::ProviderHello {
+                    model_info: None,
                     models: Some(models),
                     services: Some(vec!["chat".into()]),
                     voices: None,
@@ -930,6 +958,7 @@ mod tests {
         consumer.handle_message(
             "second",
             &ProtocolMessage::ProviderHello {
+                model_info: None,
                 models: Some(vec![]),
                 services: Some(vec![]),
                 voices: None,
@@ -938,12 +967,85 @@ mod tests {
         assert!(consumer.models().is_empty());
     }
 
+    #[test]
+    fn room_catalog_merges_model_info_and_refreshes_it() {
+        let consumer = Consumer::new(Arc::new(|_, _| {}));
+        let info = |kind: Option<&str>, metered| protocol::ModelInfo {
+            kind: kind.map(String::from),
+            metered,
+        };
+        let first = BTreeMap::from([
+            ("video-model".into(), info(None, true)),
+            ("image-model".into(), info(Some("image"), false)),
+        ]);
+        let second = BTreeMap::from([
+            ("video-model".into(), info(Some("video"), false)),
+            ("image-model".into(), info(Some("other"), true)),
+            ("music-model".into(), info(Some("music"), false)),
+        ]);
+        for (peer, metadata) in [("first", &first), ("second", &second)] {
+            assert!(consumer.handle_message(
+                peer,
+                &ProtocolMessage::ProviderHello {
+                    models: Some(metadata.keys().cloned().collect()),
+                    services: Some(vec!["chat".into()]),
+                    voices: None,
+                    model_info: Some(metadata.clone()),
+                }
+            ));
+        }
+        assert_eq!(consumer.provider().unwrap().model_info, first);
+        assert_eq!(
+            consumer.model_info(),
+            BTreeMap::from([
+                ("video-model".into(), info(Some("video"), true)),
+                ("image-model".into(), info(Some("image"), true)),
+                ("music-model".into(), info(Some("music"), false)),
+            ])
+        );
+        assert!(consumer.handle_message(
+            "first",
+            &ProtocolMessage::ProviderHello {
+                models: Some(vec!["video-model".into(), "image-model".into()]),
+                services: Some(vec!["chat".into()]),
+                voices: None,
+                model_info: None,
+            }
+        ));
+        assert!(consumer.provider().unwrap().model_info.is_empty());
+        assert_eq!(consumer.model_info(), second);
+        consumer.on_peer_disconnected("second");
+        assert!(consumer.model_info().is_empty());
+    }
+
+    #[test]
+    fn room_catalog_rejects_oversized_model_info() {
+        let consumer = Consumer::new(Arc::new(|_, _| {}));
+        let mut metadata: BTreeMap<_, _> = (0..256)
+            .map(|i| (format!("model-{i}"), protocol::ModelInfo::default()))
+            .collect();
+        let hello =
+            |metadata: BTreeMap<String, protocol::ModelInfo>| ProtocolMessage::ProviderHello {
+                models: None,
+                services: None,
+                voices: None,
+                model_info: Some(metadata),
+            };
+        assert!(consumer.handle_message("first", &hello(metadata.clone())));
+        metadata.insert("extra-model".into(), protocol::ModelInfo::default());
+        let oversized = protocol::decode(&protocol::encode(&hello(metadata))).unwrap();
+        assert!(!consumer.handle_message("first", &oversized));
+        assert_eq!(consumer.model_info().len(), 256);
+        assert_eq!(consumer.provider().unwrap().model_info.len(), 256);
+    }
+
     #[tokio::test]
     async fn voice_only_peers_are_discovered_without_becoming_chat_providers() {
         let consumer = Consumer::new(Arc::new(|_, _| {}));
         consumer.handle_message(
             "voice",
             &ProtocolMessage::ProviderHello {
+                model_info: None,
                 models: None,
                 services: Some(vec!["tts".into()]),
                 voices: None,
@@ -993,6 +1095,7 @@ mod tests {
         consumer.handle_message(
             "second",
             &ProtocolMessage::ProviderHello {
+                model_info: None,
                 models: Some(vec!["raw".into()]),
                 services: Some(vec!["chat".into(), "tools".into()]),
                 voices: None,
@@ -1511,6 +1614,7 @@ mod tests {
         consumer.handle_message(
             "p1",
             &ProtocolMessage::ProviderHello {
+                model_info: None,
                 models: Some(vec!["chat-model".into()]),
                 services: None,
                 voices: None,
@@ -1537,6 +1641,7 @@ mod tests {
         consumer.handle_message(
             "p1",
             &ProtocolMessage::ProviderHello {
+                model_info: None,
                 models: Some(vec!["chat-model".into()]),
                 services: None,
                 voices: None,
@@ -1545,6 +1650,7 @@ mod tests {
         consumer.handle_message(
             "p1",
             &ProtocolMessage::ProviderHello {
+                model_info: None,
                 models: Some(vec!["chat-model".into(), "chat-model-mini".into()]),
                 services: None,
                 voices: None,
@@ -1576,6 +1682,7 @@ mod tests {
         consumer.handle_message(
             "p1",
             &ProtocolMessage::ProviderHello {
+                model_info: None,
                 models: Some(vec!["chat-model".into()]),
                 services: Some(vec!["chat".into(), "tts".into()]),
                 voices: Some(vec!["alloy".into()]),
@@ -1602,6 +1709,7 @@ mod tests {
         consumer.handle_message(
             "voice-only",
             &ProtocolMessage::ProviderHello {
+                model_info: None,
                 models: None,
                 services: Some(vec!["tts".into(), "stt".into()]),
                 voices: None,
@@ -1633,6 +1741,7 @@ mod tests {
         consumer.handle_message(
             "voice-only",
             &ProtocolMessage::ProviderHello {
+                model_info: None,
                 models: None,
                 services: Some(vec!["tts".into()]),
                 voices: None,
@@ -1641,6 +1750,7 @@ mod tests {
         consumer.handle_message(
             "chat-provider",
             &ProtocolMessage::ProviderHello {
+                model_info: None,
                 models: Some(vec!["chat-model".into()]),
                 services: Some(vec!["chat".into()]),
                 voices: None,
@@ -1670,6 +1780,7 @@ mod tests {
         consumer.handle_message(
             "legacy-provider",
             &ProtocolMessage::ProviderHello {
+                model_info: None,
                 models: None,
                 services: None,
                 voices: None,
@@ -1688,6 +1799,7 @@ mod tests {
         consumer.handle_message(
             "p1",
             &ProtocolMessage::ProviderHello {
+                model_info: None,
                 models: None,
                 services: None,
                 voices: None,
@@ -1696,6 +1808,7 @@ mod tests {
         consumer.handle_message(
             "p2",
             &ProtocolMessage::ProviderHello {
+                model_info: None,
                 models: Some(vec!["other-model".into()]),
                 services: None,
                 voices: None,
@@ -1716,6 +1829,7 @@ mod tests {
         consumer.handle_message(
             "p1",
             &ProtocolMessage::ProviderHello {
+                model_info: None,
                 models: None,
                 services: None,
                 voices: None,
@@ -1745,6 +1859,7 @@ mod tests {
         consumer.handle_message(
             "p1",
             &ProtocolMessage::ProviderHello {
+                model_info: None,
                 models: None,
                 services: None,
                 voices: None,
@@ -1768,6 +1883,7 @@ mod tests {
         consumer.handle_message(
             "p1",
             &ProtocolMessage::ProviderHello {
+                model_info: None,
                 models: Some(vec!["m1".into()]),
                 services: None,
                 voices: None,
@@ -1834,6 +1950,7 @@ mod tests {
 
     fn hello() -> ProtocolMessage {
         ProtocolMessage::ProviderHello {
+            model_info: None,
             models: None,
             services: Some(vec!["chat".into()]),
             voices: None,
@@ -1949,6 +2066,7 @@ mod tests {
         consumer.handle_message(
             "provider1",
             &ProtocolMessage::ProviderHello {
+                model_info: None,
                 models: None,
                 services,
                 voices: None,

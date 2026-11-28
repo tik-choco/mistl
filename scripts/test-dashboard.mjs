@@ -20,6 +20,7 @@ const fixtures = {
   'daemon.status': {pid:123, version:'0.1.0', uptime_secs:10, build, network:{enabled:false, state:'off', saved:true}},
   'stream.status': {running:false},
   'ai.external.get': {registrations:[]},
+  'ai.media.list': {jobs:[]},
   'ai.status': {providing:true, serving:false, rooms:[{provider_id:'home',room:'home-room',enabled:true,joined:true,providing:true,peers:3},{provider_id:'team',room:'team-room',enabled:true,joined:false,providing:false,peers:0}]},
   'topology.status': {self:{node_id:longId, did:longId, display_name:'\u9577\u3044\u540d\u524d\u306e\u30ce\u30fc\u30c9'.repeat(12)}, rooms:[room], peers:[{node_id:'peer-two',state:'connected'}], room_peers:[{room,features:['chat_relay','storage'],peers:[{node_id:'peer-two',state:'connected'}]}], modules:{ai:{room:'unrelated-mailbox',joined:false},chat_relay:{rooms:[{room,joined:true}]}, store:{rooms:[]}}, stream:{running:false}},
   'profile.show': {did:longId, display_name:'UI test'},
@@ -260,7 +261,7 @@ try {
   assert.equal(modelCalls('local'),justFetched,'successful discovery is throttled for ten seconds across all open paths');
   assert.equal(document.querySelector('#panel-ai [data-role=refresh]'),null,'AI refresh button is removed');
   assert.ok([...document.querySelectorAll('.ai-provider-card button')].every(b=>!['Refresh','\u66f4\u65b0'].includes(b.textContent)),'cards have no refresh buttons');
-  assert.equal(document.querySelectorAll('#panel-ai [role=tab]').length,3);
+  assert.equal(document.querySelectorAll('#panel-ai [role=tab]').length,4);
   assert.equal(document.querySelector('#panel-ai [data-subtab-target=network]'),null);
   assert.equal(document.getElementById('settings-ai-room_id'),null);
   assert.equal(document.querySelectorAll('.ai-provider-card').length,4);
@@ -907,7 +908,7 @@ try {
   assert.ok(highlight.style.transform.startsWith('translate('),'highlight ends at the selected tab');
   reducedMotion.matches=false;delete window.HTMLElement.prototype.animate;
   // Both catalogs render concrete labels, and model recents tolerate unavailable storage.
-  const tabNames={en:['Connections','Tasks','Sharing'],ja:['\u63a5\u7d9a\u5148','\u30bf\u30b9\u30af','\u63d0\u4f9b'],zh:['\u8fde\u63a5','\u4efb\u52a1','\u5171\u4eab']};
+  const tabNames={en:['Connections','Tasks','Sharing','Generated'],ja:['\u63a5\u7d9a\u5148','\u30bf\u30b9\u30af','\u63d0\u4f9b','\u751f\u6210\u7d50\u679c'],zh:['\u8fde\u63a5','\u4efb\u52a1','\u5171\u4eab','\u751f\u6210\u7ed3\u679c']};
   for(const language of ['en','zh','ja']) {
     document.getElementById('lang-'+language+'-btn').click();await flush();
     assert.equal(document.querySelector('#topology-svg [data-topology-key="feature:chat_relay"]'), featureNode, 'Language changes preserve topology nodes');

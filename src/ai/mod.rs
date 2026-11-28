@@ -10,6 +10,7 @@
 mod api_server;
 mod consumer;
 pub(crate) mod external;
+mod media;
 pub mod media_cli;
 mod model_discovery;
 mod oai_tunnel;
@@ -30,7 +31,7 @@ mod stt;
 pub mod tts;
 mod voice_consumer;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
@@ -105,7 +106,8 @@ impl std::fmt::Display for ModelNotFound {
 impl std::error::Error for ModelNotFound {}
 
 /// Model list for `GET /v1/models`.
-pub type ModelsFn = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
+/// Model ids for `GET /v1/models`, with any `kind` / `metered` metadata.
+pub type ModelsFn = Arc<dyn Fn() -> Vec<(String, protocol::ModelInfo)> + Send + Sync>;
 
 /// One text-to-speech call for `POST /v1/audio/speech`.
 pub type TtsCallFuture =
@@ -347,7 +349,16 @@ impl AiService {
             Duration::from_secs(self.state.effective_config().ai.request_timeout_secs.max(1));
         let models: ModelsFn = {
             let session = session.clone();
-            Arc::new(move || session.consumer.models())
+            Arc::new(move || {
+                let mut info = session.consumer.model_info();
+                let models = session.consumer.models().into_iter();
+                models
+                    .map(|m| {
+                        let i = info.remove(&m).unwrap_or_default();
+                        (m, i)
+                    })
+                    .collect()
+            })
         };
         let call: LlmCallFn = {
             let session = session.clone();
@@ -634,6 +645,7 @@ impl AiService {
         for session in withdrawn {
             session
                 .broadcast(ProtocolMessage::ProviderHello {
+                    model_info: None,
                     models: Some(Vec::new()),
                     services: Some(Vec::new()),
                     voices: None,
@@ -729,6 +741,45 @@ impl AiService {
             models.push(reference.model.clone());
         }
         models
+    }
+
+    /// [`Self::model_list`] with each model's metadata: the first enabled
+    /// provider that knows the model (a room's catalog or an HTTP
+    /// provider's `model_info`) wins.
+    fn model_list_with_info(&self) -> Vec<(String, protocol::ModelInfo)> {
+        let config = self.state.effective_config();
+        let rooms = self.rooms.read().expect("ai rooms lock");
+        let known: Vec<BTreeMap<String, protocol::ModelInfo>> = config
+            .ai
+            .providers
+            .iter()
+            .filter(|p| p.enabled)
+            .map(|p| match p.room() {
+                Some(room) => rooms
+                    .get(room)
+                    .map(|s| s.consumer.model_info())
+                    .unwrap_or_default(),
+                None => p
+                    .model_info
+                    .iter()
+                    .map(|(m, i)| {
+                        let info = protocol::ModelInfo {
+                            kind: i.kind.clone(),
+                            metered: i.metered,
+                        };
+                        (m.clone(), info)
+                    })
+                    .collect(),
+            })
+            .collect();
+        drop(rooms);
+        self.model_list()
+            .into_iter()
+            .map(|m| {
+                let info = known.iter().find_map(|k| k.get(&m)).cloned();
+                (m, info.unwrap_or_default())
+            })
+            .collect()
     }
 
     async fn chat(
@@ -1187,6 +1238,9 @@ pub(crate) async fn synthesize_model(
 }
 
 pub async fn handle(cmd: &str, args: Value, state: &Arc<AppState>) -> Result<Value> {
+    if cmd.starts_with("ai.media.") {
+        return media::handle(cmd, args, state).await;
+    }
     if cmd.starts_with("ai.external.") {
         return handle_external(cmd, args, state).await;
     }
@@ -1373,6 +1427,7 @@ async fn status_with_service(
     for provider in config.ai.providers.iter().filter(|p| p.room().is_some()) {
         let room = provider.room().unwrap();
         let session = sessions.get(room);
+        let catalog = session.filter(|s| s.consumer.has_catalog());
         let peers = connections
             .iter()
             .find(|(r, _)| r == room)
@@ -1380,7 +1435,8 @@ async fn status_with_service(
             .unwrap_or(0);
         rooms.push(json!({ "provider_id": provider.id, "room": room, "enabled": provider.enabled,
             "owners": state.ai_external.lock().expect("external registrations lock").owners(room),
-            "models": session.filter(|s| s.consumer.has_catalog()).map(|s| s.consumer.models()),
+            "models": catalog.map(|s| s.consumer.models()),
+            "model_info": catalog.map(|s| s.consumer.model_info()),
             "joined": provider.enabled && session.is_some(), "providing": provider.enabled && provider.provide && session.is_some_and(|s| s.local_provider().is_some()), "peers": peers }));
     }
     let first = config
@@ -1458,9 +1514,14 @@ pub fn spawn_room_connections(state: Arc<AppState>) {
 fn resolve_advertised_models(
     cfg: &crate::config::AiConfig,
     room: &crate::config::AiProviderConfig,
-) -> (Vec<String>, HashMap<String, crate::config::ResolvedModel>) {
+) -> (
+    Vec<String>,
+    HashMap<String, crate::config::ResolvedModel>,
+    BTreeMap<String, protocol::ModelInfo>,
+) {
     let mut models = Vec::new();
     let mut advertised = HashMap::new();
+    let mut model_info = BTreeMap::new();
     for reference in &room.shared {
         let Some(resolved) = crate::config::resolve_ref_exact(cfg, reference) else {
             continue;
@@ -1472,8 +1533,22 @@ fn resolve_advertised_models(
         }
         models.push(reference.model.clone());
         advertised.insert(reference.model.clone(), resolved);
+        if let Some(info) = cfg
+            .providers
+            .iter()
+            .find(|p| p.id == reference.provider_id && p.enabled)
+            .and_then(|p| p.model_info.get(&reference.model))
+        {
+            model_info.insert(
+                reference.model.clone(),
+                protocol::ModelInfo {
+                    kind: info.kind.clone(),
+                    metered: info.metered,
+                },
+            );
+        }
     }
-    (models, advertised)
+    (models, advertised, model_info)
 }
 
 async fn build_provider(
@@ -1481,7 +1556,7 @@ async fn build_provider(
     cfg: &crate::config::AiConfig,
     room: &crate::config::AiProviderConfig,
 ) -> Result<Arc<Provider>> {
-    let (models, advertised) = resolve_advertised_models(cfg, room);
+    let (models, advertised, model_info) = resolve_advertised_models(cfg, room);
     let default = cfg
         .default_ref
         .as_ref()
@@ -1557,11 +1632,12 @@ async fn build_provider(
         stt_call,
         voices,
     );
+    provider.set_model_info(model_info);
     provider.set_shared_restricted(!room.shared.is_empty());
     provider.set_default_reasoning_effort(cfg.default_reasoning_effort.clone());
     // Providing rooms support the tunnel even if their upstream is unavailable;
     // the resolver rejects those requests without hiding the wire capability.
-    let (_, shared) = resolve_advertised_models(cfg, room);
+    let (_, shared, _) = resolve_advertised_models(cfg, room);
     let restricted = !room.shared.is_empty();
     provider.set_oai(oai_tunnel::TunnelProvider::new(
         session.send.clone(),
@@ -1923,7 +1999,7 @@ async fn serve_start(service: &Arc<AiService>, state: &Arc<AppState>) -> Result<
     };
     let models_fn: ModelsFn = {
         let service = service.clone();
-        Arc::new(move || service.model_list())
+        Arc::new(move || service.model_list_with_info())
     };
 
     let tts_fn: TtsFn = {
@@ -2068,6 +2144,7 @@ mod tests {
         session.consumer.handle_message(
             "peer",
             &ProtocolMessage::ProviderHello {
+                model_info: None,
                 models: Some(vec!["raw".into(), "other".into()]),
                 services: Some(vec!["chat".into(), "tts".into()]),
                 voices: None,
@@ -2427,7 +2504,7 @@ mod tests {
             provider_id: "other".into(),
             model: "raw".into(),
         });
-        let (_, shared) = resolve_advertised_models(&ai, &ai.providers[2]);
+        let (_, shared, _) = resolve_advertised_models(&ai, &ai.providers[2]);
         let default = ai
             .default_ref
             .as_ref()
@@ -2545,7 +2622,7 @@ mod tests {
             provider_id: "http".into(),
             model: "raw".into(),
         });
-        let (models, refs) = resolve_advertised_models(&ai, &ai.providers[1]);
+        let (models, refs, _) = resolve_advertised_models(&ai, &ai.providers[1]);
         assert_eq!(models, vec!["raw"]);
         assert_eq!(refs.len(), 1);
         ai.providers[0].enabled = false;
@@ -2559,9 +2636,23 @@ mod tests {
     #[test]
     fn duplicate_raw_ids_keep_shared_list_order() {
         let mut ai = sample_config();
+        ai.providers[0].model_info.insert(
+            "raw".into(),
+            crate::config::ModelInfo {
+                kind: Some("video".into()),
+                metered: true,
+            },
+        );
         ai.providers.push(AiProviderConfig {
             id: "second".into(),
             base_url: "http://second/v1".into(),
+            model_info: BTreeMap::from([(
+                "raw".into(),
+                crate::config::ModelInfo {
+                    kind: Some("image".into()),
+                    metered: false,
+                },
+            )]),
             ..Default::default()
         });
         ai.providers[1].shared.insert(
@@ -2571,8 +2662,21 @@ mod tests {
                 model: "raw".into(),
             },
         );
-        let (_, refs) = resolve_advertised_models(&ai, &ai.providers[1]);
+        let (_, refs, info) = resolve_advertised_models(&ai, &ai.providers[1]);
         assert_eq!(refs["raw"].base_url, "http://second/v1");
+        assert_eq!(
+            info["raw"],
+            protocol::ModelInfo {
+                kind: Some("image".into()),
+                metered: false
+            }
+        );
+        ai.providers[2].model_info.clear();
+        assert!(
+            resolve_advertised_models(&ai, &ai.providers[1])
+                .2
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2681,6 +2785,7 @@ mod tests {
         session.consumer.handle_message(
             "peer",
             &ProtocolMessage::ProviderHello {
+                model_info: None,
                 models: Some(vec!["raw".into(), "speech".into(), "transcribe".into()]),
                 services: Some(vec![
                     "chat".into(),
@@ -2939,6 +3044,60 @@ mod tests {
         let status = status_with_service(&state, Some(&service)).await.unwrap();
         assert_eq!(status["providing"], true);
         assert_eq!(status["rooms"][0]["providing"], true);
+        assert_eq!(status["rooms"][0]["models"], Value::Null);
+        assert_eq!(status["rooms"][0]["model_info"], Value::Null);
+        session.consumer.handle_message(
+            "peer",
+            &ProtocolMessage::ProviderHello {
+                models: Some(vec![
+                    "video-model".into(),
+                    "image-model".into(),
+                    "music-model".into(),
+                ]),
+                services: None,
+                voices: None,
+                model_info: Some(BTreeMap::from([
+                    (
+                        "video-model".into(),
+                        protocol::ModelInfo {
+                            kind: Some("video".into()),
+                            metered: true,
+                        },
+                    ),
+                    (
+                        "image-model".into(),
+                        protocol::ModelInfo {
+                            kind: Some("image".into()),
+                            metered: false,
+                        },
+                    ),
+                    (
+                        "music-model".into(),
+                        protocol::ModelInfo {
+                            kind: None,
+                            metered: true,
+                        },
+                    ),
+                ])),
+            },
+        );
+        let status = status_with_service(&state, Some(&service)).await.unwrap();
+        assert_eq!(
+            status["rooms"][0]["models"],
+            json!(["image-model", "music-model", "video-model"])
+        );
+        assert_eq!(
+            status["rooms"][0]["model_info"],
+            json!({
+                "video-model": {"kind":"video", "metered":true},
+                "image-model": {"kind":"image"},
+                "music-model": {"metered":true}
+            })
+        );
+        session.consumer.on_peer_disconnected("peer");
+        let status = status_with_service(&state, Some(&service)).await.unwrap();
+        assert_eq!(status["rooms"][0]["models"], json!([]));
+        assert_eq!(status["rooms"][0]["model_info"], json!({}));
         service.reconcile(false).await.unwrap();
         assert!(
             Arc::ptr_eq(&first, &session.local_provider().unwrap()),
@@ -3078,7 +3237,7 @@ mod tests {
         assert_eq!(
             status["rooms"],
             json!([{ "provider_id": "disabled-room", "room": "disabled-test", "enabled": false,
-            "joined": false, "providing": false, "peers": 0, "models": null, "owners": [] }])
+            "joined": false, "providing": false, "peers": 0, "models": null, "model_info": null, "owners": [] }])
         );
     }
 
@@ -3334,6 +3493,7 @@ mod tests {
             relay_jobs: Default::default(),
         };
         let hello = |models| ProtocolMessage::ProviderHello {
+            model_info: None,
             models: Some(models),
             services: None,
             voices: None,
@@ -3367,6 +3527,7 @@ mod tests {
         );
         assert_eq!(state.config().ai.providers[1].models, ["changed", "other"]);
         let withdrawal = ProtocolMessage::ProviderHello {
+            model_info: None,
             models: Some(Vec::new()),
             services: Some(Vec::new()),
             voices: None,
@@ -3387,6 +3548,29 @@ mod tests {
     async fn provider_hello_is_scoped_to_each_rooms_shared_refs() {
         let _authz_guard = crate::authz::TEST_LOCK.lock().await;
         let mut ai = sample_config();
+        ai.providers[0].model_info = BTreeMap::from([
+            (
+                "raw".into(),
+                crate::config::ModelInfo {
+                    kind: Some("video".into()),
+                    metered: true,
+                },
+            ),
+            (
+                "other".into(),
+                crate::config::ModelInfo {
+                    kind: Some("music".into()),
+                    metered: false,
+                },
+            ),
+            (
+                "unshared-model".into(),
+                crate::config::ModelInfo {
+                    kind: Some("image".into()),
+                    metered: false,
+                },
+            ),
+        ]);
         let second = AiProviderConfig {
             id: "room2".into(),
             base_url: "mist-network://second".into(),
@@ -3406,11 +3590,19 @@ mod tests {
         assert_eq!(second.models(), vec!["other"]);
         let hello: Value = serde_json::from_slice(&protocol::encode(&first.hello())).unwrap();
         assert_eq!(hello["models"], json!(["raw"]));
+        assert_eq!(
+            hello["modelInfo"],
+            json!({"raw":{"kind":"video","metered":true}})
+        );
+        let hello: Value = serde_json::from_slice(&protocol::encode(&second.hello())).unwrap();
+        assert_eq!(hello["modelInfo"], json!({"other":{"kind":"music"}}));
         ai.providers[0].enabled = false;
         let first = build_provider(&test_session("test"), &ai, &ai.providers[1])
             .await
             .unwrap();
         assert!(first.models().is_empty());
+        let hello: Value = serde_json::from_slice(&protocol::encode(&first.hello())).unwrap();
+        assert!(hello.get("modelInfo").is_none());
         assert!(
             first
                 .call_upstream(vec![], ToolOptions::default(), Some("raw".into()), None)

@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use futures_util::future::join_all;
+use futures_util::{StreamExt, stream};
 use serde_json::{Value, json};
 
 use super::api_server::RelayRequest;
@@ -38,23 +39,30 @@ impl<T: Clone> Jobs<T> {
     }
 
     fn remember(&self, response: &TunnelResponse, route: T) {
-        if !matches!(response.status, 200 | 202) {
+        self.remember_family("/3d/generations", response, route);
+    }
+
+    fn remember_family(&self, family: &str, response: &TunnelResponse, route: T) {
+        // Media job families also accept 201 Created; 3D keeps 200/202.
+        let created = matches!(response.status, 200 | 202)
+            || family != "/3d/generations" && response.status == 201;
+        if !created {
             return;
         }
         let Ok(body) = serde_json::from_slice::<Value>(&response.body) else {
             return;
         };
-        let Some(id) = body
+        let Some(key) = body
             .get("id")
             .and_then(Value::as_str)
-            .filter(|id| valid_id(id))
+            .and_then(|id| oai_tunnel::binding_key(family, id))
         else {
             return;
         };
         let mut jobs = self.0.lock().expect("relay jobs lock");
         jobs.retain(|_, (_, at)| at.elapsed() < JOB_TTL);
         if jobs.len() >= JOB_LIMIT
-            && !jobs.contains_key(id)
+            && !jobs.contains_key(&key)
             && let Some(oldest) = jobs
                 .iter()
                 .min_by_key(|(_, (_, at))| *at)
@@ -62,7 +70,11 @@ impl<T: Clone> Jobs<T> {
         {
             jobs.remove(&oldest);
         }
-        jobs.insert(id.to_string(), (route, Instant::now()));
+        jobs.insert(key, (route, Instant::now()));
+    }
+
+    fn forget(&self, key: &str) {
+        self.0.lock().expect("relay jobs lock").remove(key);
     }
 }
 
@@ -106,7 +118,27 @@ fn job_id(path: &str) -> Option<&str> {
     valid_id(id).then_some(id)
 }
 
+fn job_key(path: &str) -> Option<&str> {
+    job_id(path).or_else(|| oai_tunnel::media_job_key(path).map(|(key, _)| key))
+}
+
+fn list_family(path: &str) -> bool {
+    path == "/3d/generations"
+        || oai_tunnel::media_kind(path).is_some_and(|(prefix, _)| path == prefix)
+}
+
+fn path_not_found(path: &str) -> TunnelResponse {
+    if oai_tunnel::media_kind(path).is_some() {
+        oai_tunnel::media_job_not_found()
+    } else {
+        not_found()
+    }
+}
+
 fn allowed(method: &str, path: &str) -> bool {
+    if oai_tunnel::media_kind(path).is_some() {
+        return oai_tunnel::media_job_allowed(method, path);
+    }
     match (method, path) {
         ("GET", "/3d/generations" | "/audio/voices" | "/health" | "/api/ps") => true,
         ("GET", path) => job_id(path).is_some() || oai_tunnel::is_motion_catalog(path),
@@ -145,36 +177,74 @@ fn relativize(mut response: TunnelResponse) -> TunnelResponse {
     response
 }
 
-fn merge_lists(responses: Vec<TunnelResponse>) -> TunnelResponse {
+fn merge_lists(family: &str, responses: Vec<TunnelResponse>) -> TunnelResponse {
+    let generation = family == "/3d/generations";
     let mut seen = HashSet::new();
     let mut data = Vec::new();
     for response in responses
         .into_iter()
         .filter(|r| (200..300).contains(&r.status))
     {
-        if let Ok(body) = serde_json::from_slice::<Value>(&response.body)
-            && let Some(jobs) = body.get("data").and_then(Value::as_array)
+        if let Ok(mut body) = serde_json::from_slice::<Value>(&response.body)
+            && let Some(jobs) = body.get_mut("data").and_then(Value::as_array_mut)
         {
-            for job in jobs {
-                if let Some(id) = job
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .filter(|id| valid_id(id))
-                    && seen.insert(id.to_string())
+            for job in jobs.drain(..) {
+                if let Some(id) = job.get("id").and_then(Value::as_str).filter(|id| {
+                    if generation {
+                        valid_id(id)
+                    } else {
+                        oai_tunnel::valid_media_id(id)
+                    }
+                }) && seen.insert(id.to_string())
                 {
-                    data.push(job.clone());
+                    data.push(job);
                 }
             }
         }
     }
     data.sort_by_key(|job| {
-        std::cmp::Reverse(
+        std::cmp::Reverse(if generation {
             job.get("created")
                 .and_then(Value::as_i64)
-                .unwrap_or_default(),
-        )
+                .unwrap_or_default()
+        } else {
+            oai_tunnel::job_created(job, false).min(i64::MAX as u64) as i64
+        })
     });
-    relativize(json_response(200, json!({"object":"list","data":data})))
+    let response = json_response(200, json!({"object":"list","data":data}));
+    if generation {
+        relativize(response)
+    } else {
+        response
+    }
+}
+
+// Unlike the 3D path, media lists may include large job metadata from many
+// routes. Bound the fan-out and retained responses, including room replies.
+async fn list_replies(
+    family: &str,
+    requests: impl Iterator<Item = impl std::future::Future<Output = Result<TunnelResponse>>>,
+) -> Result<Vec<TunnelResponse>> {
+    if family == "/3d/generations" {
+        return Ok(join_all(requests)
+            .await
+            .into_iter()
+            .filter_map(Result::ok)
+            .collect());
+    }
+    let mut replies = Box::pin(stream::iter(requests).buffered(4));
+    let mut responses = Vec::new();
+    let mut bytes = 0usize;
+    while let Some(response) = replies.next().await {
+        if let Ok(response) = response
+            && (200..300).contains(&response.status)
+        {
+            bytes = bytes.saturating_add(response.body.len());
+            anyhow::ensure!(bytes <= oai_tunnel::MAX_BYTES, "media job list too large");
+            responses.push(response);
+        }
+    }
+    Ok(responses)
 }
 
 impl AiService {
@@ -224,7 +294,7 @@ impl AiService {
                     })
                     .context("ai: provider unavailable")?;
                 let (path, range) = oai_tunnel::split_range(&request.path)?;
-                let image_edit = request.method == "POST" && path == "/images/edits";
+                let image = request.method == "POST" && oai_tunnel::image_post(&path);
                 // Only the 3D deadline depends on the request body.
                 let body = request
                     .body
@@ -240,7 +310,7 @@ impl AiService {
                     request.body,
                     range,
                     oai_tunnel::relay_deadline(&request.method, &path, &body),
-                    if image_edit {
+                    if image {
                         oai_tunnel::MAX_IMAGE_RESPONSE_BYTES
                     } else {
                         oai_tunnel::MAX_BYTES
@@ -260,12 +330,17 @@ impl AiService {
         self: Arc<Self>,
         mut request: RelayRequest,
     ) -> Result<TunnelResponse> {
+        if oai_tunnel::media_kind(&request.path).is_some()
+            && !allowed(&request.method, &request.path)
+        {
+            return Ok(path_not_found(&request.path));
+        }
         let (path, _) = match oai_tunnel::split_range(&request.path) {
             Ok(parts) => parts,
             Err(err) => return Ok(error(400, &err.to_string(), "invalid_request", None)),
         };
         if !allowed(&request.method, &path) {
-            return Ok(not_found());
+            return Ok(path_not_found(&path));
         }
         if matches!(path.as_str(), "/health" | "/api/ps") {
             return lifecycle(&self.state.effective_config().ai.providers, &request).await;
@@ -344,40 +419,53 @@ impl AiService {
             let response = self.clone().forward_route(route.clone(), request).await?;
             if path == "/3d/generations" {
                 self.relay_jobs.remember(&response, route);
+            } else if list_family(&path) {
+                self.relay_jobs.remember_family(&path, &response, route);
             }
             return Ok(response);
         }
         let jobs = self.relay_jobs.snapshot();
-        if path == "/3d/generations" {
-            let mut routes: HashSet<_> = jobs.into_values().collect();
+        if list_family(&path) {
+            let mut routes: HashSet<_> = jobs
+                .into_iter()
+                .filter(|(key, _)| oai_tunnel::binding_in_family(&path, key))
+                .map(|(_, route)| route)
+                .collect();
             {
                 let rooms = self.rooms.read().expect("ai rooms lock");
                 routes.extend(
                     rooms
                         .iter()
-                        .filter(|(_, session)| !session.relay_jobs.snapshot().is_empty())
+                        .filter(|(_, session)| {
+                            session
+                                .relay_jobs
+                                .snapshot()
+                                .keys()
+                                .any(|key| oai_tunnel::binding_in_family(&path, key))
+                        })
                         .map(|(room, _)| Route::Room { room: room.clone() }),
                 );
             }
             let mut routes: Vec<_> = routes.into_iter().collect();
             // Stable order also makes duplicate ids resolve consistently.
             routes.sort_by_key(|route| format!("{route:?}"));
-            let replies = join_all(routes.into_iter().map(|route| {
-                self.clone().forward_route(
-                    route,
-                    RelayRequest {
-                        method: "GET".into(),
-                        path: path.clone(),
-                        body: None,
-                    },
-                )
-            }))
-            .await;
-            return Ok(merge_lists(
-                replies.into_iter().filter_map(Result::ok).collect(),
-            ));
+            let replies = list_replies(
+                &path,
+                routes.into_iter().map(|route| {
+                    self.clone().forward_route(
+                        route,
+                        RelayRequest {
+                            method: "GET".into(),
+                            path: path.clone(),
+                            body: None,
+                        },
+                    )
+                }),
+            )
+            .await?;
+            return Ok(merge_lists(&path, replies));
         }
-        let id = job_id(&path).expect("validated job path");
+        let id = job_key(&path).expect("validated job path");
         // Jobs this daemon did not create (or forgot on restart) are unknown.
         let route = jobs.get(id).cloned().or_else(|| {
             let rooms = self.rooms.read().expect("ai rooms lock");
@@ -390,9 +478,16 @@ impl AiService {
             })
         });
         let Some(route) = route else {
-            return Ok(not_found());
+            return Ok(path_not_found(&path));
         };
-        self.forward_route(route, request).await
+        let delete = request.method == "DELETE";
+        let response = self.clone().forward_route(route, request).await?;
+        if oai_tunnel::media_kind(&path).is_some()
+            && (response.status == 404 || delete && (200..300).contains(&response.status))
+        {
+            self.relay_jobs.forget(id);
+        }
+        Ok(response)
     }
 }
 
@@ -416,6 +511,11 @@ impl AiRoom {
     }
 
     pub(super) async fn relay(self: Arc<Self>, request: RelayRequest) -> Result<TunnelResponse> {
+        if oai_tunnel::media_kind(&request.path).is_some()
+            && !allowed(&request.method, &request.path)
+        {
+            return Ok(path_not_found(&request.path));
+        }
         let (path, _) = match oai_tunnel::split_range(&request.path) {
             Ok(parts) => parts,
             Err(err) => return Ok(error(400, &err.to_string(), "invalid_request", None)),
@@ -423,7 +523,7 @@ impl AiRoom {
         if !allowed(&request.method, &path)
             || matches!(path.as_str(), "/health" | "/api/ps" | "/chat/completions")
         {
-            return Ok(not_found());
+            return Ok(path_not_found(&path));
         }
         if path == "/audio/voices" {
             self.broadcast(ProtocolMessage::ConsumerHello).await;
@@ -487,30 +587,45 @@ impl AiRoom {
                 .await?;
             if path == "/3d/generations" {
                 self.relay_jobs.remember(&response, info.node_id);
+            } else if list_family(&path) {
+                self.relay_jobs
+                    .remember_family(&path, &response, info.node_id);
             }
             return Ok(response);
         }
         let jobs = self.relay_jobs.snapshot();
-        if path == "/3d/generations" {
-            let peers: BTreeSet<_> = jobs.into_values().collect();
-            let responses = join_all(peers.iter().map(|peer| {
-                self.oai.request_method(
-                    peer,
-                    "GET",
-                    &path,
-                    &[],
-                    oai_tunnel::relay_deadline("GET", &path, &Value::Null),
-                )
-            }))
-            .await;
-            return Ok(merge_lists(
-                responses.into_iter().filter_map(Result::ok).collect(),
-            ));
+        if list_family(&path) {
+            let peers: BTreeSet<_> = jobs
+                .into_iter()
+                .filter(|(key, _)| oai_tunnel::binding_in_family(&path, key))
+                .map(|(_, peer)| peer)
+                .collect();
+            let responses = list_replies(
+                &path,
+                peers.into_iter().map(|peer| {
+                    let oai = self.oai.clone();
+                    let path = path.clone();
+                    async move {
+                        oai.request_method(
+                            &peer,
+                            "GET",
+                            &path,
+                            &[],
+                            oai_tunnel::relay_deadline("GET", &path, &Value::Null),
+                        )
+                        .await
+                    }
+                }),
+            )
+            .await?;
+            return Ok(merge_lists(&path, responses));
         }
-        let Some(peer) = jobs.get(job_id(&path).expect("validated job path")) else {
-            return Ok(not_found());
+        let key = job_key(&path).expect("validated job path");
+        let Some(peer) = jobs.get(key) else {
+            return Ok(path_not_found(&path));
         };
-        self.oai
+        let response = self
+            .oai
             .request_method(
                 peer,
                 &request.method,
@@ -518,7 +633,14 @@ impl AiRoom {
                 &[],
                 oai_tunnel::relay_deadline(&request.method, &path, &Value::Null),
             )
-            .await
+            .await?;
+        if oai_tunnel::media_kind(&path).is_some()
+            && (response.status == 404
+                || request.method == "DELETE" && (200..300).contains(&response.status))
+        {
+            self.relay_jobs.forget(key);
+        }
+        Ok(response)
     }
 }
 
@@ -995,6 +1117,161 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn image_generations_route_to_http_with_large_response_cap() {
+        let bytes = vec![b'a'; oai_tunnel::MAX_BYTES + 1];
+        let expected = bytes.clone();
+        let mut upstream = mock_bytes("image", move |method, path, body| {
+            assert_eq!(method, "POST");
+            assert_eq!(path, "/v1/images/generations");
+            assert_eq!(body, &json!({"model":"image-model","prompt":"hello","n":2}));
+            (200, "application/json", bytes.clone())
+        })
+        .await;
+        upstream.provider.models = vec!["image-model".into()];
+        let service = service(vec![upstream.provider.clone()]);
+        let response = service
+            .clone()
+            .relay(request(
+                "POST",
+                "/images/generations",
+                Some(json!({"model":"image-model","prompt":"hello","n":2})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, expected);
+        assert!(service.relay_jobs.snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn media_jobs_route_by_family_and_merge_lists_http_direct() {
+        let mut upstreams = Vec::new();
+        for &(family, op) in oai_tunnel::JOB_KINDS {
+            let mut upstream = mock_bytes(op, move |method, path, body| {
+                let job = json!({"id":"same-id","status":"completed","created_at":3,"family":op,"url":"unchanged"});
+                let (status, value) = match method {
+                    "POST" => {
+                        assert_eq!(path, format!("/v1{family}"));
+                        assert_eq!(body["model"], format!("{op}-model"));
+                        (201, job)
+                    }
+                    "GET" if path == format!("/v1{family}") => (200, json!({"object":"list","data":[job,job,{"id":"old","created":1},{"id":"new","created_at":9},{"id":"bad.id"}]})),
+                    "GET" if path.contains("/content") => {
+                        assert_eq!(path, format!("/v1{family}/same-id/content?variant=preview"));
+                        return (206, "application/octet-stream", b"content".to_vec());
+                    }
+                    "GET" => { assert_eq!(path, format!("/v1{family}/same-id")); (200, job) }
+                    "DELETE" => { assert_eq!(path, format!("/v1{family}/same-id")); (200, json!({"deleted":true})) }
+                    _ => panic!("unexpected request"),
+                };
+                (status, "application/json", serde_json::to_vec(&value).unwrap())
+            }).await;
+            upstream.provider.models = vec![format!("{op}-model")];
+            upstreams.push(upstream);
+        }
+        let service = service(upstreams.iter().map(|u| u.provider.clone()).collect());
+        for &(family, op) in oai_tunnel::JOB_KINDS {
+            let response = service
+                .clone()
+                .relay(request(
+                    "POST",
+                    family,
+                    Some(json!({"model":format!("{op}-model"),"prompt":"hello"})),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status, 201);
+            assert_eq!(value(response)["url"], "unchanged");
+        }
+        assert_eq!(service.relay_jobs.snapshot().len(), 2);
+        for (i, &(family, op)) in oai_tunnel::JOB_KINDS.iter().enumerate() {
+            let path = format!("{family}/same-id");
+            let list = value(
+                service
+                    .clone()
+                    .relay(request("GET", family, None))
+                    .await
+                    .unwrap(),
+            );
+            assert_eq!(list["data"].as_array().unwrap().len(), 3);
+            assert_eq!(list["data"][0]["id"], "new");
+            assert_eq!(list["data"][1]["family"], op);
+            assert_eq!(list["data"][2]["id"], "old");
+            assert_eq!(
+                value(
+                    service
+                        .clone()
+                        .relay(request("GET", &path, None))
+                        .await
+                        .unwrap()
+                )["family"],
+                op
+            );
+            let content = service
+                .clone()
+                .relay(request(
+                    "GET",
+                    &format!("{path}/content?range=0-6&variant=preview"),
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(content.status, 206);
+            assert_eq!(content.body, b"content");
+            assert_eq!(
+                service
+                    .clone()
+                    .relay(request("GET", &format!("{path}/content?variant=BAD"), None))
+                    .await
+                    .unwrap()
+                    .status,
+                400
+            );
+            for (method, invalid) in [
+                ("GET", format!("{family}/bad.id")),
+                ("DELETE", format!("{path}/content")),
+            ] {
+                assert_eq!(
+                    service
+                        .clone()
+                        .relay(request(method, &invalid, None))
+                        .await
+                        .unwrap()
+                        .status,
+                    404
+                );
+            }
+            assert_eq!(
+                service
+                    .clone()
+                    .relay(request("DELETE", &path, None))
+                    .await
+                    .unwrap()
+                    .status,
+                200
+            );
+            assert_eq!(
+                service
+                    .clone()
+                    .relay(request("GET", &path, None))
+                    .await
+                    .unwrap()
+                    .status,
+                404
+            );
+            let calls = upstreams[i].requests.lock().unwrap();
+            assert_eq!(calls.len(), 5);
+            assert!(
+                calls[3]
+                    .3
+                    .to_ascii_lowercase()
+                    .contains("range: bytes=0-6\r\n")
+            );
+        }
+        assert!(service.relay_jobs.snapshot().is_empty());
+    }
+
+    #[tokio::test]
     async fn post_records_provider_and_unknown_jobs_are_not_found() {
         let a = mock("a", |method, _, body| {
             if method == "POST" {
@@ -1256,6 +1533,7 @@ mod tests {
             assert!(room.consumer.handle_message(
                 peer,
                 &ProtocolMessage::ProviderHello {
+                    model_info: None,
                     models: Some(vec![model.into()]),
                     services: Some(vec![service.into()]),
                     voices: None,
@@ -1350,6 +1628,7 @@ mod tests {
             assert!(room.consumer.handle_message(
                 peer,
                 &ProtocolMessage::ProviderHello {
+                    model_info: None,
                     models: Some(vec![model.into()]),
                     services: Some(vec![service_tag.into()]),
                     voices: None,
@@ -1363,7 +1642,7 @@ mod tests {
         let oai = room.oai.clone();
         let task = tokio::spawn(async move {
             let mut requests = 0;
-            while requests < 2 {
+            while requests < 4 {
                 let (peer, message) = rx.recv().await.unwrap();
                 match message {
                     ProtocolMessage::ConsumerHello => {}
@@ -1380,7 +1659,14 @@ mod tests {
                         assert_eq!(seq, 0);
                         assert!(last);
                         assert_eq!(method.as_deref(), Some("POST"));
-                        assert_eq!(path.as_deref(), Some("/images/edits"));
+                        assert_eq!(
+                            path.as_deref(),
+                            Some(if requests < 2 {
+                                "/images/edits"
+                            } else {
+                                "/images/generations"
+                            })
+                        );
                         let body: Value = serde_json::from_slice(
                             &base64::engine::general_purpose::STANDARD
                                 .decode(data)
@@ -1405,30 +1691,27 @@ mod tests {
                 }
             }
         });
-        let make_request = || {
-            request(
-                "POST",
-                "/images/edits",
-                Some(json!({"model":"image-model","scale":2})),
-            )
-        };
-        for response in [
-            tokio::time::timeout(Duration::from_secs(5), room.clone().relay(make_request()))
+        for path in ["/images/edits", "/images/generations"] {
+            let make_request =
+                || request("POST", path, Some(json!({"model":"image-model","scale":2})));
+            for response in [
+                tokio::time::timeout(Duration::from_secs(5), room.clone().relay(make_request()))
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                tokio::time::timeout(
+                    Duration::from_secs(5),
+                    service.clone().relay(make_request()),
+                )
                 .await
                 .unwrap()
                 .unwrap(),
-            tokio::time::timeout(
-                Duration::from_secs(5),
-                service.clone().relay(make_request()),
-            )
-            .await
-            .unwrap()
-            .unwrap(),
-        ] {
-            assert_eq!(response.status, 200);
-            assert_eq!(response.body, expected);
-            assert!(room.relay_jobs.snapshot().is_empty());
-            assert!(service.relay_jobs.snapshot().is_empty());
+            ] {
+                assert_eq!(response.status, 200);
+                assert_eq!(response.body, expected);
+                assert!(room.relay_jobs.snapshot().is_empty());
+                assert!(service.relay_jobs.snapshot().is_empty());
+            }
         }
         task.await.unwrap();
         for path in ["/images/edits", "/3d/generations"] {
@@ -1489,6 +1772,7 @@ mod tests {
             ("c", "chat", vec!["excluded"]),
         ] {
             let hello = ProtocolMessage::ProviderHello {
+                model_info: None,
                 models: Some(vec!["tts-model".into()]),
                 services: Some(vec![service_tag.into()]),
                 voices: Some(voices.into_iter().map(String::from).collect()),
@@ -1527,6 +1811,7 @@ mod tests {
         );
         assert_eq!(voices["count"], 2);
         let withdrawn = ProtocolMessage::ProviderHello {
+            model_info: None,
             models: Some(vec![]),
             services: Some(vec![]),
             voices: None,
@@ -1588,6 +1873,7 @@ mod tests {
         assert!(room.consumer.handle_message(
             "provider",
             &ProtocolMessage::ProviderHello {
+                model_info: None,
                 models: Some(vec!["3d-model".into()]),
                 services: Some(vec![protocol::SERVICE_OAI.into()]),
                 voices: None,
@@ -1712,6 +1998,175 @@ mod tests {
         assert_eq!(value(response)["data"], json!([]));
         assert_eq!(requests.lock().unwrap().len(), 6);
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn media_jobs_use_room_discovery_and_family_bindings() {
+        use base64::Engine as _;
+        let _guard = crate::authz::TEST_LOCK.lock().await;
+        let service = service(vec![AiProviderConfig {
+            id: "room".into(),
+            base_url: "mist-network://test".into(),
+            models: oai_tunnel::JOB_KINDS
+                .iter()
+                .map(|(_, op)| format!("{op}-model"))
+                .collect(),
+            ..Default::default()
+        }]);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let room = room(Arc::new(move |peer, message| {
+            tx.send((peer.to_string(), message)).unwrap();
+        }));
+        service
+            .rooms
+            .write()
+            .unwrap()
+            .insert("test".into(), room.clone());
+        for &(_, op) in oai_tunnel::JOB_KINDS {
+            assert!(room.consumer.handle_message(
+                op,
+                &ProtocolMessage::ProviderHello {
+                    model_info: None,
+                    models: Some(vec![format!("{op}-model")]),
+                    services: Some(vec![protocol::SERVICE_OAI.into()]),
+                    voices: None,
+                }
+            ));
+        }
+        let oai = room.oai.clone();
+        let task = tokio::spawn(async move {
+            let mut calls = 0;
+            while calls < 10 {
+                let (peer, message) = rx.recv().await.unwrap();
+                let ProtocolMessage::OaiRequest {
+                    id,
+                    method,
+                    path,
+                    last,
+                    data,
+                    ..
+                } = message
+                else {
+                    continue;
+                };
+                assert!(last);
+                let method = method.unwrap();
+                let path = path.unwrap();
+                let (family, op) = oai_tunnel::media_kind(&path).unwrap();
+                assert_eq!(peer, op);
+                let job =
+                    json!({"id":"same-id","status":"completed","family":op,"url":"unchanged"});
+                let (status, mime, body) = if method == "POST" {
+                    assert_eq!(path, family);
+                    let body: Value = serde_json::from_slice(
+                        &base64::engine::general_purpose::STANDARD
+                            .decode(data)
+                            .unwrap(),
+                    )
+                    .unwrap();
+                    assert_eq!(body["model"], format!("{op}-model"));
+                    (201, "application/json", serde_json::to_vec(&job).unwrap())
+                } else if path == family {
+                    (
+                        200,
+                        "application/json",
+                        serde_json::to_vec(&json!({"data":[job]})).unwrap(),
+                    )
+                } else if path == format!("{family}/same-id/content?variant=preview&range=0-2") {
+                    (206, "application/octet-stream", b"abc".to_vec())
+                } else {
+                    assert_eq!(path, format!("{family}/same-id"));
+                    (200, "application/json", serde_json::to_vec(&job).unwrap())
+                };
+                oai.handle_message(
+                    &peer,
+                    &ProtocolMessage::OaiResponse {
+                        id,
+                        seq: 0,
+                        last: true,
+                        data: base64::engine::general_purpose::STANDARD.encode(body),
+                        status: Some(status),
+                        content_type: Some(mime.into()),
+                    },
+                );
+                calls += 1;
+            }
+        });
+        for &(family, op) in oai_tunnel::JOB_KINDS {
+            let response = room
+                .clone()
+                .relay(request(
+                    "POST",
+                    family,
+                    Some(json!({"model":format!("{op}-model")})),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status, 201);
+        }
+        assert_eq!(room.relay_jobs.snapshot().len(), 2);
+        for &(family, op) in oai_tunnel::JOB_KINDS {
+            let path = format!("{family}/same-id");
+            let list = value(
+                service
+                    .clone()
+                    .relay(request("GET", family, None))
+                    .await
+                    .unwrap(),
+            );
+            assert_eq!(list["data"][0]["family"], op);
+            assert_eq!(
+                value(
+                    service
+                        .clone()
+                        .relay(request("GET", &path, None))
+                        .await
+                        .unwrap()
+                )["url"],
+                "unchanged"
+            );
+            assert_eq!(
+                service
+                    .clone()
+                    .relay(request(
+                        "GET",
+                        &format!("{path}/content?variant=preview&range=0-2"),
+                        None
+                    ))
+                    .await
+                    .unwrap()
+                    .body,
+                b"abc"
+            );
+            assert_eq!(
+                room.clone()
+                    .relay(request("GET", &format!("{path}?variant=x"), None))
+                    .await
+                    .unwrap()
+                    .status,
+                400
+            );
+            assert_eq!(
+                service
+                    .clone()
+                    .relay(request("DELETE", &path, None))
+                    .await
+                    .unwrap()
+                    .status,
+                200
+            );
+            assert_eq!(
+                service
+                    .clone()
+                    .relay(request("GET", &path, None))
+                    .await
+                    .unwrap()
+                    .status,
+                404
+            );
+        }
+        assert!(room.relay_jobs.snapshot().is_empty());
+        task.await.unwrap();
     }
 
     #[test]

@@ -21,6 +21,7 @@ pub(super) const MAX_BYTES: usize = MAX_BASE64_CHARS / 4 * 3;
 /// HTTP-direct image results may exceed the room tunnel's body cap.
 pub(super) const MAX_IMAGE_RESPONSE_BYTES: usize = 128 * 1024 * 1024;
 pub(super) const IMAGE_EDIT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+pub(super) const MEDIA_SUBMIT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// Motion endpoints: a cold start may first build an inference plan (minutes).
 const MOTION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// tc-ai-api passthrough: deadline for a synchronous (`background` not
@@ -41,11 +42,76 @@ const MAX_JOBS_PER_PEER: usize = 64;
 const JOB_TTL: Duration = Duration::from_secs(25 * 60 * 60);
 const SKELETON_PREFIX: &str = "/motion/skeletons/";
 
+pub(super) const JOB_KINDS: &[(&str, &str)] = &[("/videos", "video"), ("/music", "music")];
+
+pub(super) fn media_kind(path: &str) -> Option<(&'static str, &'static str)> {
+    let bare = path.split('?').next().unwrap_or(path);
+    JOB_KINDS.iter().copied().find(|(prefix, _)| {
+        bare == *prefix
+            || bare
+                .strip_prefix(prefix)
+                .is_some_and(|rest| rest.starts_with('/'))
+    })
+}
+
+pub(super) fn valid_media_id(id: &str) -> bool {
+    (1..=128).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+}
+
+/// Binding key includes the family, but excludes the content suffix and query.
+pub(super) fn media_job_key(path: &str) -> Option<(&str, bool)> {
+    let (prefix, _) = media_kind(path)?;
+    let bare = path.split('?').next()?;
+    let rest = bare.strip_prefix(prefix)?.strip_prefix('/')?;
+    let (key, id, content) = match rest.strip_suffix("/content") {
+        Some(id) => (&bare[..bare.len() - "/content".len()], id, true),
+        None => (bare, rest, false),
+    };
+    valid_media_id(id).then_some((key, content))
+}
+
+pub(super) fn media_job_allowed(method: &str, path: &str) -> bool {
+    let Some((prefix, _)) = media_kind(path) else {
+        return false;
+    };
+    if path.split('?').next() == Some(prefix) {
+        return matches!(method, "GET" | "POST");
+    }
+    match media_job_key(path) {
+        Some((_, true)) => method == "GET",
+        Some((_, false)) => matches!(method, "GET" | "DELETE"),
+        None => false,
+    }
+}
+
+pub(super) fn binding_key(family: &str, id: &str) -> Option<String> {
+    if family == "/3d/generations" {
+        valid_job_id(id).then(|| id.to_string())
+    } else {
+        valid_media_id(id).then(|| format!("{family}/{id}"))
+    }
+}
+
+pub(super) fn binding_in_family(family: &str, key: &str) -> bool {
+    if family == "/3d/generations" {
+        valid_job_id(key)
+    } else {
+        key.strip_prefix(family)
+            .is_some_and(|rest| rest.starts_with('/'))
+    }
+}
+
+pub(super) fn image_post(path: &str) -> bool {
+    matches!(path, "/images/edits" | "/images/generations")
+}
+
 pub(super) fn is_model_relay_post(path: &str) -> bool {
-    matches!(
-        path,
-        "/3d/generations" | "/images/edits" | "/game/act" | "/motion/inbetween"
-    )
+    matches!(path, "/3d/generations" | "/game/act" | "/motion/inbetween")
+        || image_post(path)
+        || media_kind(path).is_some_and(|(prefix, _)| path == prefix)
 }
 
 pub(super) fn is_motion_catalog(path: &str) -> bool {
@@ -477,6 +543,11 @@ impl TunnelProvider {
         let path = ready.path.clone();
         let method = ready.method.clone();
         let content_type = ready.content_type.clone();
+        if let Some((_, op)) = media_kind(&path) {
+            authorized = authorized.with_op(op);
+        } else if path == "/images/generations" {
+            authorized = authorized.with_op("image");
+        }
         let result = match ready.decode() {
             Ok(bytes) => {
                 let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
@@ -550,8 +621,12 @@ impl TunnelProvider {
         content_type: &str,
         bytes: &[u8],
     ) -> Result<TunnelResponse> {
+        let media = media_kind(path);
+        if media.is_some() && !media_job_allowed(method, path) {
+            return Ok(media_job_not_found());
+        }
         let (path, range) = split_range(path)?;
-        let job_path = generation_path(&path);
+        let job_path = generation_path(&path).or_else(|| media_job_key(&path));
         let model_post = is_model_relay_post(&path);
         let catalog = is_motion_catalog(&path);
         if !matches!(
@@ -572,6 +647,9 @@ impl TunnelProvider {
             match (path.as_str(), job_path) {
                 ("/models", _) | (_, Some((_, true))) => method == "GET",
                 ("/3d/generations", _) => matches!(method, "GET" | "POST"),
+                (p, _) if media.is_some_and(|(prefix, _)| p == prefix) => {
+                    matches!(method, "GET" | "POST")
+                }
                 (_, Some((_, false))) => matches!(method, "GET" | "DELETE"),
                 _ => method == "POST",
             }
@@ -586,7 +664,11 @@ impl TunnelProvider {
                 .expect("oai bindings lock")
                 .target(id, from);
             let Some(target) = target else {
-                return Ok(generation_not_found());
+                return Ok(if media.is_some() {
+                    media_job_not_found()
+                } else {
+                    generation_not_found()
+                });
             };
             let mut response = forward_with(
                 &target.base_url,
@@ -606,13 +688,13 @@ impl TunnelProvider {
                     .expect("oai bindings lock")
                     .remove(id, from);
             }
-            if !content {
+            if !content && media.is_none() {
                 relativize_response(&mut response)?;
             }
             return Ok(response);
         }
-        if path == "/3d/generations" && method == "GET" {
-            return self.list_generations(from).await;
+        if method == "GET" && (path == "/3d/generations" || media.is_some()) {
+            return self.list_generations(from, &path).await;
         }
         if catalog {
             let model = match motion_catalog_model(&path) {
@@ -642,7 +724,7 @@ impl TunnelProvider {
             serde_json::from_slice(bytes).map_err(|_| anyhow::anyhow!("request_rejected"))?
         };
         let generation = path == "/3d/generations";
-        let image_edit = path == "/images/edits";
+        let image = image_post(&path);
         if model_post {
             let object = body.as_object().context("request_rejected")?;
             // No built-in default: routing needs an explicit model id.
@@ -684,44 +766,55 @@ impl TunnelProvider {
             relay_deadline(method, &path, &body),
         )
         .await;
-        if image_edit {
+        if image {
             return match response {
                 Err(err) if err.to_string() == "request_too_large" => json_response(
                     502,
                     serde_json::json!({"error": {
-                        "message":"image result exceeds the room relay limit; request a smaller scale or a compressed output_format",
+                        "message": if path == "/images/edits" {
+                            "image result exceeds the room relay limit; request a smaller scale or a compressed output_format"
+                        } else {
+                            "image result exceeds the room relay limit; request fewer or smaller images"
+                        },
                         "type":"api_error", "code":"response_too_large"
                     }}),
                 ),
                 response => response,
             };
         }
-        if !generation {
+        if !generation && media.is_none() {
             return response;
         }
         let mut response = response?;
-        if matches!(response.status, 200 | 202)
+        if (matches!(response.status, 200 | 202) || media.is_some() && response.status == 201)
             && let Ok(job) = serde_json::from_slice::<Value>(&response.body)
-            && let Some(id) = job
+            && let Some(key) = job
                 .get("id")
                 .and_then(Value::as_str)
-                .filter(|id| valid_job_id(id))
+                .and_then(|id| binding_key(&path, id))
         {
             self.bindings
                 .lock()
                 .expect("oai bindings lock")
-                .bind(id.to_string(), from, target);
+                .bind(key, from, target);
         }
-        relativize_response(&mut response)?;
+        if generation {
+            relativize_response(&mut response)?;
+        }
         Ok(response)
     }
 
-    async fn list_generations(&self, from: &str) -> Result<TunnelResponse> {
+    async fn list_generations(&self, from: &str, family: &str) -> Result<TunnelResponse> {
+        let generation = family == "/3d/generations";
         let mut targets = Vec::new();
         {
             let mut bindings = self.bindings.lock().expect("oai bindings lock");
             bindings.prune();
-            for binding in bindings.0.values().filter(|b| b.peer == from) {
+            for (_, binding) in bindings
+                .0
+                .iter()
+                .filter(|(key, b)| b.peer == from && binding_in_family(family, key))
+            {
                 if !targets
                     .iter()
                     .any(|t: &ResolvedModel| same_target(t, &binding.target))
@@ -733,14 +826,8 @@ impl TunnelProvider {
         let mut jobs = Vec::new();
         let mut size = 0usize;
         for target in targets {
-            let Ok(response) = forward(
-                &target.base_url,
-                &target.api_key,
-                "GET",
-                "/3d/generations",
-                None,
-            )
-            .await
+            let Ok(response) =
+                forward(&target.base_url, &target.api_key, "GET", family, None).await
             else {
                 continue;
             };
@@ -750,7 +837,9 @@ impl TunnelProvider {
             let Ok(mut body) = serde_json::from_slice::<Value>(&response.body) else {
                 continue;
             };
-            relativize_job_urls(&mut body);
+            if generation {
+                relativize_job_urls(&mut body);
+            }
             let Some(data) = body.get_mut("data").and_then(Value::as_array_mut) else {
                 continue;
             };
@@ -760,9 +849,12 @@ impl TunnelProvider {
                 let Some(id) = job.get("id").and_then(Value::as_str) else {
                     continue;
                 };
+                let Some(key) = binding_key(family, id) else {
+                    continue;
+                };
                 if !bindings
                     .0
-                    .get(id)
+                    .get(&key)
                     .is_some_and(|b| b.peer == from && same_target(&b.target, &target))
                     || jobs.iter().any(|j: &Value| j["id"].as_str() == Some(id))
                 {
@@ -775,13 +867,19 @@ impl TunnelProvider {
                 jobs.push(job);
             }
         }
-        jobs.sort_by(|a, b| {
-            b["created"]
-                .as_u64()
-                .unwrap_or(0)
-                .cmp(&a["created"].as_u64().unwrap_or(0))
-        });
+        jobs.sort_by_key(|job| std::cmp::Reverse(job_created(job, generation)));
         json_response(200, serde_json::json!({"object":"list", "data":jobs}))
+    }
+}
+
+pub(super) fn job_created(job: &Value, generation: bool) -> u64 {
+    if generation {
+        job["created"].as_u64().unwrap_or(0)
+    } else {
+        job["created_at"]
+            .as_u64()
+            .or_else(|| job["created"].as_u64())
+            .unwrap_or(0)
     }
 }
 
@@ -836,6 +934,17 @@ fn generation_not_found() -> TunnelResponse {
         404,
         serde_json::json!({"error": {
             "message":"generation not found", "type":"invalid_request_error",
+            "code":"not_found", "param":"id"
+        }}),
+    )
+    .expect("small error response")
+}
+
+pub(super) fn media_job_not_found() -> TunnelResponse {
+    json_response(
+        404,
+        serde_json::json!({"error": {
+            "message":"job not found", "type":"invalid_request_error",
             "code":"not_found", "param":"id"
         }}),
     )
@@ -946,15 +1055,20 @@ pub(super) async fn forward_capped(
 /// `body` is the parsed JSON body (`Value::Null` if none).
 pub(super) fn relay_deadline(method: &str, path: &str, body: &Value) -> Duration {
     let path = path.split('?').next().unwrap_or(path);
-    if method == "POST" && path == "/images/edits" {
+    if method == "POST" && image_post(path) {
         IMAGE_EDIT_TIMEOUT
+    } else if method == "POST" && media_kind(path).is_some_and(|(prefix, _)| path == prefix) {
+        MEDIA_SUBMIT_TIMEOUT
     } else if method == "POST" && path == "/3d/generations" && body["background"] != true {
         GEN3D_SYNC_TIMEOUT
     } else if (method == "POST" && path == "/motion/inbetween")
         || (method == "GET" && is_motion_catalog(path))
     {
         MOTION_TIMEOUT
-    } else if generation_path(path).is_some_and(|(_, content)| content) {
+    } else if generation_path(path)
+        .or_else(|| media_job_key(path))
+        .is_some_and(|(_, content)| content)
+    {
         CONTENT_TIMEOUT
     } else {
         TIMEOUT
@@ -970,13 +1084,47 @@ pub(super) fn split_range(path: &str) -> Result<(String, Option<(u64, u64)>)> {
     if bare == "/motion/clips" {
         return Ok((path.to_string(), None));
     }
+    if media_kind(bare).is_some() {
+        if !media_job_key(bare).is_some_and(|(_, content)| content) {
+            bail!("request_rejected");
+        }
+        let mut variant = None;
+        let mut range = None;
+        for pair in query.split('&') {
+            if let Some(value) = pair.strip_prefix("variant=")
+                && variant.is_none()
+                && (1..=32).contains(&value.len())
+                && value
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+            {
+                variant = Some(value);
+            } else if let Some(value) = pair.strip_prefix("range=")
+                && range.is_none()
+            {
+                range = Some(parse_range(value)?);
+            } else {
+                bail!("request_rejected");
+            }
+        }
+        return Ok((
+            variant.map_or_else(|| bare.to_string(), |v| format!("{bare}?variant={v}")),
+            range,
+        ));
+    }
     if !generation_path(bare).is_some_and(|(_, content)| content) {
         bail!("request_rejected");
     }
-    let (start, end) = query
-        .strip_prefix("range=")
-        .and_then(|range| range.split_once('-'))
-        .context("request_rejected")?;
+    Ok((
+        bare.to_string(),
+        Some(parse_range(
+            query.strip_prefix("range=").context("request_rejected")?,
+        )?),
+    ))
+}
+
+fn parse_range(range: &str) -> Result<(u64, u64)> {
+    let (start, end) = range.split_once('-').context("request_rejected")?;
     let decimal = |s: &str| -> Result<u64> {
         if s.is_empty() || !s.bytes().all(|c| c.is_ascii_digit()) {
             bail!("request_rejected");
@@ -988,7 +1136,7 @@ pub(super) fn split_range(path: &str) -> Result<(String, Option<(u64, u64)>)> {
     if end < start || end - start >= CONTENT_WINDOW {
         bail!("request_rejected");
     }
-    Ok((bare.to_string(), Some((start, end))))
+    Ok((start, end))
 }
 
 /// Rewrites every 3D job's `data[].url` (in a job, a sync response or a
@@ -1692,7 +1840,12 @@ mod tests {
 
     #[tokio::test]
     async fn image_edits_oversized_results_return_json_502_with_or_without_content_length() {
-        for declared_length in [true, false] {
+        for (path, declared_length) in [
+            ("/images/edits", true),
+            ("/images/edits", false),
+            ("/images/generations", true),
+            ("/images/generations", false),
+        ] {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
             let server = tokio::spawn(async move {
@@ -1749,7 +1902,7 @@ mod tests {
                 .dispatch(
                     "peer",
                     "POST",
-                    "/images/edits",
+                    path,
                     "application/json",
                     br#"{"model":"image-model"}"#,
                 )
@@ -1760,12 +1913,227 @@ mod tests {
             assert_eq!(
                 json_body(&response),
                 json!({"error": {
-                    "message":"image result exceeds the room relay limit; request a smaller scale or a compressed output_format",
+                    "message": if path == "/images/edits" { "image result exceeds the room relay limit; request a smaller scale or a compressed output_format" } else { "image result exceeds the room relay limit; request fewer or smaller images" },
                     "type":"api_error", "code":"response_too_large"
                 }})
             );
             assert!(provider.bindings.lock().unwrap().0.is_empty());
             server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn image_generations_resolve_model_and_preserve_response() {
+        let bytes = br#"{ "data": [{"b64_json":"YWJj"}] }"#.to_vec();
+        let (mut target, recorded, server) =
+            mock_upstream(vec![(200, "application/json", bytes.clone())]).await;
+        target.model = "image-model".into();
+        let (send, _) = capture();
+        let provider = TunnelProvider::new(
+            send,
+            Arc::new(move |path, body| {
+                assert_eq!(path, "/images/generations");
+                assert_eq!(body["model"], "shared-image-model");
+                Ok(Some(target.clone()))
+            }),
+        );
+        let raw = br#"{"model":"shared-image-model","prompt":"hello","n":2,"response_format":"b64_json"}"#;
+        let response = provider
+            .dispatch(
+                "peer",
+                "POST",
+                "/images/generations",
+                "application/json",
+                raw,
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, bytes);
+        server.await.unwrap();
+        let calls = recorded.lock().unwrap();
+        assert!(calls[0].0.starts_with("POST /v1/images/generations "));
+        assert_eq!(
+            serde_json::from_slice::<Value>(&calls[0].1).unwrap(),
+            json!({"model":"image-model","prompt":"hello","n":2,"response_format":"b64_json"})
+        );
+        assert_eq!(
+            relay_deadline("POST", "/images/generations", &Value::Null),
+            IMAGE_EDIT_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn media_job_paths_queries_and_deadlines() {
+        for &(family, _) in JOB_KINDS {
+            let path = format!("{family}/job_1-A/content");
+            for query in ["variant=preview&range=0-9", "range=0-9&variant=preview"] {
+                assert_eq!(
+                    split_range(&format!("{path}?{query}")).unwrap(),
+                    (format!("{path}?variant=preview"), Some((0, 9)))
+                );
+            }
+            for query in [
+                "",
+                "variant=",
+                "variant=ABC",
+                "variant=a-b",
+                "variant=x&variant=y",
+                "range=1-0",
+                "range=0-1&range=2-3",
+                "range=0-8388608",
+                "x=y",
+                "variant=x&",
+                "variant=%61",
+            ] {
+                assert!(split_range(&format!("{path}?{query}")).is_err(), "{query}");
+            }
+            assert!(split_range(&format!("{family}?variant=x")).is_err());
+            assert!(split_range(&format!("{family}/job?range=0-9")).is_err());
+            for id in ["", "a.b", "a/b", "a%2Fb", "..", "あ"] {
+                assert!(!media_job_allowed("GET", &format!("{family}/{id}")));
+            }
+            assert!(valid_media_id(&"x".repeat(128)));
+            assert!(!valid_media_id(&"x".repeat(129)));
+            assert!(media_job_allowed("GET", &format!("{family}/content")));
+            assert!(!media_job_allowed("DELETE", &path));
+            assert_eq!(
+                relay_deadline("POST", family, &Value::Null),
+                MEDIA_SUBMIT_TIMEOUT
+            );
+            assert_eq!(relay_deadline("GET", &path, &Value::Null), CONTENT_TIMEOUT);
+            assert_eq!(relay_deadline("GET", family, &Value::Null), TIMEOUT);
+        }
+    }
+
+    #[tokio::test]
+    async fn media_jobs_are_family_and_peer_bound() {
+        let reply = |status, body: Value| {
+            (
+                status,
+                "application/json",
+                serde_json::to_vec(&body).unwrap(),
+            )
+        };
+        let job = json!({"id":"shared-id","status":"completed","created_at":3,"url":"unchanged"});
+        let other = json!({"id":"other-id","status":"completed","created":9});
+        let mut replies = Vec::new();
+        for _ in JOB_KINDS {
+            replies.extend([
+                reply(201, job.clone()),
+                reply(202, other.clone()),
+                reply(200, job.clone()),
+                (206, "application/octet-stream", b"abc".to_vec()),
+                reply(200, json!({"object":"list","data":[other, job, job]})),
+                (204, "application/json", Vec::new()),
+            ]);
+        }
+        let (mut target, calls, server) = mock_upstream(replies).await;
+        target.model = "media-model".into();
+        let (send, _) = capture();
+        let provider = TunnelProvider::new(send, Arc::new(move |_, _| Ok(Some(target.clone()))));
+        for (i, &(family, _)) in JOB_KINDS.iter().enumerate() {
+            let (owner, stranger) = if i == 0 { ("a", "b") } else { ("b", "a") };
+            let body = format!(
+                r#"{{"model":"{}-model","prompt":"hello"}}"#,
+                if i == 0 { "video" } else { "music" }
+            );
+            for (peer, id) in [(owner, "shared-id"), (stranger, "other-id")] {
+                let response = provider
+                    .dispatch(peer, "POST", family, "application/json", body.as_bytes())
+                    .await
+                    .unwrap();
+                assert_eq!(json_body(&response)["id"], id);
+            }
+            if i == 1 {
+                let mut bindings = provider.bindings.lock().unwrap();
+                assert!(bindings.target("/videos/other-id", "b").is_some());
+                assert!(bindings.target("/music/other-id", "a").is_some());
+                assert!(bindings.target("/videos/other-id", "a").is_none());
+                assert!(bindings.target("/music/other-id", "b").is_none());
+            }
+            let path = format!("{family}/shared-id");
+            for (method, path) in [
+                ("GET", path.clone()),
+                ("DELETE", path.clone()),
+                ("GET", format!("{path}/content?variant=preview&range=0-2")),
+                ("GET", format!("{family}/bad.id")),
+                ("DELETE", format!("{path}/content")),
+            ] {
+                let response = provider
+                    .dispatch(stranger, method, &path, "", b"")
+                    .await
+                    .unwrap();
+                assert_eq!(response.status, 404);
+                assert_eq!(json_body(&response)["error"]["message"], "job not found");
+            }
+            assert!(
+                provider
+                    .dispatch(
+                        owner,
+                        "GET",
+                        &format!("{path}/content?variant=BAD"),
+                        "",
+                        b""
+                    )
+                    .await
+                    .is_err()
+            );
+            let response = provider
+                .dispatch(owner, "GET", &path, "", b"")
+                .await
+                .unwrap();
+            assert_eq!(json_body(&response), job);
+            let response = provider
+                .dispatch(
+                    owner,
+                    "GET",
+                    &format!("{path}/content?range=0-2&variant=preview"),
+                    "",
+                    b"",
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status, 206);
+            assert_eq!(response.body, b"abc");
+            let list = provider
+                .dispatch(owner, "GET", family, "", b"")
+                .await
+                .unwrap();
+            assert_eq!(json_body(&list)["data"], json!([job]));
+            assert_eq!(
+                provider
+                    .dispatch(owner, "DELETE", &path, "", b"")
+                    .await
+                    .unwrap()
+                    .status,
+                204
+            );
+            assert_eq!(
+                provider
+                    .dispatch(owner, "GET", &path, "", b"")
+                    .await
+                    .unwrap()
+                    .status,
+                404
+            );
+        }
+        server.await.unwrap();
+        let calls = calls.lock().unwrap();
+        for (i, &(family, _)) in JOB_KINDS.iter().enumerate() {
+            assert_eq!(
+                serde_json::from_slice::<Value>(&calls[i * 6].1).unwrap()["model"],
+                "media-model"
+            );
+            let headers = &calls[i * 6 + 3].0;
+            assert!(headers.starts_with(&format!(
+                "GET /v1{family}/shared-id/content?variant=preview "
+            )));
+            assert!(
+                headers
+                    .to_ascii_lowercase()
+                    .contains("range: bytes=0-2\r\n")
+            );
         }
     }
 

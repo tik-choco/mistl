@@ -113,6 +113,16 @@ pub const MAX_TOOLS_BYTES: usize = 256 * 1024;
 /// Maximum `tool_calls` entries in one message / one response.
 pub const MAX_TOOL_CALLS: usize = 128;
 
+/// `provider_hello.modelInfo` value: what a model produces and whether
+/// using it may incur charges for the provider.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct ModelInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub metered: bool,
+}
+
 /// A protocol v1 message. Variant/field names map 1:1 onto the wire
 /// `type`/fields documented in the module header.
 #[derive(Debug, Clone, PartialEq)]
@@ -135,6 +145,9 @@ pub enum ProtocolMessage {
         /// voices" -- a provider that offers TTS but couldn't resolve a
         /// voice list simply omits the field rather than sending `[]`.
         voices: Option<Vec<String>>,
+        /// Per-model metadata keyed by advertised model name (`modelInfo`
+        /// on the wire, additive). `None` means the field was absent.
+        model_info: Option<std::collections::BTreeMap<String, ModelInfo>>,
     },
     ConsumerHello,
     OaiRequest {
@@ -284,6 +297,7 @@ pub fn encode(msg: &ProtocolMessage) -> Vec<u8> {
 
     let value: Value = match msg {
         ProtocolMessage::ProviderHello {
+            model_info,
             models,
             services,
             voices,
@@ -299,6 +313,9 @@ pub fn encode(msg: &ProtocolMessage) -> Vec<u8> {
             }
             if let Some(voices) = voices {
                 map.insert("voices".into(), json!(voices));
+            }
+            if let Some(info) = model_info.as_ref().filter(|info| !info.is_empty()) {
+                map.insert("modelInfo".into(), json!(info));
             }
             Value::Object(map)
         }
@@ -604,7 +621,25 @@ pub fn decode(bytes: &[u8]) -> Option<ProtocolMessage> {
                 None => None,
                 Some(v) => str_array_non_empty(v),
             };
+            let model_info = obj.get("modelInfo").and_then(Value::as_object).map(|info| {
+                info.iter()
+                    .filter_map(|(model, value)| {
+                        if !crate::config::valid_model_info_key(model) {
+                            return None;
+                        }
+                        let value = value.as_object()?;
+                        let kind = value
+                            .get("kind")
+                            .and_then(Value::as_str)
+                            .filter(|kind| crate::config::valid_model_kind(kind))
+                            .map(String::from);
+                        let metered = value.get("metered").and_then(Value::as_bool) == Some(true);
+                        Some((model.clone(), ModelInfo { kind, metered }))
+                    })
+                    .collect()
+            });
             Some(ProtocolMessage::ProviderHello {
+                model_info,
                 models,
                 services,
                 voices,
@@ -871,7 +906,7 @@ mod tests {
     }
     use super::*;
     use serde_json::{Value, json};
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     #[test]
     fn reasoning_effort_is_optional_strict_and_preserves_unknown_strings() {
@@ -937,8 +972,141 @@ mod tests {
     // ---- encode: byte-level field checks -----------------------------
 
     #[test]
+    fn provider_hello_model_info_roundtrips_with_optional_members() {
+        let msg = ProtocolMessage::ProviderHello {
+            models: Some(vec![
+                "video-model".into(),
+                "image-model".into(),
+                "music-model".into(),
+                "unknown-model".into(),
+            ]),
+            services: None,
+            voices: None,
+            model_info: Some(BTreeMap::from([
+                (
+                    "video-model".into(),
+                    ModelInfo {
+                        kind: Some("video".into()),
+                        metered: true,
+                    },
+                ),
+                (
+                    "image-model".into(),
+                    ModelInfo {
+                        kind: Some("image".into()),
+                        metered: false,
+                    },
+                ),
+                (
+                    "music-model".into(),
+                    ModelInfo {
+                        kind: None,
+                        metered: true,
+                    },
+                ),
+                ("unknown-model".into(), ModelInfo::default()),
+            ])),
+        };
+        let bytes = encode(&msg);
+        assert_eq!(
+            parsed(&bytes)["modelInfo"],
+            json!({
+                "video-model": {"kind":"video", "metered":true},
+                "image-model": {"kind":"image"},
+                "music-model": {"metered":true},
+                "unknown-model": {}
+            })
+        );
+        assert_eq!(decode(&bytes), Some(msg));
+        for model_info in [None, Some(BTreeMap::new())] {
+            let bytes = encode(&ProtocolMessage::ProviderHello {
+                models: None,
+                services: None,
+                voices: None,
+                model_info,
+            });
+            assert!(parsed(&bytes).get("modelInfo").is_none());
+        }
+    }
+
+    #[test]
+    fn provider_hello_model_info_defensive_decode() {
+        for bad in [json!(null), json!(true), json!("invalid"), json!([])] {
+            let msg = json!({"v":1,"type":"provider_hello","modelInfo":bad});
+            assert_eq!(
+                decode(&serde_json::to_vec(&msg).unwrap()),
+                Some(ProtocolMessage::ProviderHello {
+                    models: None,
+                    services: None,
+                    voices: None,
+                    model_info: None,
+                })
+            );
+        }
+        let msg = json!({"v":1,"type":"provider_hello","models":["video-model"],"modelInfo":{
+            "": {"kind":"video"},
+            ("a".repeat(513)): {"kind":"video"},
+            ("é".repeat(257)): {"kind":"video"},
+            "bad-entry": 42,
+            "bad-entry-2": [],
+            "bad-entry-3": null,
+            "video-model": {"kind":"video", "metered":true, "future": 42},
+            "bad-kind": {"kind":"Video", "metered":true},
+            "long-kind": {"kind":"a".repeat(33)},
+            "empty-kind": {"kind":""},
+            "wrong-types": {"kind":42, "metered":"true"},
+            "number-metered": {"metered":1},
+            "future-model": {"kind":"custom_kind_2", "metered":false},
+            ("a".repeat(512)): {"kind":"a".repeat(32)}
+        }});
+        assert_eq!(
+            decode(&serde_json::to_vec(&msg).unwrap()),
+            Some(ProtocolMessage::ProviderHello {
+                models: Some(vec!["video-model".into()]),
+                services: None,
+                voices: None,
+                model_info: Some(BTreeMap::from([
+                    (
+                        "video-model".into(),
+                        ModelInfo {
+                            kind: Some("video".into()),
+                            metered: true
+                        }
+                    ),
+                    (
+                        "bad-kind".into(),
+                        ModelInfo {
+                            kind: None,
+                            metered: true
+                        }
+                    ),
+                    ("long-kind".into(), ModelInfo::default()),
+                    ("empty-kind".into(), ModelInfo::default()),
+                    ("wrong-types".into(), ModelInfo::default()),
+                    ("number-metered".into(), ModelInfo::default()),
+                    (
+                        "future-model".into(),
+                        ModelInfo {
+                            kind: Some("custom_kind_2".into()),
+                            metered: false
+                        }
+                    ),
+                    (
+                        "a".repeat(512),
+                        ModelInfo {
+                            kind: Some("a".repeat(32)),
+                            metered: false
+                        }
+                    ),
+                ])),
+            })
+        );
+    }
+
+    #[test]
     fn encode_provider_hello_with_models() {
         let bytes = encode(&ProtocolMessage::ProviderHello {
+            model_info: None,
             models: Some(vec!["chat-model".to_string()]),
             services: None,
             voices: None,
@@ -956,6 +1124,7 @@ mod tests {
     #[test]
     fn encode_provider_hello_without_models_omits_field() {
         let bytes = encode(&ProtocolMessage::ProviderHello {
+            model_info: None,
             models: None,
             services: None,
             voices: None,
@@ -968,6 +1137,7 @@ mod tests {
     #[test]
     fn encode_provider_hello_with_services() {
         let bytes = encode(&ProtocolMessage::ProviderHello {
+            model_info: None,
             models: None,
             services: Some(vec!["chat".to_string()]),
             voices: None,
@@ -983,6 +1153,7 @@ mod tests {
     #[test]
     fn encode_provider_hello_with_voices() {
         let bytes = encode(&ProtocolMessage::ProviderHello {
+            model_info: None,
             models: None,
             services: Some(vec!["chat".to_string(), "tts".to_string()]),
             voices: Some(vec!["alloy".to_string(), "kokoro-1".to_string()]),
@@ -1328,6 +1499,7 @@ mod tests {
         assert_eq!(
             decode(bytes),
             Some(ProtocolMessage::ProviderHello {
+                model_info: None,
                 models: Some(vec!["chat-model".to_string()]),
                 services: None,
                 voices: None,
@@ -1342,6 +1514,7 @@ mod tests {
         assert_eq!(
             decode(bytes),
             Some(ProtocolMessage::ProviderHello {
+                model_info: None,
                 models: Some(vec!["chat-model".to_string()]),
                 services: Some(vec!["chat".to_string(), "tts".to_string()]),
                 voices: None,
@@ -1355,6 +1528,7 @@ mod tests {
         assert_eq!(
             decode(bytes),
             Some(ProtocolMessage::ProviderHello {
+                model_info: None,
                 models: None,
                 services: Some(vec!["chat".to_string(), "tts".to_string()]),
                 voices: Some(vec!["alloy".to_string(), "echo".to_string()]),
@@ -1481,21 +1655,25 @@ mod tests {
     #[test]
     fn roundtrip_all_variants() {
         assert_roundtrip(ProtocolMessage::ProviderHello {
+            model_info: None,
             models: Some(vec!["a".into(), "b".into()]),
             services: None,
             voices: None,
         });
         assert_roundtrip(ProtocolMessage::ProviderHello {
+            model_info: None,
             models: None,
             services: None,
             voices: None,
         });
         assert_roundtrip(ProtocolMessage::ProviderHello {
+            model_info: None,
             models: None,
             services: Some(vec!["chat".into(), "tts".into()]),
             voices: None,
         });
         assert_roundtrip(ProtocolMessage::ProviderHello {
+            model_info: None,
             models: None,
             services: Some(vec!["chat".into(), "tts".into()]),
             voices: Some(vec!["alloy".into(), "kokoro-1".into()]),
@@ -1717,6 +1895,7 @@ mod tests {
         assert_eq!(
             decode(bytes),
             Some(ProtocolMessage::ProviderHello {
+                model_info: None,
                 models: None,
                 services: None,
                 voices: None
@@ -1734,6 +1913,7 @@ mod tests {
         assert_eq!(
             decode(bytes),
             Some(ProtocolMessage::ProviderHello {
+                model_info: None,
                 models: Some(vec!["chat-model".to_string(), "other-model".to_string()]),
                 services: None,
                 voices: None,
@@ -1747,6 +1927,7 @@ mod tests {
         assert_eq!(
             decode(bytes),
             Some(ProtocolMessage::ProviderHello {
+                model_info: None,
                 models: None,
                 services: None,
                 voices: None
@@ -1760,6 +1941,7 @@ mod tests {
         assert_eq!(
             decode(bytes),
             Some(ProtocolMessage::ProviderHello {
+                model_info: None,
                 models: None,
                 services: Some(vec!["chat".to_string(), "tts".to_string()]),
                 voices: None,
@@ -1775,6 +1957,7 @@ mod tests {
         assert_eq!(
             decode(bytes),
             Some(ProtocolMessage::ProviderHello {
+                model_info: None,
                 models: None,
                 services: Some(vec!["chat".to_string(), "future-service".to_string()]),
                 voices: None,
@@ -1789,6 +1972,7 @@ mod tests {
         assert_eq!(
             decode(bytes),
             Some(ProtocolMessage::ProviderHello {
+                model_info: None,
                 models: None,
                 services: Some(vec!["chat".to_string(), "tts".to_string()]),
                 voices: None,
@@ -1802,6 +1986,7 @@ mod tests {
         assert_eq!(
             decode(bytes),
             Some(ProtocolMessage::ProviderHello {
+                model_info: None,
                 models: None,
                 services: Some(vec!["chat".to_string(), "tts".to_string()]),
                 voices: Some(vec!["alloy".to_string(), "echo".to_string()]),

@@ -332,6 +332,64 @@ $ mistl ai image edit --image input.png -m image-model -o edited.webp --param ou
 Image editing requests binary output; use `--param key=value` for other upstream
 fields. See the [CLI reference](cli.md) for more examples and file options.
 
+### Media generation (image, video, music)
+
+mistl does not generate media itself. It makes generation models that live
+behind an HTTP provider (a gateway, a local server, or a cloud API behind a
+gateway) usable through the local API and by the peers of a room. The provider's
+API key stays in its `ai.providers` entry and is never sent to peers.
+
+**Describing models.** An HTTP provider can say what each upstream model
+produces and whether using it may cost money:
+
+```toml
+[ai.providers.model_info."video-model"]
+kind = "video"      # chat, image, video, music, speech, 3d, other
+metered = true      # using this model may incur charges for the provider
+```
+
+When the model is shared with a room, the room's peers see this metadata
+(`provider_hello` gains an optional `modelInfo` object; older peers ignore it).
+`mistl ai status` and the dashboard show it per room, and the local API's
+`GET /v1/models` entries gain `kind` and `metered`. The dashboard lets you set
+both per model in the sharing settings.
+
+**Routes.** Relative to the local API base, also under `/rooms/{room}/...`.
+Every request names a `model`, which is resolved like chat:
+
+| Method | Route | Behavior |
+| --- | --- | --- |
+| POST | `/images/generations` | OpenAI Images API request, relayed as JSON; synchronous. Same deadline (10 min) and result limits as image edits (128 MiB locally, 18 MiB over a room). Ask for `response_format: "b64_json"`: an upstream `url` is passed through unchanged and may not be reachable from other peers |
+| POST | `/videos`, `/music` | Creates a job (OpenAI Videos API shape). JSON, or multipart where every file part becomes a data URL |
+| GET | `/videos`, `/music` | Jobs this daemon created, newest first |
+| GET, DELETE | `/videos/{id}`, `/music/{id}` | Job status (`queued`, `in_progress`, `completed`, `failed`) / delete |
+| GET | `/videos/{id}/content`, `/music/{id}/content` | The result, fetched in 8 MiB range windows and streamed as one 200 download (`?variant=` is passed upstream; client `Range` is ignored) |
+
+The upstream must implement these routes; mistl relays status codes and bodies
+as-is. Results larger than 18 MiB need `Range` support on the content route
+(mistl requests `bytes=start-end` windows and stops at a short window or 416). Job ids must match `[A-Za-z0-9_-]{1,128}`. As with 3D jobs, the providing
+peer binds every job to the peer that created it, and follow-up requests go to
+the provider or room that created the job. Creating a job has a 5-minute
+deadline and each content window 5 minutes.
+
+**Dashboard and daemon jobs.** The dashboard's AI page has a **Generate**
+wizard (kind, model, prompt, a confirmation step for metered models) and a
+list of generated files with status, preview, download and remove. It is
+backed by the `ai.media.generate`, `ai.media.list` and `ai.media.remove`
+commands. Results are stored under `<data_dir>/ai-media/` (at most 100 jobs
+and 4 running at once, 2 GiB per job). Generations still running when the
+daemon stops are marked failed.
+
+**CLI.**
+
+```console
+$ mistl ai image generate "a lighthouse at dusk" -m image-model -o lighthouse.png
+$ mistl ai video generate "waves on rocks" -m video-model -o waves.mp4 --param seconds=8 --room my-room
+$ mistl ai music generate "calm piano" -m music-model -o piano.mp3 --no-wait
+$ mistl ai music status <id>
+$ mistl ai music download <id> -o piano.mp3
+```
+
 ### API errors
 
 An explicit model that cannot be resolved from an enabled provider's advertised,
@@ -363,7 +421,9 @@ CLI error path.
 Native OpenAI clients send no `Origin` and are unaffected. A web page served
 from another origin (for example a tc-* app) is refused with HTTP 403
 `origin not allowed`, including its `OPTIONS` preflight, until its origin is
-listed in `ai.api_allowed_origins`:
+listed in `ai.api_allowed_origins`. The project's own web apps
+(`https://tik-choco.github.io`, `https://app.tik-choco.com`) are listed by
+default; set the list to `[]` to allow none. To add your own:
 
 ```console
 $ mistl config set ai.api_allowed_origins '["https://example.com", "http://localhost:5173"]'

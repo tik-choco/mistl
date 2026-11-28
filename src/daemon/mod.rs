@@ -1021,7 +1021,8 @@ mod tests {
             json!({ "default_ref": { "provider_id": "http", "model": "raw" }, "default_reasoning_effort": null, "tts": null, "stt": null,
             "providers": [{ "id": "http", "label": "", "base_url": "http://local/v1", "api_key": "***",
                 "enabled": true, "models": [], "models_fetched_at": null, "provide": false, "shared": [] }],
-            "api_listen": "127.0.0.1:6478", "api_allowed_origins": [], "request_timeout_secs": 120, "trusted_providers": [] })
+            "api_listen": "127.0.0.1:6478", "api_allowed_origins": crate::config::DEFAULT_API_ALLOWED_ORIGINS,
+            "request_timeout_secs": 120, "trusted_providers": [] })
         );
     }
 
@@ -1320,6 +1321,15 @@ mod tests {
             ),
             ("store.sandbox.export", json!({"path":"a"})),
             ("store.folder-sync", json!({"url":"u"})),
+            (
+                "ai.media.generate",
+                json!({"kind":"image","model":"image-model","params":{"prompt":"test"}}),
+            ),
+            ("ai.media.list", json!({})),
+            (
+                "ai.media.remove",
+                json!({"id":"media_00000000000000000000000000000000"}),
+            ),
             ("config.show", json!({})),
         ];
         for (cmd, args) in allowed {

@@ -963,10 +963,20 @@ pub enum AiAction {
     Voices(crate::ai::media_cli::VoicesArgs),
     /// Transcribe an audio file
     Transcribe(crate::ai::media_cli::TranscribeArgs),
-    /// Edit images
+    /// Generate and edit images
     Image {
         #[command(subcommand)]
         action: crate::ai::media_cli::ImageAction,
+    },
+    /// Generate and manage videos
+    Video {
+        #[command(subcommand)]
+        action: crate::ai::media_cli::VideoAction,
+    },
+    /// Generate and manage music
+    Music {
+        #[command(subcommand)]
+        action: crate::ai::media_cli::MusicAction,
     },
     /// Generate and manage 3D assets
     #[command(name = "3d")]
@@ -1864,6 +1874,16 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             }
             AiAction::Image { action } => {
                 crate::ai::media_cli::run(crate::ai::media_cli::Action::Image(action), || {
+                    request("ai.serve.start", json!({}))
+                })
+            }
+            AiAction::Video { action } => {
+                crate::ai::media_cli::run(crate::ai::media_cli::Action::Video(action), || {
+                    request("ai.serve.start", json!({}))
+                })
+            }
+            AiAction::Music { action } => {
+                crate::ai::media_cli::run(crate::ai::media_cli::Action::Music(action), || {
                     request("ai.serve.start", json!({}))
                 })
             }

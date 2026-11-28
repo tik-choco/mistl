@@ -47,7 +47,7 @@
 //! `error` (with detail). Authorization denials are logged for every
 //! request kind; other voice requests are not logged.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -61,7 +61,7 @@ use crate::config::ResolvedModel;
 
 use super::openai::ToolOptions;
 use super::openai::{self, UpstreamConfig};
-use super::protocol::ProtocolMessage;
+use super::protocol::{ModelInfo, ProtocolMessage};
 use super::tts::TtsAudio;
 use super::{LlmCallFn, LlmCallFuture, SendFn};
 
@@ -425,6 +425,7 @@ pub struct Provider {
     call: LlmCallFn,
     default_reasoning_effort: std::sync::RwLock<Option<String>>,
     models: Vec<String>,
+    model_info: std::sync::RwLock<BTreeMap<String, ModelInfo>>,
     /// Raw shared model id -> exact enabled HTTP connection. Each room has
     /// its own table; shared_restricted also covers nonempty lists whose
     /// references are currently unavailable.
@@ -489,6 +490,7 @@ impl Provider {
             call,
             default_reasoning_effort: std::sync::RwLock::new(None),
             models,
+            model_info: std::sync::RwLock::new(BTreeMap::new()),
             shared_restricted: std::sync::atomic::AtomicBool::new(!advertised.is_empty()),
             advertised,
             tts,
@@ -507,6 +509,10 @@ impl Provider {
             .default_reasoning_effort
             .write()
             .expect("ai effort lock") = effort;
+    }
+
+    pub fn set_model_info(&self, model_info: BTreeMap<String, ModelInfo>) {
+        *self.model_info.write().expect("ai model info lock") = model_info;
     }
 
     /// Whether a hello reply to `peer` is allowed now (and records it).
@@ -583,7 +589,9 @@ impl Provider {
         } else {
             None
         };
+        let model_info = self.model_info.read().expect("ai model info lock");
         ProtocolMessage::ProviderHello {
+            model_info: (!model_info.is_empty()).then(|| model_info.clone()),
             models,
             services: Some(self.services()),
             voices,
@@ -1995,6 +2003,7 @@ mod tests {
         assert_eq!(
             provider.hello(),
             ProtocolMessage::ProviderHello {
+                model_info: None,
                 models: None,
                 services: Some(vec!["chat".into(), "tools".into()]),
                 voices: None,
@@ -2017,9 +2026,35 @@ mod tests {
         assert_eq!(
             provider.hello(),
             ProtocolMessage::ProviderHello {
+                model_info: None,
                 models: Some(vec!["chat-model".into(), "chat-model-mini".into()]),
                 services: Some(vec!["chat".into(), "tools".into()]),
                 voices: None,
+            }
+        );
+    }
+
+    #[test]
+    fn hello_includes_configured_model_info() {
+        let (send, _sent) = fake_send();
+        let call = fake_call_success(vec![], "");
+        let provider =
+            Provider::new_with_voice(send, call, vec!["video-model".into()], None, None, vec![]);
+        let model_info = BTreeMap::from([(
+            "video-model".into(),
+            ModelInfo {
+                kind: Some("video".into()),
+                metered: true,
+            },
+        )]);
+        provider.set_model_info(model_info.clone());
+        assert_eq!(
+            provider.hello(),
+            ProtocolMessage::ProviderHello {
+                models: Some(vec!["video-model".into()]),
+                services: Some(vec!["chat".into(), "tools".into()]),
+                voices: None,
+                model_info: Some(model_info),
             }
         );
     }
@@ -2776,6 +2811,7 @@ mod tests {
         assert_eq!(
             provider.hello(),
             ProtocolMessage::ProviderHello {
+                model_info: None,
                 models: None,
                 services: Some(vec![
                     "chat".to_string(),

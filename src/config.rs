@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -443,6 +443,30 @@ pub struct EscrowReplication {
     pub migration_seed: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModelInfo {
+    /// What the model produces; `None` = unknown (treated like before).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Using the model may incur charges for the provider (cloud API).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub metered: bool,
+}
+
+const MAX_PROVIDER_MODEL_INFO: usize = 1024;
+
+pub(crate) fn valid_model_info_key(model: &str) -> bool {
+    !model.is_empty() && model.len() <= 512
+}
+
+pub(crate) fn valid_model_kind(kind: &str) -> bool {
+    (1..=32).contains(&kind.len())
+        && kind
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
 /// HTTP endpoint or Room provider, including discovery cache and per-room sharing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -456,6 +480,8 @@ pub struct AiProviderConfig {
     pub models_fetched_at: Option<String>,
     pub provide: bool,
     pub shared: Vec<ModelRef>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_info: BTreeMap<String, ModelInfo>,
 }
 
 impl Default for AiProviderConfig {
@@ -470,6 +496,7 @@ impl Default for AiProviderConfig {
             models_fetched_at: None,
             provide: false,
             shared: Vec::new(),
+            model_info: BTreeMap::new(),
         }
     }
 }
@@ -609,6 +636,10 @@ pub fn resolve_voice(ai: &AiConfig, voice: Option<&VoiceConfig>) -> Option<Resol
     Some(resolved)
 }
 
+/// The project's own web apps, allowed to call the local API out of the box.
+pub const DEFAULT_API_ALLOWED_ORIGINS: [&str; 2] =
+    ["https://tik-choco.github.io", "https://app.tik-choco.com"];
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AiConfig {
@@ -620,6 +651,7 @@ pub struct AiConfig {
     pub api_listen: String,
     /// Browser origins (`scheme://host[:port]`) allowed to call the local
     /// API cross-origin (CORS). Empty: only native clients and same-origin.
+    /// Defaults to [`DEFAULT_API_ALLOWED_ORIGINS`].
     pub api_allowed_origins: Vec<String>,
     pub request_timeout_secs: u64,
     pub trusted_providers: Vec<String>,
@@ -655,7 +687,7 @@ impl Default for AiConfig {
             stt: None,
             providers: Vec::new(),
             api_listen: "127.0.0.1:6478".into(),
-            api_allowed_origins: Vec::new(),
+            api_allowed_origins: DEFAULT_API_ALLOWED_ORIGINS.map(String::from).to_vec(),
             request_timeout_secs: 120,
             trusted_providers: Vec::new(),
             room_id: None,
@@ -768,6 +800,22 @@ impl AiConfig {
                 "ai.api_allowed_origins: {bad:?} is not an origin; use scheme://host[:port] such as https://example.com or http://localhost:5173 (no path, no wildcard)"
             );
         }
+        for provider in &self.providers {
+            anyhow::ensure!(
+                provider.model_info.len() <= MAX_PROVIDER_MODEL_INFO,
+                "ai.providers[].model_info: expected at most {MAX_PROVIDER_MODEL_INFO} entries"
+            );
+            for (model, info) in &provider.model_info {
+                anyhow::ensure!(
+                    valid_model_info_key(model),
+                    "ai.providers[].model_info: model id must be 1..512 bytes"
+                );
+                anyhow::ensure!(
+                    info.kind.as_deref().is_none_or(valid_model_kind),
+                    "ai.providers[].model_info: kind must match ^[a-z0-9_]{{1,32}}$"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -793,6 +841,20 @@ impl AiConfig {
             }
             ok
         });
+        for provider in &mut self.providers {
+            let mut kept = 0;
+            provider.model_info.retain(|model, info| {
+                let ok = valid_model_info_key(model)
+                    && info.kind.as_deref().is_none_or(valid_model_kind)
+                    && kept < MAX_PROVIDER_MODEL_INFO;
+                if ok {
+                    kept += 1;
+                } else {
+                    tracing::warn!("ai: ignoring invalid ai.providers[].model_info entry");
+                }
+                ok
+            });
+        }
     }
 }
 
@@ -1692,6 +1754,27 @@ impl Config {
                 tracing::warn!("ai: ignoring invalid ai.tts.speed");
                 tts.remove("speed");
             }
+            if let Some(providers) = ai.get_mut("providers").and_then(toml::Value::as_array_mut) {
+                for provider in providers.iter_mut().filter_map(toml::Value::as_table_mut) {
+                    if let Some(info) = provider.get_mut("model_info") {
+                        if let Some(entries) = info.as_table_mut() {
+                            entries.retain(|_, value| {
+                                let ok = value.is_table()
+                                    && value.clone().try_into::<ModelInfo>().is_ok();
+                                if !ok {
+                                    tracing::warn!(
+                                        "ai: ignoring invalid ai.providers[].model_info entry"
+                                    );
+                                }
+                                ok
+                            });
+                        } else {
+                            tracing::warn!("ai: ignoring invalid ai.providers[].model_info");
+                            provider.remove("model_info");
+                        }
+                    }
+                }
+            }
         }
         let mut config: Self = tree.try_into()?;
         config.escrow.validate()?;
@@ -1998,6 +2081,115 @@ impl Config {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn model_info_roundtrips_toml_and_json_config_set() {
+        let (config, _) = Config::parse_loaded(
+            r#"
+            [[ai.providers]]
+            id = "http"
+            base_url = "http://local/v1"
+            [ai.providers.model_info."video-model"]
+            kind = "video"
+            metered = true
+            [ai.providers.model_info."image-model"]
+            kind = "image"
+            [ai.providers.model_info."music-model"]
+            metered = true
+            [ai.providers.model_info."unknown-model"]
+            "#,
+        )
+        .unwrap();
+        let expected = json!({
+            "video-model": {"kind":"video", "metered":true},
+            "image-model": {"kind":"image"},
+            "music-model": {"metered":true},
+            "unknown-model": {}
+        });
+        let shown = serde_json::to_value(&config).unwrap();
+        assert_eq!(shown["ai"]["providers"][0]["model_info"], expected);
+        let updated =
+            set_by_path(&config, "ai.providers", shown["ai"]["providers"].clone()).unwrap();
+        let (reloaded, _) =
+            Config::parse_loaded(&toml::to_string_pretty(&updated).unwrap()).unwrap();
+        assert_eq!(
+            reloaded.ai.providers[0].model_info,
+            config.ai.providers[0].model_info
+        );
+    }
+
+    #[test]
+    fn model_info_validates_on_config_set() {
+        let config = Config::default();
+        let set_info = |info: serde_json::Value| {
+            set_by_path(
+                &config,
+                "ai.providers",
+                json!([{"id":"http", "model_info":info}]),
+            )
+        };
+        for info in [
+            json!({"": {}}),
+            json!({("a".repeat(513)): {}}),
+            json!({("é".repeat(257)): {}}),
+            json!({"video-model": {"kind":""}}),
+            json!({"video-model": {"kind":"Video"}}),
+            json!({"video-model": {"kind":"video-model"}}),
+            json!({"video-model": {"kind":"a".repeat(33)}}),
+            json!({"video-model": {"kind":42}}),
+            json!({"video-model": {"metered":"true"}}),
+            json!({"video-model": false}),
+        ] {
+            assert!(set_info(info.clone()).is_err(), "{info}");
+        }
+        assert!(set_info(json!({("a".repeat(512)): {"kind":"a".repeat(32)}})).is_ok());
+        assert!(set_info(json!({"video-model": {"kind":"future_kind_2"}})).is_ok());
+        let mut many = (0..1024)
+            .map(|i| (format!("model-{i:04}"), json!({})))
+            .collect::<serde_json::Map<_, _>>();
+        assert!(set_info(json!(&many)).is_ok());
+        many.insert("extra-model".into(), json!({}));
+        assert!(set_info(json!(many)).is_err());
+    }
+
+    #[test]
+    fn model_info_load_discards_invalid_entries_and_limits_count() {
+        let (mut config, _) = Config::parse_loaded(
+            r#"
+            [[ai.providers]]
+            id = "http"
+            model_info = { "" = {}, "video-model" = { kind = "video", metered = true }, "bad-kind" = { kind = "Invalid" }, "bad-type" = { kind = 42 }, "bad-metered" = { metered = "yes" }, "bad-entry" = 3 }
+            [[ai.providers]]
+            id = "bad-map"
+            model_info = "invalid"
+            "#,
+        ).unwrap();
+        assert_eq!(
+            config.ai.providers[0].model_info,
+            BTreeMap::from([(
+                "video-model".into(),
+                ModelInfo {
+                    kind: Some("video".into()),
+                    metered: true
+                }
+            )])
+        );
+        assert!(config.ai.providers[1].model_info.is_empty());
+        config.ai.providers[0]
+            .model_info
+            .insert("a".repeat(513), ModelInfo::default());
+        config.ai.providers[0]
+            .model_info
+            .extend((0..1030).map(|i| (format!("model-{i:04}"), ModelInfo::default())));
+        let (loaded, _) = Config::parse_loaded(&toml::to_string_pretty(&config).unwrap()).unwrap();
+        assert_eq!(loaded.ai.providers[0].model_info.len(), 1024);
+        assert!(
+            !loaded.ai.providers[0]
+                .model_info
+                .contains_key(&"a".repeat(513))
+        );
+        loaded.ai.validate().unwrap();
+    }
 
     #[test]
     fn ai_effort_and_speed_config_roundtrip_and_validation() {
@@ -2498,7 +2690,7 @@ mod tests {
                 "default_ref": null, "default_reasoning_effort": null, "tts": null, "stt": null,
                 "providers": [{ "id": "http", "label": "", "base_url": "http://local/v1", "api_key": "",
                     "enabled": true, "models": [], "models_fetched_at": null, "provide": false, "shared": [] }],
-                "api_listen": "127.0.0.1:6478", "api_allowed_origins": [], "request_timeout_secs": 120, "trusted_providers": []
+                "api_listen": "127.0.0.1:6478", "api_allowed_origins": DEFAULT_API_ALLOWED_ORIGINS, "request_timeout_secs": 120, "trusted_providers": []
             })
         );
     }
@@ -3482,7 +3674,7 @@ mod tests {
     #[test]
     fn api_allowed_origins_validates_on_set_and_applies_immediately() {
         let config = Config::default();
-        assert!(config.ai.api_allowed_origins.is_empty());
+        assert_eq!(config.ai.api_allowed_origins, DEFAULT_API_ALLOWED_ORIGINS);
         let origins = json!(["https://example.com", "http://localhost:5173"]);
         let updated = set_by_path(&config, "ai.api_allowed_origins", origins).unwrap();
         assert_eq!(updated.ai.api_allowed_origins.len(), 2);

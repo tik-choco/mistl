@@ -156,6 +156,91 @@ pub(super) type RelayFn = Arc<
         + Sync,
 >;
 
+/// Windowed reader for a media job's content (`/<kind>/<id>/content`,
+/// optionally `?variant=<v>`) through a relay: fetches
+/// `oai_tunnel::CONTENT_WINDOW`-sized `range=` windows until a short window.
+/// See `.agents/mediagen/design.md` section "Job content".
+pub(super) struct JobContent {
+    relay: RelayFn,
+    path: String,
+    content_type: String,
+    first: Option<Vec<u8>>,
+    next: u64,
+    done: bool,
+}
+
+impl JobContent {
+    /// Fetches the first window. `Ok(Err(response))`: the upstream replied
+    /// with something that is not content (e.g. 404, 409 not completed);
+    /// pass it through as-is.
+    pub(super) async fn open(
+        relay: RelayFn,
+        path: String,
+    ) -> Result<std::result::Result<Self, super::oai_tunnel::TunnelResponse>> {
+        use super::oai_tunnel::{CONTENT_WINDOW, media_job_key, split_range};
+        anyhow::ensure!(
+            media_job_key(&path).is_some_and(|(_, content)| content),
+            "invalid job content path"
+        );
+        let (_, range) = split_range(&path)?;
+        anyhow::ensure!(range.is_none(), "unexpected job content range");
+        let response = relay_get(&relay, window_path(&path, 0, CONTENT_WINDOW - 1))
+            .await
+            .map_err(|error| content_relay_error(&error))?;
+        if !matches!(response.status, 200 | 206) {
+            return Ok(Err(response));
+        }
+        let len = response.body.len() as u64;
+        anyhow::ensure!(
+            response.status == 200 || len <= CONTENT_WINDOW,
+            "invalid content window length"
+        );
+        Ok(Ok(Self {
+            relay,
+            path,
+            content_type: response.content_type,
+            first: (!response.body.is_empty()).then_some(response.body),
+            next: len,
+            done: response.status == 200 || len < CONTENT_WINDOW,
+        }))
+    }
+
+    pub(super) fn content_type(&self) -> &str {
+        &self.content_type
+    }
+
+    /// The next chunk of content (the first window first); `None` at the end.
+    pub(super) async fn next(&mut self) -> Result<Option<Vec<u8>>> {
+        use super::oai_tunnel::CONTENT_WINDOW;
+        if let Some(first) = self.first.take() {
+            return Ok(Some(first));
+        }
+        if self.done {
+            return Ok(None);
+        }
+        let end = self
+            .next
+            .checked_add(CONTENT_WINDOW - 1)
+            .context("content range overflow")?;
+        let window = request_content_window(&self.relay, &self.path, self.next, end, |response| {
+            match response.status {
+                206 if response.body.len() as u64 <= CONTENT_WINDOW => Ok(Ok(response.body)),
+                416 => Ok(Ok(Vec::new())),
+                206 => anyhow::bail!("invalid content window length"),
+                _ => anyhow::bail!("invalid content window status: HTTP {}", response.status),
+            }
+        })
+        .await?;
+        let len = window.len() as u64;
+        self.done = len < CONTENT_WINDOW;
+        self.next = self
+            .next
+            .checked_add(len)
+            .context("content range overflow")?;
+        Ok((!window.is_empty()).then_some(window))
+    }
+}
+
 pub(super) struct RoomRoutes {
     pub call: LlmCallFn,
     pub models: ModelsFn,
@@ -753,8 +838,17 @@ fn models_response(models: &ModelsFn, allowed: Option<&[String]>) -> Value {
     let list = models();
     let data: Vec<Value> = list
         .into_iter()
-        .filter(|id| allowed.is_none_or(|allowed| allowed.contains(id)))
-        .map(|id| json!({"id": id, "object": "model", "owned_by": "mistl"}))
+        .filter(|(id, _)| allowed.is_none_or(|allowed| allowed.contains(id)))
+        .map(|(id, info)| {
+            let mut entry = json!({"id": id, "object": "model", "owned_by": "mistl"});
+            if let Some(kind) = info.kind {
+                entry["kind"] = json!(kind);
+            }
+            if info.metered {
+                entry["metered"] = json!(true);
+            }
+            entry
+        })
         .collect();
     json!({"object": "list", "data": data})
 }
@@ -1141,7 +1235,11 @@ async fn route_request(
         };
         let is_transcription = path == "/v1/audio/transcriptions";
         let is_gen3d = path == "/v1/3d/generations";
-        let has_image_upload = matches!(path.as_str(), "/v1/images/edits" | "/v1/game/act");
+        let media_post = path.strip_prefix("/v1").is_some_and(|p| {
+            super::oai_tunnel::media_kind(p).is_some_and(|(prefix, _)| p == prefix)
+        });
+        let has_image_upload =
+            matches!(path.as_str(), "/v1/images/edits" | "/v1/game/act") || media_post;
         let is_multipart =
             multipart_boundary(head.header("content-type").unwrap_or_default()).is_some();
         let body_cap = if is_transcription {
@@ -1152,7 +1250,7 @@ async fn route_request(
             MAX_GEN3D_JSON_BYTES
         } else if has_image_upload && is_multipart {
             MAX_IMAGE_EDIT_MULTIPART_BYTES
-        } else if has_image_upload {
+        } else if has_image_upload || path == "/v1/images/generations" {
             MAX_IMAGE_EDIT_JSON_BYTES
         } else {
             MAX_JSON_BODY_BYTES
@@ -1291,12 +1389,14 @@ fn room_route(path: &str) -> Option<(String, String)> {
             | "voices"
             | "3d/generations"
             | "images/edits"
+            | "images/generations"
             | "game/act"
             | "motion/inbetween"
             | "motion/clips"
     ) && !endpoint.starts_with("models/")
         && !endpoint.starts_with("3d/generations/")
         && !endpoint.starts_with("motion/skeletons/")
+        && super::oai_tunnel::media_kind(&format!("/{endpoint}")).is_none()
     {
         return None;
     }
@@ -1323,11 +1423,23 @@ pub(super) fn percent_decode(encoded: &str) -> Option<String> {
 }
 
 fn relay_path<'a>(method: &str, path: &'a str) -> Option<&'a str> {
+    if let Some(relative) = path.strip_prefix("/v1")
+        && super::oai_tunnel::media_kind(relative).is_some()
+        && matches!(
+            method.to_ascii_uppercase().as_str(),
+            "GET" | "POST" | "DELETE"
+        )
+    {
+        return Some(relative);
+    }
     match (method.to_ascii_uppercase().as_str(), path) {
         ("GET", "/v1/audio/voices" | "/v1/voices" | "/voices") => Some("/audio/voices"),
         ("GET", "/api/ps" | "/health") => Some(path),
         ("GET" | "POST", "/v1/3d/generations") => Some("/3d/generations"),
-        ("POST", "/v1/images/edits" | "/v1/game/act" | "/v1/motion/inbetween")
+        (
+            "POST",
+            "/v1/images/edits" | "/v1/images/generations" | "/v1/game/act" | "/v1/motion/inbetween",
+        )
         | ("GET", "/v1/motion/clips") => Some(&path[3..]),
         ("GET", p) if p.starts_with("/v1/motion/skeletons/") => Some(&p[3..]),
         ("GET" | "DELETE", p) if p.starts_with("/v1/3d/generations/") => Some(&p[3..]),
@@ -1370,15 +1482,20 @@ fn multipart_json(
     body: &[u8],
     boundary: &str,
     string_fields: &[&str],
+    media: bool,
 ) -> std::result::Result<Vec<u8>, &'static str> {
     let mut object = serde_json::Map::new();
     for part in parse_multipart(body, boundary) {
         if object.contains_key(&part.name) {
             return Err("duplicate multipart field");
         }
-        let value = if part.name == "image" {
+        let value = if (!media && part.name == "image") || (media && part.file_name.is_some()) {
             let mime = if part.content_type.is_empty() {
-                "image/png"
+                if media {
+                    "application/octet-stream"
+                } else {
+                    "image/png"
+                }
             } else {
                 &part.content_type
             };
@@ -1406,7 +1523,7 @@ fn multipart_json(
         };
         object.insert(part.name, value);
     }
-    if !object.contains_key("image") {
+    if !media && !object.contains_key("image") {
         return Err("image is required");
     }
     Ok(serde_json::to_vec(&object).expect("JSON object"))
@@ -1451,26 +1568,47 @@ async fn content_window(relay: &RelayFn, path: &str, start: u64, bytes: u64) -> 
         .saturating_add(super::oai_tunnel::CONTENT_WINDOW)
         .min(bytes)
         - 1;
+    request_content_window(relay, path, start, end, |response| match response.status {
+        status if status != 206 && status != 200 => {
+            anyhow::bail!("invalid content window status: HTTP {}", response.status);
+        }
+        _ if response.body.len() as u64 != end - start + 1 => Ok(Err(anyhow::anyhow!(
+            "invalid content window length: expected {}, received {}",
+            end - start + 1,
+            response.body.len()
+        ))),
+        200 if start != 0 || end != bytes - 1 => {
+            anyhow::bail!("invalid content window status: HTTP {}", response.status);
+        }
+        _ => Ok(Ok(response.body)),
+    })
+    .await
+}
+
+fn window_path(path: &str, start: u64, end: u64) -> String {
+    let separator = if path.contains('?') { '&' } else { '?' };
+    format!("{path}{separator}range={start}-{end}")
+}
+
+/// The outer error is terminal; the inner error is retryable (e.g. a short
+/// 3D window, where the expected length is known in advance).
+async fn request_content_window<T>(
+    relay: &RelayFn,
+    path: &str,
+    start: u64,
+    end: u64,
+    validate: impl Fn(super::oai_tunnel::TunnelResponse) -> Result<Result<T>>,
+) -> Result<T> {
     for attempt in 1..=3 {
-        let error = match relay_get(relay, format!("{path}?range={start}-{end}")).await {
+        let error = match relay_get(relay, window_path(path, start, end)).await {
             Err(error) => content_relay_error(&error),
             Ok(response) if (500..600).contains(&response.status) => {
                 anyhow::anyhow!("content window returned HTTP {}", response.status)
             }
-            Ok(response) if response.status != 206 && response.status != 200 => {
-                anyhow::bail!("invalid content window status: HTTP {}", response.status);
-            }
-            Ok(response) if response.body.len() as u64 != end - start + 1 => {
-                anyhow::anyhow!(
-                    "invalid content window length: expected {}, received {}",
-                    end - start + 1,
-                    response.body.len()
-                )
-            }
-            Ok(response) if response.status == 200 && (start != 0 || end != bytes - 1) => {
-                anyhow::bail!("invalid content window status: HTTP {}", response.status);
-            }
-            Ok(response) => return Ok(response.body),
+            Ok(response) => match validate(response)? {
+                Ok(window) => return Ok(window),
+                Err(error) => error,
+            },
         };
         if attempt == 3 {
             return Err(error);
@@ -1482,6 +1620,60 @@ async fn content_window(relay: &RelayFn, path: &str, start: u64, bytes: u64) -> 
         tokio::time::sleep(delay).await;
     }
     unreachable!("content window attempts are nonzero")
+}
+
+async fn serve_media_content(stream: &mut TcpStream, relay: &RelayFn, path: &str) -> Result<()> {
+    let mut content = match JobContent::open(relay.clone(), path.to_string()).await {
+        Ok(Ok(content)) => content,
+        Ok(Err(response)) => return write_tunnel_response(stream, &response).await,
+        Err(err) => {
+            write_backend_failure(stream, &err).await;
+            return Ok(());
+        }
+    };
+    let mime = content.content_type();
+    let mime = if mime.chars().any(char::is_control) {
+        "application/octet-stream"
+    } else {
+        mime
+    };
+    let ext = match mime
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "video/mp4" => "mp4",
+        "video/webm" => "webm",
+        "video/quicktime" => "mov",
+        "audio/mpeg" | "audio/mp3" => "mp3",
+        "audio/wav" | "audio/x-wav" | "audio/wave" => "wav",
+        "audio/ogg" | "application/ogg" | "video/ogg" => "ogg",
+        "audio/flac" | "audio/x-flac" => "flac",
+        "audio/mp4" | "audio/m4a" | "audio/x-m4a" => "m4a",
+        "audio/aac" | "audio/aacp" => "aac",
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        _ => "bin",
+    };
+    let (key, _) = super::oai_tunnel::media_job_key(path).expect("validated content route");
+    let id = key.rsplit('/').next().unwrap();
+    stream.write_all(format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Disposition: attachment; filename=\"{id}.{ext}\"\r\n{}Connection: close\r\n\r\n", cors_headers()
+    ).as_bytes()).await?;
+    loop {
+        match content.next().await {
+            Ok(Some(window)) => stream.write_all(&window).await?,
+            Ok(None) => return Ok(()),
+            Err(err) => {
+                warn!("api_server: content download failed for {key}: {err:#}");
+                return Ok(());
+            }
+        }
+    }
 }
 
 async fn serve_generation_content(
@@ -1604,8 +1796,10 @@ async fn handle_relay(
     let gen3d_post = method == "POST" && path == "/3d/generations";
     let image_edit_post = method == "POST" && path == "/images/edits";
     let game_post = method == "POST" && path == "/game/act";
+    let media = oai_tunnel::media_kind(path);
+    let media_post = method == "POST" && media.is_some_and(|(prefix, _)| path == prefix);
     let req = if method == "POST" {
-        if (gen3d_post || image_edit_post || game_post)
+        if (gen3d_post || image_edit_post || game_post || media_post)
             && let Some(boundary) =
                 multipart_boundary(head.header("content-type").unwrap_or_default())
         {
@@ -1613,10 +1807,12 @@ async fn handle_relay(
                 &["background"]
             } else if game_post {
                 &["system_prompt"]
+            } else if media_post {
+                &["prompt", "size", "seconds"]
             } else {
                 &[]
             };
-            body = match multipart_json(&body, &boundary, string_fields) {
+            body = match multipart_json(&body, &boundary, string_fields, media_post) {
                 Ok(body) => body,
                 Err(message) => {
                     write_error(stream, 400, "Bad Request", message).await?;
@@ -1640,7 +1836,7 @@ async fn handle_relay(
     } else {
         None
     };
-    let path = if path == "/motion/clips"
+    let path = if (path == "/motion/clips" || media.is_some())
         && let Some((_, query)) = head.path.split_once('?')
     {
         format!("{path}?{query}")
@@ -1659,12 +1855,13 @@ async fn handle_relay(
     };
     let op = match path.as_str() {
         "/images/edits" => "image_edit",
+        "/images/generations" => "image",
         "/game/act" => "game",
         "/audio/voices" => "voices",
         "/api/ps" | "/health" => "status",
         p if p.starts_with("/3d/generations") => "gen3d",
         p if p.starts_with("/motion/") => "motion",
-        _ => "oai",
+        _ => media.map_or("oai", |(_, op)| op),
     };
     let authorized = match crate::authz::authorize_api(head.header("authorization"), model) {
         Ok(authorized) => authorized.with_op(op),
@@ -1676,6 +1873,17 @@ async fn handle_relay(
     // Authenticate first; then require an explicit model (no built-in default).
     if let Some(Err(response)) = catalog_model {
         return write_tunnel_response(stream, &response).await;
+    }
+    if media.is_some() {
+        if !oai_tunnel::media_job_allowed(&method, &path) {
+            return write_tunnel_response(stream, &oai_tunnel::media_job_not_found()).await;
+        }
+        if !matches!(oai_tunnel::split_range(&path), Ok((_, None))) {
+            write_json_response(stream, 400, "Bad Request", &json!({"error": {
+                "message":"invalid job query", "type":"invalid_request_error", "code":"invalid_request"
+            }})).await?;
+            return Ok(());
+        }
     }
     if method == "POST" && model.is_none() {
         return write_tunnel_response(stream, &oai_tunnel::missing_model()).await;
@@ -1711,9 +1919,12 @@ async fn handle_relay(
         body = super::oai_tunnel::rewrite_object(&body, &[("response_format", json!("url"))], &[])?;
     }
     let mut usage = ApiUsage::new(authorized);
-    usage.started = method == "POST";
+    usage.started = method == "POST" || media.is_some();
     if method == "GET" && path.starts_with("/3d/generations/") && path.ends_with("/content") {
         return serve_generation_content(stream, relay, &path).await;
+    }
+    if method == "GET" && oai_tunnel::media_job_key(&path).is_some_and(|(_, content)| content) {
+        return serve_media_content(stream, relay, &path).await;
     }
     let response = relay(RelayRequest {
         method: method.clone(),
@@ -2506,7 +2717,7 @@ mod tests {
             Box::pin(async move {
                 Ok(Some(RoomRoutes {
                     call: fake_call_ok(),
-                    models: Arc::new(|| vec!["org/model".into()]),
+                    models: Arc::new(|| vec![("org/model".into(), Default::default())]),
                     tts: fake_tts(),
                     stt: fake_stt(),
                     oai: Arc::new(|_| Box::pin(async { anyhow::bail!("unused") })),
@@ -2518,7 +2729,12 @@ mod tests {
         ApiServer::start_with_rooms(
             "127.0.0.1:0",
             fake_call_ok(),
-            Arc::new(|| vec!["m1".into(), "org/model".into()]),
+            Arc::new(|| {
+                vec![
+                    ("m1".into(), Default::default()),
+                    ("org/model".into(), Default::default()),
+                ]
+            }),
             fake_tts(),
             fake_stt(),
             None,
@@ -2641,6 +2857,224 @@ mod tests {
             assert_eq!(status_code(&split_response(&raw).0), 404);
         }
         server.stop();
+    }
+
+    #[tokio::test]
+    async fn media_routes_json_multipart_and_content() {
+        let _authz = authz_test().await;
+        let (relay, seen) = recording_relay(|request| {
+            if request.path.contains("/content?") {
+                return TunnelResponse {
+                    status: 206,
+                    content_type: if request.path.starts_with("/videos/") {
+                        "video/mp4"
+                    } else {
+                        "audio/mpeg"
+                    }
+                    .into(),
+                    body: b"abc".to_vec(),
+                };
+            }
+            TunnelResponse {
+                status: if request.method == "POST" { 201 } else { 200 },
+                content_type: "application/json".into(),
+                body: br#"{ "id":"job-1", "url":"unchanged" }"#.to_vec(),
+            }
+        });
+        let server = relay_test_server(relay).await;
+        for prefix in ["/v1", "/v1/rooms/team%2Fone"] {
+            let raw = relay_request(
+                &server,
+                "POST",
+                &format!("{prefix}/images/generations"),
+                "application/json",
+                Some(r#"{"model":"image-model","prompt":"hello"}"#),
+            )
+            .await;
+            assert_eq!(status_code(&split_response(&raw).0), 201);
+            for &(family, op) in super::super::oai_tunnel::JOB_KINDS {
+                let create = format!("{prefix}{family}");
+                let status = format!("{create}/job-1");
+                let body = format!(r#"{{"model":"{op}-model","prompt":"hello"}}"#);
+                for (method, path, body) in [
+                    ("POST", create.as_str(), Some(body.as_str())),
+                    ("GET", create.as_str(), None),
+                    ("GET", status.as_str(), None),
+                    ("DELETE", status.as_str(), None),
+                ] {
+                    let raw = relay_request(&server, method, path, "application/json", body).await;
+                    let (headers, body) = split_response(&raw);
+                    assert_eq!(
+                        status_code(&headers),
+                        if method == "POST" { 201 } else { 200 }
+                    );
+                    assert_eq!(body, br#"{ "id":"job-1", "url":"unchanged" }"#);
+                }
+                let raw = relay_request(
+                    &server,
+                    "GET",
+                    &format!("{status}/content?variant=preview"),
+                    "",
+                    None,
+                )
+                .await;
+                let (head, payload) = split_response(&raw);
+                assert_eq!(status_code(&head), 200);
+                assert_eq!(payload, b"abc");
+                let ext = if op == "video" { "mp4" } else { "mp3" };
+                assert!(head_has(
+                    &head,
+                    &format!("Content-Disposition: attachment; filename=\"job-1.{ext}\"")
+                ));
+                assert!(!head.to_ascii_lowercase().contains("content-length:"));
+                let count = seen.lock().unwrap().len();
+                for (method, path, status) in [
+                    ("GET", format!("{create}/bad.id"), 404),
+                    ("DELETE", format!("{create}/job-1/content"), 404),
+                    ("GET", format!("{create}/job-1?variant=x"), 400),
+                    ("GET", format!("{create}/job-1/content?variant=BAD"), 400),
+                    ("GET", format!("{create}/job-1/content?range=0-2"), 400),
+                ] {
+                    let raw = relay_request(&server, method, &path, "", None).await;
+                    assert_eq!(status_code(&split_response(&raw).0), status);
+                }
+                assert_eq!(seen.lock().unwrap().len(), count);
+            }
+            let multipart = concat!(
+                "--b\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nvideo-model\r\n",
+                "--b\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\n123\r\n",
+                "--b\r\nContent-Disposition: form-data; name=\"seconds\"\r\n\r\n4\r\n",
+                "--b\r\nContent-Disposition: form-data; name=\"n\"\r\n\r\n2\r\n",
+                "--b\r\nContent-Disposition: form-data; name=\"input_reference\"; filename=\"ref.png\"\r\nContent-Type: image/png\r\n\r\nabc\r\n--b--\r\n"
+            );
+            let raw = relay_request(
+                &server,
+                "POST",
+                &format!("{prefix}/videos"),
+                "multipart/form-data; boundary=b",
+                Some(multipart),
+            )
+            .await;
+            assert_eq!(status_code(&split_response(&raw).0), 201);
+            {
+                let records = seen.lock().unwrap();
+                let sent = records.last().unwrap();
+                assert_eq!(sent.path, "/videos");
+                assert_eq!(
+                    serde_json::from_slice::<Value>(sent.body.as_deref().unwrap()).unwrap(),
+                    json!({"model":"video-model","prompt":"123","seconds":"4","n":2,"input_reference":"data:image/png;base64,YWJj"})
+                );
+            }
+            let raw = relay_request(
+                &server,
+                "POST",
+                &format!("{prefix}/images/generations"),
+                "multipart/form-data; boundary=b",
+                Some(multipart),
+            )
+            .await;
+            assert_eq!(status_code(&split_response(&raw).0), 415);
+        }
+        server.stop();
+    }
+
+    #[tokio::test]
+    async fn job_content_first_window_statuses_and_end_of_file() {
+        let window = super::super::oai_tunnel::CONTENT_WINDOW;
+        for (status, size) in [(206, 3), (206, 0), (200, 3), (409, 3), (503, 3), (416, 0)] {
+            let (relay, seen) = recording_relay(move |_| TunnelResponse {
+                status,
+                content_type: "video/mp4".into(),
+                body: vec![1; size],
+            });
+            match JobContent::open(relay, "/videos/job/content?variant=preview".into())
+                .await
+                .unwrap()
+            {
+                Ok(mut content) => {
+                    assert!(matches!(status, 200 | 206));
+                    assert_eq!(content.content_type(), "video/mp4");
+                    assert_eq!(
+                        content.next().await.unwrap(),
+                        (size > 0).then(|| vec![1; size])
+                    );
+                    assert!(content.next().await.unwrap().is_none());
+                }
+                Err(response) => {
+                    assert!(!matches!(status, 200 | 206));
+                    assert_eq!(response.status, status);
+                    assert_eq!(response.body, vec![1; size]);
+                }
+            }
+            let records = seen.lock().unwrap();
+            assert_eq!(records.len(), 1);
+            assert_eq!(
+                records[0].path,
+                format!("/videos/job/content?variant=preview&range=0-{}", window - 1)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn job_content_later_windows_retry_and_stop() {
+        let window = super::super::oai_tunnel::CONTENT_WINDOW;
+        for final_status in [206, 416, 200, 503] {
+            let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let calls = count.clone();
+            let relay: RelayFn = Arc::new(move |request| {
+                let call = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(async move {
+                    assert_eq!(
+                        request.path,
+                        if call == 0 {
+                            format!("/music/job/content?range=0-{}", window - 1)
+                        } else {
+                            format!("/music/job/content?range={window}-{}", window * 2 - 1)
+                        }
+                    );
+                    if call == 1 {
+                        anyhow::bail!("temporary relay failure");
+                    }
+                    let status = match call {
+                        0 => 206,
+                        2 => 502,
+                        _ => final_status,
+                    };
+                    let body = if call == 0 {
+                        vec![1; window as usize]
+                    } else if status == 206 {
+                        vec![2; 3]
+                    } else {
+                        Vec::new()
+                    };
+                    Ok(TunnelResponse {
+                        status,
+                        content_type: "audio/mpeg".into(),
+                        body,
+                    })
+                })
+            });
+            let Ok(mut content) = JobContent::open(relay, "/music/job/content".into())
+                .await
+                .unwrap()
+            else {
+                panic!("expected content")
+            };
+            assert_eq!(content.next().await.unwrap().unwrap().len() as u64, window);
+            let result = content.next().await;
+            match final_status {
+                206 => {
+                    assert_eq!(result.unwrap(), Some(vec![2; 3]));
+                    assert!(content.next().await.unwrap().is_none());
+                }
+                416 => {
+                    assert!(result.unwrap().is_none());
+                    assert!(content.next().await.unwrap().is_none());
+                }
+                _ => assert!(result.is_err()),
+            }
+            assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 4);
+        }
     }
 
     #[tokio::test]
@@ -4308,7 +4742,7 @@ mod tests {
                 let stt: SttFn = Arc::new(|_| Box::pin(async { Ok("room transcript".into()) }));
                 Ok(Some(RoomRoutes {
                     call,
-                    models: Arc::new(|| vec!["room-raw".into()]),
+                    models: Arc::new(|| vec![("room-raw".into(), Default::default())]),
                     tts,
                     stt,
                     oai,
@@ -4549,7 +4983,16 @@ mod tests {
     }
 
     fn fake_models() -> ModelsFn {
-        Arc::new(|| vec!["m1".to_string(), "m2".to_string()])
+        Arc::new(|| {
+            let video = super::super::protocol::ModelInfo {
+                kind: Some("video".into()),
+                metered: true,
+            };
+            vec![
+                ("m1".to_string(), Default::default()),
+                ("m2".to_string(), video),
+            ]
+        })
     }
 
     fn fake_tts() -> TtsFn {
@@ -4835,6 +5278,10 @@ mod tests {
         assert_eq!(ids, vec!["m1", "m2"]);
         assert_eq!(json["data"][0]["object"], "model");
         assert_eq!(json["data"][0]["owned_by"], "mistl");
+        // Metadata appears only when known.
+        assert!(json["data"][0].get("kind").is_none() && json["data"][0].get("metered").is_none());
+        assert_eq!(json["data"][1]["kind"], "video");
+        assert_eq!(json["data"][1]["metered"], true);
     }
 
     #[tokio::test]
