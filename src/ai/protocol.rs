@@ -50,10 +50,14 @@
 //!   Optional `speed` must be finite and within 0.25..=4.0; optional
 //!   `response_format` must be mp3/opus/aac/flac/wav/pcm. Invalid hints
 //!   drop only their field. Neither changes the protocol version.
+//!   Optional `extra` is a bounded JSON object of upstream-specific fields.
 //! - `tts_response` / `stt_request`: `id` non-empty; `seq` required
 //!   integer >= 0; `data` string; `last` bool; `mime` non-empty string;
-//!   `stt_request` additionally has optional `model` / `fileName` strings.
-//! - `stt_response`: `id` non-empty; `text` string.
+//!   `stt_request` additionally has optional `model` / `fileName` strings
+//!   and first-chunk `extra` (ordered multipart text field pairs). Presence
+//!   of `extra`, even an empty array, opts into raw response chunks.
+//! - `stt_response`: `id` non-empty; `text` string. Optional `raw` carries
+//!   `seq`, base64 `data`, `last` and `contentType` for opted-in consumers.
 //! - `voice_error`: `id` non-empty; `message` string; `code` optional
 //!   string (same defensive rule as `llm_error.code`).
 //!
@@ -216,6 +220,7 @@ pub enum ProtocolMessage {
         speed: Option<f64>,
         /// OpenAI audio format; unknown values are ignored on decode.
         response_format: Option<String>,
+        extra: serde_json::Map<String, serde_json::Value>,
     },
     TtsResponse {
         id: String,
@@ -232,10 +237,13 @@ pub enum ProtocolMessage {
         mime: String,
         model: Option<String>,
         file_name: Option<String>,
+        /// Present on the first chunk of an extension-aware request.
+        extra: Option<Vec<(String, String)>>,
     },
     SttResponse {
         id: String,
         text: String,
+        raw: Option<SttRawChunk>,
     },
     VoiceError {
         id: String,
@@ -245,11 +253,79 @@ pub enum ProtocolMessage {
     },
 }
 
+/// An opaque upstream transcription response, split into wire-sized chunks.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SttRawChunk {
+    pub seq: u64,
+    pub data: String,
+    pub last: bool,
+    pub content_type: String,
+}
+
+pub const MAX_VOICE_EXTRA_BYTES: usize = 8 * 1024;
+pub const MAX_STT_EXTRA_FIELDS: usize = 64;
+pub const MAX_STT_RESPONSE_BYTES: usize = 1024 * 1024;
+pub const MAX_STT_RAW_CHUNK_BYTES: usize = 9 * 1024;
+
+/// Count the encoded metadata without allocating a second copy of an
+/// untrusted, potentially oversized value.
+fn within_voice_extra_cap(value: &(impl serde::Serialize + ?Sized)) -> bool {
+    struct Budget(usize);
+    impl std::io::Write for Budget {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self
+                .0
+                .checked_sub(bytes.len())
+                .ok_or(std::io::ErrorKind::InvalidData)?;
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    serde_json::to_writer(Budget(MAX_VOICE_EXTRA_BYTES), value).is_ok()
+}
+
+pub fn valid_tts_extra(extra: &serde_json::Map<String, serde_json::Value>) -> bool {
+    within_voice_extra_cap(extra)
+}
+
+pub fn valid_stt_extra(extra: &[(String, String)]) -> bool {
+    extra.len() <= MAX_STT_EXTRA_FIELDS
+        && extra
+            .iter()
+            .all(|(name, _)| !name.is_empty() && !matches!(name.as_str(), "model" | "file"))
+        && within_voice_extra_cap(extra)
+}
+
+pub fn valid_stt_content_type(value: &str) -> bool {
+    !value.trim().is_empty()
+        && value.len() <= 256
+        && value.bytes().all(|b| (0x20..=0x7e).contains(&b))
+}
+
+impl SttRawChunk {
+    pub fn within_limit(&self) -> bool {
+        self.data.len() <= MAX_STT_RAW_CHUNK_BYTES.div_ceil(3) * 4
+            && valid_stt_content_type(&self.content_type)
+    }
+}
+
 /// Known `services` value for chat capability. `services` field absence on
 /// a `provider_hello` means "chat only" per the wire spec (see
 /// [`advertises_service`]).
 pub const SERVICE_CHAT: &str = "chat";
 pub const SERVICE_OAI: &str = "oai";
+/// Raw chat and opt-in incremental OAI responses, still wire v1.
+pub const SERVICE_OAI_CHAT: &str = "oai_chat";
+/// Stateless Responses API passthrough over the existing OAI tunnel.
+pub const SERVICE_OAI_RESPONSES: &str = "oai_responses";
+/// Legacy Completions API passthrough, including streaming.
+pub const SERVICE_OAI_COMPLETIONS: &str = "oai_completions";
+/// Standard multipart uploads using the existing v1 contentType metadata.
+pub const SERVICE_OAI_MULTIPART: &str = "oai_multipart";
 
 /// Known `services` value for tool calling (`tools` / `tool_choice` /
 /// `tool_calls` on chat). Providers advertise it alongside `"chat"`;
@@ -446,6 +522,7 @@ pub fn encode(msg: &ProtocolMessage) -> Vec<u8> {
             lang,
             speed,
             response_format,
+            extra,
         } => {
             let mut map = Map::new();
             map.insert("v".into(), json!(1));
@@ -466,6 +543,9 @@ pub fn encode(msg: &ProtocolMessage) -> Vec<u8> {
             }
             if let Some(format) = response_format.as_deref().filter(|v| valid_tts_format(v)) {
                 map.insert("response_format".into(), json!(format));
+            }
+            if !extra.is_empty() {
+                map.insert("extra".into(), json!(extra));
             }
             Value::Object(map)
         }
@@ -494,6 +574,7 @@ pub fn encode(msg: &ProtocolMessage) -> Vec<u8> {
             mime,
             model,
             file_name,
+            extra,
         } => {
             let mut map = Map::new();
             map.insert("v".into(), json!(1));
@@ -509,10 +590,17 @@ pub fn encode(msg: &ProtocolMessage) -> Vec<u8> {
             if let Some(file_name) = file_name {
                 map.insert("fileName".into(), json!(file_name));
             }
+            if let Some(extra) = extra {
+                map.insert("extra".into(), json!(extra));
+            }
             Value::Object(map)
         }
-        ProtocolMessage::SttResponse { id, text } => {
-            json!({"v": 1, "type": "stt_response", "id": id, "text": text})
+        ProtocolMessage::SttResponse { id, text, raw } => {
+            let mut value = json!({"v": 1, "type": "stt_response", "id": id, "text": text});
+            if let Some(raw) = raw {
+                value["raw"] = json!(raw);
+            }
+            value
         }
         ProtocolMessage::VoiceError { id, message, code } => {
             let mut map = Map::new();
@@ -766,6 +854,16 @@ pub fn decode(bytes: &[u8]) -> Option<ProtocolMessage> {
             // malformed value degrades gracefully instead of invalidating
             // an otherwise well-formed `tts_request`.
             let lang = dropped_opt_str(obj, "lang");
+            let extra = match obj.get("extra") {
+                None => Default::default(),
+                Some(value) => {
+                    let extra = value.as_object()?;
+                    if !valid_tts_extra(extra) {
+                        return None;
+                    }
+                    extra.clone()
+                }
+            };
             Some(ProtocolMessage::TtsRequest {
                 id,
                 text,
@@ -778,6 +876,7 @@ pub fn decode(bytes: &[u8]) -> Option<ProtocolMessage> {
                     .filter(|v| crate::config::valid_tts_speed(*v)),
                 response_format: dropped_opt_str(obj, "response_format")
                     .filter(|v| valid_tts_format(v)),
+                extra,
             })
         }
         "tts_response" => {
@@ -802,6 +901,22 @@ pub fn decode(bytes: &[u8]) -> Option<ProtocolMessage> {
             let mime = non_empty_str(obj, "mime")?;
             let model = opt_str(obj, "model")?;
             let file_name = opt_str(obj, "fileName")?;
+            let extra = match obj.get("extra") {
+                None => None,
+                Some(value) => {
+                    if value.as_array()?.len() > MAX_STT_EXTRA_FIELDS
+                        || !within_voice_extra_cap(value)
+                    {
+                        return None;
+                    }
+                    let fields: Vec<(String, String)> =
+                        serde_json::from_value(value.clone()).ok()?;
+                    if !valid_stt_extra(&fields) {
+                        return None;
+                    }
+                    Some(fields)
+                }
+            };
             Some(ProtocolMessage::SttRequest {
                 id,
                 seq,
@@ -810,12 +925,35 @@ pub fn decode(bytes: &[u8]) -> Option<ProtocolMessage> {
                 mime,
                 model,
                 file_name,
+                extra,
             })
         }
         "stt_response" => {
             let id = non_empty_str(obj, "id")?;
             let text = any_str(obj, "text")?;
-            Some(ProtocolMessage::SttResponse { id, text })
+            let raw = match obj.get("raw") {
+                None => None,
+                Some(value) => {
+                    let raw = value.as_object()?;
+                    let data = raw.get("data")?.as_str()?;
+                    let content_type = raw.get("contentType")?.as_str()?;
+                    if data.len() > MAX_STT_RAW_CHUNK_BYTES.div_ceil(3) * 4
+                        || !valid_stt_content_type(content_type)
+                    {
+                        return None;
+                    }
+                    Some(SttRawChunk {
+                        seq: as_u64_strict(raw.get("seq")?)?,
+                        data: data.to_string(),
+                        last: raw.get("last")?.as_bool()?,
+                        content_type: content_type.to_string(),
+                    })
+                }
+            };
+            if text.len() > MAX_STT_RESPONSE_BYTES {
+                return None;
+            }
+            Some(ProtocolMessage::SttResponse { id, text, raw })
         }
         "voice_error" => {
             let id = non_empty_str(obj, "id")?;
@@ -857,6 +995,58 @@ pub fn random_id() -> String {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn audio_extensions_roundtrip_and_preserve_legacy_defaults() {
+        let tts = json!({"v":1,"type":"tts_request","id":"a","text":"hi",
+            "extra":{"instructions":"speak softly","voice":{"id":"speaker"},"stream_format":"sse"}});
+        let msg = decode(&serde_json::to_vec(&tts).unwrap()).unwrap();
+        assert_eq!(parsed(&encode(&msg)), tts);
+        let stt = json!({"v":1,"type":"stt_request","id":"a","seq":0,"data":"AA==","last":true,"mime":"audio/wav",
+            "extra":[["timestamp_granularities[]","word"],["timestamp_granularities[]","segment"]]});
+        let msg = decode(&serde_json::to_vec(&stt).unwrap()).unwrap();
+        assert_eq!(parsed(&encode(&msg)), stt);
+        let raw = json!({"v":1,"type":"stt_response","id":"a","text":"",
+            "raw":{"seq":0,"data":"YWJj","last":true,"contentType":"text/plain; charset=utf-8"}});
+        let msg = decode(&serde_json::to_vec(&raw).unwrap()).unwrap();
+        assert_eq!(parsed(&encode(&msg)), raw);
+        for old in [
+            json!({"v":1,"type":"tts_request","id":"a","text":"hi"}),
+            json!({"v":1,"type":"stt_request","id":"a","seq":0,"data":"AA==","last":true,"mime":"audio/wav"}),
+            json!({"v":1,"type":"stt_response","id":"a","text":"hello"}),
+        ] {
+            let msg = decode(&serde_json::to_vec(&old).unwrap()).unwrap();
+            assert_eq!(parsed(&encode(&msg)), old);
+        }
+    }
+
+    #[test]
+    fn audio_extensions_enforce_wire_caps() {
+        let oversized = "a".repeat(MAX_VOICE_EXTRA_BYTES);
+        for extra in [json!({"instructions":oversized}), json!([1, 2])] {
+            let wire = json!({"v":1,"type":"tts_request","id":"a","text":"hi","extra":extra});
+            assert!(decode(&serde_json::to_vec(&wire).unwrap()).is_none());
+        }
+        for extra in [
+            json!([["prompt", "a".repeat(MAX_VOICE_EXTRA_BYTES)]]),
+            json!(vec![("include[]", "a"); MAX_STT_EXTRA_FIELDS + 1]),
+            json!([["model", "wrong-model"]]),
+            json!([["file", "not-a-file"]]),
+        ] {
+            let wire = json!({"v":1,"type":"stt_request","id":"a","seq":0,"data":"AA==","last":true,"mime":"audio/wav","extra":extra});
+            assert!(decode(&serde_json::to_vec(&wire).unwrap()).is_none());
+        }
+        for (data, mime) in [
+            (
+                "A".repeat(MAX_STT_RAW_CHUNK_BYTES.div_ceil(3) * 4 + 1),
+                "text/plain",
+            ),
+            (String::new(), "text/plain\r\nX-Test: invalid"),
+        ] {
+            let wire = json!({"v":1,"type":"stt_response","id":"a","text":"","raw":{"seq":0,"data":data,"last":true,"contentType":mime}});
+            assert!(decode(&serde_json::to_vec(&wire).unwrap()).is_none());
+        }
+    }
+
+    #[test]
     fn tts_options_roundtrip_and_defensive_decode() {
         for format in ["mp3", "opus", "aac", "flac", "wav", "pcm"] {
             for speed in [0.25, 1.0, 4.0] {
@@ -868,6 +1058,7 @@ mod tests {
                     lang: None,
                     speed: Some(speed),
                     response_format: Some(format.into()),
+                    extra: Default::default(),
                 });
             }
         }
@@ -899,6 +1090,7 @@ mod tests {
             lang: None,
             speed: None,
             response_format: None,
+            extra: Default::default(),
         });
         let wire: Value = serde_json::from_slice(&wire).unwrap();
         assert!(wire.get("speed").is_none());
@@ -1339,6 +1531,7 @@ mod tests {
             lang: Some("en".into()),
             speed: None,
             response_format: None,
+            extra: Default::default(),
         });
         assert_eq!(
             keys(&full),
@@ -1361,6 +1554,7 @@ mod tests {
             lang: None,
             speed: None,
             response_format: None,
+            extra: Default::default(),
         });
         assert_eq!(
             keys(&minimal),
@@ -1403,6 +1597,7 @@ mod tests {
             mime: "audio/wav".into(),
             model: Some("stt-model".into()),
             file_name: Some("clip.wav".into()),
+            extra: None,
         });
         assert_eq!(
             keys(&full),
@@ -1430,6 +1625,7 @@ mod tests {
             mime: "audio/wav".into(),
             model: None,
             file_name: None,
+            extra: None,
         });
         assert_eq!(
             keys(&minimal),
@@ -1450,6 +1646,7 @@ mod tests {
         let bytes = encode(&ProtocolMessage::SttResponse {
             id: "a1".into(),
             text: "hello".into(),
+            raw: None,
         });
         assert_eq!(
             keys(&bytes),
@@ -1583,6 +1780,7 @@ mod tests {
                 lang: Some("ja-JP".into()),
                 speed: None,
                 response_format: None,
+                extra: Default::default(),
             })
         );
     }
@@ -1600,6 +1798,7 @@ mod tests {
                 lang: None,
                 speed: None,
                 response_format: None,
+                extra: Default::default(),
             })
         );
     }
@@ -1620,6 +1819,7 @@ mod tests {
                 lang: None,
                 speed: None,
                 response_format: None,
+                extra: Default::default(),
             })
         );
     }
@@ -1641,6 +1841,7 @@ mod tests {
                 lang: Some("en".into()),
                 speed: None,
                 response_format: None,
+                extra: Default::default(),
             })
         );
     }
@@ -1754,6 +1955,7 @@ mod tests {
             lang: Some("en-US".into()),
             speed: None,
             response_format: None,
+            extra: Default::default(),
         });
         assert_roundtrip(ProtocolMessage::TtsRequest {
             id: "id1".into(),
@@ -1763,6 +1965,7 @@ mod tests {
             lang: None,
             speed: None,
             response_format: None,
+            extra: Default::default(),
         });
         assert_roundtrip(ProtocolMessage::TtsResponse {
             id: "id1".into(),
@@ -1779,6 +1982,7 @@ mod tests {
             mime: "audio/wav".into(),
             model: Some("stt-model".into()),
             file_name: Some("input.wav".into()),
+            extra: None,
         });
         assert_roundtrip(ProtocolMessage::SttRequest {
             id: "id1".into(),
@@ -1788,10 +1992,12 @@ mod tests {
             mime: "audio/wav".into(),
             model: None,
             file_name: None,
+            extra: None,
         });
         assert_roundtrip(ProtocolMessage::SttResponse {
             id: "id1".into(),
             text: "transcribed".into(),
+            raw: None,
         });
         assert_roundtrip(ProtocolMessage::VoiceError {
             id: "id1".into(),

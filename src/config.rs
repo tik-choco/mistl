@@ -44,6 +44,52 @@ pub struct Config {
     pub network: NetworkConfig,
     #[serde(default)]
     pub vm: VmConfig,
+    #[serde(default)]
+    pub web: WebConfig,
+}
+
+/// mistl web (`crate::web_host`): static sites served by a loopback-only
+/// gateway at `http://<siteId>.localhost:<port>/`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WebConfig {
+    /// Host sites (join `mistl-web-v1`, serve installed blocks, gateway).
+    pub enabled: bool,
+    /// Gateway address; must be a loopback IP. Keep the port stable: it is
+    /// part of every site's origin (saves live in that origin's storage).
+    pub listen: String,
+    /// Largest site this node publishes or installs, in bytes.
+    pub max_site_bytes: u64,
+}
+
+impl Default for WebConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            listen: "127.0.0.1:6490".into(),
+            max_site_bytes: crate::web_host::site::MAX_SITE_BYTES,
+        }
+    }
+}
+
+impl WebConfig {
+    pub fn validate(&self) -> Result<()> {
+        let addr: std::net::SocketAddr = self
+            .listen
+            .parse()
+            .with_context(|| format!("web.listen: {:?} is not an ip:port address", self.listen))?;
+        if !addr.ip().is_loopback() {
+            anyhow::bail!("web.listen must be a loopback address (e.g. 127.0.0.1:6490)");
+        }
+        if addr.port() == 0 {
+            anyhow::bail!("web.listen must use a nonzero port");
+        }
+        let max = crate::web_host::site::MAX_SITE_BYTES;
+        if !(1..=max).contains(&self.max_site_bytes) {
+            anyhow::bail!("web.max_site_bytes must be between 1 and {max}");
+        }
+        Ok(())
+    }
 }
 
 /// Peer-authentication policy shared by every room protocol (see
@@ -1645,6 +1691,7 @@ pub fn set_by_path(config: &Config, path: &str, value: serde_json::Value) -> Res
     updated.network.validate()?;
     updated.ai.validate()?;
     updated.escrow.validate()?;
+    updated.web.validate()?;
     Ok(updated)
 }
 
@@ -1657,6 +1704,10 @@ pub fn applies_when(path: &str) -> &'static str {
     match path {
         "ui.enabled" | "ui.listen" => "daemon restart",
         path if path.starts_with("escrow.") => "auto restart",
+        // The web host is a process-lifetime OnceCell (state, room, port).
+        "web.enabled" | "web.listen" => "auto restart",
+        // Read at every publish / install.
+        "web.max_site_bytes" => "applied immediately",
         // Chat's OnceCell cannot be reset, and AI/stream legacy room paths
         // lack a safe service-only restart preserving in-flight operations.
         // Storage resolves its rooms on each call and keeps the default below.
@@ -1706,6 +1757,9 @@ impl Config {
             if !crate::runtime::legacy_default() {
                 let api = std::net::TcpListener::bind("127.0.0.1:0")?;
                 let rtsp = std::net::TcpListener::bind("127.0.0.1:0")?;
+                // Dev instances must not take the stable gateway's port.
+                let web = std::net::TcpListener::bind("127.0.0.1:0")?;
+                config.web.listen = web.local_addr()?.to_string();
                 config.ai.api_listen = api.local_addr()?.to_string();
                 config.stream.rtsp_url = format!("rtsp://{}/stream", rtsp.local_addr()?);
                 let room = format!("mistl-dev-{}", crate::runtime::context().instance);
@@ -1725,12 +1779,22 @@ impl Config {
         crate::statefile::restrict_existing(&path);
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
-        let (config, migrated) =
+        let (mut config, mut migrated) =
             Self::parse_loaded(&text).with_context(|| format!("parsing {}", path.display()))?;
+        if crate::runtime::CHANNEL == "dev" && !Self::has_web_listen(&text)? {
+            let web = std::net::TcpListener::bind("127.0.0.1:0")?;
+            config.web.listen = web.local_addr()?.to_string();
+            migrated = true;
+        }
         if migrated {
             config.save()?;
         }
         Ok(config)
+    }
+
+    fn has_web_listen(text: &str) -> Result<bool> {
+        let tree: toml::Value = toml::from_str(text)?;
+        Ok(tree.get("web").and_then(|web| web.get("listen")).is_some())
     }
 
     fn parse_loaded(text: &str) -> Result<(Self, bool)> {
@@ -1778,6 +1842,7 @@ impl Config {
         }
         let mut config: Self = tree.try_into()?;
         config.escrow.validate()?;
+        config.web.validate()?;
         config.ai.discard_invalid_options();
         let migrated = config.migrate_legacy();
         config.ai.discard_invalid_options();
@@ -2823,8 +2888,11 @@ mod tests {
             "escrow.enabled",
             "escrow.rooms",
             "escrow.replication",
+            "web.enabled",
+            "web.listen",
         ];
         let applied_immediately = [
+            "web.max_site_bytes",
             "ai.providers",
             "ai.default_ref",
             "ai.tts",
@@ -2848,6 +2916,38 @@ mod tests {
         for path in applied_immediately {
             assert_eq!(applies_when(path), "applied immediately", "path: {path}");
         }
+    }
+
+    #[test]
+    fn web_config_defaults_and_loopback_only_listen() {
+        let cfg = Config::default();
+        assert!(cfg.web.enabled);
+        assert_eq!(cfg.web.listen, "127.0.0.1:6490");
+        cfg.web.validate().unwrap();
+        for ok in ["127.0.0.1:7000", "[::1]:6490", "127.5.5.5:1"] {
+            set_by_path(&cfg, "web.listen", serde_json::json!(ok)).unwrap();
+        }
+        for bad in [
+            "0.0.0.0:6490", "192.168.1.2:6490", "localhost:6490", "6490",
+            "127.0.0.1:0", "[::1]:0",
+        ] {
+            assert!(
+                set_by_path(&cfg, "web.listen", serde_json::json!(bad)).is_err(),
+                "{bad}"
+            );
+        }
+        assert!(set_by_path(&cfg, "web.max_site_bytes", serde_json::json!(0)).is_err());
+        let over = crate::web_host::site::MAX_SITE_BYTES + 1;
+        assert!(set_by_path(&cfg, "web.max_site_bytes", serde_json::json!(over)).is_err());
+        set_by_path(&cfg, "web.max_site_bytes", serde_json::json!(1024)).unwrap();
+        assert!(Config::parse_loaded("[web]\nlisten = \"0.0.0.0:6490\"\n").is_err());
+        let (loaded, _) = Config::parse_loaded("[web]\nenabled = false\n").unwrap();
+        assert!(!loaded.web.enabled);
+        assert_eq!(loaded.web.listen, "127.0.0.1:6490");
+        assert!(Config::parse_loaded("[web]\nlisten = \"127.0.0.1:0\"\n").is_err());
+        assert!(!Config::has_web_listen("").unwrap());
+        assert!(!Config::has_web_listen("[web]\nenabled = false\n").unwrap());
+        assert!(Config::has_web_listen("[web]\nlisten = \"127.0.0.1:6490\"\n").unwrap());
     }
 
     #[test]

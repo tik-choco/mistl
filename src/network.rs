@@ -171,6 +171,13 @@ pub fn offline_command_allowed(cmd: &str) -> bool {
             | "store.sandbox.import"
             | "store.sandbox.export"
             | "store.sandbox.ls"
+            | "web.ls"
+            | "web.status"
+            | "web.url"
+            | "web.rm"
+            | "web.trust"
+            | "web.untrust"
+            | "web.publish"
     )
 }
 

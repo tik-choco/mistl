@@ -1686,6 +1686,7 @@
 <link rel="stylesheet" href="/assets/features/storage.css">
 <link rel="stylesheet" href="/assets/features/escrow.css">
 <link rel="stylesheet" href="/assets/features/vm.css">
+<link rel="stylesheet" href="/assets/features/webhost.css">
 <link rel="stylesheet" href="/assets/features/nostr.css">
 <link rel="stylesheet" href="/assets/features/chat.css">
 <link rel="stylesheet" href="/assets/features/tunnel-graph.css">
@@ -1740,6 +1741,7 @@
     <div class="sidenav-group" role="presentation" data-i18n="nav.group.data">Data</div>
     <a href="#panel-store"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.7 4 3 9 3s9-1.3 9-3V5"/><path d="M3 12c0 1.7 4 3 9 3s9-1.3 9-3"/></svg><span data-i18n="nav.store">Store</span></a>
     <a href="#panel-escrow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3"/></svg><span data-i18n="nav.escrow">Distributed vault</span></a>
+    <a href="#panel-web"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg><span data-i18n="nav.web">Web</span></a>
     <div class="sidenav-group" role="presentation" data-i18n="nav.group.automation">Automation</div>
     <a href="#panel-scheduler"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l3 2"/><path d="M9 2h6"/></svg><span data-i18n="nav.scheduler">Scheduler</span></a>
     <a href="#panel-bot"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="2"/><circle cx="9" cy="14" r="1.2"/><circle cx="15" cy="14" r="1.2"/><path d="M12 8V4"/><circle cx="12" cy="3" r="1"/><path d="M2 13h2M20 13h2"/></svg><span data-i18n="nav.bot">Bot</span></a>
@@ -2669,6 +2671,8 @@
 
   <section class="panel panel-span2" id="panel-vm" aria-labelledby="vm-title"></section>
 
+  <section class="panel panel-span2" id="panel-web" aria-labelledby="web-title"></section>
+
   <section class="panel panel-span2" id="panel-settings">
     <h2><span data-i18n="settings.title">Settings</span></h2>
     <div class="subtabs" role="tablist" data-i18n-aria-label="settings.title" aria-label="Settings">
@@ -2779,6 +2783,7 @@
 <script src="/assets/features/tunnel-graph.js"></script>
 <script src="/assets/features/messenger.js"></script>
 <script src="/assets/features/vm.js"></script>
+<script src="/assets/features/webhost.js"></script>
 <script>
 (function () {
   "use strict";
@@ -3137,6 +3142,53 @@
       "vm.checkpointNumber": "Backup #{seq}",
       "vm.noCheckpoints": "No backups yet.",
       "vm.backupHelp": "A backup saves the VM’s disk so you can return to that point later. Running programs are not saved. With HA, backups are taken automatically and copied to the other nodes.",
+      "nav.web": "Web",
+      "web.title": "Web",
+      "web.intro": "Publish a built Web App or Web Game folder. Anyone running mistl can open it.",
+      "web.publish.title": "Publish a site",
+      "web.drop": "Drop your build folder here",
+      "web.choose": "Choose folder",
+      "web.clear": "Clear",
+      "web.summary": "{count} files, {size}",
+      "web.skipped": "{count} dotfiles or dot-folders are skipped (not published)",
+      "web.name": "Name",
+      "web.nameHelp": "Lowercase letters, digits and -, up to 48 characters. Publishing again with the same name updates the same site: the URL stays the same and players’ saves are kept.",
+      "web.nameInvalid": "Use 1–48 lowercase letters, digits and - (not at the start or end).",
+      "web.entry": "Entry file",
+      "web.entryMissing": "{entry} is not in the folder. Set the entry file.",
+      "web.spa": "SPA: serve the entry file for unknown paths",
+      "web.coi": "Cross-origin isolation (SharedArrayBuffer)",
+      "web.coi.auto": "Auto",
+      "web.coi.on": "On",
+      "web.coi.off": "Off",
+      "web.publishBtn": "Publish",
+      "web.abort": "Cancel upload",
+      "web.uploading": "Uploading {done} / {total}",
+      "web.publishing": "Publishing…",
+      "web.aborted": "Upload cancelled.",
+      "web.published": "Published {name}.",
+      "web.gdmHint": "GDM World: use this URL as the work's URL.",
+      "web.open": "Open",
+      "web.copy": "Copy",
+      "web.sites": "Sites",
+      "web.loading": "Loading sites…",
+      "web.empty": "No sites yet.",
+      "web.own": "Yours",
+      "web.trusted": "Trusted",
+      "web.installed": "Installed",
+      "web.notInstalled": "Not installed",
+      "web.installing": "Installing {pct}%",
+      "web.failed": "Install failed",
+      "web.updatePending": "Update pending",
+      "web.files": "{count} files",
+      "web.trust": "Trust",
+      "web.untrust": "Untrust",
+      "web.remove": "Remove",
+      "web.confirmRemove": "Remove {name} and free its storage?",
+      "web.tooMany": "The folder has more than {max} files.",
+      "web.tooLarge": "{path} is larger than {max}.",
+      "web.noFiles": "The folder has no files to publish.",
+      "web.readFailed": "Could not read the folder: {error}",
       "nav.chatRelay": "Chat",
       "nav.chat": "Chat",
       "chat.title": "Chat",
@@ -4258,6 +4310,53 @@
       "vm.checkpointNumber": "バックアップ #{seq}",
       "vm.noCheckpoints": "バックアップはまだありません。",
       "vm.backupHelp": "バックアップは VM のディスクを保存し、あとでその時点に戻せるようにします。実行中のプログラムは保存されません。HA を有効にすると自動でバックアップされ、ほかのノードにも複製されます。",
+      "nav.web": "Web",
+      "web.title": "Web",
+      "web.intro": "ビルド済みの Web アプリ・Web ゲームのフォルダを公開します。mistl を使っている人なら誰でも開けます。",
+      "web.publish.title": "サイトを公開",
+      "web.drop": "ビルドしたフォルダをここにドロップ",
+      "web.choose": "フォルダを選択",
+      "web.clear": "クリア",
+      "web.summary": "{count} ファイル、{size}",
+      "web.skipped": "ドットファイル・ドットフォルダ {count} 件は公開されません",
+      "web.name": "名前",
+      "web.nameHelp": "小文字の英字・数字・- で 48 文字まで。同じ名前で公開し直すと同じサイトが更新されます。URL は変わらず、プレイヤーのセーブデータも残ります。",
+      "web.nameInvalid": "1〜48 文字の小文字英字・数字・- を使ってください（先頭と末尾に - は使えません）。",
+      "web.entry": "エントリファイル",
+      "web.entryMissing": "{entry} がフォルダにありません。エントリファイルを指定してください。",
+      "web.spa": "SPA: 不明なパスにはエントリファイルを返す",
+      "web.coi": "クロスオリジン分離 (SharedArrayBuffer)",
+      "web.coi.auto": "自動",
+      "web.coi.on": "オン",
+      "web.coi.off": "オフ",
+      "web.publishBtn": "公開",
+      "web.abort": "アップロードを中止",
+      "web.uploading": "アップロード中 {done} / {total}",
+      "web.publishing": "公開処理中…",
+      "web.aborted": "アップロードを中止しました。",
+      "web.published": "{name} を公開しました。",
+      "web.gdmHint": "GDM World では、この URL を作品の URL に入力してください。",
+      "web.open": "開く",
+      "web.copy": "コピー",
+      "web.sites": "サイト",
+      "web.loading": "サイトを読み込み中…",
+      "web.empty": "サイトはまだありません。",
+      "web.own": "自分のサイト",
+      "web.trusted": "信頼済み",
+      "web.installed": "インストール済み",
+      "web.notInstalled": "未インストール",
+      "web.installing": "インストール中 {pct}%",
+      "web.failed": "インストール失敗",
+      "web.updatePending": "更新待ち",
+      "web.files": "{count} ファイル",
+      "web.trust": "信頼する",
+      "web.untrust": "信頼をやめる",
+      "web.remove": "削除",
+      "web.confirmRemove": "{name} を削除してストレージを解放しますか？",
+      "web.tooMany": "ファイルが {max} 個を超えています。",
+      "web.tooLarge": "{path} が {max} を超えています。",
+      "web.noFiles": "公開できるファイルがありません。",
+      "web.readFailed": "フォルダを読み込めませんでした: {error}",
       "nav.chatRelay": "チャット",
       "nav.chat": "チャット",
       "chat.title": "チャット",
@@ -5374,6 +5473,53 @@
       "vm.checkpointNumber": "备份 #{seq}",
       "vm.noCheckpoints": "还没有备份。",
       "vm.backupHelp": "备份会保存 VM 的磁盘，之后可以回到那个时间点。正在运行的程序不会被保存。启用 HA 后会自动备份并复制到其他节点。",
+      "nav.web": "网站",
+      "web.title": "网站",
+      "web.intro": "发布已构建的 Web 应用或 Web 游戏文件夹。任何运行 mistl 的人都可以打开。",
+      "web.publish.title": "发布网站",
+      "web.drop": "将构建好的文件夹拖到这里",
+      "web.choose": "选择文件夹",
+      "web.clear": "清除",
+      "web.summary": "{count} 个文件，{size}",
+      "web.skipped": "{count} 个点文件或点文件夹不会发布",
+      "web.name": "名称",
+      "web.nameHelp": "小写字母、数字和 -，最多 48 个字符。用相同名称再次发布会更新同一个网站：网址不变，玩家的存档也会保留。",
+      "web.nameInvalid": "请使用 1–48 个小写字母、数字和 -（开头和结尾不能是 -）。",
+      "web.entry": "入口文件",
+      "web.entryMissing": "文件夹中没有 {entry}。请设置入口文件。",
+      "web.spa": "SPA：对未知路径返回入口文件",
+      "web.coi": "跨源隔离（SharedArrayBuffer）",
+      "web.coi.auto": "自动",
+      "web.coi.on": "开启",
+      "web.coi.off": "关闭",
+      "web.publishBtn": "发布",
+      "web.abort": "取消上传",
+      "web.uploading": "正在上传 {done} / {total}",
+      "web.publishing": "正在发布…",
+      "web.aborted": "已取消上传。",
+      "web.published": "已发布 {name}。",
+      "web.gdmHint": "在 GDM World 中，请将此网址填写为作品网址。",
+      "web.open": "打开",
+      "web.copy": "复制",
+      "web.sites": "网站",
+      "web.loading": "正在加载网站…",
+      "web.empty": "还没有网站。",
+      "web.own": "我发布的",
+      "web.trusted": "已信任",
+      "web.installed": "已安装",
+      "web.notInstalled": "未安装",
+      "web.installing": "正在安装 {pct}%",
+      "web.failed": "安装失败",
+      "web.updatePending": "等待更新",
+      "web.files": "{count} 个文件",
+      "web.trust": "信任",
+      "web.untrust": "取消信任",
+      "web.remove": "删除",
+      "web.confirmRemove": "要删除 {name} 并释放其存储空间吗？",
+      "web.tooMany": "文件夹中的文件超过 {max} 个。",
+      "web.tooLarge": "{path} 超过 {max}。",
+      "web.noFiles": "文件夹中没有可发布的文件。",
+      "web.readFailed": "无法读取文件夹：{error}",
       "nav.chatRelay": "聊天",
       "nav.chat": "聊天",
       "chat.title": "聊天",
@@ -6485,6 +6631,7 @@
     renderStore(state.storeItems);
     escrowView.refreshLanguage();
     vmView.refreshLanguage();
+    webView.refreshLanguage();
     nostrView.refreshLanguage();
     renderSandbox(state.sandboxItems);
     renderSchedulerJobs(state.schedulerJobs);
@@ -7821,6 +7968,128 @@
       refreshVmList();
     }
   }
+
+  /* ---------- Web sites (publish a folder, list sites) ---------- */
+
+  var webPanel = document.getElementById("panel-web");
+  var webState = { sites: [], loading: true, error: "" };
+  var webTimer = null, webPolling = null, webAgain = false;
+  /* Parallel file uploads per publish; the daemon accepts a few more. */
+  var WEB_UPLOAD_PARALLEL = 3;
+
+  /* One request to the /api/web/upload/ routes. XHR for upload progress. */
+  function webUploadRequest(method, url, body, onProgress) {
+    var xhr = new XMLHttpRequest();
+    var promise = new Promise(function (resolve, reject) {
+      xhr.open(method, url);
+      xhr.setRequestHeader("x-mistl-ui", "1");
+      xhr.setRequestHeader("x-mistl-instance", pageIdentity());
+      if (typeof body === "string") xhr.setRequestHeader("Content-Type", "application/json");
+      if (onProgress) xhr.upload.addEventListener("progress", function (e) { onProgress(e.loaded); });
+      xhr.onload = function () {
+        var json = null;
+        try { json = JSON.parse(xhr.responseText); } catch (parseErr) { json = null; }
+        if (json && json.ok === true) resolve(json.data);
+        else reject(new Error((json && json.error) || ("upload failed (" + xhr.status + ")")));
+      };
+      xhr.onerror = function () { reject(new Error("daemon unreachable")); };
+      xhr.onabort = function () { reject(new Error("aborted")); };
+      xhr.send(body === undefined ? null : body);
+    });
+    return { xhr: xhr, promise: promise };
+  }
+
+  /* begin -> PUT each file (≤ WEB_UPLOAD_PARALLEL at once) -> finish.
+     onProgress(sentBytes, totalBytes, phase) with phase "upload" | "publish".
+     abort() cancels requests in flight and deletes the staged upload. */
+  function webPublish(options, files, onProgress) {
+    var id = null, stopped = false, live = new Set();
+    var total = files.reduce(function (n, f) { return n + f.file.size; }, 0);
+    var sent = files.map(function () { return 0; });
+    function report(phase) {
+      onProgress(sent.reduce(function (a, b) { return a + b; }, 0), total, phase);
+    }
+    function track(request) {
+      live.add(request.xhr);
+      return request.promise.finally(function () { live.delete(request.xhr); });
+    }
+    function discard() {
+      if (id) webUploadRequest("DELETE", "/api/web/upload/" + id).promise.catch(function () {});
+    }
+    async function run() {
+      /* Not aborted: once the daemon has a session, it is deleted below. */
+      var begun = await webUploadRequest("POST", "/api/web/upload/begin", JSON.stringify(options)).promise;
+      id = begun.upload_id;
+      if (stopped) { discard(); throw new Error("aborted"); }
+      var next = 0;
+      async function worker() {
+        while (!stopped && next < files.length) {
+          var i = next++;
+          var entry = files[i];
+          await track(webUploadRequest("PUT", "/api/web/upload/" + id + "/file?path=" + encodeURIComponent(entry.path),
+            entry.file, function (loaded) { sent[i] = Math.min(loaded, entry.file.size); report(); }));
+          sent[i] = entry.file.size;
+          report();
+        }
+      }
+      var workers = [];
+      for (var w = 0; w < Math.min(WEB_UPLOAD_PARALLEL, files.length); w++) workers.push(worker());
+      try {
+        await Promise.all(workers);
+      } catch (err) {
+        if (!stopped) { stopped = true; live.forEach(function (xhr) { xhr.abort(); }); discard(); }
+        throw err;
+      }
+      if (stopped) throw new Error("aborted");
+      report("publish");
+      return track(webUploadRequest("POST", "/api/web/upload/" + id + "/finish", "{}"));
+    }
+    return {
+      promise: run(),
+      abort: function () {
+        if (stopped) return;
+        stopped = true;
+        live.forEach(function (xhr) { xhr.abort(); });
+        discard();
+      }
+    };
+  }
+
+  var webView = window.MistlWebHost.create({
+    root: webPanel, t: t, formatBytes: fmtBytes, copy: copyToClipboard,
+    confirm: function (text) { return window.confirm(text); },
+    publish: webPublish,
+    mutate: function (cmd, args) { return api(cmd, args); },
+    refresh: function () { return refreshWebList(); }
+  });
+
+  function webVisible() {
+    return !document.hidden && webPanel.classList.contains("active");
+  }
+
+  /* Refreshes on open and on demand; polls only while a site is installing. */
+  function refreshWebList() {
+    clearTimeout(webTimer);
+    if (!webVisible()) return Promise.resolve();
+    if (webPolling) { webAgain = true; return webPolling; }
+    webPolling = api("web.ls", {}).then(function (data) {
+      webState.sites = data.sites || [];
+      webState.error = "";
+    }, function (err) {
+      webState.error = err.message || String(err);
+    }).finally(function () {
+      webPolling = null;
+      webState.loading = false;
+      webView.render(webState);
+      var installing = webState.sites.some(function (s) { return s.progress && s.progress.state === "installing"; });
+      var again = webAgain;
+      webAgain = false;
+      if (webVisible() && (again || installing)) webTimer = setTimeout(refreshWebList, again ? 0 : 2000);
+    });
+    return webPolling;
+  }
+
+  document.addEventListener("visibilitychange", function () { if (webVisible()) refreshWebList(); });
 
   /* ---------- Nostr relay (Storage sub-page) ---------- */
 
@@ -12758,7 +13027,7 @@
 
   var PANEL_IDS = [
     "panel-overview", "panel-chat", "panel-ai", "panel-vm",
-    "panel-tunnel", "panel-nostr", "panel-store", "panel-escrow",
+    "panel-tunnel", "panel-nostr", "panel-store", "panel-escrow", "panel-web",
     "panel-scheduler", "panel-bot", "panel-access", "panel-settings"
   ];
   var sideLinks = Array.prototype.slice.call(document.querySelectorAll("#sidenav a"));
@@ -12823,6 +13092,7 @@
     if (id === "panel-escrow") pollEscrow().catch(function (err) { showToast(err.message || String(err), "error"); });
     syncVmVisibility();
     if (nostrVisible()) pollNostr();
+    if (!wasActive && webVisible()) refreshWebList();
     if (pollTimer && !wasActive && updateVisible()) pollUpdate();
   }
 

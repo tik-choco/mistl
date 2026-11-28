@@ -26,6 +26,9 @@ pub(super) fn spawn(state: Arc<AppState>) {
     crate::ai::migrate_provide_state();
     // Local VMs need no network; `[vm] enabled` gates autostart only.
     crate::vm::spawn_background(state.clone());
+    // Static web sites: served from local pinned blocks offline too; joins
+    // `mistl-web-v1` only when the network is permitted.
+    crate::web_host::spawn_background(state.clone());
     if !state.network.permitted() {
         return;
     }

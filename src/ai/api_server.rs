@@ -13,28 +13,13 @@
 //!
 //! - `GET /v1/models` -> `{"object":"list","data":[{"id":"<m>","object":"model","owned_by":"mistl"}]}`
 //!   from the injected models fn.
-//! - `POST /v1/chat/completions` -> body `{model?, messages, stream?,
-//!   tools?, tool_choice?}`. `messages` entries must have a string `role`
-//!   and string `content` (`null` is accepted only for an assistant turn
-//!   with `tool_calls`; `tool` turns need `tool_call_id`) -- 400 otherwise.
-//!   Calls the injected [`super::LlmCallFn`]. Tool calls come back as
-//!   `message.tool_calls` / `finish_reason: "tool_calls"` (streaming: one
-//!   `delta.tool_calls` chunk after the last text delta). A tool request
-//!   the network provider cannot serve -> `400` code `tools_unsupported`.
-//!   - `stream: false`/absent: respond `200` JSON (OpenAI chat.completion
-//!     shape): `{"id","object":"chat.completion","created",<unix secs>,
-//!     "model","choices":[{"index":0,"message":{"role":"assistant",
-//!     "content":<full>},"finish_reason":"stop"}]}`.
-//!   - `stream: true`: respond `200` with `Content-Type: text/event-stream`
-//!     and `Transfer-Encoding: chunked`; emit one
-//!     `data: {"id","object":"chat.completion.chunk","created","model",
-//!     "choices":[{"index":0,"delta":{"content":<delta>},
-//!     "finish_reason":null}]}\n\n` per delta (drain the delta channel
-//!     while the call future runs), then a final chunk with empty delta
-//!     and `"finish_reason":"stop"`, then `data: [DONE]\n\n`, then the
-//!     terminating zero-length HTTP chunk.
+//! - `POST /v1/chat/completions` (also room-scoped) relays the JSON request
+//!   and full upstream response, including status and Content-Type. Only
+//!   model routing and absent configured reasoning effort rewrite the JSON.
+//!   HTTP providers and peers advertising `oai_chat` relay SSE bytes as they
+//!   arrive. Older peers keep the typed LLM/vision adaptation path.
 //! - `POST /v1/audio/speech` -> body `{input, model?, voice?,
-//!   response_format?, speed?, lang?}`. Responds `200` with the **raw
+//!   response_format?, speed?, lang?, ...}`. Responds `200` with the **raw
 //!   audio** and the format's MIME type, not JSON -- the upstream returns
 //!   bytes and so does this. `model`/`voice` omitted or empty means "use the
 //!   TTS configuration's", resolved through the same chain the wire path uses (see
@@ -43,7 +28,8 @@
 //!   schema: the BCP-47 hint `tts_request.lang` carries, which an OpenAI
 //!   client simply never sends.
 //! - `POST /v1/audio/transcriptions` -> `multipart/form-data` with a `file`
-//!   part and an optional `model` field; responds `{"text": ...}`.
+//!   part, an optional `model` field and additional text fields; responds
+//!   with the upstream body and Content-Type, or legacy `{"text": ...}`.
 //!   Multipart rather than a raw body because the point of this server is
 //!   that an unmodified OpenAI client can be pointed at it, and every such
 //!   client sends this endpoint that way.
@@ -60,13 +46,17 @@
 //!   in bounded windows; synchronous `b64_json` results are capped at 64 MiB.
 //! - `POST /v1/images/edits` (also room-scoped) relays JSON or multipart
 //!   image edits, returning the upstream JSON or image bytes unchanged.
+//! - `POST /v1/embeddings` and `POST /v1/moderations` (also room-scoped)
+//!   relay JSON and return the upstream response unchanged. An explicit
+//!   `model` selects the provider; omission returns 400.
 //! - Game actions and motion endpoints also relay through both scopes.
 //!   `/motion/clips` takes its routing model from the query string and
 //!   `/motion/skeletons/<model>` from the path segment.
 //! - Unscoped lifecycle routes `/api/ps`, `/health`, and the
 //!   root `/voices` alias use the injected local relay.
 //! - Unresolvable explicit models -> `404` with OpenAI `model_not_found`.
-//! - Upstream/backend errors: before any deltas were streamed -> `502` with
+//! - Raw chat preserves upstream HTTP errors. Legacy backend errors before
+//!   any deltas were streamed -> `502` with
 //!   `{"error":{"message":...}}` carrying a generic message (the detail is
 //!   logged only, as it can embed upstream URLs/tokens) (or `400` for malformed requests); once
 //!   streaming has begun, emit an SSE `{"error":...}` event and terminate
@@ -102,6 +92,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use base64::Engine;
+use futures_util::StreamExt;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -110,6 +101,12 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::warn;
 
+use super::endpoints::{self, ApiRoute, BodyKind};
+#[cfg(test)]
+use super::endpoints::{
+    MAX_GEN3D_JSON_BYTES, MAX_GEN3D_MULTIPART_BYTES, MAX_IMAGE_EDIT_JSON_BYTES,
+    MAX_IMAGE_EDIT_MULTIPART_BYTES, MAX_JSON_BODY_BYTES,
+};
 use super::openai::{ChatOutput, ToolOptions};
 use super::protocol::ChatMessage;
 use super::{LlmCallFn, ModelNotFound, ModelsFn, SttFn, ToolsUnsupported, TtsFn, stt, tts};
@@ -119,6 +116,16 @@ pub(super) type OaiFn = Arc<
             Value,
         ) -> std::pin::Pin<
             Box<dyn std::future::Future<Output = Result<super::oai_tunnel::TunnelResponse>> + Send>,
+        > + Send
+        + Sync,
+>;
+
+/// Raw chat proxy. None means a legacy provider requires the typed path.
+pub(super) type ChatProxyFn = Arc<
+    dyn Fn(
+            Vec<u8>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Option<super::chat_proxy::Reply>>> + Send>,
         > + Send
         + Sync,
 >;
@@ -138,11 +145,13 @@ pub(super) type DecisionFn = Arc<
 /// `path` is relative to the `/v1` base
 /// (`/3d/generations/<id>/content?range=0-8388607`, `/audio/voices`) except
 /// the root lifecycle paths (`/api/ps`, `/health`), which are
-/// passed as-is. `body` is JSON when present.
+/// passed as-is. `body` is JSON unless `multipart` contains the original
+/// multipart Content-Type (including boundary).
 pub(super) struct RelayRequest {
     pub method: String,
     pub path: String,
     pub body: Option<Vec<u8>>,
+    pub multipart: Option<String>,
 }
 
 /// Relays a [`RelayRequest`]; the reply is the upstream status, content type
@@ -247,6 +256,7 @@ pub(super) struct RoomRoutes {
     pub tts: TtsFn,
     pub stt: SttFn,
     pub oai: OaiFn,
+    pub chat_proxy: Option<ChatProxyFn>,
     /// `POST /systemone` over the room's oai tunnel.
     pub decision: DecisionFn,
     /// Image edits, 3D generation jobs and the voice catalog over the room.
@@ -267,14 +277,6 @@ pub(super) type RoomsFn = Arc<
 
 /// Header section size cap (request-line + headers), matches doc.
 const MAX_HEADER_BYTES: usize = 16 * 1024;
-/// Body size cap for `/v1/audio/transcriptions` (multipart audio upload).
-const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
-/// Body size cap for the JSON endpoints (chat / speech).
-const MAX_JSON_BODY_BYTES: usize = 2 * 1024 * 1024;
-const MAX_GEN3D_MULTIPART_BYTES: usize = 20 * 1024 * 1024 + 128 * 1024;
-const MAX_GEN3D_JSON_BYTES: usize = 20 * 1024 * 1024 / 3 * 4 + 128 * 1024;
-const MAX_IMAGE_EDIT_MULTIPART_BYTES: usize = 32 * 1024 * 1024 + 128 * 1024;
-const MAX_IMAGE_EDIT_JSON_BYTES: usize = 32 * 1024 * 1024 / 3 * 4 + 128 * 1024;
 const MAX_GEN3D_B64_BYTES: u64 = 64 * 1024 * 1024;
 /// Deadline for receiving the complete request head (slowloris guard).
 const HEAD_READ_TIMEOUT: Duration = Duration::from_secs(10);
@@ -325,7 +327,7 @@ impl ApiServer {
         stt_call: SttFn,
     ) -> Result<Arc<ApiServer>> {
         Self::start_with_rooms(
-            listen, call, models, tts_call, stt_call, None, None, None, None,
+            listen, call, models, tts_call, stt_call, None, None, None, None, None,
         )
         .await
     }
@@ -343,6 +345,7 @@ impl ApiServer {
         relay: Option<RelayFn>,
         rooms: Option<RoomsFn>,
         origins: Option<OriginsFn>,
+        chat_proxy: Option<ChatProxyFn>,
     ) -> Result<Arc<ApiServer>> {
         let listener = TcpListener::bind(listen)
             .await
@@ -381,6 +384,7 @@ impl ApiServer {
                 let relay = relay.clone();
                 let rooms = rooms.clone();
                 let origins = origins.clone();
+                let chat_proxy = chat_proxy.clone();
                 let handle = tokio::spawn(async move {
                     let _permit = permit;
                     let local = LocalRoutes {
@@ -390,6 +394,7 @@ impl ApiServer {
                         stt_call,
                         decision,
                         relay,
+                        chat_proxy,
                     };
                     if let Err(error) = handle_connection(socket, local, rooms, origins).await {
                         warn!(%error, "api_server connection ended with error");
@@ -1066,6 +1071,7 @@ struct LocalRoutes {
     stt_call: SttFn,
     decision: Option<DecisionFn>,
     relay: Option<RelayFn>,
+    chat_proxy: Option<ChatProxyFn>,
 }
 
 async fn handle_connection(
@@ -1146,10 +1152,26 @@ async fn route_request(
     local: LocalRoutes,
     rooms: Option<RoomsFn>,
 ) -> Result<()> {
-    let is_post = head.method.eq_ignore_ascii_case("POST");
-    let is_get = head.method.eq_ignore_ascii_case("GET");
+    let method = head.method.to_ascii_uppercase();
+    let is_post = method == "POST";
     let mut path = head.path.split('?').next().unwrap_or("").to_string();
     let scoped = path.starts_with("/v1/rooms/");
+    let resource = if scoped {
+        path[10..].split_once('/').map(|(_, resource)| resource)
+    } else {
+        path.strip_prefix("/v1/")
+    };
+    // Stored responses have no provider binding in this stateless relay.
+    // Reject lifecycle routes before reading a body or discovering a room.
+    if resource.is_some_and(|resource| {
+        resource.starts_with("responses/") || resource == "responses" && !is_post
+    }) {
+        write_json_response(&mut stream, 404, "Not Found", &json!({"error": {
+            "message": "Response retrieval, deletion, cancellation and input items are unsupported.",
+            "type": "invalid_request_error", "code": "unsupported_path"
+        }})).await?;
+        return Ok(());
+    }
     let url_base = if scoped {
         format!(
             "/v1/rooms/{}",
@@ -1158,7 +1180,7 @@ async fn route_request(
     } else {
         "/v1".to_string()
     };
-    let (call, models, tts_call, stt_call, oai, decision, relay) = if scoped {
+    let (call, models, tts_call, stt_call, oai, decision, relay, chat_proxy) = if scoped {
         let Some((room, endpoint)) = room_route(&path) else {
             write_error(&mut stream, 404, "Not Found", "invalid room route").await?;
             return Ok(());
@@ -1199,6 +1221,7 @@ async fn route_request(
             Some(routes.oai),
             Some(routes.decision),
             Some(routes.relay),
+            routes.chat_proxy,
         )
     } else {
         (
@@ -1209,9 +1232,14 @@ async fn route_request(
             None,
             local.decision,
             local.relay,
+            local.chat_proxy,
         )
     };
 
+    let endpoint = endpoints::api_lookup(&path);
+    let route = endpoint
+        .filter(|(e, relative)| e.api_allows(&method, relative))
+        .map(|(e, _)| e.api);
     let body: Vec<u8> = if is_post {
         let content_length: usize = match head.header("content-length") {
             Some(v) => match v.trim().parse() {
@@ -1233,28 +1261,10 @@ async fn route_request(
                 return Ok(());
             }
         };
-        let is_transcription = path == "/v1/audio/transcriptions";
-        let is_gen3d = path == "/v1/3d/generations";
-        let media_post = path.strip_prefix("/v1").is_some_and(|p| {
-            super::oai_tunnel::media_kind(p).is_some_and(|(prefix, _)| p == prefix)
-        });
-        let has_image_upload =
-            matches!(path.as_str(), "/v1/images/edits" | "/v1/game/act") || media_post;
+        let body_kind = endpoint.map_or(BodyKind::None, |(e, relative)| e.post_body(relative));
         let is_multipart =
             multipart_boundary(head.header("content-type").unwrap_or_default()).is_some();
-        let body_cap = if is_transcription {
-            MAX_BODY_BYTES
-        } else if is_gen3d && is_multipart {
-            MAX_GEN3D_MULTIPART_BYTES
-        } else if is_gen3d {
-            MAX_GEN3D_JSON_BYTES
-        } else if has_image_upload && is_multipart {
-            MAX_IMAGE_EDIT_MULTIPART_BYTES
-        } else if has_image_upload || path == "/v1/images/generations" {
-            MAX_IMAGE_EDIT_JSON_BYTES
-        } else {
-            MAX_JSON_BODY_BYTES
-        };
+        let body_cap = body_kind.cap(is_multipart);
         if content_length > body_cap {
             let _ = write_error(
                 &mut stream,
@@ -1265,8 +1275,18 @@ async fn route_request(
             .await;
             return Ok(());
         }
-        if !(is_transcription
-            || (is_gen3d || has_image_upload) && is_multipart
+        if body_kind.multipart_only() && !is_multipart {
+            write_error(
+                &mut stream,
+                415,
+                "Unsupported Media Type",
+                "Content-Type must be multipart/form-data",
+            )
+            .await?;
+            return Ok(());
+        }
+        if !(matches!(body_kind, BodyKind::Multipart(_))
+            || body_kind.accepts_multipart() && is_multipart
             || content_type_is_json(head.header("content-type")))
         {
             let _ = write_error(
@@ -1290,7 +1310,7 @@ async fn route_request(
         Vec::new()
     };
 
-    if is_get && path == "/v1/models" {
+    if route == Some(ApiRoute::Models) {
         let allowed = match crate::authz::api_model_filter(head.header("authorization")) {
             Ok(allowed) => allowed,
             Err(denied) => {
@@ -1300,7 +1320,7 @@ async fn route_request(
         };
         let body = models_response(&models, allowed.as_deref());
         let _ = write_json_response(&mut stream, 200, "OK", &body).await;
-    } else if is_get && path.starts_with("/v1/models/") {
+    } else if route == Some(ApiRoute::ModelDetail) {
         if let Err(denied) = crate::authz::authorize_api(head.header("authorization"), None) {
             write_denied(&mut stream, denied).await?;
             return Ok(());
@@ -1326,7 +1346,7 @@ async fn route_request(
                 "message": "Model not found", "type": "invalid_request_error", "code": "model_not_found"
             }})).await?;
         }
-    } else if relay_path(&head.method, &path).is_some() {
+    } else if matches!(route, Some(ApiRoute::Relay | ApiRoute::RootRelay)) {
         handle_relay(
             &mut stream,
             &head,
@@ -1337,19 +1357,34 @@ async fn route_request(
             &url_base,
         )
         .await?;
-    } else if is_post && path == "/v1/chat/completions" {
+    } else if route == Some(ApiRoute::Chat) {
         handle_chat_completions_with_oai(
             &mut stream,
             &body,
             &call,
             oai.as_ref(),
             relay.as_ref().filter(|_| !scoped),
+            chat_proxy.as_ref(),
             head.header("authorization"),
         )
         .await?;
-    } else if is_post && path == "/v1/audio/speech" {
+    } else if matches!(route, Some(ApiRoute::Responses | ApiRoute::Completions)) {
+        let endpoint = if route == Some(ApiRoute::Responses) {
+            super::chat_proxy::Endpoint::Responses
+        } else {
+            super::chat_proxy::Endpoint::Completions
+        };
+        handle_explicit_proxy(
+            endpoint,
+            &mut stream,
+            &body,
+            chat_proxy.as_ref(),
+            head.header("authorization"),
+        )
+        .await?;
+    } else if route == Some(ApiRoute::Speech) {
         handle_audio_speech(&mut stream, &body, &tts_call, head.header("authorization")).await?;
-    } else if is_post && path == "/v1/audio/transcriptions" {
+    } else if route == Some(ApiRoute::Transcription) {
         let content_type = head.header("content-type").unwrap_or_default().to_string();
         handle_audio_transcriptions(
             &mut stream,
@@ -1359,7 +1394,7 @@ async fn route_request(
             head.header("authorization"),
         )
         .await?;
-    } else if is_post && path == "/v1/systemone" {
+    } else if route == Some(ApiRoute::Decision) {
         handle_decision(
             &mut stream,
             &body,
@@ -1378,28 +1413,7 @@ async fn route_request(
 fn room_route(path: &str) -> Option<(String, String)> {
     let rest = path.strip_prefix("/v1/rooms/")?;
     let (encoded, endpoint) = rest.split_once('/')?;
-    if !matches!(
-        endpoint,
-        "models"
-            | "chat/completions"
-            | "audio/speech"
-            | "audio/transcriptions"
-            | "systemone"
-            | "audio/voices"
-            | "voices"
-            | "3d/generations"
-            | "images/edits"
-            | "images/generations"
-            | "game/act"
-            | "motion/inbetween"
-            | "motion/clips"
-    ) && !endpoint.starts_with("models/")
-        && !endpoint.starts_with("3d/generations/")
-        && !endpoint.starts_with("motion/skeletons/")
-        && super::oai_tunnel::media_kind(&format!("/{endpoint}")).is_none()
-    {
-        return None;
-    }
+    endpoints::api_lookup(&format!("/v1/{endpoint}"))?;
     let room = percent_decode(encoded)?;
     if room.is_empty() {
         return None;
@@ -1423,28 +1437,10 @@ pub(super) fn percent_decode(encoded: &str) -> Option<String> {
 }
 
 fn relay_path<'a>(method: &str, path: &'a str) -> Option<&'a str> {
-    if let Some(relative) = path.strip_prefix("/v1")
-        && super::oai_tunnel::media_kind(relative).is_some()
-        && matches!(
-            method.to_ascii_uppercase().as_str(),
-            "GET" | "POST" | "DELETE"
-        )
-    {
-        return Some(relative);
-    }
-    match (method.to_ascii_uppercase().as_str(), path) {
-        ("GET", "/v1/audio/voices" | "/v1/voices" | "/voices") => Some("/audio/voices"),
-        ("GET", "/api/ps" | "/health") => Some(path),
-        ("GET" | "POST", "/v1/3d/generations") => Some("/3d/generations"),
-        (
-            "POST",
-            "/v1/images/edits" | "/v1/images/generations" | "/v1/game/act" | "/v1/motion/inbetween",
-        )
-        | ("GET", "/v1/motion/clips") => Some(&path[3..]),
-        ("GET", p) if p.starts_with("/v1/motion/skeletons/") => Some(&p[3..]),
-        ("GET" | "DELETE", p) if p.starts_with("/v1/3d/generations/") => Some(&p[3..]),
-        _ => None,
-    }
+    let (endpoint, relative) = endpoints::api_lookup(path)?;
+    (matches!(endpoint.api, ApiRoute::Relay | ApiRoute::RootRelay)
+        && endpoint.api_allows(&method.to_ascii_uppercase(), relative))
+    .then_some(relative)
 }
 
 fn valid_generation_id(id: &str) -> bool {
@@ -1529,11 +1525,32 @@ fn multipart_json(
     Ok(serde_json::to_vec(&object).expect("JSON object"))
 }
 
+/// Convert an upload only for a legacy route or peer. Keep its original
+/// field typing rules and duplicate-field validation.
+pub(super) fn legacy_multipart_json(
+    path: &str,
+    body: &[u8],
+    boundary: &str,
+) -> std::result::Result<Vec<u8>, &'static str> {
+    let media = endpoints::media_kind(path).is_some();
+    let string_fields: &[&str] = if path == "/images/edits" {
+        &["background"]
+    } else if path == "/game/act" {
+        &["system_prompt"]
+    } else if media {
+        &["prompt", "size", "seconds"]
+    } else {
+        &[]
+    };
+    multipart_json(body, boundary, string_fields, media)
+}
+
 async fn relay_get(relay: &RelayFn, path: String) -> Result<super::oai_tunnel::TunnelResponse> {
     relay(RelayRequest {
         method: "GET".into(),
         path,
         body: None,
+        multipart: None,
     })
     .await
 }
@@ -1793,44 +1810,49 @@ async fn handle_relay(
 
     let method = head.method.to_ascii_uppercase();
     let path = relay_path(&method, path).expect("relay route");
+    let endpoint = endpoints::lookup(path).expect("relay endpoint");
     let gen3d_post = method == "POST" && path == "/3d/generations";
-    let image_edit_post = method == "POST" && path == "/images/edits";
-    let game_post = method == "POST" && path == "/game/act";
     let media = oai_tunnel::media_kind(path);
-    let media_post = method == "POST" && media.is_some_and(|(prefix, _)| path == prefix);
+    let body_kind = endpoint.post_body(path);
+    let mut multipart = None;
     let req = if method == "POST" {
-        if (gen3d_post || image_edit_post || game_post || media_post)
+        if endpoint.post_body(path).accepts_multipart()
             && let Some(boundary) =
                 multipart_boundary(head.header("content-type").unwrap_or_default())
         {
-            let string_fields: &[&str] = if image_edit_post {
-                &["background"]
-            } else if game_post {
-                &["system_prompt"]
-            } else if media_post {
-                &["prompt", "size", "seconds"]
+            if body_kind.raw_multipart() {
+                multipart = head.header("content-type").map(str::to_string);
             } else {
-                &[]
-            };
-            body = match multipart_json(&body, &boundary, string_fields, media_post) {
-                Ok(body) => body,
+                body = match legacy_multipart_json(path, &body, &boundary) {
+                    Ok(body) => body,
+                    Err(message) => {
+                        write_error(stream, 400, "Bad Request", message).await?;
+                        return Ok(());
+                    }
+                };
+            }
+        }
+        if let Some(content_type) = multipart.as_deref() {
+            match super::multipart::Form::parse(&body, content_type) {
+                Ok(form) => Some(json!({"model": form.model(&body)})),
                 Err(message) => {
                     write_error(stream, 400, "Bad Request", message).await?;
                     return Ok(());
                 }
-            };
-        }
-        match serde_json::from_slice::<Value>(&body) {
-            Ok(value @ Value::Object(_)) => Some(value),
-            _ => {
-                write_error(
-                    stream,
-                    400,
-                    "Bad Request",
-                    "request body must be a JSON object",
-                )
-                .await?;
-                return Ok(());
+            }
+        } else {
+            match serde_json::from_slice::<Value>(&body) {
+                Ok(value @ Value::Object(_)) => Some(value),
+                _ => {
+                    write_error(
+                        stream,
+                        400,
+                        "Bad Request",
+                        "request body must be a JSON object",
+                    )
+                    .await?;
+                    return Ok(());
+                }
             }
         }
     } else {
@@ -1853,18 +1875,8 @@ async fn handle_relay(
             .and_then(Value::as_str)
             .filter(|m| !m.trim().is_empty()),
     };
-    let op = match path.as_str() {
-        "/images/edits" => "image_edit",
-        "/images/generations" => "image",
-        "/game/act" => "game",
-        "/audio/voices" => "voices",
-        "/api/ps" | "/health" => "status",
-        p if p.starts_with("/3d/generations") => "gen3d",
-        p if p.starts_with("/motion/") => "motion",
-        _ => media.map_or("oai", |(_, op)| op),
-    };
     let authorized = match crate::authz::authorize_api(head.header("authorization"), model) {
-        Ok(authorized) => authorized.with_op(op),
+        Ok(authorized) => authorized.with_op(endpoint.op),
         Err(denied) => {
             write_denied(stream, denied).await?;
             return Ok(());
@@ -1885,7 +1897,7 @@ async fn handle_relay(
             return Ok(());
         }
     }
-    if method == "POST" && model.is_none() {
+    if method == "POST" && endpoint.model_post(&path) && model.is_none() {
         return write_tunnel_response(stream, &oai_tunnel::missing_model()).await;
     }
     if let Some(tail) = path.strip_prefix("/3d/generations/") {
@@ -1930,6 +1942,7 @@ async fn handle_relay(
         method: method.clone(),
         path: path.clone(),
         body: (!body.is_empty()).then_some(body),
+        multipart,
     })
     .await;
     match response {
@@ -2031,15 +2044,20 @@ async fn handle_audio_speech(
             .as_object()
             .unwrap()
             .iter()
-            .filter(|(k, _)| {
-                !matches!(
-                    k.as_str(),
-                    "model" | "input" | "voice" | "response_format" | "speed" | "lang"
-                )
+            .filter(|(k, v)| {
+                (k.as_str() == "voice" && v.is_object())
+                    || !matches!(
+                        k.as_str(),
+                        "model" | "input" | "voice" | "response_format" | "speed" | "lang"
+                    )
             })
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect(),
     };
+    if !super::protocol::valid_tts_extra(&params.extra) {
+        write_error(stream, 400, "Bad Request", "oversized TTS extra fields").await?;
+        return Ok(());
+    }
 
     // `lang` is a mistl extension, not part of OpenAI's schema: it is the
     // same BCP-47 hint `tts_request.lang` carries over the wire, and an
@@ -2075,8 +2093,8 @@ async fn handle_audio_speech(
 }
 
 /// `POST /v1/audio/transcriptions`: OpenAI's shape -- `multipart/form-data`
-/// with a `file` part and a `model` field, transcript back as
-/// `{"text": "..."}`.
+/// with a `file` part, `model`, and additional text fields. Return the
+/// upstream response unchanged, or `{"text": "..."}` for legacy peers.
 ///
 /// Multipart rather than a raw body because the whole point of this server
 /// is that an unmodified OpenAI client can be pointed at it, and every such
@@ -2115,6 +2133,51 @@ async fn handle_audio_transcriptions(
         .map(|p| String::from_utf8_lossy(&p.bytes).trim().to_string())
         .unwrap_or_default();
 
+    let mut extra = Vec::new();
+    let mut extra_bytes = 0usize;
+    for part in parts
+        .iter()
+        .filter(|p| !matches!(p.name.as_str(), "file" | "model"))
+    {
+        extra_bytes = extra_bytes
+            .saturating_add(part.name.len())
+            .saturating_add(part.bytes.len());
+        if extra.len() >= super::protocol::MAX_STT_EXTRA_FIELDS
+            || extra_bytes > super::protocol::MAX_VOICE_EXTRA_BYTES
+            || part.file_name.is_some()
+        {
+            write_error(
+                stream,
+                400,
+                "Bad Request",
+                "invalid or oversized STT extra fields",
+            )
+            .await?;
+            return Ok(());
+        }
+        let Ok(value) = std::str::from_utf8(&part.bytes) else {
+            write_error(
+                stream,
+                400,
+                "Bad Request",
+                "STT extra fields must be UTF-8 text",
+            )
+            .await?;
+            return Ok(());
+        };
+        extra.push((part.name.clone(), value.to_string()));
+    }
+    if !super::protocol::valid_stt_extra(&extra) {
+        write_error(
+            stream,
+            400,
+            "Bad Request",
+            "invalid or oversized STT extra fields",
+        )
+        .await?;
+        return Ok(());
+    }
+
     let params = stt::SttParams {
         model,
         audio: file.bytes.clone(),
@@ -2124,6 +2187,7 @@ async fn handle_audio_transcriptions(
             file.content_type.clone()
         },
         file_name: file.file_name.clone(),
+        extra,
     };
 
     let authorized = match crate::authz::authorize_api(authorization, Some(&params.model)) {
@@ -2137,8 +2201,29 @@ async fn handle_audio_transcriptions(
     usage.started = true;
 
     match (call)(params).await {
-        Ok(text) => {
+        Ok(stt::SttOutput::Text(text)) => {
             let _ = write_json_response(stream, 200, "OK", &json!({ "text": text })).await;
+        }
+        Ok(stt::SttOutput::Raw { body, content_type }) => {
+            if !super::protocol::valid_stt_content_type(&content_type)
+                || body.len() > super::protocol::MAX_STT_RESPONSE_BYTES
+            {
+                write_error(
+                    stream,
+                    502,
+                    "Bad Gateway",
+                    "invalid or oversized STT response",
+                )
+                .await?;
+                return Ok(());
+            }
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{}Connection: close\r\n\r\n",
+                body.len(),
+                cors_headers()
+            );
+            stream.write_all(head.as_bytes()).await?;
+            stream.write_all(&body).await?;
         }
         Err(err) => {
             write_backend_failure(stream, &err).await;
@@ -2369,14 +2454,150 @@ async fn handle_decision(
     }
 }
 
+async fn handle_explicit_proxy(
+    endpoint: super::chat_proxy::Endpoint,
+    stream: &mut TcpStream,
+    body: &[u8],
+    proxy: Option<&ChatProxyFn>,
+    authorization: Option<&str>,
+) -> Result<()> {
+    let requested: Value = match serde_json::from_slice(body) {
+        Ok(value @ Value::Object(_)) => value,
+        _ => {
+            write_error(
+                stream,
+                400,
+                "Bad Request",
+                "request body must be a JSON object",
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+    let Some(model) = requested["model"]
+        .as_str()
+        .filter(|m| !m.trim().is_empty() && *m != "network-auto")
+    else {
+        return write_tunnel_response(stream, &super::oai_tunnel::missing_model()).await;
+    };
+    let authorized = match crate::authz::authorize_api(authorization, Some(model)) {
+        Ok(authorized) => {
+            authorized.with_op(endpoints::lookup(endpoint.path()).expect("raw endpoint").op)
+        }
+        Err(denied) => {
+            write_denied(stream, denied).await?;
+            return Ok(());
+        }
+    };
+    drop(requested);
+    let mut usage = ApiUsage::new(authorized);
+    let result = match proxy {
+        Some(proxy) => tokio::select! {
+            result = endpoint.scope(async { proxy(body.to_vec()).await }) => result,
+            _ = client_disconnected(stream) => {
+                usage.started = true;
+                return Ok(());
+            }
+        },
+        None => Ok(None),
+    };
+    match result {
+        Ok(Some(reply)) => {
+            usage.started = true;
+            write_raw_proxy_reply(stream, reply, &mut usage, endpoint).await
+        }
+        Err(err) if !err.is::<ModelNotFound>() => {
+            usage.started = true;
+            write_backend_failure(stream, &err).await;
+            Ok(())
+        }
+        _ => {
+            write_json_response(
+                stream,
+                404,
+                "Not Found",
+                &json!({"error": {
+                    "message": if endpoint == super::chat_proxy::Endpoint::Responses { "No provider supports the Responses API for the requested model." } else { "No provider supports the Completions API for the requested model." },
+                    "type": "invalid_request_error", "code": "unsupported_service", "param": "model"
+                }}),
+            )
+            .await?;
+            Ok(())
+        }
+    }
+}
+
 async fn handle_chat_completions_with_oai(
     stream: &mut TcpStream,
     body: &[u8],
     call: &LlmCallFn,
     oai: Option<&OaiFn>,
     relay: Option<&RelayFn>,
+    chat_proxy: Option<&ChatProxyFn>,
     authorization: Option<&str>,
 ) -> Result<()> {
+    let mut legacy_authorized = None;
+    if let Some(proxy) = chat_proxy {
+        // Only validate the routing envelope here. Upstream owns the rest
+        // of the OpenAI schema, including new message and tool types.
+        let requested: Value = match serde_json::from_slice(body) {
+            Ok(value @ Value::Object(_)) => value,
+            _ => {
+                write_error(
+                    stream,
+                    400,
+                    "Bad Request",
+                    "request body must be a JSON object",
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+        if requested
+            .get("model")
+            .is_some_and(|m| !m.is_null() && !m.is_string())
+        {
+            write_error(stream, 400, "Bad Request", "model must be a string").await?;
+            return Ok(());
+        }
+        let authorized =
+            match crate::authz::authorize_api(authorization, requested["model"].as_str()) {
+                Ok(authorized) => authorized.with_op("chat"),
+                Err(denied) => {
+                    write_denied(stream, denied).await?;
+                    return Ok(());
+                }
+            };
+        let mut usage = ApiUsage::new(authorized.clone());
+        drop(requested);
+        let result = tokio::select! {
+            result = proxy(body.to_vec()) => result,
+            _ = client_disconnected(stream) => {
+                usage.started = true;
+                return Ok(());
+            }
+        };
+        match result {
+            Ok(Some(reply)) => {
+                usage.started = true;
+                return write_raw_proxy_reply(
+                    stream,
+                    reply,
+                    &mut usage,
+                    super::chat_proxy::Endpoint::Chat,
+                )
+                .await;
+            }
+            // Old peers retain the typed/vision adapters below, but the
+            // request has already passed authorization.
+            Ok(None) => legacy_authorized = Some(authorized),
+            Err(err) => {
+                usage.started = true;
+                write_backend_failure(stream, &err).await;
+                return Ok(());
+            }
+        }
+    }
     // Validate the ordinary fields using the text parser; only image content
     // parts take the non-streaming tunnel, and SSE is adapted locally below.
     let vision = match vision_request(body) {
@@ -2394,8 +2615,11 @@ async fn handle_chat_completions_with_oai(
             return Ok(());
         }
     };
-    let authorized = match crate::authz::authorize_api(authorization, req.model.as_deref()) {
-        Ok(authorized) => authorized.with_op("chat"),
+    let authorized = match legacy_authorized.map(Ok).unwrap_or_else(|| {
+        crate::authz::authorize_api(authorization, req.model.as_deref())
+            .map(|authorized| authorized.with_op("chat"))
+    }) {
+        Ok(authorized) => authorized,
         Err(denied) => {
             write_denied(stream, denied).await?;
             return Ok(());
@@ -2424,6 +2648,7 @@ async fn handle_chat_completions_with_oai(
                 method: "POST".into(),
                 path: "/chat/completions".into(),
                 body: Some(body.to_vec()),
+                multipart: None,
             })
             .await
         };
@@ -2631,6 +2856,76 @@ async fn handle_chat_completions_with_oai(
     Ok(())
 }
 
+async fn write_raw_proxy_reply(
+    stream: &mut TcpStream,
+    mut reply: super::chat_proxy::Reply,
+    usage: &mut ApiUsage,
+    endpoint: super::chat_proxy::Endpoint,
+) -> Result<()> {
+    let mut meter = super::chat_proxy::Usage::new(endpoint);
+    if !reply.is_sse() {
+        let result = tokio::select! {
+            result = reply.buffered() => result,
+            _ = client_disconnected(stream) => return Ok(()),
+        };
+        match result {
+            Ok(response) => {
+                meter.json(&response.body);
+                meter.record_tokens();
+                usage.output_chars = meter.chars;
+                return tokio::time::timeout(
+                    BODY_IDLE_TIMEOUT,
+                    write_tunnel_response(stream, &response),
+                )
+                .await?;
+            }
+            Err(err) => {
+                write_backend_failure(stream, &err).await;
+                return Ok(());
+            }
+        }
+    }
+    let content_type = if reply.content_type.contains(['\r', '\n']) {
+        "text/event-stream"
+    } else {
+        &reply.content_type
+    };
+    let head = format!(
+        "HTTP/1.1 {} Upstream\r\nContent-Type: {content_type}\r\nTransfer-Encoding: chunked\r\nCache-Control: no-cache\r\n{}Connection: close\r\n\r\n",
+        reply.status,
+        cors_headers()
+    );
+    tokio::time::timeout(BODY_IDLE_TIMEOUT, stream.write_all(head.as_bytes())).await??;
+    loop {
+        let chunk = tokio::select! {
+            chunk = reply.body.next() => chunk,
+            _ = client_disconnected(stream) => return Ok(()),
+        };
+        let Some(chunk) = chunk else { break };
+        // Once headers are committed, an interrupted or oversized reply
+        // closes the connection rather than fabricating SSE events or DONE.
+        let chunk = chunk?;
+        if chunk.is_empty() {
+            continue;
+        }
+        meter.sse(&chunk);
+        usage.output_chars = meter.chars;
+        tokio::time::timeout(BODY_IDLE_TIMEOUT, write_http_chunk(stream, &chunk)).await??;
+    }
+    meter.record_tokens();
+    tokio::time::timeout(BODY_IDLE_TIMEOUT, write_http_chunk(stream, b"")).await??;
+    Ok(())
+}
+
+// This server handles one request per connection. While waiting on upstream,
+// watch for a closed client so dropping the response also drops its tunnel id.
+async fn client_disconnected(stream: &TcpStream) {
+    let mut byte = [0; 1];
+    if matches!(stream.peek(&mut byte).await, Ok(n) if n > 0) {
+        std::future::pending::<()>().await;
+    }
+}
+
 pub(super) fn has_image_content(body: &Value) -> bool {
     body.get("messages")
         .and_then(Value::as_array)
@@ -2721,6 +3016,7 @@ mod tests {
                     tts: fake_tts(),
                     stt: fake_stt(),
                     oai: Arc::new(|_| Box::pin(async { anyhow::bail!("unused") })),
+                    chat_proxy: None,
                     decision: Arc::new(|_| Box::pin(async { anyhow::bail!("unused") })),
                     relay,
                 }))
@@ -2740,6 +3036,7 @@ mod tests {
             None,
             Some(relay),
             Some(rooms),
+            None,
             None,
         )
         .await
@@ -2769,6 +3066,77 @@ mod tests {
             ),
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn embeddings_and_moderations_relay_json_in_both_scopes() {
+        let _authz = authz_test().await;
+        let response = br#"{ "object":"list", "data":[{"result":true}] }"#;
+        let (relay, seen) = recording_relay(move |_| TunnelResponse {
+            status: 200,
+            content_type: "application/json".into(),
+            body: response.to_vec(),
+        });
+        let server = relay_test_server(relay).await;
+        for prefix in ["/v1", "/v1/rooms/team%2Fone"] {
+            for (suffix, body) in [
+                (
+                    "embeddings",
+                    r#"{ "model":"embed-model", "input":["one","two"], "dimensions":4, "encoding_format":"float" }"#,
+                ),
+                (
+                    "moderations",
+                    r#"{ "model":"moderation-model", "input":["one","two"], "user":"test-user" }"#,
+                ),
+            ] {
+                let path = format!("{prefix}/{suffix}");
+                let raw =
+                    relay_request(&server, "POST", &path, "application/json", Some(body)).await;
+                let (headers, payload) = split_response(&raw);
+                assert_eq!(status_code(&headers), 200);
+                assert_eq!(payload, response);
+                {
+                    let records = seen.lock().unwrap();
+                    let request = records.last().unwrap();
+                    assert_eq!(request.method, "POST");
+                    assert_eq!(request.path, format!("/{suffix}"));
+                    assert_eq!(request.body.as_deref(), Some(body.as_bytes()));
+                }
+                let missing = relay_request(
+                    &server,
+                    "POST",
+                    &path,
+                    "application/json",
+                    Some(r#"{"input":"one"}"#),
+                )
+                .await;
+                let (headers, payload) = split_response(&missing);
+                assert_eq!(status_code(&headers), 400);
+                assert_eq!(payload, super::super::oai_tunnel::missing_model().body);
+                let get = relay_request(&server, "GET", &path, "", None).await;
+                assert_eq!(status_code(&split_response(&get).0), 404);
+                let multipart = relay_request(
+                    &server,
+                    "POST",
+                    &path,
+                    "multipart/form-data; boundary=b",
+                    Some(body),
+                )
+                .await;
+                assert_eq!(status_code(&split_response(&multipart).0), 415);
+            }
+            let unknown = relay_request(
+                &server,
+                "POST",
+                &format!("{prefix}/unexpected"),
+                "application/json",
+                Some("{}"),
+            )
+            .await;
+            assert_eq!(status_code(&split_response(&unknown).0), 404);
+        }
+        assert_eq!(seen.lock().unwrap().len(), 4);
+        server.stop();
     }
 
     #[tokio::test]
@@ -2892,7 +3260,7 @@ mod tests {
             )
             .await;
             assert_eq!(status_code(&split_response(&raw).0), 201);
-            for &(family, op) in super::super::oai_tunnel::JOB_KINDS {
+            for (family, op) in super::super::oai_tunnel::media_kinds() {
                 let create = format!("{prefix}{family}");
                 let status = format!("{create}/job-1");
                 let body = format!(r#"{{"model":"{op}-model","prompt":"hello"}}"#);
@@ -2961,7 +3329,16 @@ mod tests {
                 let sent = records.last().unwrap();
                 assert_eq!(sent.path, "/videos");
                 assert_eq!(
-                    serde_json::from_slice::<Value>(sent.body.as_deref().unwrap()).unwrap(),
+                    sent.multipart.as_deref(),
+                    Some("multipart/form-data; boundary=b")
+                );
+                assert_eq!(sent.body.as_deref(), Some(multipart.as_bytes()));
+                assert_eq!(
+                    serde_json::from_slice::<Value>(
+                        &legacy_multipart_json("/videos", sent.body.as_deref().unwrap(), "b")
+                            .unwrap()
+                    )
+                    .unwrap(),
                     json!({"model":"video-model","prompt":"123","seconds":"4","n":2,"input_reference":"data:image/png;base64,YWJj"})
                 );
             }
@@ -3319,7 +3696,16 @@ mod tests {
                 let sent = records.last().unwrap();
                 assert_eq!(sent.method, "POST");
                 assert_eq!(sent.path, "/images/edits");
-                let value: Value = serde_json::from_slice(sent.body.as_ref().unwrap()).unwrap();
+                assert_eq!(
+                    sent.multipart.as_deref(),
+                    Some("multipart/form-data; boundary=b")
+                );
+                assert_eq!(sent.body.as_deref(), Some(body.as_bytes()));
+                let value: Value = serde_json::from_slice(
+                    &legacy_multipart_json("/images/edits", sent.body.as_deref().unwrap(), "b")
+                        .unwrap(),
+                )
+                .unwrap();
                 assert_eq!(
                     value,
                     json!({
@@ -3424,15 +3810,16 @@ mod tests {
             assert_eq!(status_code(&split_response(&raw).0), 404);
         }
         assert!(seen.lock().unwrap().is_empty());
-        // The room limit applies to the converted JSON, including base64 expansion.
+        // The raw room request still cannot exceed the decoded tunnel cap.
+        // Legacy conversion checks its expanded JSON cap after peer selection.
         let form = gen3d_form(&[("model", "image-model")]).replace(
             "\r\nPNG\r\n",
             &format!(
                 "\r\n{}\r\n",
-                "x".repeat(super::super::oai_tunnel::MAX_BYTES * 3 / 4)
+                "x".repeat(super::super::oai_tunnel::MAX_BYTES)
             ),
         );
-        assert!(form.len() < super::super::oai_tunnel::MAX_BYTES);
+        assert!(form.len() > super::super::oai_tunnel::MAX_BYTES);
         let json =
             json!({"model":"image-model", "image":"x".repeat(MAX_GEN3D_JSON_BYTES)}).to_string();
         for (content_type, body) in [
@@ -4248,7 +4635,7 @@ mod tests {
         let call: TtsFn = Arc::new(|params, lang| {
             Box::pin(async move {
                 assert_eq!(lang.as_deref(), Some("ja"));
-                assert_eq!(params.extra, json!({"keep_alive":120,"vendor_options":{"seed":42},"stream_format":"sse","future":null}).as_object().unwrap().clone());
+                assert_eq!(params.extra, json!({"keep_alive":120,"vendor_options":{"seed":42},"stream_format":"sse","future":null,"instructions":"speak softly","voice":{"id":"speaker"}}).as_object().unwrap().clone());
                 Ok(tts::TtsAudio {
                     bytes: b"speech".to_vec(),
                     mime: "audio/mpeg".into(),
@@ -4264,8 +4651,8 @@ mod tests {
         )
         .await
         .unwrap();
-        let raw = post_json(&server, "/v1/audio/speech", json!({"model":"tts-model","input":"hi","voice":"default","response_format":"mp3","speed":1,"lang":"ja",
-            "keep_alive":120,"vendor_options":{"seed":42},"stream_format":"sse","future":null})).await;
+        let raw = post_json(&server, "/v1/audio/speech", json!({"model":"tts-model","input":"hi","voice":{"id":"speaker"},"response_format":"mp3","speed":1,"lang":"ja",
+            "keep_alive":120,"vendor_options":{"seed":42},"stream_format":"sse","future":null,"instructions":"speak softly"})).await;
         assert_eq!(split_response(&raw).1, b"speech");
         server.stop();
         for (label, status, detail, expected) in [
@@ -4746,6 +5133,7 @@ mod tests {
                     tts,
                     stt,
                     oai,
+                    chat_proxy: None,
                     decision,
                     relay: Arc::new(|_| Box::pin(async { anyhow::bail!("not used") })),
                 }))
@@ -4760,6 +5148,7 @@ mod tests {
             Some(local_decision),
             None,
             Some(rooms),
+            None,
             None,
         )
         .await
@@ -4787,7 +5176,7 @@ mod tests {
             "/v1/rooms/%FF/models",
             "/v1/rooms/%2/models",
             "/v1/rooms//models",
-            "/v1/rooms/x/embeddings",
+            "/v1/rooms/x/unknown",
         ] {
             assert!(room_route(path).is_none(), "{path}");
         }
@@ -4795,6 +5184,12 @@ mod tests {
             room_route("/v1/rooms/team/systemone"),
             Some(("team".into(), "systemone".into()))
         );
+        for endpoint in ["embeddings", "moderations"] {
+            assert_eq!(
+                room_route(&format!("/v1/rooms/team/{endpoint}")),
+                Some(("team".into(), endpoint.into()))
+            );
+        }
     }
 
     #[tokio::test]
@@ -5016,7 +5411,8 @@ mod tests {
                     params.model,
                     params.file_name.unwrap_or_default(),
                     String::from_utf8_lossy(&params.audio)
-                ))
+                )
+                .into())
             })
         })
     }
@@ -5208,6 +5604,103 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&raw)
         );
+    }
+
+    #[tokio::test]
+    async fn transcription_keeps_repeated_text_fields_and_returns_srt_verbatim() {
+        let _authz = authz_test().await;
+        const SRT: &[u8] = b"1\r\n00:00:00,000 --> 00:00:01,000\r\nHello\r\n";
+        let stt: SttFn = Arc::new(|params| {
+            Box::pin(async move {
+                assert_eq!(params.model, "stt-model");
+                assert_eq!(params.audio, b"RIFF");
+                assert_eq!(
+                    params.extra,
+                    vec![
+                        ("response_format".into(), "srt".into()),
+                        ("prompt".into(), "  prompt  ".into()),
+                        ("timestamp_granularities[]".into(), "word".into()),
+                        ("timestamp_granularities[]".into(), "segment".into()),
+                        ("include[]".into(), "logprobs".into()),
+                    ]
+                );
+                Ok(stt::SttOutput::Raw {
+                    body: SRT.to_vec(),
+                    content_type: "application/x-subrip; charset=utf-8".into(),
+                })
+            })
+        });
+        let server = ApiServer::start(
+            "127.0.0.1:0",
+            fake_call_ok(),
+            fake_models(),
+            fake_tts(),
+            stt,
+        )
+        .await
+        .unwrap();
+        let body = concat!(
+            "--B\r\nContent-Disposition: form-data; name=\"file\"; filename=\"clip.wav\"\r\nContent-Type: audio/wav\r\n\r\nRIFF\r\n",
+            "--B\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nstt-model\r\n",
+            "--B\r\nContent-Disposition: form-data; name=\"response_format\"\r\n\r\nsrt\r\n",
+            "--B\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\n  prompt  \r\n",
+            "--B\r\nContent-Disposition: form-data; name=\"timestamp_granularities[]\"\r\n\r\nword\r\n",
+            "--B\r\nContent-Disposition: form-data; name=\"timestamp_granularities[]\"\r\n\r\nsegment\r\n",
+            "--B\r\nContent-Disposition: form-data; name=\"include[]\"\r\n\r\nlogprobs\r\n--B--\r\n",
+        );
+        let response = relay_request(
+            &server,
+            "POST",
+            "/v1/audio/transcriptions",
+            "multipart/form-data; boundary=B",
+            Some(body),
+        )
+        .await;
+        let (head, payload) = split_response(&response);
+        assert_eq!(status_code(&head), 200);
+        assert!(head.contains("Content-Type: application/x-subrip; charset=utf-8"));
+        assert_eq!(payload, SRT);
+        server.stop();
+    }
+
+    #[tokio::test]
+    async fn audio_extra_fields_are_bounded_before_backend_dispatch() {
+        let _authz = authz_test().await;
+        let tts: TtsFn = Arc::new(|_, _| panic!("oversized TTS request reached backend"));
+        let stt: SttFn = Arc::new(|_| panic!("oversized STT request reached backend"));
+        let server = ApiServer::start("127.0.0.1:0", fake_call_ok(), fake_models(), tts, stt)
+            .await
+            .unwrap();
+        let oversized = "a".repeat(super::super::protocol::MAX_VOICE_EXTRA_BYTES);
+        let response = post_json(
+            &server,
+            "/v1/audio/speech",
+            json!({"input":"hi","instructions":oversized}),
+        )
+        .await;
+        assert_eq!(status_code(&split_response(&response).0), 400);
+        for fields in [
+            format!(
+                "--B\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\n{}\r\n",
+                "a".repeat(super::super::protocol::MAX_VOICE_EXTRA_BYTES)
+            ),
+            "--B\r\nContent-Disposition: form-data; name=\"include[]\"\r\n\r\nlogprobs\r\n"
+                .repeat(super::super::protocol::MAX_STT_EXTRA_FIELDS + 1),
+        ] {
+            let body = format!(
+                "--B\r\nContent-Disposition: form-data; name=\"file\"; filename=\"clip.wav\"\r\n\r\nRIFF\r\n{fields}--B--\r\n"
+            );
+            let response = relay_request(
+                &server,
+                "POST",
+                "/v1/audio/transcriptions",
+                "multipart/form-data; boundary=B",
+                Some(&body),
+            )
+            .await;
+            assert_eq!(status_code(&split_response(&response).0), 400);
+        }
+        server.stop();
     }
 
     fn split_response(raw: &[u8]) -> (String, &[u8]) {
@@ -5665,6 +6158,7 @@ mod tests {
             None,
             None,
             Some(Arc::new(move || allowed.clone())),
+            None,
         )
         .await
         .unwrap()

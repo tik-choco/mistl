@@ -1,14 +1,22 @@
 //! mistai oai_* v1: base64 the entire body, then split the encoded string.
 //! Metadata lives on seq 0. Reassembly and replies are bound to the sender.
+//! Opt-in chat streaming encodes each response chunk independently.
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use base64::Engine;
+use futures_util::{StreamExt, stream};
 use serde_json::Value;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
+use super::chat_proxy::{self, Endpoint as RawEndpoint, Reply, Usage};
+pub(super) use super::endpoints::media_kind;
+#[cfg(test)]
+pub(super) use super::endpoints::media_kinds;
+use super::endpoints::{self, Deadline, Model};
 use super::protocol::{self, ProtocolMessage};
 use super::{SendFn, provider::JobLimiter};
 use crate::authz::{Action, Authorized, Denied, Service};
@@ -35,24 +43,16 @@ const MAX_BUFFERS: usize = 32;
 const MAX_PER_PEER: usize = 4;
 const MAX_TOTAL_CHARS: usize = 48 * 1024 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(120);
-const RESPONSE_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+pub(super) const RESPONSE_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_SEQ: u64 = (MAX_BASE64_CHARS / CHUNK_SIZE) as u64;
+// Negotiated streaming can have short chunks; retain both a byte and a
+// message-count limit independently of upstream event sizes.
+const MAX_CHAT_SEQ: u64 = 65_536;
+const CHAT_STREAM_CONTENT_TYPE: &str = "application/json; mistl-stream=1";
 const MAX_JOB_BINDINGS: usize = 1024;
 const MAX_JOBS_PER_PEER: usize = 64;
 const JOB_TTL: Duration = Duration::from_secs(25 * 60 * 60);
 const SKELETON_PREFIX: &str = "/motion/skeletons/";
-
-pub(super) const JOB_KINDS: &[(&str, &str)] = &[("/videos", "video"), ("/music", "music")];
-
-pub(super) fn media_kind(path: &str) -> Option<(&'static str, &'static str)> {
-    let bare = path.split('?').next().unwrap_or(path);
-    JOB_KINDS.iter().copied().find(|(prefix, _)| {
-        bare == *prefix
-            || bare
-                .strip_prefix(prefix)
-                .is_some_and(|rest| rest.starts_with('/'))
-    })
-}
 
 pub(super) fn valid_media_id(id: &str) -> bool {
     (1..=128).contains(&id.len())
@@ -74,17 +74,7 @@ pub(super) fn media_job_key(path: &str) -> Option<(&str, bool)> {
 }
 
 pub(super) fn media_job_allowed(method: &str, path: &str) -> bool {
-    let Some((prefix, _)) = media_kind(path) else {
-        return false;
-    };
-    if path.split('?').next() == Some(prefix) {
-        return matches!(method, "GET" | "POST");
-    }
-    match media_job_key(path) {
-        Some((_, true)) => method == "GET",
-        Some((_, false)) => matches!(method, "GET" | "DELETE"),
-        None => false,
-    }
+    media_kind(path).is_some() && endpoints::lookup(path).is_some_and(|e| e.allows(method, path))
 }
 
 pub(super) fn binding_key(family: &str, id: &str) -> Option<String> {
@@ -105,18 +95,11 @@ pub(super) fn binding_in_family(family: &str, key: &str) -> bool {
 }
 
 pub(super) fn image_post(path: &str) -> bool {
-    matches!(path, "/images/edits" | "/images/generations")
-}
-
-pub(super) fn is_model_relay_post(path: &str) -> bool {
-    matches!(path, "/3d/generations" | "/game/act" | "/motion/inbetween")
-        || image_post(path)
-        || media_kind(path).is_some_and(|(prefix, _)| path == prefix)
+    endpoints::lookup(path).is_some_and(|e| e.deadline == Deadline::Image)
 }
 
 pub(super) fn is_motion_catalog(path: &str) -> bool {
-    let bare = path.split('?').next().unwrap_or(path);
-    bare == "/motion/clips" || bare.starts_with(SKELETON_PREFIX)
+    endpoints::lookup(path).is_some_and(|e| e.model == Model::Catalog)
 }
 
 pub(super) fn motion_catalog_model(path: &str) -> std::result::Result<String, TunnelResponse> {
@@ -280,6 +263,21 @@ pub(super) fn chunks(bytes: &[u8]) -> Vec<String> {
         .collect()
 }
 
+async fn send_chat_message(
+    send: &SendFn,
+    room: Option<&str>,
+    peer: &str,
+    msg: ProtocolMessage,
+) -> Result<()> {
+    if let Some(room) = room {
+        crate::net::send_direct_wait(room, peer, protocol::encode(&msg)).await
+    } else {
+        send(peer, msg);
+        tokio::task::yield_now().await;
+        Ok(())
+    }
+}
+
 #[derive(Default)]
 struct Assembly {
     authorized: Option<Authorized>,
@@ -403,8 +401,21 @@ pub(super) struct TunnelProvider {
     send: SendFn,
     resolve: Resolver,
     pending: Mutex<HashMap<(String, String), (Instant, Assembly)>>,
+    active_chats: Mutex<HashMap<(String, String), CancellationToken>>,
     jobs: JobLimiter,
     bindings: Mutex<JobBindings>,
+    chat_effort: Option<String>,
+}
+
+struct ActiveChatGuard<'a> {
+    chats: &'a Mutex<HashMap<(String, String), CancellationToken>>,
+    key: (String, String),
+}
+
+impl Drop for ActiveChatGuard<'_> {
+    fn drop(&mut self) {
+        self.chats.lock().expect("oai chats lock").remove(&self.key);
+    }
 }
 
 impl TunnelProvider {
@@ -413,9 +424,18 @@ impl TunnelProvider {
             send,
             resolve,
             pending: Mutex::new(HashMap::new()),
+            active_chats: Mutex::new(HashMap::new()),
             jobs: JobLimiter::new(8),
             bindings: Mutex::new(JobBindings::default()),
+            chat_effort: None,
         })
+    }
+
+    pub fn with_chat_effort(mut self: Arc<Self>, effort: Option<String>) -> Arc<Self> {
+        Arc::get_mut(&mut self)
+            .expect("new tunnel provider")
+            .chat_effort = effort;
+        self
     }
 
     pub fn drop_peer(&self, from: &str) {
@@ -423,6 +443,11 @@ impl TunnelProvider {
             .lock()
             .expect("oai pending lock")
             .retain(|(peer, _), _| peer != from);
+        for ((peer, _), cancel) in self.active_chats.lock().expect("oai chats lock").iter() {
+            if peer == from {
+                cancel.cancel();
+            }
+        }
     }
 
     fn error(&self, from: &str, id: String, message: &str, code: Option<&str>) {
@@ -434,6 +459,56 @@ impl TunnelProvider {
                 code: code.map(String::from),
             },
         );
+    }
+
+    fn upstream_error(&self, from: &str, id: String, err: anyhow::Error) {
+        let code = err.to_string();
+        let known = matches!(
+            code.as_str(),
+            "unsupported_path" | "model_not_shared" | "request_rejected" | "request_too_large"
+        );
+        tracing::debug!(%err, "ai: OAI upstream failed");
+        self.error(
+            from,
+            id,
+            if known {
+                &code
+            } else {
+                "OAI upstream request failed."
+            },
+            known.then_some(code.as_str()),
+        );
+    }
+
+    async fn send_buffered(
+        &self,
+        room: Option<&str>,
+        from: &str,
+        id: &str,
+        response: TunnelResponse,
+    ) -> Result<()> {
+        let chunk_bytes = CHUNK_SIZE / 4 * 3;
+        let count = response.body.len().div_ceil(chunk_bytes).max(1);
+        for seq in 0..count {
+            let start = seq * chunk_bytes;
+            let end = (start + chunk_bytes).min(response.body.len());
+            let data = base64::engine::general_purpose::STANDARD.encode(&response.body[start..end]);
+            send_chat_message(
+                &self.send,
+                room,
+                from,
+                ProtocolMessage::OaiResponse {
+                    id: id.into(),
+                    seq: seq as u64,
+                    last: seq + 1 == count,
+                    data,
+                    status: (seq == 0).then_some(response.status),
+                    content_type: (seq == 0).then(|| response.content_type.clone()),
+                },
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -470,6 +545,14 @@ impl TunnelProvider {
                 "Request exceeded the maximum allowed size.",
                 Some("request_too_large"),
             );
+            return Ok(());
+        }
+        if self
+            .active_chats
+            .lock()
+            .expect("oai chats lock")
+            .contains_key(&(from.to_string(), id.clone()))
+        {
             return Ok(());
         }
         let ready = {
@@ -543,14 +626,23 @@ impl TunnelProvider {
         let path = ready.path.clone();
         let method = ready.method.clone();
         let content_type = ready.content_type.clone();
-        if let Some((_, op)) = media_kind(&path) {
-            authorized = authorized.with_op(op);
-        } else if path == "/images/generations" {
-            authorized = authorized.with_op("image");
+        if let Some(endpoint) = endpoints::lookup(&path) {
+            authorized = authorized.with_op(endpoint.tunnel_op);
         }
+        let mut usage = Usage::new(RawEndpoint::from_path(&path).unwrap_or_default());
         let result = match ready.decode() {
             Ok(bytes) => {
-                let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+                let body = if super::multipart::is_multipart(&content_type) {
+                    // The authorization and metering model is the same text
+                    // part the dispatch path will use for upstream routing.
+                    super::multipart::Form::parse(&bytes, &content_type)
+                        .ok()
+                        .and_then(|form| form.model(&bytes))
+                        .map(|model| serde_json::json!({"model":model}))
+                        .unwrap_or(Value::Null)
+                } else {
+                    serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+                };
                 let catalog_model = is_motion_catalog(&path)
                     .then(|| motion_catalog_model(&path).ok())
                     .flatten();
@@ -559,6 +651,43 @@ impl TunnelProvider {
                     .or_else(|| body.get("model").and_then(Value::as_str));
                 authorized = authorized.with_model(model);
                 let deadline = relay_deadline(&method, &path, &body);
+                if method == "POST"
+                    && let Some(endpoint) = RawEndpoint::from_path(&path)
+                    && content_type == CHAT_STREAM_CONTENT_TYPE
+                    && body["stream"] == true
+                {
+                    let key = (from.to_string(), id.clone());
+                    let cancel = CancellationToken::new();
+                    {
+                        let mut active = self.active_chats.lock().expect("oai chats lock");
+                        if active.contains_key(&key) {
+                            return Ok(());
+                        }
+                        active.insert(key.clone(), cancel.clone());
+                    }
+                    let _guard = ActiveChatGuard {
+                        chats: &self.active_chats,
+                        key,
+                    };
+                    let transfer = async {
+                        let reply = self.open_raw(endpoint, &bytes, &body).await?;
+                        drop(bytes);
+                        drop(body);
+                        self.send_chat_stream(room, from, &id, reply, &mut usage)
+                            .await
+                    };
+                    let result = tokio::select! {
+                        _ = cancel.cancelled() => None,
+                        result = tokio::time::timeout(TIMEOUT, transfer) =>
+                            Some(result.context("OAI upstream request timed out").and_then(|r| r)),
+                    };
+                    usage.record_tokens();
+                    authorized.record(1, usage.chars);
+                    if let Some(Err(err)) = result {
+                        self.upstream_error(from, id, err);
+                    }
+                    return Ok(());
+                }
                 tokio::time::timeout(
                     deadline,
                     self.dispatch(from, &method, &path, &content_type, &bytes),
@@ -567,49 +696,128 @@ impl TunnelProvider {
             }
             Err(err) => Ok(Err(err)),
         };
-        authorized.record(1, 0);
+        if let Ok(Ok(response)) = &result
+            && RawEndpoint::from_path(&path).is_some()
+        {
+            if response.content_type.starts_with("text/event-stream") {
+                usage.sse(&response.body);
+            } else {
+                usage.json(&response.body);
+            }
+        }
+        usage.record_tokens();
+        authorized.record(1, usage.chars);
         match result {
             Ok(Ok(response)) => {
-                let parts = chunks(&response.body);
-                let count = parts.len();
-                for (seq, data) in parts.into_iter().enumerate() {
-                    (self.send)(
-                        from,
-                        ProtocolMessage::OaiResponse {
-                            id: id.clone(),
-                            seq: seq as u64,
-                            last: seq + 1 == count,
-                            data,
-                            status: (seq == 0).then_some(response.status),
-                            content_type: (seq == 0).then(|| response.content_type.clone()),
-                        },
-                    );
-                    tokio::task::yield_now().await;
+                let reliable_room = RawEndpoint::from_path(&path).and(room);
+                let result = tokio::time::timeout(
+                    TIMEOUT,
+                    self.send_buffered(reliable_room, from, &id, response),
+                )
+                .await
+                .context("OAI response transfer timed out")
+                .and_then(|r| r);
+                if let Err(err) = result {
+                    self.upstream_error(from, id, err);
                 }
             }
-            Ok(Err(err)) => {
-                let code = err.to_string();
-                let known = matches!(
-                    code.as_str(),
-                    "unsupported_path"
-                        | "model_not_shared"
-                        | "request_rejected"
-                        | "request_too_large"
-                );
-                tracing::debug!(%err, "ai: OAI upstream failed");
-                self.error(
-                    from,
-                    id,
-                    if known {
-                        &code
-                    } else {
-                        "OAI upstream request failed."
-                    },
-                    known.then_some(code.as_str()),
-                );
-            }
+            Ok(Err(err)) => self.upstream_error(from, id, err),
             Err(_) => self.error(from, id, "OAI upstream request timed out.", None),
         }
+        Ok(())
+    }
+
+    pub(super) async fn open_raw(
+        &self,
+        endpoint: RawEndpoint,
+        bytes: &[u8],
+        body: &Value,
+    ) -> Result<Reply> {
+        if !body.is_object() {
+            bail!("request_rejected");
+        }
+        if endpoint != RawEndpoint::Chat
+            && body["model"].as_str().is_none_or(|m| m.trim().is_empty())
+        {
+            let response = missing_model();
+            return Ok(Reply {
+                status: response.status,
+                content_type: response.content_type,
+                body: stream::once(async move { Ok(response.body.into()) }).boxed(),
+            });
+        }
+        let target = (self.resolve)(endpoint.path(), body)?.context("unsupported_path")?;
+        let payload = chat_proxy::payload_for(
+            endpoint,
+            bytes,
+            body,
+            &target.model,
+            self.chat_effort.clone(),
+        )?;
+        chat_proxy::upstream_for(
+            endpoint,
+            &target.base_url,
+            &target.api_key,
+            payload,
+            TIMEOUT,
+        )
+        .await
+    }
+
+    pub(super) fn has_chat_target(&self, model: Option<&str>) -> bool {
+        (self.resolve)(
+            RawEndpoint::current().path(),
+            &serde_json::json!({"model": model}),
+        )
+        .is_ok_and(|target| target.is_some())
+    }
+
+    async fn send_chat_stream(
+        &self,
+        room: Option<&str>,
+        from: &str,
+        id: &str,
+        mut reply: Reply,
+        usage: &mut Usage,
+    ) -> Result<()> {
+        let mut seq = 0;
+        // A JSON error or non-SSE response is still returned as-is, including
+        // status and content type. Only actual SSE needs incremental delivery.
+        if !reply.is_sse() {
+            let response = reply.buffered().await?;
+            usage.json(&response.body);
+            return self.send_buffered(room, from, id, response).await;
+        }
+        let message = |seq, data, last| ProtocolMessage::OaiResponse {
+            id: id.into(),
+            seq,
+            last,
+            data,
+            status: (seq == 0).then_some(reply.status),
+            content_type: (seq == 0).then(|| reply.content_type.clone()),
+        };
+        while let Some(chunk) = reply.body.next().await {
+            let chunk = chunk?;
+            usage.sse(&chunk);
+            for part in chunk.chunks(CHUNK_SIZE / 4 * 3) {
+                if seq >= MAX_CHAT_SEQ {
+                    bail!("request_too_large");
+                }
+                send_chat_message(
+                    &self.send,
+                    room,
+                    from,
+                    message(
+                        seq,
+                        base64::engine::general_purpose::STANDARD.encode(part),
+                        false,
+                    ),
+                )
+                .await?;
+                seq += 1;
+            }
+        }
+        send_chat_message(&self.send, room, from, message(seq, String::new(), true)).await?;
         Ok(())
     }
 
@@ -627,36 +835,17 @@ impl TunnelProvider {
         }
         let (path, range) = split_range(path)?;
         let job_path = generation_path(&path).or_else(|| media_job_key(&path));
-        let model_post = is_model_relay_post(&path);
-        let catalog = is_motion_catalog(&path);
-        if !matches!(
-            path.as_str(),
-            "/chat/completions" | "/models" | "/embeddings" | "/systemone"
-        ) && !model_post
-            && !catalog
-            && job_path.is_none()
-        {
-            if path.starts_with("/3d/generations/") {
-                return Ok(generation_not_found());
-            }
-            bail!("unsupported_path");
+        let endpoint = endpoints::lookup(&path)
+            .filter(|e| e.tunnel)
+            .context("unsupported_path")?;
+        if path.starts_with("/3d/generations/") && job_path.is_none() {
+            return Ok(generation_not_found());
         }
-        let allowed = if catalog {
-            method == "GET"
-        } else {
-            match (path.as_str(), job_path) {
-                ("/models", _) | (_, Some((_, true))) => method == "GET",
-                ("/3d/generations", _) => matches!(method, "GET" | "POST"),
-                (p, _) if media.is_some_and(|(prefix, _)| p == prefix) => {
-                    matches!(method, "GET" | "POST")
-                }
-                (_, Some((_, false))) => matches!(method, "GET" | "DELETE"),
-                _ => method == "POST",
-            }
-        };
-        if !allowed {
+        if !endpoint.allows(method, &path) {
             bail!("request_rejected");
         }
+        let model_post = endpoint.model_post(&path);
+        let catalog = endpoint.model == Model::Catalog;
         if let Some((id, content)) = job_path {
             let target = self
                 .bindings
@@ -715,7 +904,31 @@ impl TunnelProvider {
             )
             .await;
         }
-        let body: Value = if bytes.is_empty() {
+        let kind = endpoint.post_body(&path);
+        let multipart = super::multipart::is_multipart(content_type);
+        let form = if multipart {
+            if method != "POST" || !kind.raw_multipart() {
+                bail!("request_rejected");
+            }
+            if bytes.len() > kind.cap(true).min(MAX_BYTES) {
+                bail!("request_too_large");
+            }
+            Some(
+                super::multipart::Form::parse(bytes, content_type)
+                    .map_err(|_| anyhow::anyhow!("request_rejected"))?,
+            )
+        } else {
+            if kind.multipart_only() {
+                bail!("request_rejected");
+            }
+            None
+        };
+        let body: Value = if let Some(ref form) = form {
+            let Some(model) = form.model(bytes) else {
+                return Ok(missing_model());
+            };
+            serde_json::json!({"model":model})
+        } else if bytes.is_empty() {
             Value::Null
         } else {
             if !content_type.to_ascii_lowercase().contains("json") {
@@ -723,9 +936,18 @@ impl TunnelProvider {
             }
             serde_json::from_slice(bytes).map_err(|_| anyhow::anyhow!("request_rejected"))?
         };
+        if method == "POST"
+            && let Some(endpoint) = RawEndpoint::from_path(&path)
+        {
+            return self
+                .open_raw(endpoint, bytes, &body)
+                .await?
+                .buffered()
+                .await;
+        }
         let generation = path == "/3d/generations";
         let image = image_post(&path);
-        if model_post {
+        if model_post && endpoint.model == Model::Explicit {
             let object = body.as_object().context("request_rejected")?;
             // No built-in default: routing needs an explicit model id.
             if object
@@ -737,18 +959,20 @@ impl TunnelProvider {
             }
         }
         let target = (self.resolve)(&path, &body)?.context("unsupported_path")?;
-        let payload = if method == "POST" {
-            let mut set = vec![("model", Value::String(target.model.clone()))];
-            let chat = path == "/chat/completions";
-            if chat {
-                set.push(("stream", Value::Bool(false)));
-            }
-            let remove: &[&str] =
-                if model_post || chat && super::api_server::has_image_content(&body) {
-                    &[]
-                } else {
-                    &["temperature"]
-                };
+        let payload = if let Some(form) = form {
+            Some(
+                form.rewrite_model(bytes.to_vec(), &target.model, kind.cap(true).min(MAX_BYTES))
+                    .map_err(|message| {
+                        anyhow::anyhow!(if message == "request_too_large" {
+                            message
+                        } else {
+                            "request_rejected"
+                        })
+                    })?,
+            )
+        } else if method == "POST" {
+            let set = [("model", Value::String(target.model.clone()))];
+            let remove: &[&str] = if model_post { &[] } else { &["temperature"] };
             Some(rewrite_object(bytes, &set, remove)?)
         } else {
             None
@@ -756,16 +980,30 @@ impl TunnelProvider {
         if !model_post {
             return forward(&target.base_url, &target.api_key, method, &path, payload).await;
         }
-        let response = forward_with(
-            &target.base_url,
-            &target.api_key,
-            method,
-            &path,
-            payload,
-            None,
-            relay_deadline(method, &path, &body),
-        )
-        .await;
+        let deadline = relay_deadline(method, &path, &body);
+        let response = if multipart {
+            forward_multipart(
+                &target.base_url,
+                &target.api_key,
+                &path,
+                payload.expect("multipart payload"),
+                content_type,
+                deadline,
+                MAX_BYTES,
+            )
+            .await
+        } else {
+            forward_with(
+                &target.base_url,
+                &target.api_key,
+                method,
+                &path,
+                payload,
+                None,
+                deadline,
+            )
+            .await
+        };
         if image {
             return match response {
                 Err(err) if err.to_string() == "request_too_large" => json_response(
@@ -896,7 +1134,7 @@ fn valid_job_id(id: &str) -> bool {
     })
 }
 
-fn generation_path(path: &str) -> Option<(&str, bool)> {
+pub(super) fn generation_path(path: &str) -> Option<(&str, bool)> {
     let suffix = path.strip_prefix("/3d/generations/")?;
     let (id, content) = match suffix.strip_suffix("/content") {
         Some(id) => (id, true),
@@ -1003,6 +1241,247 @@ pub(super) async fn forward_capped(
     timeout: Duration,
     cap: usize,
 ) -> Result<TunnelResponse> {
+    let payload = payload.map(bytes::Bytes::from);
+    #[derive(serde::Deserialize)]
+    struct ImageFormat {
+        response_format: Option<String>,
+    }
+    let image = method == "POST" && image_post(path);
+    let wants_base64 = image
+        && payload
+            .as_deref()
+            .and_then(|body| serde_json::from_slice::<ImageFormat>(body).ok())
+            .is_some_and(|format| format.response_format.as_deref() == Some("b64_json"));
+    let mut response = forward_once(
+        base_url,
+        api_key,
+        method,
+        path,
+        payload.clone(),
+        "application/json",
+        range,
+        timeout,
+        cap,
+    )
+    .await?;
+    // Keep the format hint for backends that support it, but retry once
+    // without it when an image endpoint explicitly rejects the parameter.
+    if image
+        && matches!(response.status, 400 | 422)
+        && response
+            .body
+            .windows(b"response_format".len())
+            .any(|word| word.eq_ignore_ascii_case(b"response_format"))
+        && let Some(payload) = payload
+        && let Ok(retry) = rewrite_object(&payload, &[], &["response_format"])
+        && retry.as_slice() != payload.as_ref()
+    {
+        drop(response);
+        drop(payload);
+        response = forward_once(
+            base_url,
+            api_key,
+            method,
+            path,
+            Some(retry.into()),
+            "application/json",
+            range,
+            timeout,
+            cap,
+        )
+        .await?;
+    }
+    if wants_base64 && response.status == 200 {
+        let download_timeout = timeout.min(TIMEOUT);
+        match tokio::time::timeout(
+            download_timeout,
+            inline_image_urls(&mut response, base_url, api_key, download_timeout, cap),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) if err.to_string() == "request_too_large" => {
+                return json_response(
+                    502,
+                    serde_json::json!({"error": {
+                        "message": "image result exceeds the response size limit",
+                        "type": "api_error", "code": "response_too_large"
+                    }}),
+                );
+            }
+            _ => {
+                // Do not expose download URLs (which may contain credentials).
+                return json_response(
+                    502,
+                    serde_json::json!({"error": {
+                        "message": "could not fetch the upstream image result",
+                        "type": "api_error", "code": "image_fetch_failed"
+                    }}),
+                );
+            }
+        }
+    }
+    Ok(response)
+}
+
+/// Resolve image URLs on the provider, before the response crosses the wire.
+/// Bound the aggregate encoded images as well as the resulting JSON body.
+async fn inline_image_urls(
+    response: &mut TunnelResponse,
+    base_url: &str,
+    api_key: &str,
+    timeout: Duration,
+    cap: usize,
+) -> Result<()> {
+    let Ok(mut body) = serde_json::from_slice::<Value>(&response.body) else {
+        return Ok(());
+    };
+    let Some(data) = body.get_mut("data").and_then(Value::as_array_mut) else {
+        return Ok(());
+    };
+    let cap = cap.min(MAX_IMAGE_RESPONSE_BYTES);
+    let mut remaining = cap;
+    let mut changed = false;
+    for item in data {
+        let Some(object) = item.as_object_mut() else {
+            continue;
+        };
+        if object.get("b64_json").is_some_and(|value| !value.is_null())
+            || !object.contains_key("url")
+        {
+            continue;
+        }
+        let url = object.remove("url").expect("image URL exists");
+        let url = url.as_str().context("invalid image URL")?;
+        let bytes = if let Some((scheme, data)) = url.split_once(':')
+            && scheme.eq_ignore_ascii_case("data")
+        {
+            let (metadata, encoded) = data.split_once(',').context("invalid data URL")?;
+            if !metadata
+                .rsplit_once(';')
+                .is_some_and(|(_, encoding)| encoding.eq_ignore_ascii_case("base64"))
+            {
+                bail!("invalid data URL");
+            }
+            if encoded.len() > remaining {
+                bail!("request_too_large");
+            }
+            base64::engine::general_purpose::STANDARD.decode(encoded)?
+        } else {
+            // Every three downloaded bytes require four base64 characters.
+            fetch_image_url(url, base_url, api_key, timeout, remaining / 4 * 3).await?
+        };
+        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+        remaining = remaining
+            .checked_sub(encoded.len())
+            .context("request_too_large")?;
+        object.insert("b64_json".into(), Value::String(encoded));
+        changed = true;
+    }
+    if changed {
+        let body = serde_json::to_vec(&body)?;
+        if body.len() > cap {
+            bail!("request_too_large");
+        }
+        response.body = body;
+        response.content_type = "application/json".into();
+    }
+    Ok(())
+}
+
+async fn fetch_image_url(
+    url: &str,
+    base_url: &str,
+    api_key: &str,
+    timeout: Duration,
+    cap: usize,
+) -> Result<Vec<u8>> {
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(timeout)
+        .build()?;
+    let upstream = reqwest::Url::parse(base_url)?;
+    let mut url = reqwest::Url::parse(url)?;
+    // Check each redirect; the upstream key is only for the configured origin.
+    for hops in 0..=3 {
+        if !matches!(url.scheme(), "http" | "https")
+            || !url.username().is_empty()
+            || url.password().is_some()
+        {
+            bail!("invalid image URL");
+        }
+        let mut request = client.get(url.clone());
+        if url.origin() == upstream.origin() && !api_key.trim().is_empty() {
+            request = request.bearer_auth(api_key);
+        }
+        let mut response = request.send().await?;
+        if matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
+            if hops == 3 {
+                bail!("too many image redirects");
+            }
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .context("missing image redirect location")?
+                .to_str()?;
+            url = url.join(location)?;
+            continue;
+        }
+        if !response.status().is_success() {
+            bail!("image download failed");
+        }
+        if response.content_length().is_some_and(|n| n > cap as u64) {
+            bail!("request_too_large");
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            if bytes.len().saturating_add(chunk.len()) > cap {
+                bail!("request_too_large");
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        return Ok(bytes);
+    }
+    bail!("too many image redirects")
+}
+
+/// Standard multipart is an opaque body after model resolution. Unlike
+/// the JSON image adapter, do not retry with edited form fields.
+pub(super) async fn forward_multipart(
+    base_url: &str,
+    api_key: &str,
+    path: &str,
+    body: Vec<u8>,
+    content_type: &str,
+    timeout: Duration,
+    cap: usize,
+) -> Result<TunnelResponse> {
+    forward_once(
+        base_url,
+        api_key,
+        "POST",
+        path,
+        Some(body.into()),
+        content_type,
+        None,
+        timeout,
+        cap,
+    )
+    .await
+}
+
+async fn forward_once(
+    base_url: &str,
+    api_key: &str,
+    method: &str,
+    path: &str,
+    payload: Option<bytes::Bytes>,
+    content_type: &str,
+    range: Option<(u64, u64)>,
+    timeout: Duration,
+    cap: usize,
+) -> Result<TunnelResponse> {
     // `no_proxy()`: upstreams are usually loopback (e.g. Ollama), and a
     // proxy from the environment would break those requests.
     let client = reqwest::Client::builder()
@@ -1023,7 +1502,7 @@ pub(super) async fn forward_capped(
     // legitimately exceed MAX_BYTES on an HTTP-direct route).
     if let Some(payload) = payload.filter(|_| method == "POST") {
         request = request
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(reqwest::header::CONTENT_TYPE, content_type)
             .body(payload);
     }
     let mut response = request.send().await?;
@@ -1055,23 +1534,25 @@ pub(super) async fn forward_capped(
 /// `body` is the parsed JSON body (`Value::Null` if none).
 pub(super) fn relay_deadline(method: &str, path: &str, body: &Value) -> Duration {
     let path = path.split('?').next().unwrap_or(path);
-    if method == "POST" && image_post(path) {
-        IMAGE_EDIT_TIMEOUT
-    } else if method == "POST" && media_kind(path).is_some_and(|(prefix, _)| path == prefix) {
-        MEDIA_SUBMIT_TIMEOUT
-    } else if method == "POST" && path == "/3d/generations" && body["background"] != true {
-        GEN3D_SYNC_TIMEOUT
-    } else if (method == "POST" && path == "/motion/inbetween")
-        || (method == "GET" && is_motion_catalog(path))
-    {
-        MOTION_TIMEOUT
-    } else if generation_path(path)
+    if generation_path(path)
         .or_else(|| media_job_key(path))
         .is_some_and(|(_, content)| content)
     {
-        CONTENT_TIMEOUT
-    } else {
-        TIMEOUT
+        return CONTENT_TIMEOUT;
+    }
+    let Some(endpoint) = endpoints::lookup(path).filter(|e| e.allows(method, path)) else {
+        return TIMEOUT;
+    };
+    match endpoint.deadline {
+        Deadline::Image => IMAGE_EDIT_TIMEOUT,
+        Deadline::Media if method == "POST" && path == endpoint.path => MEDIA_SUBMIT_TIMEOUT,
+        Deadline::Gen3d
+            if method == "POST" && path == endpoint.path && body["background"] != true =>
+        {
+            GEN3D_SYNC_TIMEOUT
+        }
+        Deadline::Motion => MOTION_TIMEOUT,
+        _ => TIMEOUT,
     }
 }
 
@@ -1178,12 +1659,113 @@ pub(super) struct TunnelResponse {
 
 pub(super) struct TunnelConsumer {
     send: SendFn,
+    room: Option<String>,
     pending: Mutex<HashMap<String, (String, mpsc::Sender<ProtocolMessage>)>>,
 }
 
 struct PendingGuard<'a> {
     consumer: &'a TunnelConsumer,
     id: String,
+}
+
+struct ChatReceiver {
+    consumer: Arc<TunnelConsumer>,
+    id: String,
+    rx: mpsc::Receiver<ProtocolMessage>,
+    parts: BTreeMap<u64, ChatPiece>,
+    seq: u64,
+    last: Option<u64>,
+    bytes: usize,
+    deadline: tokio::time::Instant,
+}
+
+struct ChatPiece {
+    body: bytes::Bytes,
+    status: Option<u16>,
+    content_type: Option<String>,
+}
+
+impl Drop for ChatReceiver {
+    fn drop(&mut self) {
+        self.consumer
+            .pending
+            .lock()
+            .expect("oai consumer lock")
+            .remove(&self.id);
+    }
+}
+
+impl ChatReceiver {
+    async fn next(&mut self) -> Result<Option<ChatPiece>> {
+        let deadline = if self.seq == 0 {
+            self.deadline
+        } else {
+            self.deadline
+                .min(tokio::time::Instant::now() + RESPONSE_IDLE_TIMEOUT)
+        };
+        loop {
+            if self.last.is_some_and(|last| self.seq > last) {
+                return Ok(None);
+            }
+            if let Some(piece) = self.parts.remove(&self.seq) {
+                self.seq += 1;
+                return Ok(Some(piece));
+            }
+            if tokio::time::Instant::now() >= deadline {
+                bail!("OAI response stalled");
+            }
+            let msg = tokio::time::timeout_at(deadline, self.rx.recv())
+                .await
+                .context("OAI response stalled")?
+                .context("OAI response closed")?;
+            match msg {
+                ProtocolMessage::OaiError { message, code, .. } => {
+                    bail!("{message} ({})", code.unwrap_or_default());
+                }
+                ProtocolMessage::OaiResponse {
+                    seq,
+                    last,
+                    data,
+                    status,
+                    content_type,
+                    ..
+                } => {
+                    if seq < self.seq || self.parts.contains_key(&seq) {
+                        continue;
+                    }
+                    if self
+                        .last
+                        .is_some_and(|end| seq > end || (last && seq != end))
+                        || self.parts.len() >= MAX_SEQ as usize + 1
+                    {
+                        bail!("invalid OAI response");
+                    }
+                    if last {
+                        if self.parts.keys().any(|n| *n > seq) {
+                            bail!("invalid OAI response");
+                        }
+                        self.last = Some(seq);
+                    }
+                    // Old buffered responses split one base64 string at
+                    // multiples of four; those chunks also decode separately.
+                    let body = base64::engine::general_purpose::STANDARD.decode(data)?;
+                    self.bytes = self.bytes.saturating_add(body.len());
+                    if self.bytes > MAX_BYTES {
+                        bail!("request_too_large");
+                    }
+                    self.parts.insert(
+                        seq,
+                        ChatPiece {
+                            body: body.into(),
+                            status,
+                            content_type,
+                        },
+                    );
+                }
+                _ => bail!("Unexpected OAI response"),
+            }
+        }
+    }
 }
 impl Drop for PendingGuard<'_> {
     fn drop(&mut self) {
@@ -1199,8 +1781,17 @@ impl TunnelConsumer {
     pub fn new(send: SendFn) -> Arc<Self> {
         Arc::new(Self {
             send,
+            room: None,
             pending: Mutex::new(HashMap::new()),
         })
+    }
+    pub fn in_room(mut self: Arc<Self>, room: String) -> Arc<Self> {
+        Arc::get_mut(&mut self).expect("new tunnel consumer").room = Some(room);
+        self
+    }
+    #[cfg(test)]
+    pub(super) fn pending_count(&self) -> usize {
+        self.pending.lock().unwrap().len()
     }
     pub fn reject_all(&self) {
         self.pending.lock().expect("oai consumer lock").clear();
@@ -1222,7 +1813,7 @@ impl TunnelConsumer {
             } => (
                 id,
                 data.len() <= CHUNK_SIZE
-                    && *seq <= MAX_SEQ
+                    && *seq <= MAX_CHAT_SEQ
                     && content_type.as_ref().is_none_or(|s| s.len() <= 256),
             ),
             ProtocolMessage::OaiError { id, message, code } => (
@@ -1253,6 +1844,98 @@ impl TunnelConsumer {
             .await
     }
 
+    /// Open the raw chat response at sequence zero and yield contiguous
+    /// decoded chunks as they arrive. Sender binding and queue caps are the
+    /// same as for buffered requests; dropping the body unregisters the id.
+    pub async fn request_chat(
+        self: &Arc<Self>,
+        peer: &str,
+        body: &[u8],
+        streaming: bool,
+        timeout: Duration,
+    ) -> Result<Reply> {
+        self.request_raw(RawEndpoint::current(), peer, body, streaming, timeout)
+            .await
+    }
+
+    pub(super) async fn request_raw(
+        self: &Arc<Self>,
+        endpoint: RawEndpoint,
+        peer: &str,
+        body: &[u8],
+        streaming: bool,
+        timeout: Duration,
+    ) -> Result<Reply> {
+        if body.len() > MAX_BYTES {
+            bail!("OAI request too large");
+        }
+        let id = protocol::random_id();
+        let rx = {
+            let mut pending = self.pending.lock().expect("oai consumer lock");
+            if pending.len() >= 8 || pending.values().filter(|(p, _)| p == peer).count() >= 2 {
+                bail!("Too many pending OAI requests");
+            }
+            let (tx, rx) = mpsc::channel(MAX_SEQ as usize + 2);
+            pending.insert(id.clone(), (peer.to_string(), tx));
+            rx
+        };
+        let mut receiver = ChatReceiver {
+            consumer: self.clone(),
+            id: id.clone(),
+            rx,
+            parts: BTreeMap::new(),
+            seq: 0,
+            last: None,
+            bytes: 0,
+            deadline: tokio::time::Instant::now() + timeout.min(TIMEOUT),
+        };
+        let parts = chunks(body);
+        let count = parts.len();
+        for (seq, data) in parts.into_iter().enumerate() {
+            tokio::time::timeout_at(
+                receiver.deadline,
+                send_chat_message(
+                    &self.send,
+                    self.room.as_deref(),
+                    peer,
+                    ProtocolMessage::OaiRequest {
+                        id: id.clone(),
+                        seq: seq as u64,
+                        last: seq + 1 == count,
+                        data,
+                        path: (seq == 0).then(|| endpoint.path().into()),
+                        method: (seq == 0).then(|| "POST".into()),
+                        content_type: (seq == 0).then(|| {
+                            if streaming {
+                                CHAT_STREAM_CONTENT_TYPE
+                            } else {
+                                "application/json"
+                            }
+                            .into()
+                        }),
+                    },
+                ),
+            )
+            .await
+            .context("OAI request transfer timed out")??;
+        }
+        let first = receiver.next().await?.context("empty OAI response")?;
+        let status = first.status.unwrap_or(200);
+        let content_type = first
+            .content_type
+            .unwrap_or_else(|| "application/json".into());
+        let body = stream::once(async move { Ok(first.body) })
+            .chain(stream::try_unfold(receiver, |mut receiver| async move {
+                Ok(receiver.next().await?.map(|piece| (piece.body, receiver)))
+            }))
+            .boxed();
+        Ok(Reply {
+            status,
+            content_type,
+            body,
+        })
+    }
+
     /// Like [`Self::request`] with an explicit method (`GET`/`POST`/`DELETE`)
     /// for the tc-ai-api passthrough paths; GET/DELETE send an empty body.
     pub async fn request_method(
@@ -1263,7 +1946,20 @@ impl TunnelConsumer {
         body: &[u8],
         timeout: Duration,
     ) -> Result<TunnelResponse> {
-        if !matches!(method, "GET" | "POST" | "DELETE") {
+        self.request_method_with_content_type(peer, method, path, body, "application/json", timeout)
+            .await
+    }
+
+    pub(super) async fn request_method_with_content_type(
+        &self,
+        peer: &str,
+        method: &str,
+        path: &str,
+        body: &[u8],
+        content_type: &str,
+        timeout: Duration,
+    ) -> Result<TunnelResponse> {
+        if !matches!(method, "GET" | "POST" | "DELETE") || content_type.len() > 256 {
             bail!("request_rejected");
         }
         let body = if method == "POST" { body } else { &[] };
@@ -1297,7 +1993,7 @@ impl TunnelConsumer {
                     data,
                     path: (seq == 0).then(|| path.to_string()),
                     method: (seq == 0).then(|| method.to_string()),
-                    content_type: (seq == 0).then(|| "application/json".into()),
+                    content_type: (seq == 0).then(|| content_type.to_string()),
                 },
             );
             tokio::task::yield_now().await;
@@ -1924,7 +2620,8 @@ mod tests {
 
     #[tokio::test]
     async fn image_generations_resolve_model_and_preserve_response() {
-        let bytes = br#"{ "data": [{"b64_json":"YWJj"}] }"#.to_vec();
+        let bytes =
+            br#"{ "data": [{"b64_json":"YWJj", "url":"https://unused.invalid/image"}] }"#.to_vec();
         let (mut target, recorded, server) =
             mock_upstream(vec![(200, "application/json", bytes.clone())]).await;
         target.model = "image-model".into();
@@ -1963,9 +2660,428 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn image_posts_inline_upstream_urls_without_cross_origin_key() {
+        for path in ["/images/generations", "/images/edits"] {
+            let (download, downloads, download_server) =
+                mock_upstream(vec![(200, "image/png", b"abc".to_vec())]).await;
+            let url = format!("{}/image", download.base_url);
+            let (target, _, server) = mock_upstream(vec![(
+                200,
+                "application/json",
+                serde_json::to_vec(&json!({"created": 42, "data": [
+                    {"url": url, "revised_prompt": "revised"},
+                    {"url": "data:image/png;BASE64,ZGVm", "b64_json": null},
+                    {"b64_json": "Z2hp", "url": "https://unused.invalid/image"}
+                ]}))
+                .unwrap(),
+            )])
+            .await;
+            let response = forward_capped(
+                &target.base_url,
+                &target.api_key,
+                "POST",
+                path,
+                Some(br#"{"model":"image-model","response_format":"b64_json"}"#.to_vec()),
+                None,
+                TIMEOUT,
+                MAX_IMAGE_RESPONSE_BYTES,
+            )
+            .await
+            .unwrap();
+            assert_eq!(response.status, 200);
+            assert_eq!(response.content_type, "application/json");
+            assert_eq!(
+                json_body(&response),
+                json!({"created": 42, "data": [
+                    {"b64_json": "YWJj", "revised_prompt": "revised"},
+                    {"b64_json": "ZGVm"},
+                    {"b64_json": "Z2hp", "url": "https://unused.invalid/image"}
+                ]})
+            );
+            server.await.unwrap();
+            download_server.await.unwrap();
+            let calls = downloads.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            assert!(calls[0].0.starts_with("GET /v1/image "));
+            assert!(!calls[0].0.to_ascii_lowercase().contains("authorization:"));
+        }
+    }
+
+    #[tokio::test]
+    async fn image_url_format_preserves_response_even_after_retry() {
+        let raw = br#"{ "data": [{"url":"https://unused.invalid/image"}] }"#;
+        for retry in [false, true] {
+            let mut replies = Vec::new();
+            if retry {
+                replies.push((400, "application/json", b"Unknown response_format".to_vec()));
+            }
+            replies.push((200, "application/json", raw.to_vec()));
+            let (target, _, server) = mock_upstream(replies).await;
+            let response = forward_capped(
+                &target.base_url,
+                &target.api_key,
+                "POST",
+                "/images/generations",
+                Some(br#"{"model":"image-model","response_format":"url"}"#.to_vec()),
+                None,
+                TIMEOUT,
+                MAX_IMAGE_RESPONSE_BYTES,
+            )
+            .await
+            .unwrap();
+            assert_eq!(response.status, 200);
+            assert_eq!(response.body, raw);
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn image_posts_inline_urls_after_format_retry() {
+        let (target, recorded, server) = mock_upstream(vec![
+            (
+                422,
+                "application/json",
+                b"Unsupported response_format".to_vec(),
+            ),
+            (
+                200,
+                "application/json",
+                br#"{"data":[{"url":"data:image/png;base64,YWJj"}]}"#.to_vec(),
+            ),
+        ])
+        .await;
+        let response = forward_capped(
+            &target.base_url,
+            &target.api_key,
+            "POST",
+            "/images/generations",
+            Some(br#"{"model":"image-model","response_format":"b64_json"}"#.to_vec()),
+            None,
+            TIMEOUT,
+            MAX_IMAGE_RESPONSE_BYTES,
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            json_body(&response),
+            json!({"data": [{"b64_json": "YWJj"}]})
+        );
+        server.await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&recorded.lock().unwrap()[1].1).unwrap(),
+            json!({"model": "image-model"})
+        );
+    }
+
+    #[tokio::test]
+    async fn image_url_download_errors_return_json_502() {
+        for (status, bytes, code) in [
+            (200, vec![0; 257], "response_too_large"),
+            (404, b"not found".to_vec(), "image_fetch_failed"),
+        ] {
+            let (download, _, download_server) =
+                mock_upstream(vec![(status, "image/png", bytes)]).await;
+            let (target, _, server) = mock_upstream(vec![(
+                200,
+                "application/json",
+                serde_json::to_vec(
+                    &json!({"data": [{"url": format!("{}/image", download.base_url)}]}),
+                )
+                .unwrap(),
+            )])
+            .await;
+            let response = forward_capped(
+                &target.base_url,
+                &target.api_key,
+                "POST",
+                "/images/generations",
+                Some(br#"{"model":"image-model","response_format":"b64_json"}"#.to_vec()),
+                None,
+                TIMEOUT,
+                256,
+            )
+            .await
+            .unwrap();
+            assert_eq!(response.status, 502);
+            assert_eq!(json_body(&response)["error"]["code"], code);
+            server.await.unwrap();
+            // The capped reader may close the connection before the fixture finishes writing.
+            let _ = download_server.await;
+        }
+    }
+
+    #[tokio::test]
+    async fn image_url_download_budget_is_shared_by_all_items() {
+        let (download, downloads, download_server) =
+            mock_upstream(vec![(200, "image/png", vec![0; 100]); 2]).await;
+        let url = format!("{}/image", download.base_url);
+        let (target, _, server) = mock_upstream(vec![(
+            200,
+            "application/json",
+            serde_json::to_vec(&json!({"data": [{"url": url}, {"url": url}]})).unwrap(),
+        )])
+        .await;
+        let response = forward_capped(
+            &target.base_url,
+            &target.api_key,
+            "POST",
+            "/images/generations",
+            Some(br#"{"model":"image-model","response_format":"b64_json"}"#.to_vec()),
+            None,
+            TIMEOUT,
+            256,
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status, 502);
+        assert_eq!(json_body(&response)["error"]["code"], "response_too_large");
+        server.await.unwrap();
+        let _ = download_server.await;
+        assert_eq!(downloads.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn embeddings_and_moderations_tunnel_rewrite_only_model_and_preserve_response() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
+        for (path, model, input, expected, status, bytes) in [
+            (
+                "/embeddings", "embed-model",
+                br#"{"model":"embed-model","input":["one","two"],"dimensions":4,"encoding_format":"float"}"#.as_slice(),
+                br#"{"model":"upstream-model","input":["one","two"],"dimensions":4,"encoding_format":"float"}"#.as_slice(),
+                200, br#"{ "data": [{"embedding":[0.5]}], "usage":{"total_tokens":2} }"#.as_slice(),
+            ),
+            (
+                "/moderations", "moderation-model",
+                br#"{"model":"moderation-model","input":"hello","user":"test-user"}"#.as_slice(),
+                br#"{"model":"upstream-model","input":"hello","user":"test-user"}"#.as_slice(),
+                200, br#"{ "results":[{"flagged":false}] }"#.as_slice(),
+            ),
+            (
+                "/moderations", "moderation-model",
+                br#"{"model":"moderation-model","input":"hello","user":"test-user"}"#.as_slice(),
+                br#"{"model":"upstream-model","input":"hello","user":"test-user"}"#.as_slice(),
+                422, br#"{ "error":{"message":"fixture rejection"} }"#.as_slice(),
+            ),
+        ] {
+            let (mut target, recorded, server) = mock_upstream(vec![(status, "application/json", bytes.to_vec())]).await;
+            target.model = "upstream-model".into();
+            let (send, sent) = capture();
+            let provider = TunnelProvider::new(send, Arc::new(move |resolved_path, body| {
+                assert_eq!(resolved_path, path);
+                assert_eq!(body["model"], model);
+                Ok(Some(target.clone()))
+            }));
+            provider.handle_message("peer", request("r", 0, true, chunks(input).remove(0), Some(path))).await;
+            server.await.unwrap();
+            let sent = sent.lock().unwrap();
+            assert_eq!(sent.len(), 1);
+            assert_eq!(sent[0].0, "peer");
+            let ProtocolMessage::OaiResponse { data, status: actual, content_type, .. } = &sent[0].1 else { panic!("expected tunnel response") };
+            assert_eq!(*actual, Some(status));
+            assert_eq!(content_type.as_deref(), Some("application/json"));
+            assert_eq!(base64::engine::general_purpose::STANDARD.decode(data).unwrap(), bytes);
+            let calls = recorded.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            assert!(calls[0].0.starts_with(&format!("POST /v1{path} ")));
+            assert_eq!(calls[0].1, expected);
+            assert!(provider.bindings.lock().unwrap().0.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn moderation_requires_model_and_new_routes_reject_wrong_methods() {
+        let (send, _) = capture();
+        let provider = TunnelProvider::new(send, Arc::new(|_, _| panic!("must not resolve")));
+        for body in [
+            br#"{}"#.as_slice(),
+            br#"{"model":""}"#.as_slice(),
+            br#"{"model":null}"#.as_slice(),
+        ] {
+            let response = provider
+                .dispatch("peer", "POST", "/moderations", "application/json", body)
+                .await
+                .unwrap();
+            assert_eq!(response.status, 400);
+            assert_eq!(response.body, missing_model().body);
+        }
+        for path in ["/embeddings", "/moderations"] {
+            assert_eq!(
+                provider
+                    .dispatch("peer", "GET", path, "application/json", b"")
+                    .await
+                    .err()
+                    .unwrap()
+                    .to_string(),
+                "request_rejected"
+            );
+            assert_eq!(
+                provider
+                    .dispatch(
+                        "peer",
+                        "POST",
+                        &format!("{path}/unknown"),
+                        "application/json",
+                        b"{}"
+                    )
+                    .await
+                    .err()
+                    .unwrap()
+                    .to_string(),
+                "unsupported_path"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_embedding_tunnel_can_still_use_the_provider_default_model() {
+        let (mut target, recorded, server) =
+            mock_upstream(vec![(200, "application/json", b"{}".to_vec())]).await;
+        target.model = "embed-model".into();
+        let (send, _) = capture();
+        let provider = TunnelProvider::new(
+            send,
+            Arc::new(move |_, body| {
+                assert!(body.get("model").is_none());
+                Ok(Some(target.clone()))
+            }),
+        );
+        let response = provider
+            .dispatch(
+                "peer",
+                "POST",
+                "/embeddings",
+                "application/json",
+                br#"{"input":"one"}"#,
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status, 200);
+        server.await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&recorded.lock().unwrap()[0].1).unwrap(),
+            json!({"model":"embed-model","input":"one"})
+        );
+    }
+
+    #[tokio::test]
+    async fn image_posts_retry_without_rejected_response_format() {
+        let error = br#"{"error":{"message":"Unknown parameter: 'response_format'.","type":"invalid_request_error","param":"response_format"}}"#;
+        let success = br#"{"data":[{"b64_json":"YWJj"}]}"#;
+        for (path, status, error) in [
+            ("/images/generations", 400, error.as_slice()),
+            (
+                "/images/edits",
+                422,
+                b"Unsupported RESPONSE_FORMAT".as_slice(),
+            ),
+        ] {
+            let (mut target, recorded, server) = mock_upstream(vec![
+                (status, "application/json", error.to_vec()),
+                (200, "application/json", success.to_vec()),
+            ])
+            .await;
+            target.model = "image-model".into();
+            let (send, _) = capture();
+            let provider =
+                TunnelProvider::new(send, Arc::new(move |_, _| Ok(Some(target.clone()))));
+            let raw = br#"{"model":"shared-image-model","prompt":"hello","n":2,"response_format":"b64_json"}"#;
+            let response = provider
+                .dispatch("peer", "POST", path, "application/json", raw)
+                .await
+                .unwrap();
+            assert_eq!(response.status, 200);
+            assert_eq!(response.body, success);
+            server.await.unwrap();
+            let calls = recorded.lock().unwrap();
+            assert_eq!(calls.len(), 2);
+            for (headers, _) in calls.iter() {
+                assert!(headers.starts_with(&format!("POST /v1{path} ")));
+            }
+            assert_eq!(
+                serde_json::from_slice::<Value>(&calls[0].1).unwrap(),
+                json!({"model":"image-model","prompt":"hello","n":2,"response_format":"b64_json"})
+            );
+            assert_eq!(
+                serde_json::from_slice::<Value>(&calls[1].1).unwrap(),
+                json!({"model":"image-model","prompt":"hello","n":2})
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn image_format_retry_is_bounded_and_skips_other_errors() {
+        let hint = br#"{"model":"image-model","response_format":"b64_json"}"#;
+        let no_hint = br#"{"model":"image-model"}"#;
+        let rejection = b"Unknown parameter: response_format";
+        for (path, raw, status, error, attempts) in [
+            (
+                "/images/generations",
+                hint.as_slice(),
+                400,
+                rejection.as_slice(),
+                2,
+            ),
+            (
+                "/images/generations",
+                no_hint.as_slice(),
+                400,
+                rejection.as_slice(),
+                1,
+            ),
+            (
+                "/images/generations",
+                hint.as_slice(),
+                400,
+                b"Invalid prompt".as_slice(),
+                1,
+            ),
+            (
+                "/images/generations",
+                hint.as_slice(),
+                500,
+                rejection.as_slice(),
+                1,
+            ),
+            (
+                "/chat/completions",
+                hint.as_slice(),
+                400,
+                rejection.as_slice(),
+                1,
+            ),
+        ] {
+            let (target, recorded, server) =
+                mock_upstream(vec![(status, "text/plain", error.to_vec()); attempts]).await;
+            let response = forward_capped(
+                &target.base_url,
+                &target.api_key,
+                "POST",
+                path,
+                Some(raw.to_vec()),
+                None,
+                TIMEOUT,
+                MAX_IMAGE_RESPONSE_BYTES,
+            )
+            .await
+            .unwrap();
+            assert_eq!(response.status, status);
+            assert_eq!(response.body, error);
+            let calls = recorded.lock().unwrap();
+            assert_eq!(calls.len(), attempts);
+            assert_eq!(calls[0].1, raw);
+            if attempts == 2 {
+                assert_eq!(calls[1].1, no_hint);
+            }
+            drop(calls);
+            server.await.unwrap();
+        }
+    }
+
     #[test]
     fn media_job_paths_queries_and_deadlines() {
-        for &(family, _) in JOB_KINDS {
+        for (family, _) in media_kinds() {
             let path = format!("{family}/job_1-A/content");
             for query in ["variant=preview&range=0-9", "range=0-9&variant=preview"] {
                 assert_eq!(
@@ -2018,7 +3134,7 @@ mod tests {
         let job = json!({"id":"shared-id","status":"completed","created_at":3,"url":"unchanged"});
         let other = json!({"id":"other-id","status":"completed","created":9});
         let mut replies = Vec::new();
-        for _ in JOB_KINDS {
+        for _ in media_kinds() {
             replies.extend([
                 reply(201, job.clone()),
                 reply(202, other.clone()),
@@ -2032,7 +3148,7 @@ mod tests {
         target.model = "media-model".into();
         let (send, _) = capture();
         let provider = TunnelProvider::new(send, Arc::new(move |_, _| Ok(Some(target.clone()))));
-        for (i, &(family, _)) in JOB_KINDS.iter().enumerate() {
+        for (i, (family, _)) in media_kinds().enumerate() {
             let (owner, stranger) = if i == 0 { ("a", "b") } else { ("b", "a") };
             let body = format!(
                 r#"{{"model":"{}-model","prompt":"hello"}}"#,
@@ -2120,7 +3236,7 @@ mod tests {
         }
         server.await.unwrap();
         let calls = calls.lock().unwrap();
-        for (i, &(family, _)) in JOB_KINDS.iter().enumerate() {
+        for (i, (family, _)) in media_kinds().enumerate() {
             assert_eq!(
                 serde_json::from_slice::<Value>(&calls[i * 6].1).unwrap()["model"],
                 "media-model"
@@ -2881,11 +3997,216 @@ mod tests {
         assert_eq!(upstream["model"], "resolved");
         assert_eq!(upstream["reasoning_effort"], "future-effort");
         assert_eq!(upstream["messages"], body["messages"]);
-        assert_eq!(upstream["stream"], false);
+        assert_eq!(upstream["stream"], true);
         assert_eq!(upstream["temperature"], 0.8);
         assert!(
             matches!(&sent.lock().unwrap()[0], (peer, ProtocolMessage::OaiResponse { status: Some(429), content_type: Some(ct), last: true, .. }) if peer == "consumer" && ct == "application/json")
         );
+    }
+
+    #[tokio::test]
+    async fn chat_receiver_accepts_buffered_v1_reply_and_checks_sender() {
+        let (send, sent) = capture();
+        let consumer = TunnelConsumer::new(send);
+        let task = {
+            let consumer = consumer.clone();
+            tokio::spawn(async move {
+                consumer
+                    .request_chat("provider", br#"{"stream":true}"#, true, TIMEOUT)
+                    .await
+                    .unwrap()
+                    .buffered()
+                    .await
+                    .unwrap()
+            })
+        };
+        let id = loop {
+            if let Some((_, ProtocolMessage::OaiRequest { id, .. })) = sent.lock().unwrap().first()
+            {
+                break id.clone();
+            }
+            tokio::task::yield_now().await;
+        };
+        let body = br#"{ "choices":[], "usage":{"completion_tokens":3} }"#;
+        let mut msg = ProtocolMessage::OaiResponse {
+            id,
+            seq: 0,
+            last: true,
+            data: chunks(body).remove(0),
+            status: Some(200),
+            content_type: Some("application/json".into()),
+        };
+        if let ProtocolMessage::OaiResponse { data, .. } = &mut msg {
+            *data = chunks(b"untrusted").remove(0);
+        }
+        consumer.handle_message("other", &msg);
+        if let ProtocolMessage::OaiResponse { data, .. } = &mut msg {
+            *data = chunks(body).remove(0);
+        }
+        consumer.handle_message("provider", &msg);
+        let reply = task.await.unwrap();
+        assert_eq!(reply.body, body);
+        assert!(consumer.pending.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn chat_receiver_enforces_total_decoded_stream_cap() {
+        let (send, sent) = capture();
+        let consumer = TunnelConsumer::new(send);
+        let task = {
+            let consumer = consumer.clone();
+            tokio::spawn(async move {
+                let mut reply = consumer
+                    .request_chat("provider", br#"{"stream":true}"#, true, TIMEOUT)
+                    .await
+                    .unwrap();
+                let mut total = 0;
+                while let Some(chunk) = reply.body.next().await {
+                    match chunk {
+                        Ok(bytes) => total += bytes.len(),
+                        Err(err) => {
+                            assert_eq!(err.to_string(), "request_too_large");
+                            return total;
+                        }
+                    }
+                }
+                panic!("oversized stream was accepted");
+            })
+        };
+        let id = loop {
+            if let Some((_, ProtocolMessage::OaiRequest { id, .. })) = sent.lock().unwrap().first()
+            {
+                break id.clone();
+            }
+            tokio::task::yield_now().await;
+        };
+        let data = chunks(&vec![b'x'; CHUNK_SIZE / 4 * 3]).remove(0);
+        for seq in 0..=MAX_SEQ {
+            consumer.handle_message(
+                "provider",
+                &ProtocolMessage::OaiResponse {
+                    id: id.clone(),
+                    seq,
+                    last: seq == MAX_SEQ,
+                    data: data.clone(),
+                    status: (seq == 0).then_some(200),
+                    content_type: (seq == 0).then(|| "text/event-stream".into()),
+                },
+            );
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(task.await.unwrap(), MAX_BYTES);
+        assert!(consumer.pending.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn chat_receiver_releases_pending_after_idle_timeout() {
+        let (send, sent) = capture();
+        let consumer = TunnelConsumer::new(send);
+        let task = {
+            let consumer = consumer.clone();
+            tokio::spawn(async move {
+                consumer
+                    .request_chat("provider", br#"{"stream":true}"#, true, TIMEOUT)
+                    .await
+                    .unwrap()
+            })
+        };
+        let id = loop {
+            if let Some((_, ProtocolMessage::OaiRequest { id, .. })) = sent.lock().unwrap().first()
+            {
+                break id.clone();
+            }
+            tokio::task::yield_now().await;
+        };
+        consumer.handle_message(
+            "provider",
+            &ProtocolMessage::OaiResponse {
+                id,
+                seq: 0,
+                last: false,
+                data: chunks(b"data: hello\n\n").remove(0),
+                status: Some(200),
+                content_type: Some("text/event-stream".into()),
+            },
+        );
+        let mut reply = task.await.unwrap();
+        assert_eq!(
+            &reply.body.next().await.unwrap().unwrap()[..],
+            b"data: hello\n\n"
+        );
+        let err = reply.body.next().await.unwrap().unwrap_err();
+        assert!(err.to_string().contains("stalled"));
+        assert_eq!(consumer.pending_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn chat_provider_cancels_active_stream_when_peer_leaves() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
+        crate::authz::test_reset();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = [0; 4096];
+            assert!(socket.read(&mut bytes).await.unwrap() > 0);
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: hello\n\n").await.unwrap();
+            // Keep the stream open until the provider drops its upstream body.
+            std::future::pending::<()>().await;
+        });
+        let (send, sent) = capture();
+        let provider = TunnelProvider::new(
+            send,
+            Arc::new(move |_, _| {
+                Ok(Some(ResolvedModel {
+                    base_url: format!("http://{addr}/v1"),
+                    api_key: String::new(),
+                    model: "chat-model".into(),
+                    reasoning_effort: None,
+                    voice: None,
+                    lang_voices: HashMap::new(),
+                }))
+            }),
+        );
+        let task = {
+            let provider = provider.clone();
+            tokio::spawn(async move {
+                let mut msg = request(
+                    "chat-request",
+                    0,
+                    true,
+                    chunks(br#"{"model":"chat-model","stream":true}"#).remove(0),
+                    Some("/chat/completions"),
+                );
+                if let ProtocolMessage::OaiRequest { content_type, .. } = &mut msg {
+                    *content_type = Some(CHAT_STREAM_CONTENT_TYPE.into());
+                }
+                provider.handle_message("consumer", msg).await;
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if sent
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|(_, msg)| matches!(msg, ProtocolMessage::OaiResponse { seq: 0, .. }))
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(provider.active_chats.lock().unwrap().len(), 1);
+        provider.drop_peer("consumer");
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(provider.active_chats.lock().unwrap().is_empty());
+        server.abort();
     }
 
     #[tokio::test]

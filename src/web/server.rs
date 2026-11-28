@@ -29,6 +29,10 @@
 //!   the (percent-encoded, sandbox-relative) path to a temp file and streams
 //!   it back the same way `/api/store/download` does, or 404 JSON error if
 //!   the path is unknown/outside the sandbox.
+//! - `POST /api/web/upload/begin`, `PUT /api/web/upload/<id>/file?path=...`,
+//!   `POST /api/web/upload/<id>/finish`, `DELETE /api/web/upload/<id>` ->
+//!   staged site upload for `web.publish` (see `web_upload.rs`); local
+//!   sessions only.
 //! - `GET /api/dev/instance` -> 200 JSON with a per-process `instance` nonce.
 //!   In debug builds it also returns an asset fingerprint, and the dashboard
 //!   polls for changes to either value. Release builds do not poll or read
@@ -42,7 +46,8 @@
 //!   without a session serves a small 401 "locked" page. This holds on
 //!   loopback too: any local process could otherwise drive the daemon.
 //! - `POST /api/call`, `POST /api/store/upload`, and
-//!   `POST /api/store/sandbox-upload`, and `POST /api/escrow/import` require the request header
+//!   `POST /api/store/sandbox-upload`, `POST /api/escrow/import` and the
+//!   `/api/web/upload/` routes require the request header
 //!   `x-mistl-ui: 1`. Browsers cannot attach custom headers cross-origin
 //!   without a CORS preflight, and this server never sends CORS headers
 //!   (OPTIONS -> 403), so web pages from other origins can't drive the
@@ -305,7 +310,7 @@ pub(super) async fn read_body(
 /// Like [`read_body`], but streams straight to `file` in fixed-size chunks
 /// instead of accumulating the whole body in memory (uploads can be up to
 /// [`MAX_UPLOAD_BYTES`]).
-async fn read_body_to_file(
+pub(super) async fn read_body_to_file(
     stream: &mut TcpStream,
     leftover: Vec<u8>,
     content_length: u64,
@@ -437,7 +442,7 @@ fn host_is_allowed(host: &str, local_addr: &std::net::SocketAddr) -> bool {
 /// opened from `file://`, a tab reaching the daemon under a hostname the
 /// allowlist doesn't cover) could not be told apart from a broken handler
 /// after the fact.
-fn is_guard_denied(
+pub(super) fn is_guard_denied(
     head: &RequestHead,
     local_addr: &std::net::SocketAddr,
     require_ui_header: bool,
@@ -577,7 +582,7 @@ fn response_head(status: u16, reason: &str, content_type: &str, content_length: 
     )
 }
 
-async fn write_json_response(
+pub(super) async fn write_json_response(
     stream: &mut TcpStream,
     status: u16,
     reason: &str,
@@ -647,7 +652,7 @@ async fn write_feature_response(
 }
 
 /// JSON error body shape used by every non-2xx response from this server.
-async fn write_error(
+pub(super) async fn write_error(
     stream: &mut TcpStream,
     status: u16,
     reason: &str,
@@ -760,7 +765,9 @@ pub(super) async fn handle_connection_inner(
     }
     // Bind every mutation to the page's actual build/instance. A stale tab cannot
     // operate a different daemon which happens to reuse the same port.
-    if method == "POST" && head.header("x-mistl-instance") != Some(page_identity().as_str()) {
+    if matches!(method.as_str(), "POST" | "PUT" | "DELETE")
+        && head.header("x-mistl-instance") != Some(page_identity().as_str())
+    {
         return write_error(stream, 409, "Conflict", "daemon changed; reload this page").await;
     }
 
@@ -831,6 +838,9 @@ pub(super) async fn handle_connection_inner(
         }
         ("GET", "/api/store/sandbox-download") => {
             handle_store_sandbox_download(stream, &head, state).await
+        }
+        (m @ ("POST" | "PUT" | "DELETE"), p) if p.starts_with(super::web_upload::ROUTE_PREFIX) => {
+            super::web_upload::handle(stream, m, p, &head, leftover, state, caller).await
         }
         // Never send CORS headers/allow preflights: any OPTIONS is refused.
         ("OPTIONS", _) => write_error(stream, 403, "Forbidden", "forbidden").await,

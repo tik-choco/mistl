@@ -29,6 +29,7 @@ Windows 版本只有一个独立的 `mistl.exe`：内置屏幕捕获、H264 编�
 | **屏幕共享** | 将你的屏幕或 [tc-chat](https://github.com/tik-choco/tc-chat) 中的共享内容作为 RTSP 提供给 VRChat 视频播放器 |
 | **聊天中继** | 持续驻留 tc-chat 房间，向后加入的用户重放带签名的历史记录 |
 | **隧道** | 穿透 NAT 的 TCP/UDP 端口转发，每次连接都需批准 |
+| **网站与游戏** | `mistl upload ./dist` 发布静态 Web 应用或游戏；装有 mistl 的人可在 `http://<site>.localhost:6490/` 打开（仅限本机回环）（[详情](docs/web.md)） |
 | **AI 网络** | 与其他节点共享 LLM（[mistai](https://github.com/tik-choco-lab/mistai) 协议），并提供兼容 OpenAI 的本地 API |
 | **智能体** | `mistl agent`：可操作 mistl 和你的工作区的终端 AI 助手 |
 | **控制面板** | 在浏览器中使用上述所有功能，支持英语和日语 |
@@ -70,6 +71,7 @@ $ mistl agent                           # terminal AI agent
 | 主题 | |
 | --- | --- |
 | [CLI 参考](docs/cli.md) | 所有命令、VRChat 中继、聊天中继、托管、智能体 |
+| [网站与游戏](docs/web.md) | `mistl upload`、在 localhost 上打开、安全模型 |
 | [配置](docs/configuration.md) | `config.toml` 配置键和数据存放位置 |
 | [AI 配置](docs/ai-config.md) | 提供商、房间和本地 API |
 | [身份](docs/identity.md) | 个人资料文档和 DID 委托 |

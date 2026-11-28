@@ -70,8 +70,9 @@ registers again can restore its removed contribution.
 
 Configure an HTTP endpoint in `ai.providers`, then select models directly with
 `{ provider_id, model }`. Model names are raw upstream ids; labels identify
-providers for display only. Temperature is never sent upstream. Bot chat tasks
-can carry their own `reasoning_effort`.
+providers for display only. OpenAI chat passthrough preserves temperature;
+the typed LLM protocol used by CLI and bot tasks retains its existing behavior.
+Bot chat tasks can carry their own `reasoning_effort`.
 
 ```toml
 [ai]
@@ -159,9 +160,22 @@ local HTTP responses use the upstream's actual Content-Type (or
 `application/octet-stream` if no type is reported).
 If an upstream explicitly rejects `response_format` with HTTP 400/422,
 mistl retries once without that hint while preserving speed.
+Speech also forwards additional JSON fields (for example `instructions`,
+object-form `voice`, `stream_format` and vendor options) directly and through
+updated room providers. Extra fields cannot replace the routed `model` or
+`input`. Transcription forwards additional multipart text fields, preserving
+their order and repeated names (for example `language`, `prompt`, `temperature`,
+`response_format`, `timestamp_granularities[]`, `include[]`, `chunking_strategy`
+and `stream`). The successful upstream body and Content-Type are preserved,
+including JSON, verbose JSON, text, SRT and VTT. Responses are buffered, even
+for `stream=true`, and limited to 1 MiB for transcription. Additional fields
+are limited to 8 KiB of encoded metadata per request (at most 64 fields for
+transcription). Older room providers ignore the additional fields and return
+the legacy `{"text":"..."}` transcription response; updated providers keep
+this response shape for older clients.
 
-Chat requests carry the task's `reasoning_effort` through `llm_request`, including
-bot transforms and the default local API routes. Providers forward a supplied
+Typed chat requests carry the task's `reasoning_effort` through `llm_request`,
+including bot transforms and legacy room routes. Providers forward a supplied
 string verbatim, overriding their upstream default; absence preserves that
 default. `none` is an explicit override, and unknown future request values pass through.
 The configured default task effort is `ai.default_reasoning_effort`: exactly
@@ -169,7 +183,7 @@ The configured default task effort is `ai.default_reasoning_effort`: exactly
 effort; `none` sends the literal string. Invalid configuration values are
 rejected by `config set` and ignored with a warning on load.
 
-A room provider uses this effort for any incoming `llm_request` that omits
+A room provider uses this effort for any incoming chat request that omits
 `reasoning_effort`; a request value always wins, including for shared models.
 The local chat APIs and `mistl ai chat` inherit it when the model is omitted
 or resolves to `ai.default_ref`. Another model gets no configured task effort.
@@ -186,8 +200,8 @@ mistl config get ai.tts.speed
 mistl config set ai.default_reasoning_effort null
 mistl config set ai.tts.speed null
 ```
-Ordinary room chat always uses the streaming LLM protocol, even when the local
-HTTP client asks for a non-streaming result.
+Legacy typed room chat uses the streaming LLM protocol, even when the local HTTP
+client asks for a non-streaming result.
 
 ## Room-scoped local API and OpenAI tunnel
 
@@ -198,9 +212,15 @@ directly, independently of `ai.default_ref`, `ai.tts` and `ai.stt`:
 | Method | Route (relative to the base) | Behavior |
 | --- | --- | --- |
 | GET | `/rooms/{room}/models` | Currently advertised raw model ids in that room; no cached or other-room models |
-| POST | `/rooms/{room}/chat/completions` | `llm_request` for text chat and `oai` for image content; supports JSON and SSE responses |
-| POST | `/rooms/{room}/audio/speech` | That room's advertised TTS service, forwarding body `speed` and `response_format` |
-| POST | `/rooms/{room}/audio/transcriptions` | Multipart upload to that room's advertised STT service |
+| POST | `/rooms/{room}/chat/completions` | Raw JSON/SSE through `oai_chat`; legacy peers use `llm_request` for text or buffered `oai` for image content |
+| POST | `/rooms/{room}/responses` | Stateless Responses API JSON/SSE through `oai_responses`; no legacy fallback |
+| POST | `/rooms/{room}/completions` | Legacy text Completions JSON/SSE through `oai_completions`; explicit model required |
+| POST | `/rooms/{room}/audio/speech` | That room's advertised TTS service, forwarding `speed`, `response_format` and bounded additional JSON fields |
+| POST | `/rooms/{room}/audio/transcriptions` | Multipart upload and additional text fields to that room's advertised STT service; preserves the upstream response with updated providers |
+| POST | `/rooms/{room}/audio/translations` | Standard multipart through `oai_multipart`; explicit model required |
+| POST | `/rooms/{room}/images/variations` | Standard multipart through `oai_multipart`; explicit model required |
+| POST | `/rooms/{room}/embeddings` | JSON passthrough to the room's advertised embedding model |
+| POST | `/rooms/{room}/moderations` | JSON passthrough to the room's advertised moderation model |
 | POST | `/rooms/{room}/systemone` | System One decision request (`{model?, state, questions, ...}`, as Ollama's `/v1/systemone`) relayed over the room's `oai` tunnel; upstream status and body are returned as-is |
 
 URL-encode the whole room id as one path segment (for example `team/one` becomes
@@ -218,13 +238,13 @@ $ curl http://127.0.0.1:6478/v1/rooms/team-room/chat/completions \
 
 Room providers also advertise `oai` when a usable HTTP target exists. The
 mistai-compatible `oai_request` / `oai_response` / `oai_error` tunnel allows
-`POST /chat/completions`, `GET /models`, `POST /embeddings` and `POST /systemone`
+`POST /chat/completions`, `GET /models`, `POST /embeddings`, `POST /moderations` and `POST /systemone`
 (decision models, e.g. an Ollama upstream), plus the relayed media paths described
 under the tc-ai-api passthrough below. It resolves the
 model against that room's shared refs with the same rules as LLM requests,
-including `model_not_shared`, first-match ordering and empty-model defaults.
-Only the resolved provider's API key is used. Tunnel chat is forced to
-`stream:false`; image chat preserves `temperature`. The tunnel relays upstream
+including `model_not_shared`, first-match ordering and empty-model defaults
+where supported.
+Only the resolved provider's API key is used. The tunnel relays upstream
 status, content type and body.
 Redirects are not followed.
 
@@ -236,15 +256,57 @@ limits per-peer/global pending requests and total buffered bytes, expires idle
 buffers and drops them on disconnect. Replies are bound to the transport sender.
 The local API retains its body limits: 2 MiB JSON and 10 MiB multipart.
 
-Image `content` parts on a room-scoped chat route select a peer advertising
-`oai`. Unscoped `POST /v1/chat/completions` with image parts resolves the request's
-`model` through `ai.providers` (using `ai.default_ref` if omitted). An HTTP
-provider receives the OpenAI request at `<base_url>/chat/completions` with its
-API key. A Room provider sends it over that room's `oai` tunnel. The upstream
-response is buffered; `stream:true` clients receive a local SSE adaptation once
-that response completes. Direct HTTP vision requests have a 120-second deadline.
-Room-scoped text chat uses `llm_request`. Local `/rooms/{room}/embeddings` and tunnel consumers for arbitrary
-paths are not exposed; mistai consumers can call all four provider tunnel paths.
+Both chat routes resolve the provider and rewrite only `model` (and add a
+configured `reasoning_effort` when absent). HTTP providers and room peers
+advertising the additive v1 `oai_chat` service receive all other JSON fields
+unchanged, including image/audio parts, arbitrary vendor fields and stream
+options. The upstream's status, content type and body are returned unchanged,
+including errors and multiple choices. SSE bytes, including usage and
+`[DONE]`, are relayed incrementally without synthesizing events.
+Authorization usage limits continue to count output characters; when the
+upstream reports token usage, those counts are also available in debug telemetry
+and in the unchanged response.
+The chat response limit is 18 MiB decoded and the deadline is at most 120 seconds.
+After the response starts, a 30-second idle timeout bounds stalled streams.
+For incremental room chat, the consumer opts in using the existing request
+`contentType` parameter `application/json; mistl-stream=1`. Each response
+chunk is independently base64 encoded, with a bounded sequence count;
+old buffered v1 replies still decode. Without this opt-in, the ordinary
+buffered v1 framing is unchanged.
+If no matching remote peer advertises `oai_chat`, an advertised local room
+model (or a usable local default when the model is omitted) can use the same
+HTTP passthrough without a P2P round trip. Otherwise
+text chat retains the legacy `llm_request` path and image chat retains its
+buffered `oai` adapter.
+`POST /v1/responses` and `POST /v1/rooms/{room}/responses` follow the same raw
+JSON/SSE relay, with an explicit `model` and only that field rewritten. For a
+room, only peers advertising `oai_responses` (an additive v1 service) are
+eligible; a model without a supporting provider returns an OpenAI-style 404.
+Direct HTTP providers receive the request at `<base_url>/responses`. Upstream
+status, content type, JSON and incremental SSE are returned unchanged, within
+the same body and time limits as chat. Output text characters are metered and
+`input_tokens`/`output_tokens` are observed from the upstream usage data.
+This is a stateless relay: `store` (including omission) and
+`previous_response_id` pass through unchanged, but mistl does not pin a
+response id to a provider. Use `store: false` for independent requests; a
+follow-up referencing a stored response may reach a different provider.
+Retrieval/deletion (`GET`/`DELETE /responses/{id}`), cancellation and
+`/responses/{id}/input_items` return 404 unsupported.
+Legacy `POST /v1/completions` (also room-scoped) uses the same raw JSON/SSE
+relay, requiring an explicit model. Room peers must advertise the additive v1
+`oai_completions` service; no legacy fallback is attempted. Direct HTTP
+providers receive `<base_url>/completions`. The chat body and time limits
+apply; only the model is rewritten, and output text characters are metered.
+Arbitrary tunnel paths are not exposed.
+`POST /v1/embeddings` and `POST /v1/moderations` also work unscoped, resolving
+an explicit `model` through `ai.providers`, or through room discovery on the
+room-scoped routes. Both accept JSON (2 MiB locally) and relay upstream status,
+content type and body unchanged (18 MiB result cap, 120-second deadline).
+On these local HTTP routes an omitted or empty `model` returns 400
+`missing_required_parameter`; mistl does not guess an embedding or moderation
+model. The upstream receives the resolved model name, with all other request
+fields preserved. Legacy direct tunnel requests to `/embeddings` may still
+use the provider's default model.
 The unscoped `POST /v1/systemone` takes the same decision body and resolves its
 `model` like chat completions (omitted: `ai.default_ref`). An HTTP provider
 receives it at `<base_url>/systemone` with only `model` rewritten; a Room
@@ -261,9 +323,12 @@ through the local API and, when its models are shared, across rooms:
 
 | Method | Route (relative to the base) | Behavior |
 | --- | --- | --- |
-| POST | `/audio/speech` | Unknown top-level fields (`keep_alive`, vendor-specific options, `stream_format`, ...) are passed through to an HTTP TTS provider; `voice` may be omitted. Over a room only the wire v1 fields are carried |
+| POST | `/audio/speech` | Additional top-level fields (`keep_alive`, `instructions`, object-form `voice`, `stream_format`, ...) pass through to HTTP and updated room TTS providers |
+| POST | `/audio/transcriptions` | Additional multipart text fields pass through; updated providers preserve the successful upstream body and Content-Type |
 | GET | `/audio/voices`, `/voices` (also root `/voices`) | The `ai.tts` provider's catalog as returned upstream; a Room synthesizes it from advertised voices |
-| POST | `/images/edits`, `/rooms/{room}/images/edits` | JSON or multipart converted to JSON (the `image` part becomes a data URL); `model` is required |
+| POST | `/images/edits`, `/rooms/{room}/images/edits` | JSON or standard multipart; legacy room peers receive converted JSON |
+| POST | `/images/variations` | Standard multipart, with explicit `model` |
+| POST | `/audio/translations` | Standard multipart, with explicit `model`; upstream status, MIME and body preserved |
 | POST | `/game/act` | Forwards the game action request as JSON with a required `model`. A multipart `image` part is converted to a JSON data URL |
 | POST | `/motion/inbetween` | Forwards the JSON request with a required `model` and returns the upstream status, content type and bytes, including JSON, BVH and CSV |
 | GET | `/motion/clips?model=<id>` | Lists sample clips. mistl requires `model` to select a provider (400 `missing_required_parameter` when absent) and forwards the query unchanged |
@@ -276,9 +341,11 @@ through the local API and, when its models are shared, across rooms:
 
 All 3D routes also exist under `/rooms/{room}/...`, and `/rooms/{room}/audio/voices`.
 Returned `data[].url` values point back at the local API route that
-served the job, so clients never see the provider's own address. A synchronous
-`response_format: "b64_json"` request is fetched as a URL and re-encoded locally
-(up to 64 MiB). Upstream statuses and error bodies are relayed as-is, including
+served the job, so clients never see the provider's own address. For synchronous
+image requests explicitly asking for `response_format: "b64_json"`, URL-only
+results are downloaded and encoded as Base64 on the provider, within the
+route's response body limit. Upstream statuses and error bodies are relayed
+as-is, including
 TTS validation errors (4xx and 503) that previously became 502.
 
 Unscoped requests resolve `model` like chat; follow-up requests for a job id go
@@ -289,17 +356,19 @@ advertising `oai` with the requested model, so sharing the provider's
 providing peer binds every job id to the requesting peer: other peers get 404
 for it and the job list only shows the caller's jobs (bounded, 25 h). The tunnel
 gains these 3D paths (`GET`/`POST`/`DELETE`, `?range=start-end` on content
-only); the four mistai paths are unchanged. Synchronous generations get a
+only); the original mistai paths remain supported. Synchronous generations get a
 35-minute deadline, content windows 5 minutes. Requests over a room are limited
 by the tunnel's 18 MiB body cap; locally the 3D body caps follow the upstream
 (about 26.8 MiB JSON, 20 MiB + 128 KiB multipart).
 
 Image edits resolve the model like 3D requests; share the gateway's image model
 ids in the room to make them available to peers. The upstream status, content
-type and body are relayed verbatim (JSON `b64_json` or binary image), without
-`X-Model` or `X-Processing-Ms` headers. The local limit is 32 MiB per image and
-128 MiB per result. Room requests are limited to about 18 MiB after multipart
-conversion (413 if exceeded), and room results to 18 MiB (502
+type and body are relayed verbatim (JSON or binary image), except for the
+URL-to-Base64 conversion described above. `X-Model` and `X-Processing-Ms`
+headers are not forwarded. The local multipart limit is 32 MiB + 128 KiB per
+request and the response limit is 128 MiB. Room requests are limited to 18 MiB
+(including base64 expansion for the legacy JSON adapter; 413 if exceeded),
+and room results to 18 MiB (502
 `response_too_large` if exceeded). The deadline is 10 minutes.
 
 The game and motion endpoints also work under `/rooms/{room}/...`. Their models
@@ -307,6 +376,20 @@ are discoverable over a room when the gateway lists them in `/v1/models` and
 the provider shares them with the room. The game action deadline is 2 minutes,
 including cold load, and all three motion endpoints have a 5-minute deadline
 (a cold start may first build an inference plan).
+Standard multipart on image edits/variations, audio translations, and
+video/music submissions is forwarded unchanged to HTTP providers or room peers
+advertising the additive mistai v1 service `oai_multipart`. The existing
+seq-zero `contentType` carries the original boundary. Only the single
+explicit text `model` part is rewritten; repeated fields such as `image[]`,
+binary masks, and ordering survive byte-for-byte. Translations use the 10 MiB
+audio upload cap and return upstream status, MIME and body unchanged.
+Room requests/responses retain the 18 MiB tunnel cap. For legacy room peers,
+image edits and video/music submissions retain their previous JSON conversion
+and the cap applies after conversion (including base64 expansion); translations
+and variations require a capable peer. JSON requests remain supported on
+edits and video/music. Raw multipart requests do not use the JSON image
+adapter's response-format retry or URL-to-base64 normalization.
+
 Game actions use the image edit upload caps (32 MiB + 128 KiB multipart or about
 42.8 MiB JSON). Motion inbetween uses the 2 MiB JSON cap. Room uploads stay within
 18 MiB after multipart conversion, and game and motion responses are capped at
@@ -359,8 +442,8 @@ Every request names a `model`, which is resolved like chat:
 
 | Method | Route | Behavior |
 | --- | --- | --- |
-| POST | `/images/generations` | OpenAI Images API request, relayed as JSON; synchronous. Same deadline (10 min) and result limits as image edits (128 MiB locally, 18 MiB over a room). Ask for `response_format: "b64_json"`: an upstream `url` is passed through unchanged and may not be reachable from other peers |
-| POST | `/videos`, `/music` | Creates a job (OpenAI Videos API shape). JSON, or multipart where every file part becomes a data URL |
+| POST | `/images/generations` | OpenAI Images API request, relayed as JSON; synchronous. Same deadline (10 min) and result limits as image edits (128 MiB locally, 18 MiB over a room). For both image routes, `response_format: "b64_json"` causes the provider to fetch and inline upstream image URLs within the result size limit |
+| POST | `/videos`, `/music` | Creates a job (OpenAI Videos API shape). JSON or standard multipart; legacy room peers receive JSON data URLs |
 | GET | `/videos`, `/music` | Jobs this daemon created, newest first |
 | GET, DELETE | `/videos/{id}`, `/music/{id}` | Job status (`queued`, `in_progress`, `completed`, `failed`) / delete |
 | GET | `/videos/{id}/content`, `/music/{id}/content` | The result, fetched in 8 MiB range windows and streamed as one 200 download (`?variant=` is passed upstream; client `Range` is ignored) |
@@ -407,13 +490,14 @@ provider for the requested service supplies a model list. They do not wait for d
 reject a known mismatch. With no providers, the existing no-provider error remains;
 legacy providers without model lists retain pass-through behavior. Omitted or
 empty models keep the configured default behavior; room `network-auto` requests
-still defer selection to the remote provider. Embeddings have no local API route.
+still defer selection to the remote provider.
 
 `model_not_found` is a local API resolution error. The wire-level
 `model_not_shared` refusal remains distinct: a providing peer rejects a named
 model outside its configured shared list, even if that model exists upstream.
-Other backend failures retain the generic HTTP 502 response, with details in the
-daemon log. `mistl ai chat` prints the model resolution message through its normal
+Chat passthrough returns upstream HTTP errors as-is. Transport failures retain
+the generic HTTP 502 response before headers; an interrupted SSE response closes
+without a fabricated completion event. `mistl ai chat` prints the model resolution message through its normal
 CLI error path.
 
 ### Browser apps (CORS)

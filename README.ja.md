@@ -31,6 +31,7 @@ C ランタイムを内蔵しており、DLL、インストーラ、外部ツー
 | **画面共有** | 自分の画面や [tc-chat](https://github.com/tik-choco/tc-chat) の共有映像を、VRChat の動画プレイヤー向けに RTSP で配信 |
 | **チャットリレー** | tc-chat のルームに常駐し、後から参加したピアへ署名付きの履歴を再送 |
 | **トンネル** | NAT を越える TCP/UDP ポート転送。接続ごとの承認に対応 |
+| **Web サイト・ゲーム** | `mistl upload ./dist` で静的な Web アプリやゲームを公開。mistl があれば `http://<site>.localhost:6490/` で遊べる（ループバックのみ）（[詳細](docs/web.md)） |
 | **AI ネットワーク** | ピアとの LLM 共有（[mistai](https://github.com/tik-choco-lab/mistai) プロトコル）と、ローカルの OpenAI 互換 API |
 | **エージェント** | `mistl agent`: mistl とワークスペースを操作できるターミナル AI アシスタント |
 | **ダッシュボード** | 上記の機能をすべてブラウザから操作。英語と日本語に対応 |
@@ -76,6 +77,7 @@ $ mistl agent                           # terminal AI agent
 | トピック | |
 | --- | --- |
 | [CLI リファレンス](docs/cli.md) | 全コマンド、VRChat リレー、チャットリレー、エスクロー、エージェント |
+| [Web サイトとゲーム](docs/web.md) | `mistl upload`、localhost での利用、セキュリティモデル |
 | [設定](docs/configuration.md) | `config.toml` のキーとデータの保存場所 |
 | [AI 設定](docs/ai-config.md) | プロバイダ、ルーム、ローカル API |
 | [アイデンティティ](docs/identity.md) | プロフィールドキュメントと DID 委任 |

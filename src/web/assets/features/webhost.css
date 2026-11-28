@@ -1,0 +1,72 @@
+/* Web page (publish + site list); shares the dashboard theme. */
+#panel-web { gap: 12px; }
+#panel-web h2 { margin: 0; }
+.web-muted { color: var(--text-dim); font-size: 12px; margin: 0; overflow-wrap: anywhere; }
+.web-error { color: var(--err); font-size: 13px; margin: 0; overflow-wrap: anywhere; }
+.web-error[hidden], .web-progress[hidden] { display: none; }
+.web-card {
+  min-width: 0;
+  padding: 13px 15px;
+  border: 1px solid var(--panel-border);
+  border-radius: 9px;
+  background: var(--panel);
+}
+.web-card h3 { margin: 0 0 10px; font-size: 15px; }
+.web-drop {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 96px;
+  padding: 16px;
+  border: 2px dashed var(--panel-border);
+  border-radius: 9px;
+  color: var(--text-dim);
+  text-align: center;
+  cursor: pointer;
+}
+.web-drop.dragging { border-color: var(--accent); background: var(--accent-dim); }
+.web-form { display: grid; gap: 10px; }
+.web-chosen { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; overflow-wrap: anywhere; }
+.web-chosen button { margin-inline-start: auto; }
+.web-skipped summary { cursor: pointer; color: var(--text-dim); font-size: 12px; width: fit-content; }
+.web-skipped ul { margin: 6px 0 0; padding-inline-start: 20px; font-size: 12px; max-height: 160px; overflow: auto; }
+.web-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
+.web-field { display: grid; gap: 4px; font-size: 13px; min-width: 0; }
+.web-field input, .web-field select { width: 100%; box-sizing: border-box; }
+.web-actions { gap: 8px; }
+.web-progress { display: flex; align-items: center; gap: 10px; }
+.web-progress progress { flex: 1; min-width: 0; height: 8px; }
+.web-result { display: grid; gap: 6px; margin-top: 4px; }
+.web-result > p:first-child { margin: 0; color: var(--ok); font-size: 13px; }
+.web-url { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; min-width: 0; }
+.web-url > a.mono { min-width: 0; overflow-wrap: anywhere; font-size: 12px; }
+.web-url a.web-open {
+  font: 600 13px var(--sans);
+  padding: 7px 13px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: var(--accent-dim);
+  color: var(--accent);
+  text-decoration: none;
+}
+.web-url a.web-open:hover { border-color: var(--accent); }
+.web-list-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.web-list-head h3 { margin: 0; font-size: 15px; }
+.web-list { display: grid; gap: 10px; }
+.web-site { display: grid; gap: 6px; }
+.web-site-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.web-site-head h4 { margin: 0; font-size: 14px; overflow-wrap: anywhere; }
+.web-badge, .web-status {
+  padding: 2px 7px;
+  border-radius: 5px;
+  background: var(--bg-alt);
+  color: var(--text-dim);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.web-badge[hidden] { display: none; }
+.web-status[data-state="installed"] { color: var(--ok); }
+.web-status[data-state="installing"] { color: var(--accent); }
+.web-status[data-state="failed"] { color: var(--err); }

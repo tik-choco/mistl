@@ -35,6 +35,7 @@ tools.
 | **Distributed vault** | Keeps other apps' encrypted checkpoints replicated across peers (tc-escrow v1, `mistl escrow`) ([details](docs/escrow.md)) |
 | **Nostr relay** | Local `ws://` Nostr relay with clustered replication and optional TLS and upstream relays ([setup](docs/configuration.md#nostr-relay)) |
 | **Tunnel** | TCP/UDP port forwarding through NAT, with per-connection approval |
+| **Web sites & games** | `mistl upload ./dist` publishes a static Web App or Game; anyone with mistl plays it at `http://<site>.localhost:6490/` (loopback only) ([details](docs/web.md)) |
 | **AI network** | Share LLMs with peers ([mistai](https://github.com/tik-choco-lab/mistai) protocol), and a local OpenAI-compatible API |
 | **Agent** | `mistl agent`: a terminal AI assistant that can operate mistl and your workspace |
 | **Dashboard** | Everything above from the browser, in English, 日本語 and 中文, with a live network topology and a tunnel node graph |
@@ -83,6 +84,7 @@ options and approval behavior.
 | Topic | |
 | --- | --- |
 | [CLI reference](docs/cli.md) | Every command, VRChat relay, chat relay, distributed vault, updates, agent |
+| [Web sites and games](docs/web.md) | `mistl upload`, playing sites on localhost, security model |
 | [Distributed vault](docs/escrow.md) | Encrypted checkpoint escrow and replication |
 | [Tunnel node graph](docs/tunnel-graph.md) | Dashboard links, port forwards, proposal rules |
 | [Configuration](docs/configuration.md) | `config.toml` keys and where data lives |

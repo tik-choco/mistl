@@ -20,7 +20,7 @@
 //!   - On success: `llm_response_done { id, content: Some(full) }`.
 //!   - On failure: `llm_error { id, message }`.
 //! - `consumer_hello` -> reply [`Provider::hello`] directly to the sender.
-//! - `tts_request` (single message: `id, text, model?, voice?, lang?`) ->
+//! - `tts_request` (single message: `id, text, model?, voice?, lang?, extra?`) ->
 //!   when a TTS closure is configured, synthesize and reply with one or more
 //!   `tts_response { id, seq, data (base64), last, mime }` chunks
 //!   ([`TTS_CHUNK_RAW_BYTES`] raw bytes per chunk before base64, comfortably
@@ -29,11 +29,13 @@
 //!   TTS, the upstream call itself just failed). Otherwise, immediate
 //!   `voice_error { code: "unsupported_service" }`.
 //! - `stt_request` (chunked: `id, seq, data (base64), last, mime, model?,
-//!   fileName?`, one or more messages sharing `id`) -> when an STT closure
+//!   fileName?, extra?`, one or more messages sharing `id`) -> when an STT closure
 //!   is configured, chunks are reassembled per `id` (capped at
 //!   [`STT_MAX_BUFFERED_BYTES`], beyond which the buffer is dropped and a
 //!   `voice_error` sent) until `last == true`, then transcribed and replied
 //!   as `stt_response { id, text }` (or `voice_error` on upstream failure).
+//!   An `extra` field on the first chunk opts into `stt_response.raw`
+//!   chunks with the original upstream response body and Content-Type.
 //!   Otherwise, immediate `voice_error { code: "unsupported_service" }`,
 //!   without ever buffering.
 //!
@@ -62,6 +64,7 @@ use crate::config::ResolvedModel;
 use super::openai::ToolOptions;
 use super::openai::{self, UpstreamConfig};
 use super::protocol::{ModelInfo, ProtocolMessage};
+use super::stt::SttOutput;
 use super::tts::TtsAudio;
 use super::{LlmCallFn, LlmCallFuture, SendFn};
 
@@ -88,6 +91,7 @@ type VoiceFuture<T> = Pin<Box<dyn Future<Output = anyhow::Result<T>> + Send>>;
 pub struct TtsOptions {
     pub speed: Option<f64>,
     pub response_format: Option<String>,
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Synthesizes speech: `(text, model_override, voice_override, lang_hint)`
@@ -111,12 +115,20 @@ pub type TtsCallFn = Arc<
         + Sync,
 >;
 
-/// Transcribes speech: `(audio_bytes, mime, model_override, file_name)` ->
-/// text. Built in `super::provide_start` from the resolved
+/// Transcribes speech: `(audio_bytes, mime, model_override, file_name, extra)` ->
+/// upstream response. Built in `super::provide_start` from the resolved
 /// `ai.stt` model reference; `None` on [`Provider`] means this node
 /// doesn't offer STT.
 pub type SttCallFn = Arc<
-    dyn Fn(Vec<u8>, String, Option<String>, Option<String>) -> VoiceFuture<String> + Send + Sync,
+    dyn Fn(
+            Vec<u8>,
+            String,
+            Option<String>,
+            Option<String>,
+            Vec<(String, String)>,
+        ) -> VoiceFuture<SttOutput>
+        + Send
+        + Sync,
 >;
 
 /// Total bytes buffered across *all* in-flight `stt_request` streams.
@@ -243,13 +255,14 @@ impl JobLimiter {
 }
 
 /// In-progress reassembly of one chunked `stt_request` stream, keyed by
-/// `(from, id)`. `mime`/`model`/`file_name` are captured from the first
+/// `(from, id)`. `mime`/`model`/`file_name`/`extra` are captured from the first
 /// chunk only (peers are not required to repeat them on every chunk).
 struct SttBuffer {
     authorized: Option<Authorized>,
     mime: String,
     model: Option<String>,
     file_name: Option<String>,
+    extra: Option<Vec<(String, String)>>,
     bytes: Vec<u8>,
     next_seq: u64,
     last_update: Instant,
@@ -324,6 +337,7 @@ impl SttBuffers {
         mime: String,
         model: Option<String>,
         file_name: Option<String>,
+        extra: Option<Vec<(String, String)>>,
     ) -> SttPush {
         self.sweep(now);
         let key = (from.to_string(), id.to_string());
@@ -360,6 +374,7 @@ impl SttBuffers {
             mime,
             model,
             file_name,
+            extra,
             bytes: Vec::new(),
             next_seq: 0,
             last_update: now,
@@ -552,6 +567,10 @@ impl Provider {
         ];
         if self.oai.read().expect("ai oai lock").is_some() {
             services.push(super::protocol::SERVICE_OAI.to_string());
+            services.push(super::protocol::SERVICE_OAI_CHAT.to_string());
+            services.push(super::protocol::SERVICE_OAI_RESPONSES.to_string());
+            services.push(super::protocol::SERVICE_OAI_COMPLETIONS.to_string());
+            services.push(super::protocol::SERVICE_OAI_MULTIPART.to_string());
         }
         if self.tts.is_some() {
             services.push(super::protocol::SERVICE_TTS.to_string());
@@ -685,6 +704,7 @@ impl Provider {
                 lang,
                 speed,
                 response_format,
+                extra,
             } => {
                 let Some(authorized) =
                     self.authorize_request(room.as_deref(), &from, &id, model.clone(), "tts")
@@ -701,6 +721,7 @@ impl Provider {
                     TtsOptions {
                         speed,
                         response_format,
+                        extra,
                     },
                     authorized,
                 )
@@ -714,6 +735,7 @@ impl Provider {
                 mime,
                 model,
                 file_name,
+                extra,
             } => {
                 self.handle_stt_request(
                     room.as_deref(),
@@ -725,6 +747,7 @@ impl Provider {
                     mime,
                     model,
                     file_name,
+                    extra,
                 )
                 .await;
             }
@@ -807,6 +830,17 @@ impl Provider {
             self.reject_voice_request(&from, id);
             return;
         };
+        if !super::protocol::valid_tts_extra(&options.extra) {
+            (self.send)(
+                &from,
+                ProtocolMessage::VoiceError {
+                    id,
+                    message: "ai: oversized TTS extra fields".into(),
+                    code: None,
+                },
+            );
+            return;
+        }
         let Some(_job) = self.limiter.try_acquire(&from, MAX_JOBS_PER_PEER) else {
             (self.send)(
                 &from,
@@ -890,10 +924,26 @@ impl Provider {
         mime: String,
         model: Option<String>,
         file_name: Option<String>,
+        extra: Option<Vec<(String, String)>>,
     ) {
         let outcome = {
             let mut buffers = self.stt_buffers.lock().expect("ai stt buffer lock");
             buffers.sweep(Instant::now());
+            if extra
+                .as_ref()
+                .is_some_and(|fields| !super::protocol::valid_stt_extra(fields))
+            {
+                buffers.remove(&from, &id);
+                (self.send)(
+                    &from,
+                    ProtocolMessage::VoiceError {
+                        id,
+                        message: "ai: invalid or oversized STT extra fields".into(),
+                        code: None,
+                    },
+                );
+                return;
+            }
             let authorized = buffers
                 .map
                 .get(&(from.clone(), id.clone()))
@@ -934,6 +984,7 @@ impl Provider {
                 mime,
                 model,
                 file_name,
+                extra,
             );
             match &mut outcome {
                 SttPush::Waiting => {
@@ -983,10 +1034,18 @@ impl Provider {
         };
         let authorized = buffer.authorized.expect("authorized STT buffer");
         let stt = self.stt.as_ref().expect("configured STT upstream");
-        let result = stt(buffer.bytes, buffer.mime, buffer.model, buffer.file_name).await;
+        let raw_response = buffer.extra.is_some();
+        let result = stt(
+            buffer.bytes,
+            buffer.mime,
+            buffer.model,
+            buffer.file_name,
+            buffer.extra.unwrap_or_default(),
+        )
+        .await;
         authorized.record(1, 0);
-        match result {
-            Ok(text) => (self.send)(&from, ProtocolMessage::SttResponse { id, text }),
+        match result.and_then(|output| self.send_stt_response(&from, &id, output, raw_response)) {
+            Ok(()) => {}
             Err(err) => {
                 (self.send)(
                     &from,
@@ -998,6 +1057,62 @@ impl Provider {
                 );
             }
         }
+    }
+
+    fn send_stt_response(
+        &self,
+        from: &str,
+        id: &str,
+        output: SttOutput,
+        raw_response: bool,
+    ) -> anyhow::Result<()> {
+        use super::protocol::{
+            MAX_STT_RAW_CHUNK_BYTES, MAX_STT_RESPONSE_BYTES, SttRawChunk, valid_stt_content_type,
+        };
+        use base64::Engine as _;
+        match output {
+            SttOutput::Raw { body, content_type } if raw_response => {
+                anyhow::ensure!(
+                    body.len() <= MAX_STT_RESPONSE_BYTES && valid_stt_content_type(&content_type),
+                    "ai: invalid or oversized STT response"
+                );
+                let count = body.len().div_ceil(MAX_STT_RAW_CHUNK_BYTES).max(1);
+                for seq in 0..count {
+                    let start = seq * MAX_STT_RAW_CHUNK_BYTES;
+                    let end = (start + MAX_STT_RAW_CHUNK_BYTES).min(body.len());
+                    (self.send)(
+                        from,
+                        ProtocolMessage::SttResponse {
+                            id: id.into(),
+                            text: String::new(),
+                            raw: Some(SttRawChunk {
+                                seq: seq as u64,
+                                data: base64::engine::general_purpose::STANDARD
+                                    .encode(&body[start..end]),
+                                last: seq + 1 == count,
+                                content_type: content_type.clone(),
+                            }),
+                        },
+                    );
+                }
+            }
+            output => {
+                let text = output.into_legacy_text()?;
+                anyhow::ensure!(
+                    text.len() <= MAX_STT_RESPONSE_BYTES,
+                    "ai: oversized STT response"
+                );
+                (self.send)(
+                    from,
+                    ProtocolMessage::SttResponse {
+                        id: id.into(),
+                        text,
+                        raw: None,
+                    },
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Drops any partially buffered `stt_request` streams of a peer that
@@ -1020,6 +1135,35 @@ impl Provider {
 
     pub fn set_oai(&self, tunnel: Arc<super::oai_tunnel::TunnelProvider>) {
         *self.oai.write().expect("ai oai lock") = Some(tunnel);
+    }
+
+    pub(super) fn local_chat_available(&self, model: Option<&str>) -> bool {
+        // An explicit model must be advertised; an omitted model can use
+        // the room's usable default even without a shared-model list.
+        model.is_none_or(|m| self.models().iter().any(|id| id == m))
+            && self
+                .oai
+                .read()
+                .expect("ai oai lock")
+                .as_ref()
+                .is_some_and(|tunnel| tunnel.has_chat_target(model))
+    }
+
+    /// Use the same room model resolver and HTTP passthrough for self.
+    pub(super) async fn local_chat_proxy(
+        &self,
+        raw: Vec<u8>,
+    ) -> anyhow::Result<super::chat_proxy::Reply> {
+        let tunnel = self
+            .oai
+            .read()
+            .expect("ai oai lock")
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("ai: OpenAI tunnel unavailable"))?;
+        let body = serde_json::from_slice(&raw)?;
+        tunnel
+            .open_raw(super::chat_proxy::Endpoint::current(), &raw, &body)
+            .await
     }
 
     fn resolve_llm_call(&self, model: &Option<String>) -> LlmCallResolution {
@@ -1426,6 +1570,7 @@ mod tests {
                 lang: None,
                 speed: None,
                 response_format: None,
+                extra: Default::default(),
             },
             ProtocolMessage::SttRequest {
                 id: "stt".into(),
@@ -1435,6 +1580,7 @@ mod tests {
                 mime: "audio/wav".into(),
                 model: None,
                 file_name: None,
+                extra: None,
             },
             ProtocolMessage::OaiRequest {
                 id: "oai".into(),
@@ -1662,6 +1808,7 @@ mod tests {
                         mime: "audio/wav".into(),
                         model: (seq == 0).then(|| "example-model".into()),
                         file_name: None,
+                        extra: None,
                     },
                 )
                 .await;
@@ -1709,6 +1856,7 @@ mod tests {
                         lang: None,
                         speed: None,
                         response_format: None,
+                        extra: Default::default(),
                     },
                 )
                 .await;
@@ -2230,6 +2378,7 @@ mod tests {
                     lang: None,
                     speed: None,
                     response_format: None,
+                    extra: Default::default(),
                 },
             )
             .await;
@@ -2266,6 +2415,7 @@ mod tests {
                     mime: "audio/wav".into(),
                     model: None,
                     file_name: None,
+                    extra: None,
                 },
             )
             .await;
@@ -2304,6 +2454,7 @@ mod tests {
                     lang: None,
                     speed: None,
                     response_format: None,
+                    extra: Default::default(),
                 },
             )
             .await;
@@ -2742,26 +2893,263 @@ mod tests {
         })
     }
 
-    type SttCallArgs = (Vec<u8>, String, Option<String>, Option<String>);
+    type SttCallArgs = (
+        Vec<u8>,
+        String,
+        Option<String>,
+        Option<String>,
+        Vec<(String, String)>,
+    );
 
     fn fake_stt_success(
         text: &'static str,
         captured: Arc<Mutex<Option<SttCallArgs>>>,
     ) -> SttCallFn {
-        Arc::new(move |audio, mime, model, file_name| {
+        Arc::new(move |audio, mime, model, file_name, extra| {
             let text = text.to_string();
             let captured = captured.clone();
             Box::pin(async move {
-                *captured.lock().unwrap() = Some((audio, mime, model, file_name));
-                Ok(text)
+                *captured.lock().unwrap() = Some((audio, mime, model, file_name, extra));
+                Ok(text.into())
             })
         })
     }
 
     fn fake_stt_error(message: &'static str) -> SttCallFn {
-        Arc::new(move |_audio, _mime, _model, _file_name| {
+        Arc::new(move |_audio, _mime, _model, _file_name, _extra| {
             Box::pin(async move { anyhow::bail!(message) })
         })
+    }
+
+    async fn mock_voice_upstream(
+        path: &'static str,
+        content_type: &'static str,
+        response_body: Vec<u8>,
+    ) -> (
+        crate::config::AiProviderConfig,
+        tokio::task::JoinHandle<Vec<u8>>,
+    ) {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = BufReader::new(socket);
+            let mut line = String::new();
+            socket.read_line(&mut line).await.unwrap();
+            assert!(line.starts_with(&format!("POST {path} ")), "{line}");
+            let mut length = None;
+            loop {
+                line.clear();
+                assert_ne!(socket.read_line(&mut line).await.unwrap(), 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':')
+                    && name.eq_ignore_ascii_case("content-length")
+                {
+                    length = Some(value.trim().parse::<usize>().unwrap());
+                }
+            }
+            let mut body = vec![0; length.unwrap()];
+            socket.read_exact(&mut body).await.unwrap();
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                response_body.len()
+            );
+            socket.get_mut().write_all(head.as_bytes()).await.unwrap();
+            socket.get_mut().write_all(&response_body).await.unwrap();
+            body
+        });
+        (
+            crate::config::AiProviderConfig {
+                base_url: format!("http://{addr}"),
+                ..Default::default()
+            },
+            server,
+        )
+    }
+
+    #[tokio::test]
+    async fn tts_wire_extras_reach_upstream_without_overriding_model_or_input() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
+        let (upstream, captured) =
+            mock_voice_upstream("/audio/speech", "audio/wav", b"audio".to_vec()).await;
+        let tts: TtsCallFn = Arc::new(move |text, model, _, _, options| {
+            let upstream = upstream.clone();
+            Box::pin(async move {
+                crate::ai::tts::synthesize(
+                    &upstream,
+                    crate::ai::tts::TtsParams {
+                        model: model.unwrap(),
+                        input: text,
+                        voice: "default".into(),
+                        speed: options.speed,
+                        format: options.response_format,
+                        extra: options.extra,
+                    },
+                )
+                .await
+            })
+        });
+        let (send, sent) = fake_send();
+        let provider = Provider::new_with_voice(
+            send,
+            fake_call_success(vec![], ""),
+            vec![],
+            Some(tts),
+            None,
+            vec![],
+        );
+        let wire = json!({"v":1,"type":"tts_request","id":"a","text":"hi","model":"tts-model",
+            "extra":{"model":"other-model","input":"other","instructions":"speak softly","stream_format":"sse","voice":{"id":"speaker"}}});
+        provider
+            .handle_message(
+                "consumer".into(),
+                super::super::protocol::decode(&serde_json::to_vec(&wire).unwrap()).unwrap(),
+            )
+            .await;
+        let body: serde_json::Value = serde_json::from_slice(&captured.await.unwrap()).unwrap();
+        assert_eq!(body["model"], "tts-model");
+        assert_eq!(body["input"], "hi");
+        assert_eq!(body["instructions"], "speak softly");
+        assert_eq!(body["stream_format"], "sse");
+        assert_eq!(body["voice"], json!({"id":"speaker"}));
+        assert!(
+            matches!(&sent.lock().unwrap()[0].1, ProtocolMessage::TtsResponse { mime, .. } if mime == "audio/wav")
+        );
+    }
+
+    #[tokio::test]
+    async fn stt_wire_extras_reach_upstream_and_raw_response_is_chunked() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
+        use base64::Engine as _;
+        let srt = b"1\r\n00:00:00,000 --> 00:00:01,000\r\nHello!\r\n\r\n".repeat(400);
+        let (upstream, captured) =
+            mock_voice_upstream("/audio/transcriptions", "application/x-subrip", srt.clone()).await;
+        let stt: SttCallFn = Arc::new(move |audio, mime, model, file_name, extra| {
+            let upstream = upstream.clone();
+            Box::pin(async move {
+                crate::ai::stt::transcribe(
+                    &upstream,
+                    crate::ai::stt::SttParams {
+                        model: model.unwrap(),
+                        audio,
+                        mime,
+                        file_name,
+                        extra,
+                    },
+                )
+                .await
+            })
+        });
+        let (send, sent) = fake_send();
+        let provider = Provider::new_with_voice(
+            send,
+            fake_call_success(vec![], ""),
+            vec![],
+            None,
+            Some(stt),
+            vec![],
+        );
+        let fields = [
+            ("language", "en"),
+            ("prompt", "  a prompt  "),
+            ("temperature", "0.2"),
+            ("response_format", "srt"),
+            ("timestamp_granularities[]", "word"),
+            ("timestamp_granularities[]", "segment"),
+            ("include[]", "logprobs"),
+            ("chunking_strategy", "auto"),
+            ("stream", "true"),
+        ];
+        for (seq, extra) in [Some(json!(fields)), Some(json!([["prompt", "ignored"]]))]
+            .into_iter()
+            .enumerate()
+        {
+            let wire = json!({"v":1,"type":"stt_request","id":"a","seq":seq,"data":"eA==","last":seq==1,"mime":"audio/wav","model":"stt-model","extra":extra});
+            provider
+                .clone()
+                .handle_message(
+                    "consumer".into(),
+                    super::super::protocol::decode(&serde_json::to_vec(&wire).unwrap()).unwrap(),
+                )
+                .await;
+        }
+        let request = String::from_utf8(captured.await.unwrap()).unwrap();
+        for (name, value) in fields {
+            assert!(
+                request.contains(&format!("name=\"{name}\"\r\n\r\n{value}\r\n")),
+                "missing {name}={value}"
+            );
+        }
+        assert!(!request.contains("ignored"));
+        assert!(request.contains("name=\"model\"\r\n\r\nstt-model\r\n"));
+        let sent = sent.lock().unwrap();
+        assert!(sent.len() > 1);
+        let mut body = Vec::new();
+        for (seq, (_, msg)) in sent.iter().enumerate() {
+            let ProtocolMessage::SttResponse {
+                text,
+                raw: Some(raw),
+                ..
+            } = msg
+            else {
+                panic!("raw STT chunk expected");
+            };
+            assert!(text.is_empty());
+            assert!(raw.within_limit());
+            assert_eq!(raw.seq, seq as u64);
+            assert_eq!(raw.last, seq + 1 == sent.len());
+            assert_eq!(raw.content_type, "application/x-subrip");
+            body.extend(
+                base64::engine::general_purpose::STANDARD
+                    .decode(&raw.data)
+                    .unwrap(),
+            );
+        }
+        assert_eq!(body, srt);
+    }
+
+    #[test]
+    fn stt_response_preserves_legacy_text_and_bounds_raw_body() {
+        let (send, sent) = fake_send();
+        let provider = Provider::new_with_voice(
+            send,
+            fake_call_success(vec![], ""),
+            vec![],
+            None,
+            None,
+            vec![],
+        );
+        provider
+            .send_stt_response(
+                "peer",
+                "old",
+                SttOutput::Raw {
+                    body: br#"{"text":"hello","duration":1}"#.to_vec(),
+                    content_type: "application/json".into(),
+                },
+                false,
+            )
+            .unwrap();
+        assert!(
+            matches!(&sent.lock().unwrap()[0].1, ProtocolMessage::SttResponse { id, text, raw: None } if id == "old" && text == "hello")
+        );
+        assert!(
+            provider
+                .send_stt_response(
+                    "peer",
+                    "new",
+                    SttOutput::Raw {
+                        body: vec![0; super::super::protocol::MAX_STT_RESPONSE_BYTES + 1],
+                        content_type: "text/plain".into(),
+                    },
+                    true
+                )
+                .is_err()
+        );
+        assert_eq!(sent.lock().unwrap().len(), 1);
     }
 
     #[test]
@@ -2919,6 +3307,7 @@ mod tests {
                     lang: None,
                     speed: None,
                     response_format: None,
+                    extra: Default::default(),
                 },
             )
             .await;
@@ -2975,6 +3364,7 @@ mod tests {
                     lang: Some("ja-JP".into()),
                     speed: None,
                     response_format: None,
+                    extra: Default::default(),
                 },
             )
             .await;
@@ -3016,6 +3406,7 @@ mod tests {
                     lang: None,
                     speed: None,
                     response_format: None,
+                    extra: Default::default(),
                 },
             )
             .await;
@@ -3063,6 +3454,7 @@ mod tests {
                     mime: "audio/wav".into(),
                     model: Some("stt-model".into()),
                     file_name: Some("clip.wav".into()),
+                    extra: None,
                 },
             )
             .await;
@@ -3084,20 +3476,29 @@ mod tests {
                     mime: "audio/wav".into(),
                     model: None,
                     file_name: None,
+                    extra: None,
                 },
             )
             .await;
 
-        let (audio, mime, model, file_name) = captured.lock().unwrap().clone().unwrap();
+        let (audio, mime, model, file_name, extra) = captured.lock().unwrap().clone().unwrap();
         assert_eq!(audio, b"hello world");
         assert_eq!(mime, "audio/wav");
         assert_eq!(model.as_deref(), Some("stt-model"));
         assert_eq!(file_name.as_deref(), Some("clip.wav"));
+        assert!(extra.is_empty());
 
         let sent = sent.lock().unwrap();
         assert_eq!(sent.len(), 1);
         match &sent[0] {
-            (to, ProtocolMessage::SttResponse { id, text }) => {
+            (
+                to,
+                ProtocolMessage::SttResponse {
+                    id,
+                    text,
+                    raw: None,
+                },
+            ) => {
                 assert_eq!(to, "consumer1");
                 assert_eq!(id, "stt1");
                 assert_eq!(text, "hello world");
@@ -3135,6 +3536,7 @@ mod tests {
                     mime: "audio/wav".into(),
                     model: None,
                     file_name: None,
+                    extra: None,
                 },
             )
             .await;
@@ -3182,6 +3584,7 @@ mod tests {
                     mime: "audio/wav".into(),
                     model: None,
                     file_name: None,
+                    extra: None,
                 },
             )
             .await;
@@ -3287,6 +3690,7 @@ mod tests {
             &vec![0u8; n],
             last,
             "audio/wav".into(),
+            None,
             None,
             None,
         )

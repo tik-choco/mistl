@@ -33,6 +33,11 @@ $ mistl key pair                              # no-copy-paste: prints a pairing 
 $ mistl profile set display_name "yourname"
 $ mistl profile show
 
+# Web sites and games (see web.md)
+$ mistl upload .\dist         # publish / update a static site -> http://<site>.localhost:6490/
+$ mistl web ls                # known sites
+$ mistl web open <site>       # open in the browser (site id or URL)
+
 # Storage
 $ mistl store put .\file.bin  # -> returns a CID
 $ mistl store ls

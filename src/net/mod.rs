@@ -20,7 +20,7 @@
 //! Modules coexist on the wire by shape: each handler parses inbound bytes
 //! against its own schema and silently ignores what it can't parse
 //! (tc-chat wires are JSON tagged by `type`; the ai protocol is JSON
-//! with `v: 1` + `type`). This is unchanged by multi-room support, since
+//! with `v: 1` + `type`; mistl web uses `"mweb": 1` + `op`). This is unchanged by multi-room support, since
 //! the raw handler fan-out is still global across every joined room.
 
 use std::collections::HashMap;
@@ -103,6 +103,7 @@ pub enum RoomUse {
     Stream,
     Bot,
     Pairing,
+    Web,
 }
 
 impl RoomUse {
@@ -118,6 +119,7 @@ impl RoomUse {
             Self::Stream => "stream",
             Self::Bot => "bot",
             Self::Pairing => "pairing",
+            Self::Web => "web",
         }
     }
 }
@@ -806,6 +808,7 @@ mod room_tests {
             (RoomUse::Stream, "stream"),
             (RoomUse::Bot, "bot"),
             (RoomUse::Pairing, "pairing"),
+            (RoomUse::Web, "web"),
         ];
         for (use_, id) in cases {
             assert_eq!(use_.id(), id);

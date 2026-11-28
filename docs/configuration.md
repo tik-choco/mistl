@@ -103,7 +103,14 @@ request_timeout_secs = 120                   # p2p inactivity timeout (resets pe
 [ui]
 enabled = true                               # serve the dashboard from the daemon
 listen = "127.0.0.1:6480"                    # keep on loopback (no auth)
+
+[web]
+enabled = true                               # host static sites (gateway + room mistl-web-v1)
+listen = "127.0.0.1:6490"                    # loopback only; keep the port stable (part of each site's origin)
+max_site_bytes = 2147483648                  # largest site published or installed here
 ```
+
+See [Web sites and games](web.md) for `[web]`.
 
 Note: storage, chat_relay, ai, and stream relay can each join their **own** room --
 the p2p transport supports multiple simultaneous rooms per process. AI rooms are

@@ -43,6 +43,11 @@ const fixtures = {
     ]},scheduler:{enabled:false},bot:{enabled:false,pipelines:[]},update:{},ui:{enabled:true,listen:'127.0.0.1:6480'}},
   'bot.options':{rooms:[{room,joined:true}]},
   'update.status': {current:'0.1.0'}, 'tunnel.status': {running:false, peers:[], forwards:[]}, 'tunnel.room.list': {rooms:[]},
+  'web.ls': {sites:[
+    {site:'a'.repeat(32),name:'my-game',url:'http://'+'a'.repeat(32)+'.localhost:6490/',did:longId,own:true,trusted:true,installed:true,update_pending:false,size:2048,files:3,seq:1,at:1,progress:null},
+    {site:'b'.repeat(32),name:'friend-<b>game</b>',url:'http://'+'b'.repeat(32)+'.localhost:6490/',did:'did:key:z6Mkfriend',own:false,trusted:false,installed:false,update_pending:false,size:4096,files:7,seq:2,at:2,progress:{state:'installing',done_bytes:1024,total_bytes:4096,error:null}}
+  ]},
+  'web.trust': {trusted:true},
 };
 const window = new Window({url:'http://127.0.0.1:6480/#panel-store',settings:{disableJavaScriptEvaluation:true, disableJavaScriptFileLoading:true, disableCSSFileLoading:true}});
 const {document} = window;
@@ -1149,6 +1154,96 @@ try {
     assert.equal(q('#panel-overview h3[data-i18n="profile.title"]').textContent, profile);
   }
   console.log('PASS: merged navigation, legacy links, profile focus, settings shortcuts, tab refresh and polling, version wizard, en/zh/ja labels');
+
+  // Web: site list from web.ls, keyed cards, install polling, trust, folder publish.
+  assert.equal(count('web.ls'), 0, 'Web list waits until the page is opened');
+  q('#sidenav a[href="#panel-web"]').click();await flush();
+  const webPage = q('#panel-web');
+  assert.ok(webPage.classList.contains('active'));
+  assert.equal(q('#sidenav a[href="#panel-web"]').getAttribute('aria-current'), 'page');
+  assert.equal(count('web.ls'), 1, 'Opening Web lists sites');
+  const webSites = [...webPage.querySelectorAll('.web-site')];
+  assert.equal(webSites.length, 2);
+  assert.ok(webSites[1].textContent.includes('friend-<b>game</b>'), 'site names are text');
+  assert.equal(webSites[1].querySelector('b'), null);
+  assert.ok(webSites[1].querySelector('.web-status').textContent.includes('25%'));
+  assert.equal(webSites[0].querySelector('.web-url a.mono').getAttribute('href'), fixtures['web.ls'].sites[0].url);
+  assert.equal(webSites[0].querySelector('.web-actions button').hidden, true, 'own sites have no trust toggle');
+  Object.assign(fixtures['web.ls'].sites[1], {progress:null, installed:true});
+  await new Promise(resolve => setTimeout(resolve, 2100));await flush();
+  assert.equal(count('web.ls'), 2, 'polls while a site is installing');
+  assert.equal(webPage.querySelectorAll('.web-site')[1], webSites[1], 'site cards survive polling');
+  await new Promise(resolve => setTimeout(resolve, 2100));await flush();
+  assert.equal(count('web.ls'), 2, 'stops polling once installs finish');
+  webSites[1].querySelector('.web-actions button').click();await flush();
+  assert.deepEqual(calls.filter(c => c.cmd === 'web.trust').at(-1).args, {site:'b'.repeat(32)});
+
+  const W = window.MistlWebHost;
+  assert.equal(W.suggestName('My Game!'), 'my-game');
+  assert.equal(W.suggestName('dist'), '', 'a bare build folder needs a typed name');
+  assert.equal(W.suggestName('Build', 'Cool__Proj'), 'cool-proj');
+  assert.equal(W.skippedPrefix('.git/config'), '.git/');
+  assert.equal(W.skippedPrefix('a/.env'), 'a/.env');
+  assert.equal(W.skippedPrefix('.well-known/x.json'), '');
+  const fakeFile = (name, size) => ({name, isFile:true, isDirectory:false, file:ok => ok({name, size})});
+  const fakeDir = (name, children) => ({name, isFile:false, isDirectory:true, createReader:() => { let read = false; return {readEntries:ok => { ok(read ? [] : children); read = true; }}; }});
+  const dropped = await W.fromDropEntries([fakeDir('build', [fakeFile('index.html', 3), fakeDir('.git', [fakeFile('HEAD', 1)]), fakeDir('js', [fakeFile('app.js', 5)])])]);
+  assert.equal(dropped.folder, 'build');
+  assert.deepEqual(Array.from(dropped.entries, e => e.path), ['index.html', 'js/app.js']);
+  assert.deepEqual([...dropped.skipped], ['.git/']);
+
+  const xhrLog = [];
+  const realXHR = window.XMLHttpRequest;
+  window.XMLHttpRequest = class {
+    constructor() { this.upload = new window.EventTarget(); this.headers = {}; }
+    open(method, url) { this.method = method; this.url = url; }
+    setRequestHeader(key, value) { this.headers[key] = value; }
+    abort() { this.onabort?.(); }
+    send(body) {
+      xhrLog.push({method:this.method, url:this.url, body, headers:this.headers});
+      setTimeout(() => {
+        const data = this.url.endsWith('/begin') ? {upload_id:'f'.repeat(32)} :
+          this.url.endsWith('/finish') ? {name:'my-game', url:fixtures['web.ls'].sites[0].url} : {};
+        this.status = 200;this.responseText = JSON.stringify({ok:true, data});this.onload();
+      }, 0);
+    }
+  };
+  const picker = webPage.querySelector('input[type=file]');
+  assert.ok(picker.hasAttribute('webkitdirectory'));
+  assert.equal(webPage.querySelector('.web-form').hidden, true, 'fields appear after choosing a folder');
+  Object.defineProperty(picker, 'files', {configurable:true, value:[
+    {name:'index.html', size:3, webkitRelativePath:'my-game/index.html'},
+    {name:'app.js', size:5, webkitRelativePath:'my-game/js/app.js'},
+    {name:'HEAD', size:1, webkitRelativePath:'my-game/.git/HEAD'}
+  ]});
+  picker.dispatchEvent(new window.Event('change'));await flush();
+  assert.equal(webPage.querySelector('.web-form').hidden, false);
+  assert.equal(q('#web-name').value, 'my-game');
+  assert.equal(webPage.querySelector('.web-skipped').hidden, false, 'skipped dotfiles are listed before upload');
+  webPage.querySelector('.web-actions .primary').click();
+  for (let i = 0; i < 6; i++) await flush();
+  assert.deepEqual(xhrLog.map(r => r.method + ' ' + r.url), [
+    'POST /api/web/upload/begin',
+    'PUT /api/web/upload/' + 'f'.repeat(32) + '/file?path=index.html',
+    'PUT /api/web/upload/' + 'f'.repeat(32) + '/file?path=js%2Fapp.js',
+    'POST /api/web/upload/' + 'f'.repeat(32) + '/finish'
+  ]);
+  assert.deepEqual(JSON.parse(xhrLog[0].body), {name:'my-game', entry:'index.html', spa:false, coi:null});
+  assert.ok(xhrLog.every(r => r.headers['x-mistl-ui'] === '1' && r.headers['x-mistl-instance'] === 'mistl-ui-test/ui-test-build'));
+  assert.equal(webPage.querySelector('.web-result').hidden, false, 'the Play URL is shown after publishing');
+  assert.equal(webPage.querySelector('.web-result a.mono').getAttribute('href'), fixtures['web.ls'].sites[0].url);
+  window.XMLHttpRequest = realXHR;
+  for (const [language, nav, hint] of [
+    ['en', 'Web', "GDM World: use this URL as the work's URL."],
+    ['zh', '网站', '在 GDM World 中，请将此网址填写为作品网址。'],
+    ['ja', 'Web', 'GDM World では、この URL を作品の URL に入力してください。']
+  ]) {
+    document.getElementById('lang-'+language+'-btn').click();await flush();
+    assert.equal(q('#sidenav a[href="#panel-web"] span').textContent, nav);
+    assert.equal(webPage.querySelector('.web-result .web-muted').textContent, hint);
+    assert.equal(webPage.querySelectorAll('.web-site').length, 2);
+  }
+  console.log('PASS: Web page list, install polling, trust, dotfile skip, drag-drop walk, staged publish requests, Play URL, en/zh/ja');
   document.querySelectorAll('.toast.error button').forEach(b=>b.click());
   assert.deepEqual(errors, []);
   assert.equal(document.querySelectorAll('.toast.error').length, 0, 'no hidden initialization failure');

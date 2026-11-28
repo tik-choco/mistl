@@ -384,6 +384,7 @@ impl Store {
                         method: "DELETE".into(),
                         path,
                         body: None,
+                        multipart: None,
                     }),
                 )
                 .await;
@@ -476,6 +477,7 @@ async fn request_json(
         method: method.into(),
         path: path.into(),
         body,
+        multipart: None,
     })
     .await
     .context("provider request failed")?;

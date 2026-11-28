@@ -130,6 +130,41 @@ pub enum Command {
         #[command(subcommand)]
         action: VmAction,
     },
+    /// Upload a static Web App / Web Game folder; anyone with mistl can play
+    /// it at the printed http://<site>.localhost URL (same as `web publish`)
+    Upload {
+        /// Folder with the built site (must contain the entry file)
+        dir: String,
+        /// Site name (default: the folder name, or its parent for dist/build/...)
+        #[arg(long)]
+        name: Option<String>,
+        /// Entry file (default: index.html)
+        #[arg(long)]
+        entry: Option<String>,
+        /// Single-page app: unknown extension-less paths serve the entry file
+        #[arg(long)]
+        spa: bool,
+        /// Send COOP/COEP headers (SharedArrayBuffer; default: on for Godot exports)
+        #[arg(long, conflicts_with = "no_coi")]
+        coi: bool,
+        /// Never send COOP/COEP headers
+        #[arg(long)]
+        no_coi: bool,
+        /// Show what would be uploaded without storing anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Static web sites hosted over p2p and served on localhost
+    Web {
+        /// Print JSON
+        #[arg(long, global = true)]
+        json: bool,
+        #[command(subcommand)]
+        action: WebAction,
+    },
     /// Natural-language agent (TUI) that runs mistl commands and workspace
     /// tools, using the AI network through the local API
     Agent(crate::agent::AgentArgs),
@@ -1237,6 +1272,32 @@ pub enum NostrAction {
 }
 
 #[derive(Subcommand)]
+pub enum WebAction {
+    /// List known sites
+    Ls,
+    /// Show the web host status
+    Status,
+    /// Download a site so it can be played (asks peers for it)
+    Install {
+        /// Site id or http://<site>.localhost URL
+        site: String,
+        /// Trust the site first (it runs in your browser)
+        #[arg(long)]
+        trust: bool,
+    },
+    /// Remove a site and free its storage
+    Rm { site: String },
+    /// Trust a site, or a publisher DID (all of its sites)
+    Trust { target: String },
+    /// Stop trusting a site or a publisher DID
+    Untrust { target: String },
+    /// Print a site's URL
+    Url { site: String },
+    /// Open a site in the browser
+    Open { site: String },
+}
+
+#[derive(Subcommand)]
 pub enum VmAction {
     /// Manage this VM's replication group
     Ha {
@@ -2033,6 +2094,29 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             }
         },
         Command::Vm { json, action } => vm_call(action, json),
+        Command::Upload {
+            dir,
+            name,
+            entry,
+            spa,
+            coi,
+            no_coi,
+            dry_run,
+            json,
+        } => {
+            let abs = canonicalize_or_die(&dir);
+            let coi = match (coi, no_coi) {
+                (true, _) => Some(true),
+                (_, true) => Some(false),
+                _ => None,
+            };
+            let args = json!({
+                "path": abs.to_string_lossy(), "name": name, "entry": entry,
+                "spa": spa, "coi": coi, "dry_run": dry_run,
+            });
+            web_call("web.publish", args, json)
+        }
+        Command::Web { json, action } => web_action(action, json),
         Command::Tunnel { action } => match action {
             TunnelAction::Status => client_call("tunnel.status", json!({})),
             TunnelAction::Start => client_call("tunnel.start", json!({})),
@@ -3004,6 +3088,218 @@ fn print_vm_pool_status(response: &Value) {
             member["disk_free_gb"].as_u64().unwrap_or_default(),
             member["name"].as_str().unwrap_or_default(),
         );
+    }
+}
+
+fn web_action(action: WebAction, json_output: bool) -> Result<()> {
+    let target_args = |target: String| {
+        if target.starts_with("did:") {
+            json!({ "did": target })
+        } else {
+            json!({ "site": target })
+        }
+    };
+    match action {
+        WebAction::Ls => web_call("web.ls", json!({}), json_output),
+        WebAction::Status => web_call("web.status", json!({}), json_output),
+        WebAction::Install { site, trust } => web_call(
+            "web.install",
+            json!({ "site": site, "trust": trust }),
+            json_output,
+        ),
+        WebAction::Rm { site } => web_call("web.rm", json!({ "site": site }), json_output),
+        WebAction::Trust { target } => web_call("web.trust", target_args(target), json_output),
+        WebAction::Untrust { target } => web_call("web.untrust", target_args(target), json_output),
+        WebAction::Url { site } => web_call("web.url", json!({ "site": site }), json_output),
+        WebAction::Open { site } => {
+            let response = request("web.url", json!({ "site": site }))?;
+            let url = response["url"].as_str().context("missing site URL")?;
+            if json_output {
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else {
+                println!("{url}");
+            }
+            if !crate::web::browser::open_in_browser(url) {
+                eprintln!("Could not open a browser; open the URL above manually.");
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Send a `web.*` request and print JSON or the human rendering.
+fn web_call(cmd: &str, mut args: Value, json_output: bool) -> Result<()> {
+    if let Some(args) = args.as_object_mut() {
+        args.retain(|_, value| !value.is_null());
+    }
+    let response = request(cmd, args)?;
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&response)?);
+        return Ok(());
+    }
+    match cmd {
+        "web.publish" => print!("{}", render_web_publish(&response)),
+        "web.ls" => print!("{}", render_web_ls(&response)),
+        "web.status" => {
+            println!(
+                "Web hosting: {}",
+                if response["enabled"] == true {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            );
+            println!(
+                "Listen:      {}",
+                response["listen"].as_str().unwrap_or("?")
+            );
+            if let Some(base) = response["base_url"].as_str() {
+                println!("Index:       {base}");
+            }
+            println!(
+                "Network:     {}{}",
+                if response["network"] == true {
+                    "on"
+                } else {
+                    "off"
+                },
+                if response["room_joined"] == true {
+                    " (room joined)"
+                } else {
+                    ""
+                }
+            );
+            println!("Sites:       {}", response["sites"].as_u64().unwrap_or(0));
+        }
+        "web.install" => web_install_wait(&response)?,
+        "web.rm" => println!("Removed {}", response["site"].as_str().unwrap_or("?")),
+        "web.trust" | "web.untrust" => {
+            let target = response["site"]
+                .as_str()
+                .or_else(|| response["did"].as_str())
+                .unwrap_or("?");
+            if response["trusted"] == true {
+                println!("Trusted {target}");
+            } else {
+                println!("No longer trusted: {target}");
+            }
+        }
+        "web.url" => println!("{}", response["url"].as_str().unwrap_or("?")),
+        _ => println!("{}", serde_json::to_string_pretty(&response)?),
+    }
+    Ok(())
+}
+
+fn render_web_publish(r: &Value) -> String {
+    let name = r["name"].as_str().unwrap_or("?");
+    let files = r["files"].as_u64().unwrap_or(0);
+    let size = authz_size(r["size"].as_u64().unwrap_or(0));
+    let url = r["url"].as_str().unwrap_or("?");
+    let mut out = String::new();
+    for skipped in r["skipped"].as_array().into_iter().flatten() {
+        out.push_str(&format!("Skipped {}\n", skipped.as_str().unwrap_or("?")));
+    }
+    if r["dry_run"] == true {
+        out.push_str(&format!("Would upload {name} ({files} files, {size})\n"));
+        out.push_str(&format!("Play:  {url}\n"));
+        out.push_str("Dry run: nothing uploaded.\n");
+        return out;
+    }
+    out.push_str(&format!(
+        "Uploaded {name} ({files} files, {size}), version {}\n",
+        r["seq"].as_u64().unwrap_or(0)
+    ));
+    out.push_str(&format!("Play:  {url}\n"));
+    out.push_str("GDM World: use this URL as the work's URL.\n");
+    if r["announced"] != true {
+        out.push_str("Not announced (network off) — peers will find it when you go online.\n");
+    }
+    out
+}
+
+fn web_site_state(site: &Value) -> String {
+    let progress = &site["progress"];
+    if progress["state"] == "installing" {
+        let total = progress["total_bytes"].as_u64().unwrap_or(0).max(1);
+        let done = progress["done_bytes"].as_u64().unwrap_or(0);
+        return format!("installing {}%", done.saturating_mul(100) / total);
+    }
+    if progress["state"] == "failed" {
+        return "failed".into();
+    }
+    let base = if site["own"] == true {
+        "own"
+    } else if site["installed"] == true {
+        "installed"
+    } else {
+        "not installed"
+    };
+    if site["trusted"] == true {
+        base.into()
+    } else {
+        format!("{base}, untrusted")
+    }
+}
+
+fn render_web_ls(r: &Value) -> String {
+    let sites = r["sites"].as_array().map(Vec::as_slice).unwrap_or_default();
+    if sites.is_empty() {
+        return "No sites. Upload one with `mistl upload <dir>`.\n".into();
+    }
+    let mut out = format!(
+        "{:<24} {:<24} {:>10} {:>6}  URL\n",
+        "NAME", "STATE", "SIZE", "FILES"
+    );
+    for site in sites {
+        out.push_str(&format!(
+            "{:<24} {:<24} {:>10} {:>6}  {}\n",
+            site["name"].as_str().unwrap_or("?"),
+            web_site_state(site),
+            authz_size(site["size"].as_u64().unwrap_or(0)),
+            site["files"].as_u64().unwrap_or(0),
+            site["url"].as_str().unwrap_or("?"),
+        ));
+    }
+    out
+}
+
+/// After `web.install`: poll `web.ls` until the site is installed or failed.
+fn web_install_wait(first: &Value) -> Result<()> {
+    let site = first["site"].as_str().context("missing site")?.to_string();
+    let name = first["name"].as_str().unwrap_or("?").to_string();
+    let url = first["url"].as_str().unwrap_or("?").to_string();
+    let mut last = String::new();
+    loop {
+        let response = request("web.ls", json!({}))?;
+        let Some(view) = response["sites"]
+            .as_array()
+            .and_then(|sites| sites.iter().find(|s| s["site"] == site.as_str()))
+            .cloned()
+        else {
+            bail!("site {site} was removed during install");
+        };
+        let progress = &view["progress"];
+        if progress["state"] == "failed" {
+            eprintln!();
+            bail!(
+                "installing {name} failed: {}",
+                progress["error"].as_str().unwrap_or("unknown error")
+            );
+        }
+        if view["installed"] == true && progress.is_null() {
+            if !last.is_empty() {
+                eprintln!();
+            }
+            println!("Installed {name}");
+            println!("Play:  {url}");
+            return Ok(());
+        }
+        let state = web_site_state(&view);
+        if state != last {
+            eprint!("\r{name}: {state}   ");
+            last = state;
+        }
+        std::thread::sleep(Duration::from_millis(500));
     }
 }
 

@@ -15,6 +15,7 @@ pub mod browser;
 pub mod server;
 mod service_api;
 pub mod ui_state;
+mod web_upload;
 
 pub use auth::dashboard_url;
 pub use server::serve;

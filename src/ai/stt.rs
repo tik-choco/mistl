@@ -4,7 +4,7 @@
 //! network provider and needs to answer an inbound `stt_request` (see
 //! `crate::ai::provider`) by forwarding the reassembled audio bytes to an
 //! upstream transcription endpoint. Mirrors `tts.rs`'s conventions as
-//! closely as it makes sense to for a multipart request / JSON response:
+//! closely as it makes sense to for a multipart request / opaque response:
 //!
 //! - `base_url` has any trailing `/` stripped before appending
 //!   `/audio/transcriptions` (same convention as `tts.rs`'s `/audio/speech`
@@ -15,16 +15,15 @@
 //! - Body: multipart form with a `model` text part and a `file` part
 //!   carrying the raw audio bytes, `req.mime` as the part's content-type,
 //!   and a filename (`req.file_name` if the peer sent one, else a generic
-//!   `audio.<ext>` derived from the mime type).
+//!   `audio.<ext>` derived from the mime type), plus bounded text fields.
 //! - Non-2xx -> error including status and the first 500 chars of the body
 //!   (same as `tts.rs`/`openai.rs`).
-//! - Response is parsed as JSON `{"text": "..."}` (OpenAI's default
-//!   `verbose_json`-less response shape); missing/non-string `text` ->
-//!   error, same style as `openai.rs`'s `choices[0].message.content`
-//!   extraction.
+//! - Successful responses are buffered without changing their bytes or MIME.
+//!   Legacy peers still receive the JSON response's `text` field only.
 
 use anyhow::{Context, Result, bail};
 
+use super::protocol::{MAX_STT_RESPONSE_BYTES, valid_stt_content_type, valid_stt_extra};
 use crate::config::AiProviderConfig;
 
 /// One speech-to-text request: already-reassembled audio bytes (see
@@ -41,6 +40,43 @@ pub struct SttParams {
     pub mime: String,
     /// Filename hint from the peer's `stt_request.fileName`, if any.
     pub file_name: Option<String>,
+    /// Ordered text fields, including repeated names such as `include[]`.
+    pub extra: Vec<(String, String)>,
+}
+
+/// Upstream response, or the text-only response of a legacy network provider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SttOutput {
+    Text(String),
+    Raw { body: Vec<u8>, content_type: String },
+}
+
+impl From<String> for SttOutput {
+    fn from(text: String) -> Self {
+        Self::Text(text)
+    }
+}
+
+impl From<&str> for SttOutput {
+    fn from(text: &str) -> Self {
+        Self::Text(text.to_string())
+    }
+}
+
+impl SttOutput {
+    pub fn into_legacy_text(self) -> Result<String> {
+        match self {
+            Self::Text(text) => Ok(text),
+            Self::Raw { body, .. } => {
+                let json: serde_json::Value = serde_json::from_slice(&body)
+                    .context("ai: parsing STT API response as JSON")?;
+                json.get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .context("ai: STT API response missing a string \"text\" field")
+            }
+        }
+    }
 }
 
 fn strip_trailing_slash(base_url: &str) -> &str {
@@ -89,13 +125,16 @@ fn validate(req: &SttParams) -> Result<()> {
     if req.audio.is_empty() {
         bail!("ai: stt requires non-empty audio");
     }
+    if !valid_stt_extra(&req.extra) {
+        bail!("ai: invalid or oversized STT extra fields");
+    }
     Ok(())
 }
 
 /// `POST {base_url}/audio/transcriptions`: transcribes `req.audio` via the
 /// OpenAI-compatible STT endpoint of `provider`. See the module doc for the
 /// base_url/header/error conventions this follows.
-pub async fn transcribe(provider: &AiProviderConfig, req: SttParams) -> Result<String> {
+pub async fn transcribe(provider: &AiProviderConfig, req: SttParams) -> Result<SttOutput> {
     validate(&req)?;
 
     let file_name = req
@@ -106,9 +145,12 @@ pub async fn transcribe(provider: &AiProviderConfig, req: SttParams) -> Result<S
         .file_name(file_name)
         .mime_str(&req.mime)
         .context("ai: invalid stt audio mime type")?;
-    let form = reqwest::multipart::Form::new()
+    let mut form = reqwest::multipart::Form::new()
         .text("model", req.model.clone())
         .part("file", part);
+    for (name, value) in req.extra {
+        form = form.text(name, value);
+    }
 
     let url = format!(
         "{}/audio/transcriptions",
@@ -126,7 +168,7 @@ pub async fn transcribe(provider: &AiProviderConfig, req: SttParams) -> Result<S
 
     if !response.status().is_success() {
         let status = response.status();
-        let body_text = response.text().await.unwrap_or_default();
+        let body_text = super::tts::read_error_text(response).await;
         return Err(anyhow::Error::new(super::openai::UpstreamHttpError {
             label: "STT API",
             status: status.as_u16(),
@@ -134,14 +176,32 @@ pub async fn transcribe(provider: &AiProviderConfig, req: SttParams) -> Result<S
         }));
     }
 
-    let body: serde_json::Value = response
-        .json()
-        .await
-        .context("ai: parsing STT API response as JSON")?;
-    match body.get("text").and_then(|v| v.as_str()) {
-        Some(text) => Ok(text.to_string()),
-        None => bail!("ai: STT API response missing a string \"text\" field"),
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| valid_stt_content_type(v))
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    if response
+        .content_length()
+        .is_some_and(|len| len > MAX_STT_RESPONSE_BYTES as u64)
+    {
+        bail!("ai: STT API response exceeds the maximum transcription size");
     }
+    let mut response = response;
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .context("ai: reading STT API response body")?
+    {
+        if body.len().saturating_add(chunk.len()) > MAX_STT_RESPONSE_BYTES {
+            bail!("ai: STT API response exceeds the maximum transcription size");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(SttOutput::Raw { body, content_type })
 }
 
 #[cfg(test)]
@@ -154,6 +214,7 @@ mod tests {
             audio: audio.to_vec(),
             mime: "audio/wav".to_string(),
             file_name: None,
+            extra: Vec::new(),
         }
     }
 
@@ -178,5 +239,41 @@ mod tests {
     #[test]
     fn validate_accepts_a_well_formed_request() {
         assert!(validate(&params(b"fake-audio-bytes")).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_excessive_or_reserved_extra_fields() {
+        let mut req = params(b"audio");
+        req.extra = vec![(
+            "prompt".into(),
+            "a".repeat(super::super::protocol::MAX_VOICE_EXTRA_BYTES),
+        )];
+        assert!(validate(&req).is_err());
+        req.extra = vec![
+            ("include[]".into(), "logprobs".into());
+            super::super::protocol::MAX_STT_EXTRA_FIELDS + 1
+        ];
+        assert!(validate(&req).is_err());
+        req.extra = vec![("model".into(), "other-model".into())];
+        assert!(validate(&req).is_err());
+        req.extra = vec![
+            ("timestamp_granularities[]".into(), "word".into()),
+            ("timestamp_granularities[]".into(), "segment".into()),
+        ];
+        assert!(validate(&req).is_ok());
+    }
+
+    #[test]
+    fn legacy_text_uses_json_transcript_and_ignores_other_metadata() {
+        let raw = SttOutput::Raw {
+            body: br#"{"text":"hello","duration":1}"#.to_vec(),
+            content_type: "application/json".into(),
+        };
+        assert_eq!(raw.into_legacy_text().unwrap(), "hello");
+        let malformed = SttOutput::Raw {
+            body: br#"{"duration":1}"#.to_vec(),
+            content_type: "application/json".into(),
+        };
+        assert!(malformed.into_legacy_text().is_err());
     }
 }

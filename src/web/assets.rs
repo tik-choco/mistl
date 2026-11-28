@@ -50,6 +50,8 @@ feature_assets! {
     "peers.css" => "text/css; charset=utf-8",
     "vm.js" => "text/javascript; charset=utf-8",
     "vm.css" => "text/css; charset=utf-8",
+    "webhost.js" => "text/javascript; charset=utf-8",
+    "webhost.css" => "text/css; charset=utf-8",
 }
 
 fn find_feature(path: &str) -> Option<&'static FeatureAsset> {
@@ -159,6 +161,7 @@ mod tests {
             "messenger",
             "peers",
             "vm",
+            "webhost",
         ] {
             for extension in ["js", "css"] {
                 let (mime, bytes) =
@@ -187,6 +190,15 @@ mod tests {
         assert!(html.contains("id=\"panel-vm\""));
         assert!(html.contains("href=\"/assets/features/vm.css\""));
         assert!(html.contains("src=\"/assets/features/vm.js\""));
+    }
+
+    #[test]
+    fn web_panel_loads_its_embedded_assets() {
+        let html = super::super::INDEX_HTML;
+        assert!(html.contains("href=\"#panel-web\""));
+        assert!(html.contains("id=\"panel-web\""));
+        assert!(html.contains("href=\"/assets/features/webhost.css\""));
+        assert!(html.contains("src=\"/assets/features/webhost.js\""));
     }
 
     #[cfg(debug_assertions)]

@@ -28,6 +28,7 @@ mod tunnel;
 mod update;
 mod vm;
 mod web;
+mod web_host;
 mod wiresign;
 
 use anyhow::Result;

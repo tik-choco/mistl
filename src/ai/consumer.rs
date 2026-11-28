@@ -396,7 +396,12 @@ impl Consumer {
     pub fn models(&self) -> Vec<String> {
         let mut models = std::collections::BTreeSet::new();
         for info in self.catalog.lock().expect("catalog lock").values() {
-            if protocol::advertises_service(&info.services, protocol::SERVICE_CHAT) {
+            if protocol::advertises_service(&info.services, protocol::SERVICE_CHAT)
+                || protocol::advertises_service(&info.services, protocol::SERVICE_OAI_CHAT)
+                || protocol::advertises_service(&info.services, protocol::SERVICE_OAI_RESPONSES)
+                || protocol::advertises_service(&info.services, protocol::SERVICE_OAI_COMPLETIONS)
+                || protocol::advertises_service(&info.services, protocol::SERVICE_OAI_MULTIPART)
+            {
                 models.extend(info.models.iter().cloned());
             }
         }
@@ -500,6 +505,168 @@ impl Consumer {
 
     pub async fn wait_for_service(&self, service: &str, timeout: Duration) -> Result<ProviderInfo> {
         self.wait_for_service_model(service, None, timeout).await
+    }
+
+    /// Prefer a peer with transparent chat support over a compatible legacy
+    /// peer. A legacy match returns None immediately (no failed upstream
+    /// attempt or retry); the existing typed/vision path chooses that peer.
+    pub async fn wait_for_chat_proxy(
+        &self,
+        model: Option<&str>,
+        legacy_service: &str,
+        local_available: bool,
+        timeout: Duration,
+    ) -> Result<Option<ProviderInfo>> {
+        let endpoint = super::chat_proxy::Endpoint::current();
+        if endpoint != super::chat_proxy::Endpoint::Chat {
+            return Ok(self
+                .wait_for_explicit_proxy(endpoint.service(), model, local_available, timeout)
+                .await);
+        }
+        tokio::time::timeout(timeout, async {
+            loop {
+                let notified = self.catalog_changed.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                {
+                    let catalog = self.catalog.lock().expect("catalog lock");
+                    let modern = |p: &&ProviderInfo| {
+                        protocol::advertises_service(&p.services, protocol::SERVICE_OAI_CHAT)
+                    };
+                    let legacy = |p: &&ProviderInfo| {
+                        protocol::advertises_service(&p.services, legacy_service)
+                    };
+                    let matches =
+                        |p: &&ProviderInfo| model.is_none_or(|m| p.models.iter().any(|id| id == m));
+                    if let Some(info) = catalog.values().filter(modern).find(matches) {
+                        return Ok(Some(info.clone()));
+                    }
+                    if local_available || catalog.values().filter(legacy).any(|p| matches(&p)) {
+                        return Ok(None);
+                    }
+                    // A service with no advertised model lists retains the
+                    // old discovery behavior; known lists take precedence.
+                    let modern_known = catalog.values().filter(modern).any(|p| p.models_known);
+                    let legacy_known = catalog.values().filter(legacy).any(|p| p.models_known);
+                    if !modern_known {
+                        if let Some(info) = catalog.values().filter(modern).next() {
+                            return Ok(Some(info.clone()));
+                        }
+                    }
+                    if !legacy_known && catalog.values().any(|p| legacy(&p)) {
+                        return Ok(None);
+                    }
+                    if let Some(model) = model
+                        && (modern_known || legacy_known)
+                    {
+                        return Err(super::ModelNotFound(model.to_string()).into());
+                    }
+                }
+                notified.await;
+            }
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("ai: no provider for the requested model found in the room"))?
+    }
+
+    /// Responses and legacy Completions have no typed fallback. Only a peer
+    /// that explicitly offers the service can receive the request.
+    async fn wait_for_explicit_proxy(
+        &self,
+        service: &str,
+        model: Option<&str>,
+        local_available: bool,
+        timeout: Duration,
+    ) -> Option<ProviderInfo> {
+        tokio::time::timeout(timeout, async {
+            loop {
+                let notified = self.catalog_changed.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                {
+                    let catalog = self.catalog.lock().expect("catalog lock");
+                    let modern =
+                        |p: &&ProviderInfo| protocol::advertises_service(&p.services, service);
+                    let matches = |p: &&ProviderInfo| {
+                        model.is_some_and(|m| p.models.iter().any(|id| id == m))
+                    };
+                    if let Some(info) = catalog.values().filter(modern).find(matches) {
+                        return Some(info.clone());
+                    }
+                    if local_available {
+                        return None;
+                    }
+                    // Unlike legacy chat, these endpoints require a model match;
+                    // an unknown model list is not a reason to use a default.
+                    if catalog.values().any(|p| matches(&p) || p.models_known) {
+                        return None;
+                    }
+                }
+                notified.await;
+            }
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    /// Prefer raw multipart for a matching model. Only older routes with a
+    /// defined JSON adapter may use the general OAI service instead.
+    pub async fn wait_for_multipart_model(
+        &self,
+        model: &str,
+        allow_legacy: bool,
+        timeout: Duration,
+    ) -> Result<ProviderInfo> {
+        tokio::time::timeout(timeout, async {
+            loop {
+                let notified = self.catalog_changed.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                {
+                    let catalog = self.catalog.lock().expect("catalog lock");
+                    let modern = |p: &&ProviderInfo| {
+                        protocol::advertises_service(&p.services, protocol::SERVICE_OAI_MULTIPART)
+                    };
+                    let legacy = |p: &&ProviderInfo| {
+                        allow_legacy
+                            && protocol::advertises_service(&p.services, protocol::SERVICE_OAI)
+                    };
+                    let matches = |p: &&ProviderInfo| p.models.iter().any(|id| id == model);
+                    if let Some(info) = catalog
+                        .values()
+                        .filter(modern)
+                        .find(matches)
+                        .or_else(|| catalog.values().filter(legacy).find(matches))
+                    {
+                        return Ok(info.clone());
+                    }
+                    if catalog
+                        .values()
+                        .filter(|p| modern(p) || legacy(p))
+                        .any(|p| p.models_known)
+                    {
+                        return Err(super::ModelNotFound(model.to_string()).into());
+                    }
+                    // Unknown model lists retain the legacy discovery rule,
+                    // but cannot take priority over an explicit model match.
+                    if let Some(info) = catalog
+                        .values()
+                        .filter(modern)
+                        .next()
+                        .or_else(|| catalog.values().filter(legacy).next())
+                    {
+                        return Ok(info.clone());
+                    }
+                    if !allow_legacy && catalog.values().any(|p| matches(&p) || p.models_known) {
+                        anyhow::bail!("ai: no multipart provider for the requested model");
+                    }
+                }
+                notified.await;
+            }
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("ai: no multipart provider found in the room"))?
     }
 
     pub async fn wait_for_service_model(
@@ -783,6 +950,53 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use tokio::time::sleep;
+
+    #[tokio::test]
+    async fn raw_chat_discovery_uses_both_service_catalogs() {
+        let consumer = Consumer::new(Arc::new(|_, _| {}));
+        for (peer, service, model) in [
+            ("legacy", protocol::SERVICE_CHAT, "legacy-model"),
+            ("modern", protocol::SERVICE_OAI_CHAT, "chat-model"),
+        ] {
+            consumer.handle_message(
+                peer,
+                &ProtocolMessage::ProviderHello {
+                    model_info: None,
+                    models: Some(vec![model.into()]),
+                    services: Some(vec![service.into()]),
+                    voices: None,
+                },
+            );
+        }
+        assert_eq!(consumer.models(), vec!["chat-model", "legacy-model"]);
+        let timeout = Duration::from_millis(100);
+        let modern = consumer
+            .wait_for_chat_proxy(Some("chat-model"), protocol::SERVICE_CHAT, false, timeout)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(modern.node_id, "modern");
+        assert!(
+            consumer
+                .wait_for_chat_proxy(Some("legacy-model"), protocol::SERVICE_CHAT, false, timeout,)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            consumer
+                .wait_for_chat_proxy(
+                    Some("missing-model"),
+                    protocol::SERVICE_CHAT,
+                    false,
+                    timeout,
+                )
+                .await
+                .unwrap_err()
+                .downcast_ref::<super::super::ModelNotFound>()
+                .is_some()
+        );
+    }
 
     #[tokio::test]
     async fn request_sends_effort_without_requiring_tools() {

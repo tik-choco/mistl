@@ -41,6 +41,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use chrono::Utc;
 use mistlib::storage::fs::NativeBlockStore;
+use mistlib::storage::meta::NativeMetaStore;
 use mistlib_core::storage::{SpatialPolicy, StorageEngine};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -57,6 +58,9 @@ use resolver::RoomPeerResolver;
 /// Handle to the content-addressed store.
 pub struct Store {
     engine: StorageEngine<NativeBlockStore, RoomPeerResolver>,
+    /// Second handle on the engine's block directory, used only to restore
+    /// a pinned root block in place (the engine has no raw-block write).
+    root_blocks: NativeBlockStore,
     data_dir: PathBuf,
     /// Serializes read-modify-write access to `store-index.json`.
     index_lock: Mutex<()>,
@@ -84,15 +88,28 @@ impl Store {
         })?;
         // No VRChat position source, so blocks are never spatially tagged
         // and the default (decay-disabled) policy applies.
+        // Pin registry (SPEC-18) persists under `<blocks_dir>/meta`, the same
+        // layout mistlib-native uses; a directory never collides with a CID
+        // block file.
+        let meta = NativeMetaStore::new(blocks_dir.join("meta"))
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!("opening meta store under {}: {error}", blocks_dir.display())
+            })?;
         let engine = StorageEngine::new(
             backend,
             RoomPeerResolver::new(),
             storage_cfg.capacity_bytes,
             None,
             SpatialPolicy::default(),
-        );
+        )
+        .with_meta_store(Arc::new(meta));
+        let root_blocks = NativeBlockStore::new(&blocks_dir).await.map_err(|error| {
+            anyhow::anyhow!("opening block store at {}: {error}", blocks_dir.display())
+        })?;
         Ok(Self {
             engine,
+            root_blocks,
             data_dir,
             index_lock: Mutex::new(()),
             rooms: Mutex::new(std::collections::BTreeSet::new()),
@@ -204,6 +221,284 @@ impl Store {
         Ok(data)
     }
 
+    /// Like [`Self::put`], but the root and every chunk are pinned
+    /// (`StorageEngine::add_pinned`). The root CID is [`file_root_cid`] of
+    /// `name` and `data`, so a caller can record it before calling this.
+    ///
+    /// Caveat: the engine registers the pin only after the whole write, and
+    /// capacity eviction runs between chunk writes, so a file larger than
+    /// the room left beside already-pinned data can evict its *own* earlier
+    /// chunks mid-write. This checks every chunk afterwards and fails rather
+    /// than returning a broken file; the pin is dropped again only if the
+    /// root was not pinned before this call (an existing pin is never
+    /// released on a caller's behalf).
+    pub(crate) async fn put_pinned(&self, name: &str, data: Vec<u8>) -> Result<String> {
+        let predicted = file_root_cid(name, data.chunks(mistlib_core::storage::CHUNK_SIZE));
+        let was_pinned = self.engine.is_pinned(&predicted).await;
+        let result = self.put_pinned_claimed(name, data, &predicted).await;
+        if result.is_err() && !was_pinned {
+            self.engine.unpin(&predicted).await?;
+        }
+        result
+    }
+
+    /// Store a file whose predicted root is already tracked by the caller.
+    /// Like `fetch_file_pinned`, this leaves all pin cleanup to the caller:
+    /// a concurrent operation may have claimed the same root before it was
+    /// first pinned, so even a newly-created pin must not be released here.
+    pub(crate) async fn put_pinned_claimed(
+        &self,
+        name: &str,
+        data: Vec<u8>,
+        predicted: &str,
+    ) -> Result<String> {
+        let size = data.len() as u64;
+        let cid = self.engine.add_pinned(name, &data).await?;
+        drop(data);
+        if cid != predicted {
+            // Never expected (same chunking + manifest encoding as the
+            // engine); keep the pin rather than guess whether it pre-existed.
+            bail!("stored root CID {cid} differs from predicted {predicted}");
+        }
+        let complete = match self.local_file(&cid).await? {
+            Some(file) => {
+                let mut all = true;
+                for chunk in &file.chunks {
+                    if self.get_local(chunk).await?.is_none() {
+                        all = false;
+                        break;
+                    }
+                }
+                all
+            }
+            None => false,
+        };
+        if !complete {
+            bail!(
+                "{name} ({size} bytes) does not fit in storage capacity beside pinned data; \
+                 raise storage.capacity_bytes"
+            );
+        }
+        self.record(&cid, name, size).await?;
+        Ok(cid)
+    }
+
+    /// Pin a file whose manifest is already local: the root and every chunk
+    /// CID it lists become exempt from eviction (chunks are protected by
+    /// CID, so ones not yet local are covered as soon as they arrive).
+    /// Local-only -- use [`Self::fetch_file_pinned`] to pull from peers.
+    /// Idempotent.
+    ///
+    /// Pinned data wins over `storage.capacity_bytes`: writes never fail
+    /// because pinned blocks fill the store. Eviction removes unpinned
+    /// blocks only; if pinned data alone exceeds the capacity the engine
+    /// logs a warning and the store simply stays over capacity. Pinned
+    /// blocks are still served to peers (the block provider reads the block
+    /// store without regard to pin state).
+    pub(crate) async fn pin_file(&self, cid: &str) -> Result<()> {
+        if self.local_file(cid).await?.is_none() {
+            bail!("cannot pin {cid}: manifest is not stored locally");
+        }
+        self.engine.pin(cid).await?;
+        Ok(())
+    }
+
+    /// Drop the pin on `cid` (root + chunks; chunks shared with another
+    /// pinned file stay protected). The blocks remain stored but become
+    /// ordinary eviction candidates again. Idempotent.
+    pub(crate) async fn unpin_file(&self, cid: &str) -> Result<()> {
+        self.engine.unpin(cid).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn is_pinned(&self, cid: &str) -> Result<bool> {
+        Ok(self.engine.is_pinned(cid).await)
+    }
+
+    /// Decode the file manifest for `cid` from the local block store only
+    /// (no network). `None` if the root block isn't local. Rejects manifests
+    /// over [`MAX_MANIFEST_BYTES`] and ones whose chunk count doesn't match
+    /// `size` split into 1 MiB chunks.
+    pub(crate) async fn local_file(&self, cid: &str) -> Result<Option<LocalFile>> {
+        let Some(bytes) = self.get_local(cid).await? else {
+            return Ok(None);
+        };
+        decode_manifest(cid, &bytes).map(Some)
+    }
+
+    /// Make the file `cid` fully local and pinned without assembling it in
+    /// memory: the manifest is fetched (if missing) and pinned first, so
+    /// every chunk is protected the moment it lands, then missing chunks are
+    /// fetched one at a time from peers in `rooms` (CID-verified, at most
+    /// 3 attempts each). `progress` gets the cumulative byte count after
+    /// each chunk, already-local chunks included. Returns the file size.
+    /// With empty `rooms` this succeeds only if the file is complete
+    /// locally.
+    ///
+    /// The caller owns the pin lifecycle: this never unpins. A failed fetch
+    /// leaves the root pinned (if the manifest block was obtained) until the
+    /// caller unpins it.
+    ///
+    /// Each fetched chunk is written through `StorageEngine::add` (the
+    /// engine has no public raw-block write), which also stores a ~100-byte
+    /// unpinned single-chunk wrapper manifest; those are ordinary LRU
+    /// eviction candidates.
+    pub(crate) async fn fetch_file_pinned(
+        &self,
+        cid: &str,
+        max_size: u64,
+        rooms: &[String],
+        per_block_timeout: Duration,
+        progress: &(dyn Fn(u64) + Send + Sync),
+    ) -> Result<u64> {
+        let scope = resolver::ResolveScope {
+            rooms: rooms.to_vec(),
+            timeout: per_block_timeout,
+        };
+        let file = match self.local_file(cid).await? {
+            Some(file) => {
+                self.engine.pin(cid).await?;
+                file
+            }
+            None if self.engine.is_pinned(cid).await => {
+                // Pinned, but the root block went missing (e.g. removed from
+                // disk). `pin` no-ops on a pinned root, so restore the block
+                // directly instead of unpinning: the existing pin (same CID,
+                // so the same chunk list) keeps protecting the chunks.
+                if rooms.is_empty() {
+                    bail!("file {cid} is not stored locally and no rooms were given");
+                }
+                self.restore_root_block(cid, &scope).await?;
+                self.local_file(cid)
+                    .await?
+                    .with_context(|| format!("manifest block {cid} vanished after fetch"))?
+            }
+            None => {
+                if rooms.is_empty() {
+                    bail!("file {cid} is not stored locally and no rooms were given");
+                }
+                let mut last_error = None;
+                for _ in 0..FETCH_ATTEMPTS {
+                    match resolver::with_scope(scope.clone(), self.engine.pin(cid)).await {
+                        Ok(()) => {
+                            last_error = None;
+                            break;
+                        }
+                        Err(error) => last_error = Some(error),
+                    }
+                }
+                if let Some(error) = last_error {
+                    let error = anyhow::Error::from(error);
+                    return Err(error.context(format!("fetching manifest block {cid}")));
+                }
+                self.local_file(cid)
+                    .await?
+                    .with_context(|| format!("manifest block {cid} vanished after fetch"))?
+            }
+        };
+        // Checked from the manifest block alone, before any chunk is pulled,
+        // so a peer cannot make us download more than the caller budgeted.
+        if file.size > max_size {
+            bail!(
+                "file {cid} is {} bytes, over the {max_size} byte budget",
+                file.size
+            );
+        }
+
+        let mut done = 0u64;
+        for chunk_cid in &file.chunks {
+            let len = match self.get_local(chunk_cid).await? {
+                Some(data) => data.len(),
+                None => {
+                    if rooms.is_empty() {
+                        bail!("chunk {chunk_cid} of {cid} is not stored locally");
+                    }
+                    self.fetch_chunk(chunk_cid, &scope).await?
+                }
+            };
+            done += len as u64;
+            if done > file.size {
+                bail!("chunks of {cid} exceed the manifest size {}", file.size);
+            }
+            progress(done);
+        }
+        if done != file.size {
+            bail!(
+                "chunks of {cid} total {done} bytes, manifest says {}",
+                file.size
+            );
+        }
+        Ok(file.size)
+    }
+
+    /// Re-fetch a pinned file's missing manifest (root) block from peers in
+    /// `scope`, verify it as dag-cbor and write it straight to the block
+    /// directory. The block is not tracked by the engine's capacity
+    /// accounting until the next restart rescans; that only affects this
+    /// rare repair path and the block is pinned anyway.
+    async fn restore_root_block(&self, cid: &str, scope: &resolver::ResolveScope) -> Result<()> {
+        use mistlib_core::storage::cid::MULTICODEC_DAG_CBOR;
+        use mistlib_core::storage::{BlockStore as _, PeerResolver as _};
+        let mut last_error = String::from("no attempt made");
+        for _ in 0..FETCH_ATTEMPTS {
+            let fetched =
+                resolver::with_scope(scope.clone(), RoomPeerResolver::new().resolve_block(cid))
+                    .await;
+            let Some(data) = fetched else {
+                last_error = "no peer answered".to_string();
+                continue;
+            };
+            if data.len() > MAX_MANIFEST_BYTES
+                || !mistlib_core::storage::verify_cid(cid, &data, MULTICODEC_DAG_CBOR)
+            {
+                last_error = "CID mismatch".to_string();
+                continue;
+            }
+            decode_manifest(cid, &data)?;
+            self.root_blocks
+                .store_block(cid, &data)
+                .await
+                .map_err(|error| anyhow::anyhow!("storing manifest block {cid}: {error}"))?;
+            return Ok(());
+        }
+        bail!("fetching manifest block {cid} failed after {FETCH_ATTEMPTS} attempts: {last_error}")
+    }
+
+    /// Fetch one raw chunk from peers in `scope`, verify its CID and store
+    /// it. Returns its length. The chunk must already be pinned (via its
+    /// root) by the caller so it can't be evicted right after the write.
+    async fn fetch_chunk(&self, chunk_cid: &str, scope: &resolver::ResolveScope) -> Result<usize> {
+        use mistlib_core::storage::PeerResolver as _;
+        use mistlib_core::storage::cid::MULTICODEC_RAW;
+        let mut last_error = String::from("no attempt made");
+        for _ in 0..FETCH_ATTEMPTS {
+            let fetched = resolver::with_scope(
+                scope.clone(),
+                RoomPeerResolver::new().resolve_block(chunk_cid),
+            )
+            .await;
+            let Some(data) = fetched else {
+                last_error = "no peer answered".to_string();
+                continue;
+            };
+            if !mistlib_core::storage::verify_cid(chunk_cid, &data, MULTICODEC_RAW) {
+                last_error = "CID mismatch".to_string();
+                continue;
+            }
+            // `add` re-chunks at CHUNK_SIZE; only a block that fits in one
+            // chunk keeps its CID (and an empty one stores nothing).
+            if data.is_empty() || data.len() > mistlib_core::storage::CHUNK_SIZE {
+                bail!(
+                    "chunk {chunk_cid} has unsupported size {} (must be 1..=1 MiB)",
+                    data.len()
+                );
+            }
+            self.engine.add("", &data).await?;
+            return Ok(data.len());
+        }
+        bail!("fetching chunk {chunk_cid} failed after {FETCH_ATTEMPTS} attempts: {last_error}")
+    }
+
     /// List everything recorded in the local index (most recently touched
     /// first).
     pub async fn list(&self) -> Result<Vec<IndexEntry>> {
@@ -225,6 +520,74 @@ impl Store {
             },
         )
     }
+}
+
+/// Largest local manifest block [`Store::local_file`] will decode.
+const MAX_MANIFEST_BYTES: usize = 16 * 1024 * 1024;
+
+/// Attempts per block in [`Store::fetch_file_pinned`].
+const FETCH_ATTEMPTS: usize = 3;
+
+/// CID of one raw chunk (≤ `CHUNK_SIZE` bytes), as the engine computes it.
+pub(crate) fn chunk_cid(data: &[u8]) -> String {
+    mistlib_core::storage::compute_cid(data, mistlib_core::storage::cid::MULTICODEC_RAW)
+}
+
+/// Root CID [`Store::put`] / [`Store::put_pinned`] return for `name` and
+/// content split into `CHUNK_SIZE` chunks, without storing anything (the
+/// dag-cbor `FileManifest` hash). Lets a caller predict a CID from a
+/// streaming read.
+pub(crate) fn file_root_cid<'a>(name: &str, chunks: impl IntoIterator<Item = &'a [u8]>) -> String {
+    let mut size = 0u64;
+    let chunks = chunks
+        .into_iter()
+        .map(|c| {
+            size += c.len() as u64;
+            chunk_cid(c)
+        })
+        .collect();
+    file_root_cid_from_chunks(name, size, chunks)
+}
+
+/// [`file_root_cid`] from precomputed chunk CIDs.
+pub(crate) fn file_root_cid_from_chunks(name: &str, size: u64, chunks: Vec<String>) -> String {
+    use mistlib_core::storage::FileManifest;
+    let manifest = FileManifest {
+        name: name.to_string(),
+        size,
+        chunks,
+    };
+    let bytes = serde_cbor::to_vec(&manifest).expect("FileManifest serializes");
+    mistlib_core::storage::compute_cid(&bytes, mistlib_core::storage::cid::MULTICODEC_DAG_CBOR)
+}
+
+/// A file manifest decoded from the local block store: total size and the
+/// ordered chunk CIDs (each chunk is one block, at most 1 MiB).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LocalFile {
+    pub size: u64,
+    pub chunks: Vec<String>,
+}
+
+fn decode_manifest(cid: &str, bytes: &[u8]) -> Result<LocalFile> {
+    use mistlib_core::storage::{CHUNK_SIZE, FileManifest};
+    if bytes.len() > MAX_MANIFEST_BYTES {
+        bail!("manifest block {cid} is too large ({} bytes)", bytes.len());
+    }
+    let manifest: FileManifest = serde_cbor::from_slice(bytes)
+        .with_context(|| format!("block {cid} is not a file manifest"))?;
+    let expected = manifest.size.div_ceil(CHUNK_SIZE as u64);
+    if manifest.chunks.len() as u64 != expected {
+        bail!(
+            "manifest {cid} lists {} chunks for {} bytes (expected {expected})",
+            manifest.chunks.len(),
+            manifest.size
+        );
+    }
+    Ok(LocalFile {
+        size: manifest.size,
+        chunks: manifest.chunks,
+    })
 }
 
 /// Module-internal, lazily-initialized handle to the daemon's store.
@@ -1262,6 +1625,222 @@ mod tests {
         let cid = store.put("big.bin", data.clone()).await.unwrap();
         let fetched = store.get(&cid).await.unwrap();
         assert_eq!(fetched, data);
+    }
+
+    async fn temp_store_with_capacity(label: &str, capacity_bytes: u64) -> (Store, TempDir) {
+        let dir = TempDir::new(label);
+        let cfg = StorageConfig {
+            capacity_bytes,
+            ..test_config()
+        };
+        let store = Store::open(&cfg, dir.path()).await.expect("open store");
+        (store, dir)
+    }
+
+    fn patterned(len: usize, seed: u8) -> Vec<u8> {
+        (0..len).map(|i| (i % 251) as u8 ^ seed).collect()
+    }
+
+    async fn all_chunks_local(store: &Store, file: &LocalFile) -> bool {
+        for chunk in &file.chunks {
+            if store.get_local(chunk).await.unwrap().is_none() {
+                return false;
+            }
+        }
+        true
+    }
+
+    #[tokio::test]
+    async fn put_pinned_local_file_sizes_and_chunks() {
+        let (store, _dir) = temp_store("pinned-sizes").await;
+        let mib = 1024 * 1024;
+        for (len, chunks) in [(0usize, 0usize), (1, 1), (5 * mib / 2, 3)] {
+            let data = patterned(len, 7);
+            let cid = store.put_pinned("f.bin", data.clone()).await.unwrap();
+            assert!(store.is_pinned(&cid).await.unwrap());
+            let file = store.local_file(&cid).await.unwrap().expect("local");
+            assert_eq!(file.size, len as u64);
+            assert_eq!(file.chunks.len(), chunks);
+            let mut joined = Vec::new();
+            for chunk in &file.chunks {
+                joined.extend(store.get_local(chunk).await.unwrap().unwrap());
+            }
+            assert_eq!(joined, data);
+        }
+        assert!(
+            store
+                .list()
+                .await
+                .unwrap()
+                .iter()
+                .any(|e| e.name == "f.bin")
+        );
+    }
+
+    #[tokio::test]
+    async fn local_file_is_none_for_missing_and_rejects_bad_manifest() {
+        let (store, _dir) = temp_store("local-file-missing").await;
+        let raw = store.put("x", b"x".to_vec()).await.unwrap();
+        let chunk = store.local_file(&raw).await.unwrap().unwrap().chunks[0].clone();
+        // A raw chunk block isn't a manifest.
+        assert!(store.local_file(&chunk).await.is_err());
+        let missing = mistlib_core::storage::compute_cid(b"nope", 0x71);
+        assert!(store.local_file(&missing).await.unwrap().is_none());
+
+        let bad = serde_cbor::to_vec(&mistlib_core::storage::FileManifest {
+            name: "bad".into(),
+            size: 3 * 1024 * 1024,
+            chunks: vec![chunk],
+        })
+        .unwrap();
+        assert!(decode_manifest("bad", &bad).is_err());
+        assert!(decode_manifest("big", &vec![0u8; MAX_MANIFEST_BYTES + 1]).is_err());
+    }
+
+    #[tokio::test]
+    async fn pinned_file_survives_capacity_pressure_until_unpinned() {
+        let mib = 1024 * 1024;
+        let (store, _dir) = temp_store_with_capacity("pin-pressure", 3 * mib as u64).await;
+        let cid = store
+            .put_pinned("site.bin", patterned(5 * mib / 2, 1))
+            .await
+            .unwrap();
+        let file = store.local_file(&cid).await.unwrap().unwrap();
+        for i in 0..6u8 {
+            store
+                .put(&format!("filler{i}"), patterned(mib, 10 + i))
+                .await
+                .unwrap();
+        }
+        assert!(all_chunks_local(&store, &file).await);
+        assert!(store.local_file(&cid).await.unwrap().is_some());
+
+        store.unpin_file(&cid).await.unwrap();
+        store.unpin_file(&cid).await.unwrap(); // idempotent
+        assert!(!store.is_pinned(&cid).await.unwrap());
+        for i in 0..6u8 {
+            store
+                .put(&format!("filler-b{i}"), patterned(mib, 40 + i))
+                .await
+                .unwrap();
+        }
+        let root_left = store.get_local(&cid).await.unwrap().is_some();
+        assert!(
+            !root_left || !all_chunks_local(&store, &file).await,
+            "unpinned file should have been (partly) evicted"
+        );
+    }
+
+    #[tokio::test]
+    async fn put_pinned_larger_than_capacity_fails_and_unpins() {
+        let mib = 1024 * 1024;
+        let (store, _dir) = temp_store_with_capacity("pin-oversize", mib as u64).await;
+        let data = patterned(3 * mib, 5);
+        assert!(store.put_pinned("too-big", data.clone()).await.is_err());
+        // Same content -> same root CID, which must not stay pinned.
+        let (other, _dir2) = temp_store("pin-oversize-cid").await;
+        let cid = other.put("too-big", data).await.unwrap();
+        assert!(!store.is_pinned(&cid).await.unwrap());
+        assert!(store.list().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn put_pinned_claimed_failure_leaves_cleanup_to_caller() {
+        let mib = 1024 * 1024;
+        let (store, _dir) = temp_store_with_capacity("pin-claimed-oversize", mib as u64).await;
+        let data = patterned(3 * mib, 5);
+        let cid = file_root_cid("too-big", data.chunks(mib));
+        assert!(store.put_pinned_claimed("too-big", data, &cid).await.is_err());
+        assert!(store.is_pinned(&cid).await.unwrap());
+        store.unpin_file(&cid).await.unwrap();
+        assert!(!store.is_pinned(&cid).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn pin_file_requires_local_manifest_and_is_idempotent() {
+        let (store, _dir) = temp_store("pin-file").await;
+        let cid = store.put("a", patterned(10, 3)).await.unwrap();
+        assert!(!store.is_pinned(&cid).await.unwrap());
+        store.pin_file(&cid).await.unwrap();
+        store.pin_file(&cid).await.unwrap();
+        assert!(store.is_pinned(&cid).await.unwrap());
+        let missing = mistlib_core::storage::compute_cid(b"absent", 0x71);
+        assert!(store.pin_file(&missing).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn fetch_file_pinned_local_complete_and_missing() {
+        let (store, _dir) = temp_store("fetch-pinned").await;
+        let len = 2 * 1024 * 1024 + 5;
+        let cid = store.put("b", patterned(len, 9)).await.unwrap();
+        let seen = std::sync::Mutex::new(Vec::new());
+        let size = store
+            .fetch_file_pinned(&cid, u64::MAX, &[], Duration::from_millis(50), &|n: u64| {
+                seen.lock().unwrap().push(n)
+            })
+            .await
+            .unwrap();
+        assert_eq!(size, len as u64);
+        assert_eq!(*seen.lock().unwrap().last().unwrap(), len as u64);
+        assert_eq!(seen.lock().unwrap().len(), 3);
+        assert!(store.is_pinned(&cid).await.unwrap());
+
+        let missing = mistlib_core::storage::compute_cid(b"absent", 0x71);
+        let result = store
+            .fetch_file_pinned(
+                &missing,
+                u64::MAX,
+                &[],
+                Duration::from_millis(50),
+                &|_: u64| {},
+            )
+            .await;
+        assert!(result.is_err());
+        assert!(!store.is_pinned(&missing).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn fetch_file_pinned_failure_keeps_the_pin() {
+        let (store, dir) = temp_store("fetch-keeps-pin").await;
+        let cid = store
+            .put("c", patterned(2 * 1024 * 1024, 4))
+            .await
+            .unwrap();
+        let file = store.local_file(&cid).await.unwrap().unwrap();
+        // Lose a chunk: even a first-time fetch claims the root and then
+        // fails (no rooms), leaving the pin for the caller to reconcile.
+        assert!(!store.is_pinned(&cid).await.unwrap());
+        std::fs::remove_file(dir.path().join("blocks").join(&file.chunks[1])).unwrap();
+        let result = store
+            .fetch_file_pinned(&cid, u64::MAX, &[], Duration::from_millis(50), &|_: u64| {})
+            .await;
+        assert!(result.is_err());
+        assert!(store.is_pinned(&cid).await.unwrap());
+        // A second failed fetch must also preserve the pre-existing pin.
+        let result = store
+            .fetch_file_pinned(&cid, u64::MAX, &[], Duration::from_millis(50), &|_: u64| {})
+            .await;
+        assert!(result.is_err());
+        assert!(store.is_pinned(&cid).await.unwrap());
+        // Lose the root too: still pinned after the failed (offline) repair.
+        std::fs::remove_file(dir.path().join("blocks").join(&cid)).unwrap();
+        let result = store
+            .fetch_file_pinned(&cid, u64::MAX, &[], Duration::from_millis(50), &|_: u64| {})
+            .await;
+        assert!(result.is_err());
+        assert!(store.is_pinned(&cid).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn file_root_cid_predicts_put() {
+        let (store, _dir) = temp_store("predict-cid").await;
+        let mib = 1024 * 1024;
+        for len in [0usize, 1, mib, 2 * mib + 3] {
+            let data = patterned(len, 11);
+            let predicted =
+                file_root_cid("p/x.bin", data.chunks(mistlib_core::storage::CHUNK_SIZE));
+            assert_eq!(store.put_pinned("p/x.bin", data).await.unwrap(), predicted);
+        }
     }
 
     #[tokio::test]

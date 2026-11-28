@@ -50,9 +50,8 @@ pub struct TtsParams {
     pub format: Option<String>,
     /// Playback speed multiplier; omitted from the request when `None`.
     pub speed: Option<f64>,
-    /// Other top-level request fields passed through verbatim to an HTTP
-    /// upstream (tc-ai-api `keep_alive`, vendor-specific options, `stream_format`, ...).
-    /// Never carried over the wire (`tts_request` is fixed by mistai v1).
+    /// Other bounded top-level request fields passed through to an HTTP or
+    /// extension-aware room provider (including object-form `voice`).
     pub extra: serde_json::Map<String, Value>,
 }
 
@@ -74,6 +73,20 @@ fn truncate_500(body: &str) -> String {
     body.chars().take(500).collect()
 }
 
+/// Keep upstream error diagnostics bounded as well as successful audio bodies.
+pub(super) async fn read_error_text(mut response: reqwest::Response) -> String {
+    const MAX_ERROR_BYTES: usize = 8 * 1024;
+    let mut bytes = Vec::new();
+    while bytes.len() < MAX_ERROR_BYTES {
+        let Ok(Some(chunk)) = response.chunk().await else {
+            break;
+        };
+        let len = chunk.len().min(MAX_ERROR_BYTES - bytes.len());
+        bytes.extend_from_slice(&chunk[..len]);
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
 /// Upper bound on the audio body accepted from a TTS upstream.
 const MAX_TTS_AUDIO_BYTES: usize = 32 * 1024 * 1024;
 
@@ -93,6 +106,9 @@ fn build_client() -> Result<reqwest::Client> {
 /// to `"mp3"`). Split out from [`synthesize`] so callers -- and tests --
 /// can check a request's shape without making an HTTP call.
 fn validate(req: &TtsParams) -> Result<String> {
+    if !super::protocol::valid_tts_extra(&req.extra) {
+        bail!("ai: oversized TTS extra fields");
+    }
     if req.model.trim().is_empty() {
         bail!("ai: tts requires a model");
     }
@@ -131,6 +147,11 @@ fn build_body(req: &TtsParams, format: &str) -> Value {
     });
     if !req.voice.is_empty() {
         body["voice"] = json!(req.voice);
+    }
+    // Object-form voice is an explicit client selection, not the resolved
+    // string default. Never let the extension replace the model or input.
+    if let Some(voice) = req.extra.get("voice").filter(|v| v.is_object()) {
+        body["voice"] = voice.clone();
     }
     for (key, value) in &req.extra {
         if !matches!(
@@ -174,7 +195,7 @@ pub async fn synthesize(provider: &AiProviderConfig, req: TtsParams) -> Result<T
             break response;
         }
         let status = response.status();
-        let body_text = response.text().await.unwrap_or_default();
+        let body_text = read_error_text(response).await;
         // A format hint is optional: retry once using the backend's own
         // container when it explicitly refuses this parameter. Other errors
         // keep their normal behavior, and speed is preserved on the retry.
@@ -324,6 +345,21 @@ mod tests {
             build_body(&req, &validate(&req).unwrap())["response_format"],
             "opus"
         );
+    }
+
+    #[test]
+    fn object_voice_overrides_resolved_default_and_extra_size_is_bounded() {
+        let mut req = params("hello");
+        req.extra.insert("voice".into(), json!({"id":"speaker"}));
+        assert_eq!(
+            build_body(&req, &validate(&req).unwrap())["voice"],
+            json!({"id":"speaker"})
+        );
+        req.extra.insert(
+            "instructions".into(),
+            json!("a".repeat(super::super::protocol::MAX_VOICE_EXTRA_BYTES)),
+        );
+        assert!(validate(&req).is_err());
     }
 
     #[test]

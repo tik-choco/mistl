@@ -306,6 +306,22 @@ async fn daemon_main(host_override: Option<String>) -> Result<()> {
         None
     };
 
+    // mistl web gateway (loopback only). A busy port is logged, not fatal.
+    let web_gateway = if state.config().web.enabled {
+        match crate::web_host::gateway::serve(state.clone()).await {
+            Ok(gateway) => {
+                info!(url = %gateway.base_url(), "mistl web gateway ready");
+                Some(gateway)
+            }
+            Err(error) => {
+                tracing::warn!(error = %format!("{error:#}"), "mistl web gateway failed to start; continuing without it");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     services::spawn(state.clone());
 
     let _tray = crate::tray::spawn(state.clone());
@@ -317,6 +333,9 @@ async fn daemon_main(host_override: Option<String>) -> Result<()> {
 
     if let Some(web) = web {
         web.close().await;
+    }
+    if let Some(gateway) = web_gateway {
+        gateway.close().await;
     }
     server.close().await;
     // Guests get an ACPI shutdown; their QEMU processes die with the daemon.
@@ -594,7 +613,7 @@ fn remote_config_denied(path: &str) -> bool {
     ];
     // Whole sections: update source/cadence, dashboard bind address, and the
     // scheduler (its jobs are shell commands).
-    const DENIED_SECTIONS: &[&str] = &["update.", "ui.", "scheduler.", "vm."];
+    const DENIED_SECTIONS: &[&str] = &["update.", "ui.", "scheduler.", "vm.", "web."];
     // Catch-all for future path / listen-address fields.
     let field = path.rsplit('.').next().unwrap_or(path);
     let pathlike = field.ends_with("_dir")
@@ -634,6 +653,22 @@ fn authorize(caller: Caller, cmd: &str, args: &Value) -> Result<()> {
             _ => bail!("`{cmd}` is available only through the local mistl CLI"),
         }
     }
+    if cmd.starts_with("web.") && caller != Caller::Ipc {
+        match cmd {
+            "web.ls" | "web.status" | "web.url" => {}
+            "web.publish" | "web.install" | "web.rm" | "web.trust" | "web.untrust" => {
+                match caller {
+                    Caller::Http { remote: false } => {}
+                    Caller::Http { remote: true } => bail!(
+                        "`{cmd}` is not available from a remote dashboard session; \
+                         use the mistl CLI or open the dashboard on this machine"
+                    ),
+                    _ => bail!("`{cmd}` requires the mistl CLI or a local dashboard session"),
+                }
+            }
+            _ => bail!("`{cmd}` is available only through the local mistl CLI"),
+        }
+    }
     // Room shortcuts are configuration writes and must share config.set's policy.
     if matches!(cmd, "escrow.rooms.add" | "escrow.rooms.remove") {
         authorize(caller, "config.set", &json!({"path": "escrow.rooms"}))?;
@@ -655,6 +690,7 @@ fn authorize(caller: Caller, cmd: &str, args: &Value) -> Result<()> {
         "store.put" | "store.put-file" if has("path") => Some("reads an arbitrary local path"),
         "store.sandbox.import" => Some("reads an arbitrary local path"),
         "escrow.import" => Some("reads an arbitrary local path"),
+        "web.publish" => Some("reads an arbitrary local path"),
         "store.folder-share" => Some("publishes an arbitrary local directory"),
         // Writes to a caller-chosen local path.
         "escrow.export" => Some("writes to an arbitrary local path"),
@@ -928,6 +964,7 @@ pub async fn dispatch_as(
             Some("ai") => crate::ai::handle(cmd, args, state).await,
             Some("tunnel") => crate::tunnel::handle(cmd, args, state).await,
             Some("vm") => crate::vm::handle(cmd, args, state).await,
+            Some("web") => crate::web_host::handle(cmd, args, state).await,
             Some("nostr") => crate::nostr::handle(cmd, args, state).await,
             Some("update") => crate::update::handle(cmd, args, state).await,
             Some("install") | Some("autostart") | Some("cli_path") => {
@@ -1187,6 +1224,37 @@ mod tests {
     }
 
     #[test]
+    fn only_web_views_are_available_from_remote_http() {
+        let args = json!({"site": "a".repeat(32), "path": "/tmp/site"});
+        for cmd in [
+            "web.publish",
+            "web.install",
+            "web.rm",
+            "web.trust",
+            "web.untrust",
+        ] {
+            for caller in [Caller::Ipc, LOCAL] {
+                authorize(caller, cmd, &args).unwrap();
+            }
+            let error = authorize(REMOTE, cmd, &args).unwrap_err().to_string();
+            assert!(error.contains(MSG), "{cmd}: {error}");
+            assert!(authorize(Caller::Internal, cmd, &args).is_err(), "{cmd}");
+        }
+        for cmd in ["web.ls", "web.status", "web.url"] {
+            for caller in [Caller::Ipc, LOCAL, REMOTE, Caller::Internal] {
+                authorize(caller, cmd, &args).unwrap();
+            }
+        }
+        authorize(Caller::Ipc, "web.future", &args).unwrap();
+        assert!(authorize(LOCAL, "web.future", &args).is_err());
+        for path in ["web.enabled", "web.listen", "web.max_site_bytes"] {
+            let set = json!({"path": path, "value": null});
+            assert!(authorize(REMOTE, "config.set", &set).is_err(), "{path}");
+            authorize(LOCAL, "config.set", &set).unwrap();
+        }
+    }
+
+    #[test]
     fn vm_cli_only_commands_require_ipc() {
         let args = json!({});
         for cmd in ["vm.key", "vm.connect", "vm.future", "vm.ha.future"] {
@@ -1300,6 +1368,9 @@ mod tests {
             ("store.folder-share", json!({"path":"/","passphrase":"p"})),
             ("store.folder-sync", json!({"url":"u","dir":"/x"})),
             ("store.browse-dirs", json!({"path":"/"})),
+            ("web.publish", json!({"path":"/home/user/game"})),
+            ("web.install", json!({"site":"a".repeat(32)})),
+            ("web.trust", json!({"did":"did:key:z6Mk"})),
         ];
         for (cmd, args) in denied {
             let err = authorize(REMOTE, cmd, &args).unwrap_err().to_string();

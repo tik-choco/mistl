@@ -8,11 +8,14 @@
 //! ai.default_ref, including network routing when the selected provider is a room.
 
 mod api_server;
+mod chat_proxy;
 mod consumer;
+mod endpoints;
 pub(crate) mod external;
 mod media;
 pub mod media_cli;
 mod model_discovery;
+mod multipart;
 mod oai_tunnel;
 pub(crate) use model_discovery::{ModelDiscovery, spawn_http_refresh};
 /// Opened to `pub(crate)` so `crate::bot`'s `summarize` transform can reuse
@@ -119,7 +122,7 @@ pub type TtsFn = Arc<dyn Fn(tts::TtsParams, Option<String>) -> TtsCallFuture + S
 
 /// One transcription for `POST /v1/audio/transcriptions`.
 pub type SttCallFuture =
-    std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send>>;
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<stt::SttOutput>> + Send>>;
 pub type SttFn = Arc<dyn Fn(stt::SttParams) -> SttCallFuture + Send + Sync>;
 
 /// Capacity of the outbound reply queue (see `init_service`).
@@ -198,6 +201,55 @@ impl AiRoom {
     }
     async fn broadcast(&self, msg: ProtocolMessage) {
         let _ = crate::net::send_broadcast(&self.room, protocol::encode(&msg)).await;
+    }
+
+    async fn proxy_chat(
+        &self,
+        raw: Vec<u8>,
+        effort: Option<String>,
+        timeout: Duration,
+    ) -> Result<Option<chat_proxy::Reply>> {
+        let body: Value = serde_json::from_slice(&raw)?;
+        let model = network_model(body["model"].as_str().map(String::from));
+        let legacy_service = if api_server::has_image_content(&body) {
+            protocol::SERVICE_OAI
+        } else {
+            protocol::SERVICE_CHAT
+        };
+        let local = self
+            .local_provider()
+            .filter(|provider| provider.local_chat_available(model.as_deref()));
+        self.broadcast(ProtocolMessage::ConsumerHello).await;
+        // Older oai peers force stream=false and may drop temperature.
+        // Only oai_chat guarantees raw chat; keep legacy text and vision
+        // routes unchanged when the selected model has only old providers.
+        let info = self
+            .consumer
+            .wait_for_chat_proxy(
+                model.as_deref(),
+                legacy_service,
+                local.is_some(),
+                DISCOVERY_TIMEOUT,
+            )
+            .await?;
+        if info.is_none() && local.is_none() {
+            return Ok(None);
+        }
+        let payload =
+            chat_proxy::payload(&raw, &body, model.as_deref().unwrap_or_default(), effort)?;
+        let streaming = body["stream"] == true;
+        drop(body);
+        match info {
+            Some(info) if info.node_id != self.node_id => self
+                .oai
+                .request_chat(&info.node_id, &payload, streaming, timeout)
+                .await
+                .map(Some),
+            _ => match local {
+                Some(provider) => provider.local_chat_proxy(payload).await.map(Some),
+                None => Ok(None),
+            },
+        }
     }
 }
 
@@ -468,6 +520,27 @@ impl AiService {
                 })
             })
         };
+        let chat_proxy: api_server::ChatProxyFn = {
+            let session = session.clone();
+            let state = self.state.clone();
+            let room = room.clone();
+            Arc::new(move |raw| {
+                let session = session.clone();
+                let state = state.clone();
+                let room = room.clone();
+                Box::pin(async move {
+                    let body: Value = serde_json::from_slice(&raw)?;
+                    let effort = room_api_effort(
+                        &state.effective_config().ai,
+                        &room,
+                        body["model"].as_str(),
+                        None,
+                    );
+                    drop(body);
+                    session.proxy_chat(raw, effort, timeout).await
+                })
+            })
+        };
         let state = self.state.clone();
         let relay_session = session.clone();
         let oai: api_server::OaiFn = Arc::new(move |mut body| {
@@ -522,6 +595,7 @@ impl AiService {
             tts,
             stt,
             oai,
+            chat_proxy: Some(chat_proxy),
             decision,
             relay,
         }))
@@ -585,7 +659,7 @@ impl AiService {
             node_id: transport.node_id.clone(),
             consumer: Consumer::new(send.clone()),
             voice: voice_consumer::VoiceConsumer::new(send.clone()),
-            oai: oai_tunnel::TunnelConsumer::new(send.clone()),
+            oai: oai_tunnel::TunnelConsumer::new(send.clone()).in_room(transport.room.clone()),
             send,
             provider: RwLock::new(None),
             handlers: Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT_HANDLERS)),
@@ -848,6 +922,36 @@ impl AiService {
         .await
     }
 
+    async fn proxy_chat(self: Arc<Self>, raw: Vec<u8>) -> Result<Option<chat_proxy::Reply>> {
+        let body: Value = serde_json::from_slice(&raw)?;
+        let config = self.state.effective_config();
+        let reference = resolve_api_ref(&config.ai, body["model"].as_str(), &self.live_models())?;
+        let target = crate::config::resolve_ref(&config.ai, Some(&reference))
+            .context("ai: model reference is unavailable; check ai.providers and ai.default_ref")?;
+        let effort = default_api_effort(&config.ai, Some(&reference), None);
+        let payload = chat_proxy::payload(&raw, &body, &target.model, effort)?;
+        drop(body);
+        if let Some(room) = target.base_url.strip_prefix("mist-network://") {
+            return self
+                .room(room)
+                .await?
+                .proxy_chat(
+                    payload,
+                    None,
+                    Duration::from_secs(config.ai.request_timeout_secs.max(1)),
+                )
+                .await;
+        }
+        chat_proxy::upstream(
+            &target.base_url,
+            &target.api_key,
+            payload,
+            Duration::from_secs(120),
+        )
+        .await
+        .map(Some)
+    }
+
     /// Unscoped tc-ai-api passthrough routes (see [`api_server::RelayRequest`]).
     async fn relay(
         self: Arc<Self>,
@@ -994,7 +1098,11 @@ impl AiService {
         tts::synthesize(&provider, req).await
     }
 
-    async fn transcribe(&self, state: &Arc<AppState>, req: stt::SttParams) -> Result<String> {
+    async fn transcribe(
+        &self,
+        state: &Arc<AppState>,
+        req: stt::SttParams,
+    ) -> Result<stt::SttOutput> {
         let cfg = state.effective_config().ai;
         let resolved_ref = cfg
             .stt
@@ -1604,20 +1712,21 @@ async fn build_provider(
                 input: text,
                 format: options.response_format,
                 speed: options.speed.or(default_speed),
-                extra: Default::default(),
+                extra: options.extra,
             };
             Box::pin(async move { tts::synthesize(&provider, req).await })
         });
         call
     });
     let stt_call = model_ref_provider(cfg, cfg.stt.as_ref()).map(|(provider, resolved)| {
-        let call: SttCallFn = Arc::new(move |audio, mime, model, file_name| {
+        let call: SttCallFn = Arc::new(move |audio, mime, model, file_name, extra| {
             let provider = provider.clone();
             let req = stt::SttParams {
                 model: resolve_voice_call_model(model, &resolved.model, "stt"),
                 audio,
                 mime,
                 file_name,
+                extra,
             };
             Box::pin(async move { stt::transcribe(&provider, req).await })
         });
@@ -1639,13 +1748,16 @@ async fn build_provider(
     // the resolver rejects those requests without hiding the wire capability.
     let (_, shared, _) = resolve_advertised_models(cfg, room);
     let restricted = !room.shared.is_empty();
-    provider.set_oai(oai_tunnel::TunnelProvider::new(
-        session.send.clone(),
-        Arc::new(move |_path, body| {
-            let model = body.get("model").and_then(Value::as_str).unwrap_or("");
-            resolve_oai_model(&shared, &oai_default, restricted, model)
-        }),
-    ));
+    provider.set_oai(
+        oai_tunnel::TunnelProvider::new(
+            session.send.clone(),
+            Arc::new(move |_path, body| {
+                let model = body.get("model").and_then(Value::as_str).unwrap_or("");
+                resolve_oai_model(&shared, &oai_default, restricted, model)
+            }),
+        )
+        .with_chat_effort(cfg.default_reasoning_effort.clone()),
+    );
     Ok(provider)
 }
 
@@ -2040,6 +2152,10 @@ async fn serve_start(service: &Arc<AiService>, state: &Arc<AppState>) -> Result<
         let state = state.clone();
         Arc::new(move || state.effective_config().ai.api_allowed_origins)
     };
+    let chat_proxy: api_server::ChatProxyFn = {
+        let service = service.clone();
+        Arc::new(move |raw| Box::pin(service.clone().proxy_chat(raw)))
+    };
     let server = ApiServer::start_with_rooms(
         &api_listen,
         call,
@@ -2050,6 +2166,7 @@ async fn serve_start(service: &Arc<AiService>, state: &Arc<AppState>) -> Result<
         Some(relay),
         Some(rooms),
         Some(origins),
+        Some(chat_proxy),
     )
     .await
     .with_context(|| format!("ai: binding API server on {api_listen}"))?;
@@ -2175,6 +2292,10 @@ mod tests {
             let state = tts_state.clone();
             Box::pin(async move { service.synthesize(&state, req, lang).await })
         });
+        let chat_proxy: api_server::ChatProxyFn = {
+            let service = service.clone();
+            Arc::new(move |raw| Box::pin(service.clone().proxy_chat(raw)))
+        };
         let rooms: api_server::RoomsFn =
             Arc::new(move |room| Box::pin(service.clone().api_room(room)));
         let stt: SttFn = Arc::new(|_| Box::pin(async { bail!("not used") }));
@@ -2188,6 +2309,7 @@ mod tests {
             None,
             Some(rooms),
             None,
+            Some(chat_proxy),
         )
         .await
         .unwrap();
@@ -2206,6 +2328,335 @@ mod tests {
                 return msg;
             }
         }
+    }
+
+    /// The second half waits for the client to acknowledge the first half,
+    /// making buffering regressions deterministic rather than timing-based.
+    async fn raw_chat_upstream(
+        status: u16,
+        content_type: &'static str,
+        first: &'static [u8],
+        rest: &'static [u8],
+    ) -> (
+        String,
+        tokio::sync::oneshot::Receiver<Value>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (captured, request) = tokio::sync::oneshot::channel();
+        let (release, wait) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut raw = Vec::new();
+            let mut buf = [0; 4096];
+            loop {
+                let n = socket.read(&mut buf).await.unwrap();
+                assert!(n > 0);
+                raw.extend_from_slice(&buf[..n]);
+                if let Some(end) = raw.windows(4).position(|b| b == b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&raw[..end]);
+                    assert!(head.starts_with("POST /v1/chat/completions "));
+                    let len: usize = head
+                        .lines()
+                        .find_map(|l| {
+                            l.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().parse().unwrap())
+                        })
+                        .unwrap();
+                    if raw.len() >= end + 4 + len {
+                        captured
+                            .send(serde_json::from_slice(&raw[end + 4..end + 4 + len]).unwrap())
+                            .unwrap();
+                        break;
+                    }
+                }
+            }
+            socket.write_all(format!("HTTP/1.1 {status} Fixture\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", first.len() + rest.len()).as_bytes()).await.unwrap();
+            socket.write_all(first).await.unwrap();
+            if !rest.is_empty() {
+                wait.await.unwrap();
+                socket.write_all(rest).await.unwrap();
+            }
+        });
+        (format!("http://{addr}/v1"), request, release)
+    }
+
+    #[tokio::test]
+    async fn raw_chat_proxy_preserves_fields_status_and_incremental_sse() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
+        crate::authz::test_reset();
+        const JSON: &[u8] = br#"{ "choices":[{"message":{"content":"one","refusal":null}},{"message":{"content":null,"refusal":"two"},"finish_reason":"length"}],"usage":{"completion_tokens":4,"prompt_tokens":7,"total_tokens":11} }"#;
+        const ERROR: &[u8] = br#"{ "error":{"message":"fixture error","type":"invalid_request_error","param":"n","code":"invalid_value"} }"#;
+        const FIRST: &[u8] = b"data: {\"choices\":[{\"delta\":{\"reasoning\":\"think\",\"content\":\"one\"}}]}\r\n\r\n";
+        const REST: &[u8] = b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{}\"}}]}}]}\n\ndata: {\"choices\":[],\"usage\":{\"completion_tokens\":4,\"total_tokens\":11}}\n\ndata: [DONE]\n\n";
+        for (room, path) in [
+            (false, "/v1/chat/completions"),
+            (true, "/v1/chat/completions"),
+            (true, "/v1/rooms/test/chat/completions"),
+        ] {
+            for (status, mime, first, rest) in [
+                (200, "application/json; charset=utf-8", JSON, b"".as_slice()),
+                (400, "application/json", ERROR, b"".as_slice()),
+                (200, "text/event-stream; charset=utf-8", FIRST, REST),
+            ] {
+                let (url, captured, release) = raw_chat_upstream(status, mime, first, rest).await;
+                let (state, session, mut requests, server) = network_api_fixture().await;
+                let provider_task = if room {
+                    // A legacy chat peer is already in the fixture; the new
+                    // capability must win without first issuing a typed call.
+                    session.consumer.handle_message(
+                        "modern",
+                        &ProtocolMessage::ProviderHello {
+                            models: Some(vec!["raw".into()]),
+                            services: Some(vec![
+                                protocol::SERVICE_CHAT.into(),
+                                protocol::SERVICE_OAI.into(),
+                                protocol::SERVICE_OAI_CHAT.into(),
+                            ]),
+                            model_info: None,
+                            voices: None,
+                        },
+                    );
+                    let consumer = session.oai.clone();
+                    let target = crate::config::ResolvedModel {
+                        base_url: url,
+                        api_key: String::new(),
+                        model: "chat-model".into(),
+                        reasoning_effort: None,
+                        voice: None,
+                        lang_voices: HashMap::new(),
+                    };
+                    let provider = oai_tunnel::TunnelProvider::new(
+                        Arc::new(move |peer, msg| {
+                            assert_eq!(peer, "consumer");
+                            consumer.handle_message("modern", &msg);
+                        }),
+                        Arc::new(move |_, _| Ok(Some(target.clone()))),
+                    );
+                    Some(tokio::spawn(async move {
+                        let msg = next_api_request(&mut requests).await;
+                        assert!(matches!(msg, ProtocolMessage::OaiRequest { .. }));
+                        provider.handle_message("consumer", msg).await;
+                    }))
+                } else {
+                    let mut config = state.config();
+                    config.ai.providers[0].base_url = url;
+                    config.ai.default_ref = Some(ModelRef {
+                        provider_id: "http".into(),
+                        model: "chat-model".into(),
+                    });
+                    state.set_config(config);
+                    None
+                };
+                let body = json!({
+                    "messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}],
+                    "temperature":0.4,"max_completion_tokens":42,
+                    "response_format":{"type":"json_schema","json_schema":{"name":"fixture","schema":{"type":"object"}}},
+                    "n":2,"logprobs":true,"top_logprobs":2,"vendor_extension":{"z":1,"a":2},
+                    "stream":!rest.is_empty(),"stream_options":{"include_usage":true},
+                    "reasoning_effort":"none"
+                });
+                let client = reqwest::Client::builder()
+                    .no_proxy()
+                    .timeout(Duration::from_secs(5))
+                    .build()
+                    .unwrap();
+                let mut response = client
+                    .post(format!("http://{}{path}", server.addr()))
+                    .json(&body)
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status().as_u16(), status);
+                assert_eq!(response.headers()["content-type"], mime);
+                let mut expected = body.clone();
+                expected["model"] = json!("chat-model");
+                assert_eq!(captured.await.unwrap(), expected);
+                let mut received = Vec::new();
+                if !rest.is_empty() {
+                    while received.len() < first.len() {
+                        let chunk = tokio::time::timeout(Duration::from_secs(2), response.chunk())
+                            .await
+                            .expect("first event must arrive before upstream finishes")
+                            .unwrap()
+                            .unwrap();
+                        received.extend_from_slice(&chunk);
+                    }
+                    assert_eq!(received, first);
+                    release.send(()).unwrap();
+                }
+                while let Some(chunk) = response.chunk().await.unwrap() {
+                    received.extend_from_slice(&chunk);
+                }
+                assert_eq!(received, [first, rest].concat());
+                if let Some(task) = provider_task {
+                    task.await.unwrap();
+                }
+                server.stop();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn raw_chat_room_can_use_its_own_shared_http_provider() {
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
+        crate::authz::test_reset();
+        let reply = br#"{"choices":[{"message":{"content":"local reply"}}],"usage":{"completion_tokens":2,"total_tokens":4}}"#;
+        let token = crate::authz::test_command(
+            "authz.token.create",
+            json!({"name":"chat fixture","limits":{"max_requests":1}}),
+        )
+        .unwrap()["token"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        crate::authz::test_command("authz.api.set", json!({"require_token":true})).unwrap();
+        let (url, captured, _) = raw_chat_upstream(200, "application/json", reply, b"").await;
+        let (state, session, mut requests, server) = network_api_fixture().await;
+        let mut config = state.config();
+        config.ai.providers[0].base_url = url;
+        state.set_config(config.clone());
+        *session.provider.write().unwrap() = Some(
+            build_provider(&session, &config.ai, &config.ai.providers[1])
+                .await
+                .unwrap(),
+        );
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let response = client.post(format!("http://{}/v1/rooms/test/chat/completions", server.addr()))
+            .bearer_auth(&token)
+            .json(&json!({"model":"raw","messages":[{"role":"user","content":"hi"}],"temperature":0.65}))
+            .send().await.unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.bytes().await.unwrap().as_ref(), reply);
+        let upstream = captured.await.unwrap();
+        assert_eq!(upstream["model"], "raw");
+        assert_eq!(upstream["temperature"], 0.65);
+        assert_eq!(upstream["reasoning_effort"], "high");
+        while let Ok(msg) = requests.try_recv() {
+            assert!(
+                !matches!(
+                    msg,
+                    ProtocolMessage::OaiRequest { .. } | ProtocolMessage::LlmRequest { .. }
+                ),
+                "self chat must not send a P2P inference request"
+            );
+        }
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let usage =
+                    crate::authz::test_command("authz.usage", json!({"service":"ai"})).unwrap();
+                let rows = usage["ai"].as_array().unwrap();
+                if let Some(row) = rows.first()
+                    && row["requests"] == 1
+                {
+                    assert_eq!(row["output_chars"], 11);
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let rejected = client
+            .post(format!(
+                "http://{}/v1/rooms/test/chat/completions",
+                server.addr()
+            ))
+            .bearer_auth(&token)
+            .json(&json!({"model":"raw","messages":[{"role":"user","content":"hi"}]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), 429);
+        server.stop();
+        crate::authz::test_reset();
+    }
+
+    #[tokio::test]
+    async fn raw_chat_client_disconnect_unregisters_pending_stream() {
+        use base64::Engine as _;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let _authz_guard = crate::authz::TEST_LOCK.lock().await;
+        crate::authz::test_reset();
+        let (_state, session, mut requests, server) = network_api_fixture().await;
+        session.consumer.handle_message(
+            "modern",
+            &ProtocolMessage::ProviderHello {
+                model_info: None,
+                models: Some(vec!["raw".into()]),
+                services: Some(vec![protocol::SERVICE_OAI_CHAT.into()]),
+                voices: None,
+            },
+        );
+        let body =
+            br#"{"model":"raw","stream":true,"messages":[{"role":"user","content":"hello"}]}"#;
+        let mut socket = tokio::net::TcpStream::connect(server.addr()).await.unwrap();
+        socket.write_all(format!(
+            "POST /v1/rooms/test/chat/completions HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            server.addr(), body.len()
+        ).as_bytes()).await.unwrap();
+        socket.write_all(body).await.unwrap();
+        let ProtocolMessage::OaiRequest { id, .. } = next_api_request(&mut requests).await else {
+            panic!("expected raw chat request");
+        };
+        assert_eq!(session.oai.pending_count(), 1);
+        let event = b"data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n";
+        session.oai.handle_message(
+            "modern",
+            &ProtocolMessage::OaiResponse {
+                id,
+                seq: 0,
+                last: false,
+                data: base64::engine::general_purpose::STANDARD.encode(event),
+                status: Some(200),
+                content_type: Some("text/event-stream".into()),
+            },
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let mut data = Vec::new();
+            let mut buf = [0; 1024];
+            while !data.windows(event.len()).any(|part| part == event) {
+                let n = socket.read(&mut buf).await.unwrap();
+                assert!(n > 0);
+                data.extend_from_slice(&buf[..n]);
+            }
+        })
+        .await
+        .unwrap();
+        drop(socket);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while session.oai.pending_count() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        server.stop();
+    }
+
+    #[tokio::test]
+    async fn raw_chat_self_uses_usable_default_without_shared_models() {
+        let mut config = sample_config();
+        config.providers[1].shared.clear();
+        let session = test_session_with_send("test", Arc::new(|_, _| {}));
+        let provider = build_provider(&session, &config, &config.providers[1])
+            .await
+            .unwrap();
+        assert!(provider.local_chat_available(None));
+        assert!(!provider.local_chat_available(Some("raw")));
+        config.default_ref = None;
+        let provider = build_provider(&session, &config, &config.providers[1])
+            .await
+            .unwrap();
+        assert!(!provider.local_chat_available(None));
     }
 
     async fn mock_speech_server_capture(
@@ -2309,6 +2760,7 @@ mod tests {
                                     lang: None,
                                     speed: requested,
                                     response_format: Some("opus".into()),
+                                    extra: Default::default(),
                                 },
                             )
                             .await;
@@ -2841,6 +3293,7 @@ mod tests {
             None,
             None,
             Some(rooms),
+            None,
             None,
         )
         .await
@@ -3388,7 +3841,18 @@ mod tests {
                 assert_eq!(to, "consumer");
                 assert_eq!(hello["type"], "provider_hello");
                 assert_eq!(hello["models"], json!([model]));
-                assert_eq!(hello["services"], json!(["chat", "tools", "oai"]));
+                assert_eq!(
+                    hello["services"],
+                    json!([
+                        "chat",
+                        "tools",
+                        "oai",
+                        "oai_chat",
+                        "oai_responses",
+                        "oai_completions",
+                        "oai_multipart"
+                    ])
+                );
                 let local = service.rooms.read().unwrap()[room]
                     .local_provider()
                     .unwrap();

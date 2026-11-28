@@ -10,6 +10,7 @@ use futures_util::{StreamExt, stream};
 use serde_json::{Value, json};
 
 use super::api_server::RelayRequest;
+use super::endpoints;
 use super::oai_tunnel::{self, TunnelResponse};
 use super::{AiRoom, AiService, DISCOVERY_TIMEOUT, ProtocolMessage, protocol, resolve_api_ref};
 use crate::config::AiProviderConfig;
@@ -136,16 +137,7 @@ fn path_not_found(path: &str) -> TunnelResponse {
 }
 
 fn allowed(method: &str, path: &str) -> bool {
-    if oai_tunnel::media_kind(path).is_some() {
-        return oai_tunnel::media_job_allowed(method, path);
-    }
-    match (method, path) {
-        ("GET", "/3d/generations" | "/audio/voices" | "/health" | "/api/ps") => true,
-        ("GET", path) => job_id(path).is_some() || oai_tunnel::is_motion_catalog(path),
-        ("POST", path) => path == "/chat/completions" || oai_tunnel::is_model_relay_post(path),
-        ("DELETE", path) => !path.ends_with("/content") && job_id(path).is_some(),
-        _ => false,
-    }
+    endpoints::lookup(path).is_some_and(|e| e.relay && e.allows(method, path))
 }
 
 /// Parses a model-routed passthrough body; `Err` is the 400 to return.
@@ -165,6 +157,65 @@ fn generation_body(request: &RelayRequest) -> std::result::Result<Value, TunnelR
             Some("model"),
         )),
     }
+}
+
+fn multipart_error(message: &str) -> TunnelResponse {
+    if message == "request_too_large" {
+        error(
+            413,
+            "request body too large for relay",
+            "request_too_large",
+            None,
+        )
+    } else {
+        error(400, message, "invalid_request", None)
+    }
+}
+
+fn relay_form(
+    request: &RelayRequest,
+    path: &str,
+) -> std::result::Result<Option<super::multipart::Form>, TunnelResponse> {
+    let kind = endpoints::lookup(path)
+        .expect("relay endpoint")
+        .post_body(path);
+    let Some(content_type) = request.multipart.as_deref() else {
+        return if kind.multipart_only() {
+            Err(error(
+                415,
+                "Content-Type must be multipart/form-data",
+                "invalid_request",
+                None,
+            ))
+        } else {
+            Ok(None)
+        };
+    };
+    let body = request.body.as_deref().unwrap_or_default();
+    if request.method != "POST" || !kind.raw_multipart() {
+        return Err(error(
+            415,
+            "multipart not supported for this route",
+            "invalid_request",
+            None,
+        ));
+    }
+    if body.len() > kind.cap(true) {
+        return Err(multipart_error("request_too_large"));
+    }
+    super::multipart::Form::parse(body, content_type)
+        .map(Some)
+        .map_err(multipart_error)
+}
+
+fn form_body(
+    form: &super::multipart::Form,
+    request: &RelayRequest,
+) -> std::result::Result<Value, TunnelResponse> {
+    let model = form
+        .model(request.body.as_deref().unwrap_or_default())
+        .ok_or_else(oai_tunnel::missing_model)?;
+    Ok(json!({"model": model}))
 }
 
 fn relativize(mut response: TunnelResponse) -> TunnelResponse {
@@ -302,21 +353,36 @@ impl AiService {
                     .filter(|_| path == "/3d/generations")
                     .and_then(|raw| serde_json::from_slice::<Value>(raw).ok())
                     .unwrap_or(Value::Null);
-                let response = oai_tunnel::forward_capped(
-                    &provider.base_url,
-                    &provider.api_key,
-                    &request.method,
-                    &path,
-                    request.body,
-                    range,
-                    oai_tunnel::relay_deadline(&request.method, &path, &body),
-                    if image {
-                        oai_tunnel::MAX_IMAGE_RESPONSE_BYTES
-                    } else {
-                        oai_tunnel::MAX_BYTES
-                    },
-                )
-                .await?;
+                let deadline = oai_tunnel::relay_deadline(&request.method, &path, &body);
+                let cap = if image {
+                    oai_tunnel::MAX_IMAGE_RESPONSE_BYTES
+                } else {
+                    oai_tunnel::MAX_BYTES
+                };
+                let response = if let Some(content_type) = request.multipart {
+                    oai_tunnel::forward_multipart(
+                        &provider.base_url,
+                        &provider.api_key,
+                        &path,
+                        request.body.unwrap_or_default(),
+                        &content_type,
+                        deadline,
+                        cap,
+                    )
+                    .await?
+                } else {
+                    oai_tunnel::forward_capped(
+                        &provider.base_url,
+                        &provider.api_key,
+                        &request.method,
+                        &path,
+                        request.body,
+                        range,
+                        deadline,
+                        cap,
+                    )
+                    .await?
+                };
                 Ok(if path.starts_with("/3d/generations") {
                     relativize(response)
                 } else {
@@ -397,7 +463,16 @@ impl AiService {
             return self.forward_route(route, request).await;
         }
         if request.method == "POST" {
-            let body = if path == "/chat/completions" {
+            let form = match relay_form(&request, &path) {
+                Ok(form) => form,
+                Err(response) => return Ok(response),
+            };
+            let body = if let Some(ref form) = form {
+                match form_body(form, &request) {
+                    Ok(body) => body,
+                    Err(response) => return Ok(response),
+                }
+            } else if path == "/chat/completions" {
                 // The local API has already validated the image request.
                 serde_json::from_slice(request.body.as_deref().unwrap_or_default())?
             } else {
@@ -407,15 +482,35 @@ impl AiService {
                 }
             };
             let (route, model) = self.generation_route(body["model"].as_str())?;
-            let mut set = vec![("model", json!(model))];
-            if path == "/chat/completions" && body.get("stream").is_some() {
-                set.push(("stream", json!(false)));
+            if let Some(form) = form {
+                let cap = endpoints::lookup(&path)
+                    .expect("relay endpoint")
+                    .post_body(&path)
+                    .cap(true);
+                let cap = if matches!(route, Route::Room { .. }) {
+                    cap.min(oai_tunnel::MAX_BYTES)
+                } else {
+                    cap
+                };
+                request.body = match form.rewrite_model(
+                    request.body.take().unwrap_or_default(),
+                    &model,
+                    cap,
+                ) {
+                    Ok(body) => Some(body),
+                    Err(message) => return Ok(multipart_error(message)),
+                };
+            } else {
+                let mut set = vec![("model", json!(model))];
+                if path == "/chat/completions" && body.get("stream").is_some() {
+                    set.push(("stream", json!(false)));
+                }
+                request.body = Some(oai_tunnel::rewrite_object(
+                    request.body.as_deref().unwrap_or_default(),
+                    &set,
+                    &[],
+                )?);
             }
-            request.body = Some(oai_tunnel::rewrite_object(
-                request.body.as_deref().unwrap_or_default(),
-                &set,
-                &[],
-            )?);
             let response = self.clone().forward_route(route.clone(), request).await?;
             if path == "/3d/generations" {
                 self.relay_jobs.remember(&response, route);
@@ -458,6 +553,7 @@ impl AiService {
                             method: "GET".into(),
                             path: path.clone(),
                             body: None,
+                            multipart: None,
                         },
                     )
                 }),
@@ -554,6 +650,10 @@ impl AiRoom {
         }
         let catalog = oai_tunnel::is_motion_catalog(&path);
         if request.method == "POST" || catalog {
+            let form = match relay_form(&request, &path) {
+                Ok(form) => form,
+                Err(response) => return Ok(response),
+            };
             let (body, model) = if catalog {
                 let model = match oai_tunnel::motion_catalog_model(&path) {
                     Ok(model) => model,
@@ -561,27 +661,95 @@ impl AiRoom {
                 };
                 (Value::Null, model)
             } else {
-                let body = match generation_body(&request) {
+                let parsed = if let Some(ref form) = form {
+                    form_body(form, &request)
+                } else {
+                    generation_body(&request)
+                };
+                let body = match parsed {
                     Ok(body) => body,
                     Err(response) => return Ok(response),
                 };
                 let model = body["model"].as_str().expect("validated model").to_string();
                 (body, model)
             };
-            self.consumer
-                .validate_api_model(protocol::SERVICE_OAI, Some(&model))?;
-            self.broadcast(ProtocolMessage::ConsumerHello).await;
-            let info = self
-                .consumer
-                .wait_for_service_model(protocol::SERVICE_OAI, Some(&model), DISCOVERY_TIMEOUT)
-                .await?;
+            let kind = endpoints::lookup(&path)
+                .expect("relay endpoint")
+                .post_body(&path);
+            let info = if form.is_some() {
+                self.broadcast(ProtocolMessage::ConsumerHello).await;
+                match self
+                    .consumer
+                    .wait_for_multipart_model(&model, kind.legacy_multipart(), DISCOVERY_TIMEOUT)
+                    .await
+                {
+                    Ok(info) => info,
+                    Err(err) if err.is::<super::ModelNotFound>() => return Err(err),
+                    Err(_) => {
+                        return Ok(error(
+                            404,
+                            "No provider supports this multipart request for the requested model.",
+                            "unsupported_service",
+                            Some("model"),
+                        ));
+                    }
+                }
+            } else {
+                self.consumer
+                    .validate_api_model(protocol::SERVICE_OAI, Some(&model))?;
+                self.broadcast(ProtocolMessage::ConsumerHello).await;
+                self.consumer
+                    .wait_for_service_model(protocol::SERVICE_OAI, Some(&model), DISCOVERY_TIMEOUT)
+                    .await?
+            };
+            let raw = request.body.as_deref().unwrap_or_default();
+            let legacy_json = if let Some(form) = form {
+                if raw.len() > oai_tunnel::MAX_BYTES {
+                    return Ok(multipart_error("request_too_large"));
+                }
+                if !protocol::advertises_service(&info.services, protocol::SERVICE_OAI_MULTIPART) {
+                    let converted = match super::api_server::legacy_multipart_json(
+                        &path,
+                        raw,
+                        &form.boundary,
+                    ) {
+                        Ok(body) => body,
+                        Err(message) => return Ok(multipart_error(message)),
+                    };
+                    if converted.len() > oai_tunnel::MAX_BYTES {
+                        return Ok(multipart_error("request_too_large"));
+                    }
+                    // The legacy adapter must retain the model used for routing.
+                    if serde_json::from_slice::<Value>(&converted)
+                        .ok()
+                        .and_then(|v| v["model"].as_str().map(str::to_string))
+                        .as_deref()
+                        != Some(model.as_str())
+                    {
+                        return Ok(multipart_error("invalid multipart model"));
+                    }
+                    Some(converted)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let (raw, content_type) = match legacy_json.as_deref() {
+                Some(json) => (json, "application/json"),
+                None => (
+                    raw,
+                    request.multipart.as_deref().unwrap_or("application/json"),
+                ),
+            };
             let response = self
                 .oai
-                .request_method(
+                .request_method_with_content_type(
                     &info.node_id,
                     &request.method,
                     &path,
-                    request.body.as_deref().unwrap_or_default(),
+                    raw,
+                    content_type,
                     oai_tunnel::relay_deadline(&request.method, &path, &body),
                 )
                 .await?;
@@ -869,6 +1037,7 @@ mod tests {
             method: method.into(),
             path: path.into(),
             body: body.map(|v| serde_json::to_vec(&v).unwrap()),
+            multipart: None,
         }
     }
 
@@ -891,6 +1060,817 @@ mod tests {
 
     fn value(response: TunnelResponse) -> Value {
         serde_json::from_slice(&response.body).unwrap()
+    }
+
+    async fn responses_server(service: Arc<AiService>) -> Arc<super::super::ApiServer> {
+        use super::super::api_server;
+        let raw_service = service.clone();
+        let proxy: api_server::ChatProxyFn =
+            Arc::new(move |raw| Box::pin(raw_service.clone().proxy_chat(raw)));
+        let relay_service = service.clone();
+        let relay: api_server::RelayFn =
+            Arc::new(move |request| Box::pin(relay_service.clone().relay(request)));
+        let rooms: api_server::RoomsFn =
+            Arc::new(move |room| Box::pin(service.clone().api_room(room)));
+        super::super::ApiServer::start_with_rooms(
+            "127.0.0.1:0",
+            Arc::new(|_, _, _, _| Box::pin(async { panic!("unexpected typed chat call") })),
+            Arc::new(Vec::new),
+            Arc::new(|_, _| Box::pin(async { panic!("unexpected TTS call") })),
+            Arc::new(|_| Box::pin(async { panic!("unexpected STT call") })),
+            None,
+            Some(relay),
+            Some(rooms),
+            None,
+            Some(proxy),
+        )
+        .await
+        .unwrap()
+    }
+
+    fn responses_room() -> (
+        Arc<AiService>,
+        Arc<AiRoom>,
+        tokio::sync::mpsc::UnboundedReceiver<(String, ProtocolMessage)>,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let session = room(Arc::new(move |peer, message| {
+            tx.send((peer.to_string(), message)).unwrap();
+        }));
+        let service = service(vec![AiProviderConfig {
+            id: "room".into(),
+            base_url: "mist-network://test".into(),
+            models: vec!["room-model".into()],
+            ..Default::default()
+        }]);
+        service
+            .rooms
+            .write()
+            .unwrap()
+            .insert("test".into(), session.clone());
+        // An equally suitable legacy peer must never receive Responses traffic.
+        session.consumer.handle_message(
+            "a-legacy",
+            &ProtocolMessage::ProviderHello {
+                model_info: None,
+                models: Some(vec!["room-model".into()]),
+                services: Some(vec![
+                    protocol::SERVICE_CHAT.into(),
+                    protocol::SERVICE_OAI.into(),
+                    protocol::SERVICE_OAI_CHAT.into(),
+                ]),
+                voices: None,
+            },
+        );
+        (service, session, rx)
+    }
+
+    async fn responses_route(
+        base_url: String,
+        room: bool,
+    ) -> (
+        Arc<super::super::ApiServer>,
+        Option<tokio::task::JoinHandle<()>>,
+    ) {
+        raw_route(
+            base_url,
+            room,
+            super::super::chat_proxy::Endpoint::Responses,
+        )
+        .await
+    }
+
+    async fn raw_route(
+        base_url: String,
+        room: bool,
+        endpoint: super::super::chat_proxy::Endpoint,
+    ) -> (
+        Arc<super::super::ApiServer>,
+        Option<tokio::task::JoinHandle<()>>,
+    ) {
+        let (service, responder) = if room {
+            let (service, session, mut rx) = responses_room();
+            session.consumer.handle_message(
+                "z-modern",
+                &ProtocolMessage::ProviderHello {
+                    model_info: None,
+                    models: Some(vec!["room-model".into()]),
+                    services: Some(vec![endpoint.service().into()]),
+                    voices: None,
+                },
+            );
+            let consumer = session.oai.clone();
+            let target = crate::config::ResolvedModel {
+                base_url,
+                api_key: "mock-key".into(),
+                model: "chat-model".into(),
+                reasoning_effort: None,
+                voice: None,
+                lang_voices: HashMap::new(),
+            };
+            let provider = oai_tunnel::TunnelProvider::new(
+                Arc::new(move |peer, message| {
+                    assert_eq!(peer, "consumer");
+                    consumer.handle_message("z-modern", &message);
+                }),
+                Arc::new(move |path, body| {
+                    assert_eq!(path, endpoint.path());
+                    assert_eq!(body["model"], "room-model");
+                    Ok(Some(target.clone()))
+                }),
+            )
+            .with_chat_effort(Some("high".into()));
+            let task = tokio::spawn(async move {
+                while let Some((peer, message)) = rx.recv().await {
+                    if let ProtocolMessage::OaiRequest { ref path, .. } = message {
+                        assert_eq!(peer, "z-modern");
+                        assert_eq!(path.as_deref(), Some(endpoint.path()));
+                        provider.handle_message("consumer", message).await;
+                        return;
+                    }
+                    assert!(matches!(message, ProtocolMessage::ConsumerHello));
+                }
+                panic!("missing Responses request");
+            });
+            (service, Some(task))
+        } else {
+            (
+                service(vec![AiProviderConfig {
+                    id: "http".into(),
+                    base_url,
+                    api_key: "mock-key".into(),
+                    models: vec!["chat-model".into()],
+                    ..Default::default()
+                }]),
+                None,
+            )
+        };
+        let mut config = service.state.config();
+        config.ai.default_ref = Some(crate::config::ModelRef {
+            provider_id: if room { "room" } else { "http" }.into(),
+            model: if room { "room-model" } else { "chat-model" }.into(),
+        });
+        config.ai.default_reasoning_effort = Some("high".into());
+        service.state.set_config(config);
+        (responses_server(service).await, responder)
+    }
+
+    fn responses_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap()
+    }
+
+    const MULTIPART_TYPE: &str = "multipart/form-data; boundary=\"fixture-boundary\"";
+
+    fn form_fixture(model: &str, path: &str) -> Vec<u8> {
+        let mut form = format!("--fixture-boundary\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n{model}\r\n").into_bytes();
+        let fields: &[&str] = match path {
+            "/audio/translations" => &["file"],
+            "/images/variations" => &["image"],
+            "/images/edits" => &["image[]", "image[]", "mask"],
+            "/videos" => &["input_reference"],
+            _ => panic!("unexpected fixture path"),
+        };
+        for (index, name) in fields.iter().enumerate() {
+            form.extend_from_slice(format!(
+                "--fixture-boundary\r\nContent-Disposition: form-data; name=\"{name}\"; filename=\"file-{index}.bin\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+            ).as_bytes());
+            form.extend_from_slice(&[index as u8, 0xff, 0x00, 0x80]);
+            if *name == "mask" {
+                // Cross at least one v1 tunnel chunk boundary.
+                form.extend_from_slice(&vec![0xa1; 16 * 1024]);
+            }
+            form.extend_from_slice(b"\r\n");
+        }
+        form.extend_from_slice(b"--fixture-boundary\r\nContent-Disposition: form-data; name=\"vendor[]\"\r\n\r\none\r\n--fixture-boundary\r\nContent-Disposition: form-data; name=\"vendor[]\"\r\n\r\ntwo\r\n--fixture-boundary--\r\n");
+        form
+    }
+
+    async fn multipart_route(
+        base_url: String,
+        room_route: bool,
+        legacy: bool,
+        path: &'static str,
+    ) -> (
+        Arc<super::super::ApiServer>,
+        Option<tokio::task::JoinHandle<()>>,
+    ) {
+        let (service, task) = if room_route {
+            let (service, session, mut rx) = responses_room();
+            let peer_id = if legacy { "a-legacy" } else { "z-modern" };
+            if !legacy {
+                session.consumer.handle_message(
+                    peer_id,
+                    &ProtocolMessage::ProviderHello {
+                        model_info: None,
+                        models: Some(vec!["room-model".into()]),
+                        services: Some(vec![
+                            protocol::SERVICE_OAI.into(),
+                            protocol::SERVICE_OAI_MULTIPART.into(),
+                        ]),
+                        voices: None,
+                    },
+                );
+            }
+            let consumer = session.oai.clone();
+            let target = crate::config::ResolvedModel {
+                base_url,
+                api_key: "mock-key".into(),
+                model: "upstream-model".into(),
+                reasoning_effort: None,
+                voice: None,
+                lang_voices: HashMap::new(),
+            };
+            let provider = oai_tunnel::TunnelProvider::new(
+                Arc::new(move |to, message| {
+                    assert_eq!(to, "consumer");
+                    consumer.handle_message(peer_id, &message);
+                }),
+                Arc::new(move |request_path, body| {
+                    assert_eq!(request_path, path);
+                    assert_eq!(body["model"], "room-model");
+                    Ok(Some(target.clone()))
+                }),
+            );
+            let task = tokio::spawn(async move {
+                while let Some((peer, message)) = rx.recv().await {
+                    if let ProtocolMessage::OaiRequest {
+                        path: ref wire_path,
+                        ref content_type,
+                        seq,
+                        last,
+                        ..
+                    } = message
+                    {
+                        assert_eq!(peer, peer_id);
+                        if seq == 0 {
+                            assert_eq!(wire_path.as_deref(), Some(path));
+                            assert_eq!(
+                                content_type.as_deref(),
+                                Some(if legacy {
+                                    "application/json"
+                                } else {
+                                    MULTIPART_TYPE
+                                })
+                            );
+                        } else {
+                            assert!(wire_path.is_none() && content_type.is_none());
+                        }
+                        provider.handle_message("consumer", message).await;
+                        if last {
+                            return;
+                        }
+                    } else {
+                        assert!(matches!(message, ProtocolMessage::ConsumerHello));
+                    }
+                }
+                panic!("missing multipart request");
+            });
+            (service, Some(task))
+        } else {
+            (
+                service(vec![AiProviderConfig {
+                    id: "http".into(),
+                    base_url,
+                    api_key: "mock-key".into(),
+                    models: vec!["upstream-model".into()],
+                    ..Default::default()
+                }]),
+                None,
+            )
+        };
+        (responses_server(service).await, task)
+    }
+
+    #[tokio::test]
+    async fn standard_multipart_routes_preserve_all_parts_except_model() {
+        let _guard = crate::authz::TEST_LOCK.lock().await;
+        crate::authz::test_reset();
+        for (path, status, content_type, reply) in [
+            (
+                "/images/edits",
+                200,
+                "application/json",
+                br#"{"data":[{"b64_json":"abc"}]}"#.as_slice(),
+            ),
+            (
+                "/images/variations",
+                422,
+                "application/json",
+                br#"{ "error":{"message":"fixture error"} }"#.as_slice(),
+            ),
+            (
+                "/audio/translations",
+                200,
+                "application/x-subrip",
+                b"1\r\n00:00:00,000 --> 00:00:01,000\r\nhello\r\n".as_slice(),
+            ),
+            (
+                "/videos",
+                201,
+                "application/json",
+                br#"{"id":"video-job"}"#.as_slice(),
+            ),
+        ] {
+            for room_route in [false, true] {
+                let model = if room_route {
+                    "room-model"
+                } else {
+                    "upstream-model"
+                };
+                let body = form_fixture(model, path);
+                let expected = form_fixture("upstream-model", path);
+                let upstream = mock_raw("http", move |method, upstream_path, body| {
+                    assert_eq!(method, "POST");
+                    assert_eq!(upstream_path, format!("/v1{path}"));
+                    assert_eq!(body, expected);
+                    (status, content_type, reply.to_vec())
+                })
+                .await;
+                let (server, task) =
+                    multipart_route(upstream.provider.base_url.clone(), room_route, false, path)
+                        .await;
+                let prefix = if room_route && path != "/images/variations" {
+                    "/v1/rooms/test"
+                } else {
+                    "/v1"
+                };
+                let url = format!("http://{}{prefix}{path}", server.addr());
+                let response = responses_client()
+                    .post(&url)
+                    .header("Content-Type", MULTIPART_TYPE)
+                    .body(body)
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status().as_u16(), status);
+                assert_eq!(response.headers()["content-type"], content_type);
+                assert_eq!(response.bytes().await.unwrap().as_ref(), reply);
+                if let Some(task) = task {
+                    task.await.unwrap();
+                }
+                let records = upstream.requests.lock().unwrap();
+                assert_eq!(records.len(), 1);
+                let header = records[0].3.lines().find_map(|line| {
+                    let (key, value) = line.split_once(':')?;
+                    key.eq_ignore_ascii_case("content-type")
+                        .then_some(value.trim())
+                });
+                assert_eq!(header, Some(MULTIPART_TYPE));
+                server.stop();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_multipart_peer_keeps_json_adapter_and_expanded_cap() {
+        let _guard = crate::authz::TEST_LOCK.lock().await;
+        crate::authz::test_reset();
+        let path = "/images/edits";
+        let upstream = mock("http", move |method, upstream_path, body| {
+            assert_eq!((method, upstream_path), ("POST", "/v1/images/edits"));
+            assert_eq!(*body, json!({"model":"upstream-model","image":"data:image/png;base64,UE5H","background":"true","scale":2.5}));
+            (200, json!({"data":[]}))
+        }).await;
+        let (server, task) =
+            multipart_route(upstream.provider.base_url.clone(), true, true, path).await;
+        let simple = "--fixture-boundary\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nroom-model\r\n--fixture-boundary\r\nContent-Disposition: form-data; name=\"image\"; filename=\"fixture.png\"\r\nContent-Type: image/png\r\n\r\nPNG\r\n--fixture-boundary\r\nContent-Disposition: form-data; name=\"background\"\r\n\r\ntrue\r\n--fixture-boundary\r\nContent-Disposition: form-data; name=\"scale\"\r\n\r\n2.5\r\n--fixture-boundary--\r\n";
+        let url = format!("http://{}/v1/rooms/test{path}", server.addr());
+        let client = responses_client();
+        let unknown = client
+            .post(&url)
+            .header("Content-Type", MULTIPART_TYPE)
+            .body(simple.replace("room-model", "unknown-model"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unknown.status(), 404);
+        let duplicate = form_fixture("room-model", path);
+        let response = client
+            .post(&url)
+            .header("Content-Type", MULTIPART_TYPE)
+            .body(duplicate)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 400);
+        let large = simple.replace("PNG", &"x".repeat(oai_tunnel::MAX_BYTES * 3 / 4));
+        assert!(large.len() < oai_tunnel::MAX_BYTES);
+        let response = client
+            .post(&url)
+            .header("Content-Type", MULTIPART_TYPE)
+            .body(large)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 413);
+        let response = client
+            .post(&url)
+            .header("Content-Type", MULTIPART_TYPE)
+            .body(simple)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        task.unwrap().await.unwrap();
+        assert_eq!(upstream.requests.lock().unwrap().len(), 1);
+        server.stop();
+    }
+
+    #[tokio::test]
+    async fn new_multipart_only_routes_require_model_and_capable_peer() {
+        let _guard = crate::authz::TEST_LOCK.lock().await;
+        crate::authz::test_reset();
+        let (service, _room, mut requests) = responses_room();
+        let server = responses_server(service).await;
+        let client = responses_client();
+        for path in ["/images/variations", "/audio/translations"] {
+            let url = format!("http://{}/v1/rooms/test{path}", server.addr());
+            let response = client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .body(r#"{"model":"room-model"}"#)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 415);
+            let response = client
+                .post(&url)
+                .header("Content-Type", MULTIPART_TYPE)
+                .body("--fixture-boundary--\r\n")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 400);
+            let response = client
+                .post(&url)
+                .header("Content-Type", MULTIPART_TYPE)
+                .body(form_fixture("room-model", path))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 404);
+        }
+        while let Ok((_, message)) = requests.try_recv() {
+            assert!(matches!(message, ProtocolMessage::ConsumerHello));
+        }
+        server.stop();
+    }
+
+    #[tokio::test]
+    async fn completions_preserves_body_status_and_content_type() {
+        let _guard = crate::authz::TEST_LOCK.lock().await;
+        crate::authz::test_reset();
+        for (room, status) in [(false, 200), (true, 422)] {
+            let model = if room { "room-model" } else { "chat-model" };
+            let request = format!(
+                r#"{{ "model" : "{model}", "prompt":["one","two"], "n":2,"temperature":0.40,"vendor":{{"z":1,"a":2}} }}"#
+            );
+            let expected = request.replace("room-model", "chat-model");
+            let reply = br#"{ "choices":[{"text":"hello"},{"text":"world"}], "vendor":true }"#;
+            let upstream = mock_raw("http", move |method, path, body| {
+                assert_eq!(
+                    (method, path, body),
+                    ("POST", "/v1/completions", expected.as_bytes())
+                );
+                (status, "application/json; charset=utf-8", reply.to_vec())
+            })
+            .await;
+            let (server, responder) = raw_route(
+                upstream.provider.base_url.clone(),
+                room,
+                super::super::chat_proxy::Endpoint::Completions,
+            )
+            .await;
+            let path = if room {
+                "/v1/rooms/test/completions"
+            } else {
+                "/v1/completions"
+            };
+            let client = responses_client();
+            let url = format!("http://{}{path}", server.addr());
+            let invalid = client
+                .post(&url)
+                .json(&json!({"prompt":"hi"}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(invalid.status(), 400);
+            let response = client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .body(request)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), status);
+            assert_eq!(
+                response.headers()["content-type"],
+                "application/json; charset=utf-8"
+            );
+            assert_eq!(response.bytes().await.unwrap().as_ref(), reply);
+            if let Some(task) = responder {
+                task.await.unwrap();
+            }
+            assert_eq!(upstream.requests.lock().unwrap().len(), 1);
+            server.stop();
+        }
+    }
+
+    #[tokio::test]
+    async fn responses_non_stream_preserves_body_status_and_content_type() {
+        let _guard = crate::authz::TEST_LOCK.lock().await;
+        crate::authz::test_reset();
+        const JSON: &[u8] = br#"{ "id":"response-id", "output":[{"content":[{"type":"output_text","text":"hello"}]}],"usage":{"input_tokens":4,"output_tokens":3,"total_tokens":7} }"#;
+        const ERROR: &[u8] = br#"{ "error":{"message":"fixture", "code":"invalid_value","type":"invalid_request_error"} }"#;
+        for (room, path, extra, status, reply) in [
+            (false, "/v1/responses", "", 200, JSON),
+            (true, "/v1/responses", ", \"store\":true", 201, JSON),
+            (
+                true,
+                "/v1/rooms/test/responses",
+                ", \"store\":false",
+                422,
+                ERROR,
+            ),
+        ] {
+            let model = if room { "room-model" } else { "chat-model" };
+            let request = format!(
+                r#"{{ "model" : "{model}", "input": "hi", "previous_response_id":"previous-id", "vendor":{{"b":2,"a":1}}{extra} }}"#
+            );
+            let expected = request.replace("room-model", "chat-model");
+            let upstream = mock_raw("http", move |method, path, body| {
+                assert_eq!(
+                    (method, path, body),
+                    ("POST", "/v1/responses", expected.as_bytes())
+                );
+                (status, "application/json; charset=utf-8", reply.to_vec())
+            })
+            .await;
+            let (server, responder) =
+                responses_route(upstream.provider.base_url.clone(), room).await;
+            let response = responses_client()
+                .post(format!("http://{}{path}", server.addr()))
+                .header("Content-Type", "application/json")
+                .body(request)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), status);
+            assert_eq!(
+                response.headers()["content-type"],
+                "application/json; charset=utf-8"
+            );
+            assert_eq!(response.bytes().await.unwrap().as_ref(), reply);
+            if let Some(task) = responder {
+                task.await.unwrap();
+            }
+            assert_eq!(upstream.requests.lock().unwrap().len(), 1);
+            server.stop();
+        }
+    }
+
+    #[tokio::test]
+    async fn responses_streams_incrementally_over_http_and_room() {
+        let _guard = crate::authz::TEST_LOCK.lock().await;
+        crate::authz::test_reset();
+        use super::super::chat_proxy::Endpoint;
+        let cases = [
+            (
+                Endpoint::Responses,
+                b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n".as_slice(),
+                b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":4,\"output_tokens\":3,\"total_tokens\":7}}}\n\n".as_slice(),
+                "input",
+            ),
+            (
+                Endpoint::Completions,
+                b"data: {\"choices\":[{\"text\":\"hello\"}]}\n\n".as_slice(),
+                b"data: {\"choices\":[{\"text\":\"world\"}]}\n\ndata: [DONE]\n\n".as_slice(),
+                "prompt",
+            ),
+        ];
+        for (endpoint, first, rest, field) in cases {
+            for room in [false, true] {
+                let path = format!(
+                    "{}{}",
+                    if room { "/v1/rooms/test" } else { "/v1" },
+                    endpoint.path()
+                );
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+                let (release, wait) = tokio::sync::oneshot::channel();
+                let upstream = tokio::spawn(async move {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut raw = Vec::new();
+                    let mut buf = [0; 4096];
+                    let (headers_end, len) = loop {
+                        let n = socket.read(&mut buf).await.unwrap();
+                        assert!(n > 0 && raw.len() < 128 * 1024);
+                        raw.extend_from_slice(&buf[..n]);
+                        if let Some(end) = raw.windows(4).position(|b| b == b"\r\n\r\n") {
+                            let head = String::from_utf8_lossy(&raw[..end]);
+                            assert!(head.starts_with(&format!("POST /v1{} ", endpoint.path())));
+                            let len: usize = head
+                                .lines()
+                                .find_map(|l| {
+                                    l.to_ascii_lowercase()
+                                        .strip_prefix("content-length:")
+                                        .map(|v| v.trim().parse().unwrap())
+                                })
+                                .unwrap();
+                            break (end + 4, len);
+                        }
+                    };
+                    while raw.len() < headers_end + len {
+                        let n = socket.read(&mut buf).await.unwrap();
+                        assert!(n > 0);
+                        raw.extend_from_slice(&buf[..n]);
+                    }
+                    assert_eq!(
+                        &raw[headers_end..headers_end + len],
+                        format!(r#"{{"model":"chat-model","{field}":"hi","stream":true}}"#)
+                            .as_bytes()
+                    );
+                    socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", first.len() + rest.len()).as_bytes()).await.unwrap();
+                    socket.write_all(first).await.unwrap();
+                    wait.await.unwrap();
+                    socket.write_all(rest).await.unwrap();
+                });
+                let (server, responder) = raw_route(base_url, room, endpoint).await;
+                let model = if room { "room-model" } else { "chat-model" };
+                let mut response = responses_client()
+                    .post(format!("http://{}{path}", server.addr()))
+                    .header("Content-Type", "application/json")
+                    .body(format!(
+                        r#"{{"model":"{model}","{field}":"hi","stream":true}}"#
+                    ))
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), 200);
+                assert_eq!(
+                    response.headers()["content-type"],
+                    "text/event-stream; charset=utf-8"
+                );
+                let mut received = Vec::new();
+                while received.len() < first.len() {
+                    let chunk = tokio::time::timeout(Duration::from_secs(2), response.chunk())
+                        .await
+                        .expect("first event must arrive before upstream finishes")
+                        .unwrap()
+                        .unwrap();
+                    received.extend_from_slice(&chunk);
+                }
+                assert_eq!(received, first);
+                release.send(()).unwrap();
+                while let Some(chunk) = response.chunk().await.unwrap() {
+                    received.extend_from_slice(&chunk);
+                }
+                assert_eq!(received, [first, rest].concat());
+                upstream.await.unwrap();
+                if let Some(task) = responder {
+                    task.await.unwrap();
+                }
+                server.stop();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn responses_never_falls_back_to_legacy_or_relays_lifecycle_routes() {
+        let _guard = crate::authz::TEST_LOCK.lock().await;
+        crate::authz::test_reset();
+        let (service, session, mut requests) = responses_room();
+        for (peer, models) in [
+            ("other-model-peer", Some(vec!["other-model".into()])),
+            ("unknown-model-peer", None),
+        ] {
+            session.consumer.handle_message(
+                peer,
+                &ProtocolMessage::ProviderHello {
+                    model_info: None,
+                    models,
+                    services: Some(vec![protocol::SERVICE_OAI_RESPONSES.into()]),
+                    voices: None,
+                },
+            );
+        }
+        let server = responses_server(service).await;
+        let client = responses_client();
+        for base in ["/v1", "/v1/rooms/test"] {
+            let response = client
+                .post(format!("http://{}{base}/responses", server.addr()))
+                .json(&json!({"model":"room-model","input":"hello","stream":true}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 404);
+            let body: Value = response.json().await.unwrap();
+            assert_eq!(body["error"]["code"], "unsupported_service");
+            assert!(
+                body["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("No provider supports the Responses API")
+            );
+            for (method, path) in [
+                (reqwest::Method::GET, "response-id"),
+                (reqwest::Method::DELETE, "response-id"),
+                (reqwest::Method::POST, "response-id/cancel"),
+                (reqwest::Method::GET, "response-id/input_items"),
+            ] {
+                let response = client
+                    .request(
+                        method,
+                        format!("http://{}{base}/responses/{path}", server.addr()),
+                    )
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), 404);
+                let body: Value = response.json().await.unwrap();
+                assert_eq!(body["error"]["code"], "unsupported_path");
+            }
+        }
+        while let Ok((_, msg)) = requests.try_recv() {
+            assert!(matches!(msg, ProtocolMessage::ConsumerHello));
+        }
+        server.stop();
+    }
+
+    #[tokio::test]
+    async fn responses_local_room_provider_advertises_service_and_meters_output() {
+        let _guard = crate::authz::TEST_LOCK.lock().await;
+        crate::authz::test_reset();
+        let mut upstream = mock("http", |method, path, body| {
+            assert_eq!((method, path), ("POST", "/v1/responses"));
+            assert_eq!(*body, json!({"model":"chat-model","input":"hi"}));
+            (200, json!({"output":[{"content":[{"type":"output_text","text":"one"},{"type":"output_text","text":"two"}]}],"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}))
+        }).await;
+        upstream.provider.models = vec!["chat-model".into()];
+        let (service, session, mut requests) = responses_room();
+        let mut config = service.state.config();
+        let reference = crate::config::ModelRef {
+            provider_id: "http".into(),
+            model: "chat-model".into(),
+        };
+        config.ai.providers[0].shared = vec![reference.clone()];
+        config.ai.providers.push(upstream.provider.clone());
+        config.ai.default_ref = Some(reference);
+        config.ai.default_reasoning_effort = Some("high".into());
+        service.state.set_config(config.clone());
+        let provider = super::super::build_provider(&session, &config.ai, &config.ai.providers[0])
+            .await
+            .unwrap();
+        assert!(
+            provider
+                .services()
+                .iter()
+                .any(|service| service == protocol::SERVICE_OAI_RESPONSES)
+        );
+        *session.provider.write().unwrap() = Some(provider);
+        let server = responses_server(service).await;
+        let token = crate::authz::test_command(
+            "authz.token.create",
+            json!({"name":"responses fixture","limits":{"max_requests":1}}),
+        )
+        .unwrap()["token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        crate::authz::test_command("authz.api.set", json!({"require_token":true})).unwrap();
+        let response = responses_client()
+            .post(format!("http://{}/v1/rooms/test/responses", server.addr()))
+            .bearer_auth(&token)
+            .json(&json!({"model":"chat-model","input":"hi"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let _: Value = response.json().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let usage =
+                    crate::authz::test_command("authz.usage", json!({"service":"ai"})).unwrap();
+                if let Some(row) = usage["ai"].as_array().unwrap().first()
+                    && row["requests"] == 1
+                {
+                    assert_eq!(row["output_chars"], 6);
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        while let Ok((_, msg)) = requests.try_recv() {
+            assert!(matches!(msg, ProtocolMessage::ConsumerHello));
+        }
+        server.stop();
+        crate::authz::test_reset();
     }
 
     #[tokio::test]
@@ -972,6 +1952,170 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn embeddings_and_moderations_select_http_providers() {
+        let mut embed = mock("embed", |method, path, body| {
+            assert_eq!((method, path), ("POST", "/v1/embeddings"));
+            assert_eq!(
+                *body,
+                json!({"model":"embed-model","input":["one","two"],"dimensions":3})
+            );
+            (200, json!({"data":[{"embedding":[1,2,3]}]}))
+        })
+        .await;
+        embed.provider.models = vec!["embed-model".into()];
+        let mut moderation = mock("moderation", |method, path, body| {
+            assert_eq!((method, path), ("POST", "/v1/moderations"));
+            assert_eq!(*body, json!({"model":"moderation-model","input":"one"}));
+            (200, json!({"results":[{"flagged":false}]}))
+        })
+        .await;
+        moderation.provider.models = vec!["moderation-model".into()];
+        let service = service(vec![embed.provider.clone(), moderation.provider.clone()]);
+        for (path, body, expected) in [
+            (
+                "/embeddings",
+                json!({"model":"embed-model","input":["one","two"],"dimensions":3}),
+                json!({"data":[{"embedding":[1,2,3]}]}),
+            ),
+            (
+                "/moderations",
+                json!({"model":"moderation-model","input":"one"}),
+                json!({"results":[{"flagged":false}]}),
+            ),
+        ] {
+            let result = service
+                .clone()
+                .relay(request("POST", path, Some(body)))
+                .await
+                .unwrap();
+            assert_eq!(result.status, 200);
+            assert_eq!(value(result), expected);
+            assert_eq!(
+                service
+                    .clone()
+                    .relay(request("POST", path, Some(json!({"input":"one"}))))
+                    .await
+                    .unwrap()
+                    .status,
+                400
+            );
+        }
+        assert_eq!(embed.requests.lock().unwrap().len(), 1);
+        assert_eq!(moderation.requests.lock().unwrap().len(), 1);
+        assert!(service.relay_jobs.snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn embeddings_and_moderations_select_room_peers_by_model() {
+        use base64::Engine as _;
+
+        let cases = [
+            ("embed-peer", "/embeddings", "embed-model"),
+            ("moderation-peer", "/moderations", "moderation-model"),
+        ];
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let room = room(Arc::new(move |peer, message| {
+            tx.send((peer.to_string(), message)).unwrap();
+        }));
+        let service = service(vec![AiProviderConfig {
+            id: "room".into(),
+            base_url: "mist-network://test".into(),
+            models: cases
+                .iter()
+                .map(|(_, _, model)| model.to_string())
+                .collect(),
+            ..Default::default()
+        }]);
+        service
+            .rooms
+            .write()
+            .unwrap()
+            .insert("test".into(), room.clone());
+        for (peer, _, model) in cases {
+            assert!(room.consumer.handle_message(
+                peer,
+                &ProtocolMessage::ProviderHello {
+                    model_info: None,
+                    models: Some(vec![model.into()]),
+                    // Built-in providers advertise chat and oai together;
+                    // the unscoped model catalog uses chat advertisements.
+                    services: Some(vec![
+                        protocol::SERVICE_CHAT.into(),
+                        protocol::SERVICE_OAI.into()
+                    ]),
+                    voices: None,
+                }
+            ));
+        }
+        let oai = room.oai.clone();
+        let responder = tokio::spawn(async move {
+            for (expected_peer, expected_path, model) in cases {
+                for _ in 0..2 {
+                    loop {
+                        let (peer, message) = rx.recv().await.unwrap();
+                        let ProtocolMessage::OaiRequest {
+                            id,
+                            seq,
+                            last,
+                            data,
+                            method,
+                            path,
+                            ..
+                        } = message
+                        else {
+                            assert!(matches!(message, ProtocolMessage::ConsumerHello));
+                            continue;
+                        };
+                        assert_eq!(peer, expected_peer);
+                        assert_eq!(path.as_deref(), Some(expected_path));
+                        assert_eq!(method.as_deref(), Some("POST"));
+                        assert_eq!(seq, 0);
+                        assert!(last);
+                        let body: Value = serde_json::from_slice(
+                            &base64::engine::general_purpose::STANDARD
+                                .decode(data)
+                                .unwrap(),
+                        )
+                        .unwrap();
+                        assert_eq!(body, json!({"model":model,"input":"hello"}));
+                        oai.handle_message(
+                            &peer,
+                            &ProtocolMessage::OaiResponse {
+                                id,
+                                seq: 0,
+                                last: true,
+                                data: base64::engine::general_purpose::STANDARD.encode(b"{}"),
+                                status: Some(200),
+                                content_type: Some("application/json".into()),
+                            },
+                        );
+                        break;
+                    }
+                }
+            }
+        });
+        for (_, path, model) in cases {
+            let req = || request("POST", path, Some(json!({"model":model,"input":"hello"})));
+            for response in [
+                tokio::time::timeout(Duration::from_secs(5), room.clone().relay(req()))
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                tokio::time::timeout(Duration::from_secs(5), service.clone().relay(req()))
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            ] {
+                assert_eq!(response.status, 200);
+                assert_eq!(response.body, b"{}");
+            }
+        }
+        responder.await.unwrap();
+        assert!(room.relay_jobs.snapshot().is_empty());
+        assert!(service.relay_jobs.snapshot().is_empty());
+    }
+
+    #[tokio::test]
     async fn unscoped_vision_chat_forwards_raw_http_body_and_adapts_sse() {
         const VISION: &str = r#"{ "model":"game-model", "temperature":0.4, "stream":false, "messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}]}], "extra":{"z":1,"a":2} }"#;
         const REPLY: &[u8] = br#"{ "choices": [{"message":{"content":"image answer"}}] }"#;
@@ -1004,6 +2148,7 @@ mod tests {
             Arc::new(|_| Box::pin(async { anyhow::bail!("unused") })),
             None,
             Some(relay),
+            None,
             None,
             None,
         )
@@ -1071,6 +2216,9 @@ mod tests {
         let json =
             serde_json::to_vec_pretty(&json!({"id":ID,"data":[{"url":"unchanged"}]})).unwrap();
         let expected_json = json.clone();
+        let base64_json =
+            serde_json::to_vec_pretty(&json!({"id":ID,"data":[{"b64_json":"AA=="}]})).unwrap();
+        let expected_base64_json = base64_json.clone();
         let mut upstream = mock_bytes("images", move |method, path, body| {
             assert_eq!(method, "POST");
             assert_eq!(path, "/v1/images/edits");
@@ -1079,6 +2227,8 @@ mod tests {
             assert_eq!(body["temperature"], 0.7);
             if body["response_format"] == "binary" {
                 (200, "image/png", image.clone())
+            } else if body["response_format"] == "b64_json" {
+                (200, "application/json", base64_json.clone())
             } else {
                 (200, "application/json", json.clone())
             }
@@ -1088,7 +2238,8 @@ mod tests {
         let service = service(vec![upstream.provider.clone()]);
         for (format, content_type, expected) in [
             ("binary", "image/png", expected),
-            ("b64_json", "application/json", expected_json),
+            ("url", "application/json", expected_json),
+            ("b64_json", "application/json", expected_base64_json),
         ] {
             let response = service
                 .clone()
@@ -1108,7 +2259,7 @@ mod tests {
             assert!(service.relay_jobs.snapshot().is_empty());
         }
         let calls = upstream.requests.lock().unwrap();
-        assert_eq!(calls.len(), 2);
+        assert_eq!(calls.len(), 3);
         assert!(calls.iter().all(|(_, _, _, headers)| {
             headers
                 .to_ascii_lowercase()
@@ -1146,7 +2297,7 @@ mod tests {
     #[tokio::test]
     async fn media_jobs_route_by_family_and_merge_lists_http_direct() {
         let mut upstreams = Vec::new();
-        for &(family, op) in oai_tunnel::JOB_KINDS {
+        for (family, op) in oai_tunnel::media_kinds() {
             let mut upstream = mock_bytes(op, move |method, path, body| {
                 let job = json!({"id":"same-id","status":"completed","created_at":3,"family":op,"url":"unchanged"});
                 let (status, value) = match method {
@@ -1170,7 +2321,7 @@ mod tests {
             upstreams.push(upstream);
         }
         let service = service(upstreams.iter().map(|u| u.provider.clone()).collect());
-        for &(family, op) in oai_tunnel::JOB_KINDS {
+        for (family, op) in oai_tunnel::media_kinds() {
             let response = service
                 .clone()
                 .relay(request(
@@ -1184,7 +2335,7 @@ mod tests {
             assert_eq!(value(response)["url"], "unchanged");
         }
         assert_eq!(service.relay_jobs.snapshot().len(), 2);
-        for (i, &(family, op)) in oai_tunnel::JOB_KINDS.iter().enumerate() {
+        for (i, (family, op)) in oai_tunnel::media_kinds().enumerate() {
             let path = format!("{family}/same-id");
             let list = value(
                 service
@@ -2007,8 +3158,7 @@ mod tests {
         let service = service(vec![AiProviderConfig {
             id: "room".into(),
             base_url: "mist-network://test".into(),
-            models: oai_tunnel::JOB_KINDS
-                .iter()
+            models: oai_tunnel::media_kinds()
                 .map(|(_, op)| format!("{op}-model"))
                 .collect(),
             ..Default::default()
@@ -2022,7 +3172,7 @@ mod tests {
             .write()
             .unwrap()
             .insert("test".into(), room.clone());
-        for &(_, op) in oai_tunnel::JOB_KINDS {
+        for (_, op) in oai_tunnel::media_kinds() {
             assert!(room.consumer.handle_message(
                 op,
                 &ProtocolMessage::ProviderHello {
@@ -2092,7 +3242,7 @@ mod tests {
                 calls += 1;
             }
         });
-        for &(family, op) in oai_tunnel::JOB_KINDS {
+        for (family, op) in oai_tunnel::media_kinds() {
             let response = room
                 .clone()
                 .relay(request(
@@ -2105,7 +3255,7 @@ mod tests {
             assert_eq!(response.status, 201);
         }
         assert_eq!(room.relay_jobs.snapshot().len(), 2);
-        for &(family, op) in oai_tunnel::JOB_KINDS {
+        for (family, op) in oai_tunnel::media_kinds() {
             let path = format!("{family}/same-id");
             let list = value(
                 service
